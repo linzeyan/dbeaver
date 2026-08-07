@@ -20,6 +20,52 @@ enum DetailTab: String, CaseIterable, Identifiable {
     }
 }
 
+/// One pane's result: the rows, plus everything the chrome says about them.
+///
+/// The browse and the SQL editor own one each. They used to share a single
+/// grid, so opening the Query tab showed the browse's rows underneath a
+/// statement that had not produced them, and the status bar attributed those
+/// rows to the table being browsed. Two panes showing two things need two
+/// results; one shared result can only ever describe one of them correctly.
+@Observable
+@MainActor
+final class ResultSet {
+    let table = ArrowTable()
+    /// Bumped whenever `table` is replaced, so the Metal view knows to redraw.
+    /// Zero means nothing has ever run here, which is a different state from a
+    /// query that returned no rows.
+    private(set) var generation = 0
+    private(set) var rowCount = 0
+    private(set) var milliseconds: Double = 0
+    /// Whether the result hit the LIMIT it was given, so what is on screen is a
+    /// window onto the table rather than all of it.
+    private(set) var capped = false
+    /// What the status bar says about this result.
+    private(set) var summary = ""
+    private(set) var isLoading = false
+    var selection: GridSelection?
+
+    var hasRun: Bool { generation > 0 }
+
+    func beginLoading() { isLoading = true }
+
+    func abandonLoading() { isLoading = false }
+
+    /// Publishes rows already appended to `table` by the caller.
+    func finish(capped: Bool, milliseconds: Double, summary: String) {
+        generation += 1
+        rowCount = table.rowCount
+        self.capped = capped
+        self.milliseconds = milliseconds
+        self.summary = summary
+        // Land the cursor on the first cell. It gives the arrow keys a starting
+        // point and puts a real value in the inspector, instead of asking the
+        // user to click once before the pane says anything.
+        selection = rowCount > 0 ? GridSelection(row: 0, column: 0) : nil
+        isLoading = false
+    }
+}
+
 /// UI state and the bridge to the core.
 ///
 /// Every core call blocks, so all of them run on a serial background queue and
@@ -43,23 +89,20 @@ final class AppModel {
     private(set) var columns: [ColumnInfo] = []
 
     // Content pane
-    let grid = ArrowTable()
-    /// Bumped whenever `grid` is replaced, so the Metal view knows to redraw.
-    private(set) var gridGeneration = 0
-    private(set) var loadedRows = 0
-    private(set) var loadMilliseconds: Double = 0
-    /// Whether the result hit the browse limit, so what is on screen is a window
-    /// onto the table rather than all of it.
-    private(set) var resultCapped = false
-    /// The cell the grid's cursor is on, mirrored here so the inspector and the
-    /// status bar can read it.
-    var gridSelection: GridSelection?
+    let browseResult = ResultSet()
+
+    // Query pane
+    let queryResult = ResultSet()
+
+    /// The result the chrome is currently describing. Structure has no result of
+    /// its own, so it borrows the browse's — the status bar overrides what it
+    /// says there anyway.
+    var current: ResultSet { activeTab == .query ? queryResult : browseResult }
 
     // Content pane filters
     var whereClause = ""
     var orderClause = ""
 
-    // Query pane
     var queryText = ""
     /// The last statement `selectionChanged` put in the editor, so a later
     /// selection can tell "untouched suggestion" from "the user's work".
@@ -128,11 +171,13 @@ final class AppModel {
                 expanded.insert(first.name)
                 selected = relations[first.name]?.first
             }
-            status = "\(schemas.count) schemas"
+            status = Self.pluralized(schemas.count, "schema")
             isBusy = false
             // Runs after the selection above, so an explicit `--sql` replaces
             // the browse rather than racing it.
-            if let initialSQL { runQuery(initialSQL, describedAs: "query") }
+            if let initialSQL {
+                runQuery(initialSQL, describedAs: "query", into: queryResult)
+            }
         }
     }
 
@@ -181,8 +226,9 @@ final class AppModel {
         let address: String
     }
 
-    var inspectedCell: InspectedCell? {
-        guard let s = gridSelection,
+    func inspectedCell(in result: ResultSet) -> InspectedCell? {
+        let grid = result.table
+        guard let s = result.selection,
               s.column < grid.columns.count,
               s.row < grid.rowCount
         else { return nil }
@@ -213,7 +259,7 @@ final class AppModel {
         orderClause = appliedInitialFilters ? "" : (initialFilters.order ?? "")
         appliedInitialFilters = true
         loadColumns(for: selected)
-        runQuery(browseSQL(for: selected), describedAs: selected.name, cappedAt: browseLimit)
+        runBrowse()
 
         // Reseed the editor only when it still holds text this method wrote.
         // Selecting a table used to overwrite the editor unconditionally, which
@@ -247,10 +293,16 @@ final class AppModel {
         return sql
     }
 
-    func applyFilters() {
+    private func runBrowse() {
         guard let selected else { return }
+        runQuery(
+            browseSQL(for: selected), describedAs: selected.name,
+            into: browseResult, cappedAt: browseLimit)
+    }
+
+    func applyFilters() {
         activeTab = .content
-        runQuery(browseSQL(for: selected), describedAs: selected.name, cappedAt: browseLimit)
+        runBrowse()
     }
 
     // MARK: - Sorting
@@ -275,16 +327,20 @@ final class AppModel {
         return text.isEmpty ? nil : (text, descending)
     }
 
-    /// Where to draw the ordering marker, as an index into the current result.
+    /// Where to draw the ordering marker, as an index into the browse result.
+    /// Only the browse sorts: the Query pane shows what a statement returned,
+    /// and this cannot append an ORDER BY to arbitrary SQL correctly.
     var gridSort: GridSort? {
         guard let order = parsedOrder,
-              let index = grid.columns.firstIndex(where: { $0.name == order.column })
+              let index = browseResult.table.columns
+                  .firstIndex(where: { $0.name == order.column })
         else { return nil }
         return GridSort(column: index, descending: order.descending)
     }
 
     /// Cycles a column through ascending, descending, and unsorted.
     func toggleSort(column index: Int) {
+        let grid = browseResult.table
         guard selected != nil, index < grid.columns.count else { return }
         let name = grid.columns[index].name
         let current = parsedOrder
@@ -306,9 +362,11 @@ final class AppModel {
             guard !columns.isEmpty else { return status }
             let keys = columns.filter(\.isPrimaryKey).count
             let keyPart = keys == 0 ? "no primary key" : "\(keys) in primary key"
-            return "\(columns.count) columns · \(keyPart)"
+            return "\(Self.pluralized(columns.count, "column")) · \(keyPart)"
         case .content, .query:
-            return status
+            // Each pane reports its own result. Falling back to `status` covers
+            // the connection messages and the window before anything has run.
+            return current.summary.isEmpty ? status : current.summary
         }
     }
 
@@ -324,9 +382,9 @@ final class AppModel {
         // ⌘R means "run what I am looking at": the query text in the Query tab,
         // the filtered browse elsewhere.
         if activeTab == .query {
-            runQuery(queryText, describedAs: "query")
-        } else if let selected {
-            runQuery(browseSQL(for: selected), describedAs: selected.name, cappedAt: browseLimit)
+            runQuery(queryText, describedAs: "query", into: queryResult)
+        } else {
+            runBrowse()
         }
     }
 
@@ -339,8 +397,11 @@ final class AppModel {
     /// grid is showing a window, not an answer, and the status bar has to say
     /// so — a row count that silently means "the first hundred thousand" is the
     /// same class of lie as a cell that truncates without a marker.
-    private func runQuery(_ sql: String, describedAs label: String, cappedAt: Int? = nil) {
+    private func runQuery(
+        _ sql: String, describedAs label: String, into result: ResultSet, cappedAt: Int? = nil
+    ) {
         isBusy = true
+        result.beginLoading()
         status = "Running…"
         // A new run supersedes the previous failure; leaving the banner up
         // would attribute an old error to the result now on screen.
@@ -360,33 +421,28 @@ final class AppModel {
             return QueryResult(
                 schema: schema, batches: batches,
                 milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
-        } then: { [self] result in
+        } then: { [self] fetched in
+            let grid = result.table
             grid.reset()
-            gridSelection = nil
-            grid.setSchema(result.schema)
-            if let release = result.schema.pointee.release { release(result.schema) }
-            result.schema.deallocate()
-            for batch in result.batches {
+            result.selection = nil
+            grid.setSchema(fetched.schema)
+            if let release = fetched.schema.pointee.release { release(fetched.schema) }
+            fetched.schema.deallocate()
+            for batch in fetched.batches {
                 grid.append(batch: batch)
             }
-            gridGeneration += 1
-            loadedRows = grid.rowCount
-            // Land the cursor on the first cell. It gives the arrow keys a
-            // starting point and puts a real value in the inspector, instead of
-            // asking the user to click once before the pane says anything.
-            gridSelection = grid.rowCount > 0 ? GridSelection(row: 0, column: 0) : nil
-            loadMilliseconds = result.milliseconds
-            resultCapped = cappedAt.map { grid.rowCount >= $0 } ?? false
-            let ms = result.milliseconds
+            let capped = cappedAt.map { grid.rowCount >= $0 } ?? false
             let count = Self.formatted(grid.rowCount)
-            let elapsed = String(format: "%.2f", ms / 1000)
-            if resultCapped, let estimate = selected?.estimatedRows, estimate > Int64(grid.rowCount) {
-                status = "\(label) · first \(count) of ~\(Self.formatted(estimate)) rows · \(elapsed) s"
-            } else if resultCapped {
-                status = "\(label) · first \(count) rows · \(elapsed) s"
+            let elapsed = String(format: "%.2f", fetched.milliseconds / 1000)
+            let summary: String
+            if capped, let estimate = selected?.estimatedRows, estimate > Int64(grid.rowCount) {
+                summary = "\(label) · first \(count) of ~\(Self.formatted(estimate)) rows · \(elapsed) s"
+            } else if capped {
+                summary = "\(label) · first \(count) rows · \(elapsed) s"
             } else {
-                status = "\(label) · \(count) rows · \(elapsed) s"
+                summary = "\(label) · \(Self.pluralized(grid.rowCount, "row")) · \(elapsed) s"
             }
+            result.finish(capped: capped, milliseconds: fetched.milliseconds, summary: summary)
             isBusy = false
         }
     }
@@ -434,6 +490,10 @@ final class AppModel {
         errorMessage = String(describing: error)
         status = "Failed"
         isBusy = false
+        // The core queue is serial, so at most one of these was running; clearing
+        // both saves threading the target through the generic dispatch helper.
+        browseResult.abandonLoading()
+        queryResult.abandonLoading()
         // A failed statement says nothing about the connection; only a failure
         // before one exists does.
         if db == nil { connectionState = .failed }
@@ -450,6 +510,12 @@ final class AppModel {
             if kv[0] == "dbname" { dbname = String(kv[1]) }
         }
         return "\(dbname)@\(host)"
+    }
+
+    /// "1 schema" / "2 schemas". A label that reads "1 objects" is small, but it
+    /// is the kind of small that makes a program feel unfinished.
+    static func pluralized(_ n: Int, _ singular: String, _ plural: String? = nil) -> String {
+        "\(formatted(n)) \(n == 1 ? singular : plural ?? singular + "s")"
     }
 
     static func formatted(_ n: Int) -> String {

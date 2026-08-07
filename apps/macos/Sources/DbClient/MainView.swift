@@ -120,8 +120,8 @@ struct NavigatorView: View {
         let matched = model.matchedRelationCount
         let total = model.totalRelationCount
         return matched == total
-            ? "\(total) objects"
-            : "\(matched) of \(total) objects"
+            ? AppModel.pluralized(total, "object")
+            : "\(matched) of \(AppModel.pluralized(total, "object"))"
     }
 
     private func expansion(for schema: String) -> Binding<Bool> {
@@ -150,7 +150,7 @@ private struct SchemaLabel: View {
                 .foregroundStyle(Theme.textTertiary.color)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Schema \(name), \(count) objects")
+        .accessibilityLabel("Schema \(name), \(AppModel.pluralized(count, "object"))")
     }
 }
 
@@ -318,7 +318,8 @@ struct ContentPane: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        VStack(spacing: 0) {
+        @Bindable var result = model.browseResult
+        return VStack(spacing: 0) {
             if model.selected == nil {
                 EmptyState(
                     symbol: "tablecells",
@@ -326,16 +327,16 @@ struct ContentPane: View {
                     hint: "Choose a table in the sidebar to browse its rows.")
             } else {
                 MetalGridView(
-                    table: model.grid,
-                    generation: model.gridGeneration,
-                    selection: $model.gridSelection,
+                    table: model.browseResult.table,
+                    generation: model.browseResult.generation,
+                    selection: $result.selection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
                     onSortColumn: { model.toggleSort(column: $0) })
-                    .overlay { LoadingVeil(isVisible: model.isBusy) }
+                    .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
                     .accessibilityLabel("Result grid")
 
-                CellInspector(cell: model.inspectedCell)
+                CellInspector(cell: model.inspectedCell(in: model.browseResult))
             }
 
             Rectangle().fill(Theme.separator.color).frame(height: 1)
@@ -380,7 +381,8 @@ struct QueryPane: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        VSplitView {
+        @Bindable var result = model.queryResult
+        return VSplitView {
             ZStack(alignment: .bottomTrailing) {
                 TextEditor(text: $model.queryText)
                     .font(Theme.Typography.editor)
@@ -403,14 +405,25 @@ struct QueryPane: View {
             .frame(minHeight: 72, idealHeight: 120, maxHeight: 200)
 
             VStack(spacing: 0) {
-                MetalGridView(
-                    table: model.grid,
-                    generation: model.gridGeneration,
-                    selection: $model.gridSelection)
-                    .overlay { LoadingVeil(isVisible: model.isBusy) }
-                    .accessibilityLabel("Query result grid")
+                // Until this pane has run something there is nothing to show.
+                // It used to fall back to the browse's grid, which put rows
+                // under a statement that had not produced them.
+                if model.queryResult.hasRun {
+                    MetalGridView(
+                        table: model.queryResult.table,
+                        generation: model.queryResult.generation,
+                        selection: $result.selection)
+                        .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                        .accessibilityLabel("Query result grid")
 
-                CellInspector(cell: model.inspectedCell)
+                    CellInspector(cell: model.inspectedCell(in: model.queryResult))
+                } else {
+                    EmptyState(
+                        symbol: "terminal",
+                        title: "No results yet",
+                        hint: "Press ⌘R to run the statement above.")
+                        .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                }
             }
             .frame(minHeight: 160)
         }
@@ -519,11 +532,11 @@ struct StatusBar: View {
         HStack(spacing: Theme.Space.sm) {
             // A truncated result is worth catching out of the corner of an eye,
             // not only on a careful read of the count.
-            if model.resultCapped && model.activeTab != .structure {
+            if model.current.capped && model.activeTab != .structure {
                 Image(systemName: "rectangle.compress.vertical")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.warning.color)
-                    .help("Showing the first \(AppModel.formatted(model.loadedRows)) rows")
+                    .help("Showing the first \(AppModel.formatted(model.current.rowCount)) rows")
                     .accessibilityLabel("Result truncated")
             }
 
@@ -538,14 +551,14 @@ struct StatusBar: View {
             Spacer(minLength: Theme.Space.sm)
 
             if model.activeTab != .structure {
-                if let cell = model.inspectedCell {
+                if let cell = model.inspectedCell(in: model.current) {
                     Text(cell.address)
                         .font(Theme.Typography.digits)
                         .foregroundStyle(Theme.textTertiary.color)
                 }
 
-                if !model.grid.columns.isEmpty {
-                    Text("\(model.grid.columns.count) cols")
+                if !model.current.table.columns.isEmpty {
+                    Text(AppModel.pluralized(model.current.table.columns.count, "col"))
                         .font(Theme.Typography.digits)
                         .foregroundStyle(Theme.textTertiary.color)
                 }
