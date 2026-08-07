@@ -329,6 +329,7 @@ struct ContentPane: View {
                 MetalGridView(
                     table: model.browseResult.table,
                     generation: model.browseResult.generation,
+                    rowCount: model.browseResult.rowCount,
                     selection: $result.selection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
@@ -412,6 +413,7 @@ struct QueryPane: View {
                     MetalGridView(
                         table: model.queryResult.table,
                         generation: model.queryResult.generation,
+                        rowCount: model.queryResult.rowCount,
                         selection: $result.selection)
                         .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
                         .accessibilityLabel("Query result grid")
@@ -536,7 +538,7 @@ struct StatusBar: View {
                 Image(systemName: "rectangle.compress.vertical")
                     .font(.system(size: 10))
                     .foregroundStyle(Theme.warning.color)
-                    .help("Showing the first \(AppModel.formatted(model.current.rowCount)) rows")
+                    .help(truncationHelp)
                     .accessibilityLabel("Result truncated")
             }
 
@@ -547,6 +549,16 @@ struct StatusBar: View {
                 .font(Theme.Typography.digits)
                 .foregroundStyle(Theme.textSecondary.color)
                 .lineLimit(1)
+
+            // Attached to the sentence it acts on, so "first 100,000 of
+            // ~1,000,000" reads as something you can do to rather than only
+            // something you were told.
+            if model.canLoadMore {
+                Button("Load more") { model.loadMore() }
+                    .buttonStyle(.link)
+                    .font(Theme.Typography.micro)
+                    .help("Fetch the next \(AppModel.formatted(model.pageSize)) rows")
+            }
 
             Spacer(minLength: Theme.Space.sm)
 
@@ -568,5 +580,13 @@ struct StatusBar: View {
         .frame(height: 24)
         .background(Theme.surface.color)
         .accessibilityElement(children: .contain)
+    }
+
+    /// A truncated result that cannot be paged has to say why, or the missing
+    /// button reads as a bug rather than as a property of the table.
+    private var truncationHelp: String {
+        let shown = "Showing the first \(AppModel.formatted(model.current.rowCount)) rows"
+        guard let obstacle = model.pagingObstacle else { return shown }
+        return "\(shown). \(obstacle)"
     }
 }

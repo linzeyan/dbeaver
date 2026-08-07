@@ -54,14 +54,28 @@ final class ResultSet {
     /// Publishes rows already appended to `table` by the caller.
     func finish(capped: Bool, milliseconds: Double, summary: String) {
         generation += 1
+        // Land the cursor on the first cell. It gives the arrow keys a starting
+        // point and puts a real value in the inspector, instead of asking the
+        // user to click once before the pane says anything.
+        selection = table.rowCount > 0 ? GridSelection(row: 0, column: 0) : nil
+        publish(capped: capped, milliseconds: milliseconds, summary: summary)
+    }
+
+    /// Publishes a page appended to the rows already here.
+    ///
+    /// Deliberately does not touch `generation` or `selection`: the grid resets
+    /// its scroll position on a new generation, and someone who just asked for
+    /// more rows is at the bottom of the ones they have. The row count is what
+    /// tells the view to redraw.
+    func extend(capped: Bool, milliseconds: Double, summary: String) {
+        publish(capped: capped, milliseconds: milliseconds, summary: summary)
+    }
+
+    private func publish(capped: Bool, milliseconds: Double, summary: String) {
         rowCount = table.rowCount
         self.capped = capped
         self.milliseconds = milliseconds
         self.summary = summary
-        // Land the cursor on the first cell. It gives the arrow keys a starting
-        // point and puts a real value in the inspector, instead of asking the
-        // user to click once before the pane says anything.
-        selection = rowCount > 0 ? GridSelection(row: 0, column: 0) : nil
         isLoading = false
     }
 }
@@ -115,10 +129,13 @@ final class AppModel {
     private(set) var isBusy = false
     var errorMessage: String?
 
-    /// Rows fetched per browse. A grid shows a window onto the data; pulling a
-    /// million rows to display forty is what makes other clients feel slow.
-    /// The Content pane fetches more as the user scrolls (phase 1).
-    private let browseLimit = 100_000
+    /// Rows fetched per browse page. A grid shows a window onto the data;
+    /// pulling a million rows to display forty is what makes other clients feel
+    /// slow. `loadMore()` fetches the next page on request.
+    private let browsePage = 100_000
+
+    /// Rows a page fetches, for the chrome to name in a control.
+    var pageSize: Int { browsePage }
     private let batchRows = 8192
 
     private var db: Database?
@@ -258,8 +275,12 @@ final class AppModel {
         whereClause = appliedInitialFilters ? "" : (initialFilters.where ?? "")
         orderClause = appliedInitialFilters ? "" : (initialFilters.order ?? "")
         appliedInitialFilters = true
-        loadColumns(for: selected)
-        runBrowse()
+        // The browse orders by the primary key, so the columns have to be known
+        // before its statement can be written. Issuing both at once left the
+        // first page in heap order and every later page in key order — two
+        // different orders across one result, which is how a page repeats rows
+        // the previous one already showed.
+        loadColumns(for: selected) { [self] in runBrowse() }
 
         // Reseed the editor only when it still holds text this method wrote.
         // Selecting a table used to overwrite the editor unconditionally, which
@@ -271,11 +292,12 @@ final class AppModel {
         }
     }
 
-    private func loadColumns(for relation: RelationInfo) {
+    private func loadColumns(for relation: RelationInfo, then next: @escaping @MainActor () -> Void) {
         run { db in
             try db.columns(schema: relation.schema, relation: relation.name)
         } then: { [self] cols in
             columns = cols
+            next()
         }
     }
 
@@ -283,21 +305,65 @@ final class AppModel {
     ///
     /// Filters become SQL rather than filtering fetched rows, so they apply to
     /// the whole table instead of only the window already in memory.
-    private func browseSQL(for relation: RelationInfo) -> String {
+    private func browseSQL(for relation: RelationInfo, offset: Int) -> String {
         var sql = "SELECT * FROM \(relation.qualifiedName)"
         let predicate = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
         if !predicate.isEmpty { sql += " WHERE \(predicate)" }
-        let order = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !order.isEmpty { sql += " ORDER BY \(order)" }
-        sql += " LIMIT \(browseLimit)"
+        if let order = totalOrder { sql += " ORDER BY \(order)" }
+        sql += " LIMIT \(browsePage)"
+        if offset > 0 { sql += " OFFSET \(offset)" }
         return sql
+    }
+
+    /// The browse's ORDER BY, made total by the primary key.
+    ///
+    /// LIMIT without a total order does not describe a stable window. Postgres
+    /// may return rows in a different order for the same query — a different
+    /// plan, a different set of pages in cache — so the second page can repeat
+    /// rows the first one showed and skip others entirely, with nothing on
+    /// screen to say it happened. Appending the primary key makes the order
+    /// unique, which is what gives OFFSET a meaning. A relation without one has
+    /// no such order, and `canLoadMore` refuses to page it rather than paging
+    /// it wrongly.
+    private var totalOrder: String? {
+        let user = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The user's own order may already name the key; repeating it is
+        // harmless to Postgres but noise in the statement.
+        let keys = columns
+            .filter { $0.isPrimaryKey && $0.name != parsedOrder?.column }
+            .map { "\"\($0.name)\"" }
+        let terms = user.isEmpty ? keys : [user] + keys
+        return terms.isEmpty ? nil : terms.joined(separator: ", ")
+    }
+
+    /// Whether the browse can fetch a further page. Needs both a page boundary
+    /// to fetch past and an order stable enough for "past" to mean anything.
+    var canLoadMore: Bool {
+        activeTab == .content && browseResult.capped && !browseResult.isLoading
+            && columns.contains(where: \.isPrimaryKey)
+    }
+
+    /// Why the truncation marker is not offering a next page, when it is not.
+    var pagingObstacle: String? {
+        guard browseResult.capped, !columns.contains(where: \.isPrimaryKey) else { return nil }
+        return "\(selected?.name ?? "This relation") has no primary key, "
+            + "so there is no stable order to page in."
     }
 
     private func runBrowse() {
         guard let selected else { return }
         runQuery(
-            browseSQL(for: selected), describedAs: selected.name,
-            into: browseResult, cappedAt: browseLimit)
+            browseSQL(for: selected, offset: 0), describedAs: selected.name,
+            into: browseResult, cappedAt: browsePage)
+    }
+
+    /// Fetches the next page and appends it to the rows already on screen.
+    func loadMore() {
+        guard canLoadMore, let selected else { return }
+        runQuery(
+            browseSQL(for: selected, offset: browseResult.rowCount),
+            describedAs: selected.name, into: browseResult,
+            cappedAt: browsePage, appending: true)
     }
 
     func applyFilters() {
@@ -398,7 +464,8 @@ final class AppModel {
     /// so — a row count that silently means "the first hundred thousand" is the
     /// same class of lie as a cell that truncates without a marker.
     private func runQuery(
-        _ sql: String, describedAs label: String, into result: ResultSet, cappedAt: Int? = nil
+        _ sql: String, describedAs label: String, into result: ResultSet,
+        cappedAt: Int? = nil, appending: Bool = false
     ) {
         isBusy = true
         result.beginLoading()
@@ -423,28 +490,57 @@ final class AppModel {
                 milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
         } then: { [self] fetched in
             let grid = result.table
-            grid.reset()
-            result.selection = nil
-            grid.setSchema(fetched.schema)
-            if let release = fetched.schema.pointee.release { release(fetched.schema) }
-            fetched.schema.deallocate()
+            if appending {
+                // The page carries the same schema as the rows already here;
+                // re-installing it would drop the columns the existing batches
+                // were built against.
+                if let release = fetched.schema.pointee.release { release(fetched.schema) }
+                fetched.schema.deallocate()
+            } else {
+                grid.reset()
+                result.selection = nil
+                grid.setSchema(fetched.schema)
+                if let release = fetched.schema.pointee.release { release(fetched.schema) }
+                fetched.schema.deallocate()
+            }
+
+            let before = grid.rowCount
             for batch in fetched.batches {
                 grid.append(batch: batch)
             }
-            let capped = cappedAt.map { grid.rowCount >= $0 } ?? false
-            let count = Self.formatted(grid.rowCount)
-            let elapsed = String(format: "%.2f", fetched.milliseconds / 1000)
-            let summary: String
-            if capped, let estimate = selected?.estimatedRows, estimate > Int64(grid.rowCount) {
-                summary = "\(label) · first \(count) of ~\(Self.formatted(estimate)) rows · \(elapsed) s"
-            } else if capped {
-                summary = "\(label) · first \(count) rows · \(elapsed) s"
+            // The cap applies to the page, not the running total: a fourth page
+            // that comes back short is the end of the table, however many rows
+            // are on screen by then.
+            let page = grid.rowCount - before
+            let capped = cappedAt.map { page >= $0 } ?? false
+            let summary = browseSummary(
+                label: label, rows: grid.rowCount, capped: capped,
+                seconds: fetched.milliseconds / 1000)
+            if appending {
+                result.extend(
+                    capped: capped, milliseconds: fetched.milliseconds, summary: summary)
             } else {
-                summary = "\(label) · \(Self.pluralized(grid.rowCount, "row")) · \(elapsed) s"
+                result.finish(
+                    capped: capped, milliseconds: fetched.milliseconds, summary: summary)
             }
-            result.finish(capped: capped, milliseconds: fetched.milliseconds, summary: summary)
             isBusy = false
         }
+    }
+
+    private func browseSummary(
+        label: String, rows: Int, capped: Bool, seconds: Double
+    ) -> String {
+        let elapsed = String(format: "%.2f", seconds)
+        guard capped else {
+            return "\(label) · \(Self.pluralized(rows, "row")) · \(elapsed) s"
+        }
+        let count = Self.formatted(rows)
+        // Only a browse is ever capped, so the selected relation is the one
+        // these rows came from and its estimate is the right denominator.
+        if let estimate = selected?.estimatedRows, estimate > Int64(rows) {
+            return "\(label) · first \(count) of ~\(Self.formatted(estimate)) rows · \(elapsed) s"
+        }
+        return "\(label) · first \(count) rows · \(elapsed) s"
     }
 
     // MARK: - Plumbing

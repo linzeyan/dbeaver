@@ -37,6 +37,12 @@ struct MetalGridView: NSViewRepresentable {
     /// Changes when the underlying result is replaced, which is the signal to
     /// reset scroll position and redraw.
     let generation: Int
+    /// Rows currently in `table`. Nothing here reads it — it is declared so a
+    /// result that grew, rather than being replaced, still re-runs
+    /// `updateNSView` and redraws. `generation` cannot carry that signal: it
+    /// also resets the scroll position, which is the last thing someone who
+    /// just asked for more rows wants.
+    let rowCount: Int
     @Binding var selection: GridSelection?
     /// See `GridView.claimsInitialFocus`.
     var claimsInitialFocus = false

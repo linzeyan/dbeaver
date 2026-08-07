@@ -52,6 +52,14 @@ FROM generate_series(1, :rows) g;
 ALTER TABLE bench_wide ADD PRIMARY KEY (id);
 ANALYZE bench_wide;
 
+-- A relation with no primary key, and so no order total enough for the browse
+-- to page in. The client refuses to page it rather than paging it wrongly, and
+-- that refusal needs something to refuse.
+DROP TABLE IF EXISTS no_key;
+CREATE TABLE no_key AS
+SELECT g AS n, 'row-' || g AS label FROM generate_series(1, 250000) g;
+ANALYZE no_key;
+
 SELECT count(*) AS rows FROM bench_wide;
 SELECT pg_size_pretty(pg_total_relation_size('bench_wide')) AS size;
 SQL
