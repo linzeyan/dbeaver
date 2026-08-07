@@ -20,7 +20,7 @@ use tokio_postgres::{Client, NoTls, RowStream};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PgError {
-    #[error("postgres: {0}")]
+    #[error("{}", describe(.0))]
     Postgres(#[from] tokio_postgres::Error),
     #[error("column {column:?} has unsupported type {pg_type}")]
     UnsupportedType { column: String, pg_type: String },
@@ -28,6 +28,28 @@ pub enum PgError {
     NumericOverflow(String),
     #[error("arrow: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+}
+
+/// Renders a driver error the way the server stated it.
+///
+/// `tokio_postgres::Error` displays as the bare string "db error"; everything a
+/// user needs is in the attached `DbError`. Without this the UI surfaces an
+/// error banner that says nothing, which is worse than no banner.
+fn describe(e: &tokio_postgres::Error) -> String {
+    let Some(db) = e.as_db_error() else {
+        return e.to_string();
+    };
+    let mut out = db.message().to_string();
+    if let Some(detail) = db.detail() {
+        out.push_str(" — ");
+        out.push_str(detail);
+    }
+    if let Some(hint) = db.hint() {
+        out.push_str(" (");
+        out.push_str(hint);
+        out.push(')');
+    }
+    out
 }
 
 pub struct PgSource {

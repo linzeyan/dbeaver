@@ -3,12 +3,14 @@ import SwiftUI
 /// Window shell: navigator on the left, tabbed detail on the right, status
 /// along the bottom. The layout follows Sequel Ace — pick an object, then
 /// switch between describing it, browsing it, and querying it.
-/// Where keyboard focus starts and moves between. Declared so the navigator
-/// takes initial focus: otherwise SwiftUI focuses the first text field, putting
-/// a focus ring on the filter bar before the user has chosen anything.
+
+/// Where keyboard focus can be. Named so panes can hand focus to each other and
+/// so the filter fields can draw their own focus ring; SwiftUI's default ring
+/// does not survive the custom field backgrounds this window uses.
 enum FocusArea: Hashable {
-    case navigator
-    case filter
+    case navigatorFilter
+    case whereField
+    case orderField
     case editor
 }
 
@@ -19,41 +21,37 @@ struct MainView: View {
     var body: some View {
         NavigationSplitView {
             NavigatorView(model: model, focus: $focus)
-                .navigationSplitViewColumnWidth(min: 180, ideal: 230, max: 400)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
         } detail: {
             DetailPane(model: model, focus: $focus)
         }
-        .defaultFocus($focus, .navigator)
-        .toolbar {
-            ToolbarItem(placement: .navigation) {
-                Label(model.connectionLabel, systemImage: "cylinder.split.1x2")
-                    .labelStyle(.titleAndIcon)
+        .toolbar { toolbarContent }
+        .navigationTitle(model.selected?.name ?? "DbClient")
+        .navigationSubtitle(
+            model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? model.connectionLabel)
+    }
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: Theme.Space.xs + 2) {
+                StatusDot(state: model.connectionState)
+                Text(model.connectionLabel)
+                    .font(Theme.Typography.bodyEmphasis)
+                    .foregroundStyle(Theme.textSecondary.color)
             }
-            ToolbarItem(placement: .primaryAction) {
-                if model.isBusy {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button {
-                    model.runCurrentQuery()
-                } label: {
-                    Label("Run", systemImage: "play.fill")
-                }
-                .keyboardShortcut("r", modifiers: .command)
-                .disabled(model.isBusy)
-                .help("Run the current query (⌘R)")
-            }
+            .help("\(model.connectionState.label) — \(model.connectionLabel)")
         }
-        .alert(
-            "Database error",
-            isPresented: Binding(
-                get: { model.errorMessage != nil },
-                set: { if !$0 { model.errorMessage = nil } })
-        ) {
-            Button("OK", role: .cancel) { model.errorMessage = nil }
-        } message: {
-            Text(model.errorMessage ?? "")
+
+        ToolbarItem(placement: .primaryAction) {
+            Button {
+                model.runCurrentQuery()
+            } label: {
+                Label("Run", systemImage: "play.fill")
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(model.isBusy || !model.canRun)
+            .help("Run the current query (⌘R)")
         }
     }
 }
@@ -65,47 +63,93 @@ struct NavigatorView: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        List(selection: $model.selected) {
-            ForEach(model.schemas) { schema in
-                DisclosureGroup(isExpanded: expansion(for: schema.name)) {
-                    ForEach(model.relations[schema.name] ?? []) { relation in
-                        NavigatorRow(relation: relation)
-                            .tag(relation)
+        VStack(spacing: 0) {
+            SidebarFilterField(text: $model.navigatorFilter, focus: $focus)
+                .padding(.horizontal, Theme.Space.sm)
+                .padding(.vertical, Theme.Space.sm)
+
+            if model.schemas.isEmpty {
+                EmptyState(
+                    symbol: "server.rack",
+                    title: "No schemas",
+                    hint: "Nothing to browse on this connection yet.")
+            } else if model.matchedRelationCount == 0 {
+                EmptyState(
+                    symbol: "magnifyingglass",
+                    title: "No matches",
+                    hint: "Nothing named like “\(model.navigatorFilter)”.")
+            } else {
+                List(selection: $model.selected) {
+                    ForEach(model.schemas) { schema in
+                        let relations = model.visibleRelations(in: schema.name)
+                        if !relations.isEmpty {
+                            DisclosureGroup(isExpanded: expansion(for: schema.name)) {
+                                ForEach(relations) { relation in
+                                    NavigatorRow(relation: relation)
+                                        .tag(relation)
+                                }
+                            } label: {
+                                SchemaLabel(name: schema.name, count: relations.count)
+                            }
+                        }
                     }
-                } label: {
-                    Label(schema.name, systemImage: "folder")
-                        .font(.system(size: 12, weight: .medium))
                 }
+                .listStyle(.sidebar)
             }
         }
-        .listStyle(.sidebar)
-        .focused($focus, equals: .navigator)
         .safeAreaInset(edge: .bottom) {
             // Object count belongs where the objects are, not in the main status
             // bar, which describes the result set.
             HStack {
-                Text("\(totalRelations) objects")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                Text(countLabel)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary.color)
                 Spacer()
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(.bar)
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.xs + 2)
+            .background(Theme.surface.color)
+            .overlay(alignment: .top) {
+                Rectangle().fill(Theme.separator.color).frame(height: 1)
+            }
         }
     }
 
-    private var totalRelations: Int {
-        model.relations.values.reduce(0) { $0 + $1.count }
+    private var countLabel: String {
+        let matched = model.matchedRelationCount
+        let total = model.totalRelationCount
+        return matched == total
+            ? "\(total) objects"
+            : "\(matched) of \(total) objects"
     }
 
     private func expansion(for schema: String) -> Binding<Bool> {
         Binding(
-            get: { model.expanded.contains(schema) },
+            get: { model.isExpanded(schema) },
             set: { isOpen in
-                if isOpen { model.expanded.insert(schema) }
-                else { model.expanded.remove(schema) }
+                if isOpen { model.expanded.insert(schema) } else { model.expanded.remove(schema) }
             })
+    }
+}
+
+private struct SchemaLabel: View {
+    let name: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs + 2) {
+            Image(systemName: "square.stack.3d.up")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.textSecondary.color)
+            Text(name)
+                .font(Theme.Typography.bodyEmphasis)
+            Spacer(minLength: Theme.Space.xs)
+            Text("\(count)")
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Schema \(name), \(count) objects")
     }
 }
 
@@ -113,24 +157,32 @@ struct NavigatorRow: View {
     let relation: RelationInfo
 
     var body: some View {
-        Label {
-            HStack(spacing: 6) {
-                Text(relation.name)
-                    .font(.system(size: 12))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: 4)
-                if relation.estimatedRows > 0 {
-                    Text(AppModel.formatted(relation.estimatedRows))
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(.tertiary)
-                }
-            }
-        } icon: {
+        HStack(spacing: Theme.Space.sm) {
             Image(systemName: relation.kind.symbol)
-                .foregroundStyle(relation.kind == .table ? Color.accentColor : .secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(
+                    relation.kind == .table ? Theme.accent.color : Theme.textSecondary.color)
+                .frame(width: 14)
+
+            Text(relation.name)
+                .font(Theme.Typography.body)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: Theme.Space.xs)
+
+            if relation.estimatedRows > 0 {
+                Text(AppModel.formatted(relation.estimatedRows))
+                    .font(Theme.Typography.digits)
+                    .foregroundStyle(Theme.textTertiary.color)
+            }
         }
+        .padding(.vertical, 1)
         .help("\(relation.kind.label) · ~\(AppModel.formatted(relation.estimatedRows)) rows")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(relation.name), \(relation.kind.label), "
+                + "about \(AppModel.formatted(relation.estimatedRows)) rows")
     }
 }
 
@@ -139,12 +191,17 @@ struct NavigatorRow: View {
 struct DetailPane: View {
     @Bindable var model: AppModel
     @FocusState.Binding var focus: FocusArea?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
-            TabStrip(selection: $model.activeTab)
+            TabBar(selection: $model.activeTab)
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
 
-            Divider()
+            if let error = model.errorMessage {
+                InlineBanner(message: error) { model.errorMessage = nil }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
 
             Group {
                 switch model.activeTab {
@@ -155,41 +212,11 @@ struct DetailPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Divider()
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
             StatusBar(model: model)
         }
-        .navigationTitle(model.selected?.name ?? "No selection")
-        .navigationSubtitle(model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? "")
-    }
-}
-
-struct TabStrip: View {
-    @Binding var selection: DetailTab
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(DetailTab.allCases) { tab in
-                Button {
-                    selection = tab
-                } label: {
-                    Label(tab.rawValue, systemImage: tab.symbol)
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5)
-                                .fill(selection == tab
-                                      ? Color.accentColor.opacity(0.18)
-                                      : Color.clear))
-                        .foregroundStyle(selection == tab ? Color.accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(.bar)
+        .background(Theme.background.color)
+        .animation(Theme.Motion.ease(reduceMotion), value: model.errorMessage)
     }
 }
 
@@ -200,44 +227,61 @@ struct StructurePane: View {
 
     var body: some View {
         if model.columns.isEmpty {
-            EmptyPane(message: "Select a table to see its structure")
+            EmptyState(
+                symbol: "list.bullet.rectangle",
+                title: "No structure to show",
+                hint: "Choose a table or view in the sidebar.")
         } else {
             Table(model.columns) {
                 TableColumn("") { column in
                     // The key marker earns a column of its own: it is the first
-                    // thing anyone looks for in a structure view.
+                    // thing anyone looks for in a structure view. The tooltip
+                    // and label carry it too, so it is not colour-only.
                     if column.isPrimaryKey {
                         Image(systemName: "key.fill")
-                            .foregroundStyle(.orange)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.warning.color)
                             .help("Primary key")
+                            .accessibilityLabel("Primary key")
                     }
                 }
-                .width(20)
+                .width(18)
 
                 TableColumn("Column") { column in
-                    Text(column.name).font(.system(size: 12, design: .monospaced))
+                    Text(column.name)
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.text.color)
                 }
 
                 TableColumn("Type") { column in
                     Text(column.dataType)
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.textSecondary.color)
                 }
 
-                TableColumn("Nullable") { column in
+                TableColumn("Null") { column in
+                    // Words, not a checkmark: "NO" is the constraint a reader
+                    // is scanning for, and a bare glyph makes them guess which
+                    // direction it means.
                     Text(column.nullable ? "YES" : "NO")
-                        .font(.system(size: 11))
-                        .foregroundStyle(column.nullable ? .secondary : .primary)
+                        .font(Theme.Typography.monoSmall)
+                        .foregroundStyle(
+                            column.nullable
+                                ? Theme.textTertiary.color : Theme.text.color)
                 }
-                .width(70)
+                .width(48)
 
                 TableColumn("Default") { column in
                     Text(column.defaultValue ?? "—")
-                        .font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.textTertiary.color)
                         .lineLimit(1)
                 }
             }
+            // Striping off. AppKit paints the alternating background across the
+            // table's whole height, so the area past the last column renders as
+            // a stack of empty bars that read as rows the table failed to fill.
+            .tableStyle(.inset(alternatesRowBackgrounds: false))
         }
     }
 }
@@ -249,11 +293,23 @@ struct ContentPane: View {
     var body: some View {
         VStack(spacing: 0) {
             if model.selected == nil {
-                EmptyPane(message: "Select a table to browse its rows")
+                EmptyState(
+                    symbol: "tablecells",
+                    title: "Nothing selected",
+                    hint: "Choose a table in the sidebar to browse its rows.")
             } else {
-                MetalGridView(table: model.grid, generation: model.gridGeneration)
+                MetalGridView(
+                    table: model.grid,
+                    generation: model.gridGeneration,
+                    selection: $model.gridSelection,
+                    claimsInitialFocus: true)
+                    .overlay { LoadingVeil(isVisible: model.isBusy) }
+                    .accessibilityLabel("Result grid")
+
+                CellInspector(cell: model.inspectedCell)
             }
-            Divider()
+
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
             FilterBar(model: model, focus: $focus)
         }
     }
@@ -267,28 +323,26 @@ struct FilterBar: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text("WHERE").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-            TextField("id > 100", text: $model.whereClause)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-                .focused($focus, equals: .filter)
-                .onSubmit { model.applyFilters() }
+        HStack(spacing: Theme.Space.sm) {
+            FieldLabel(text: "Where")
+            CompactField(
+                placeholder: "id > 100", text: $model.whereClause,
+                area: .whereField, focus: $focus, onSubmit: model.applyFilters)
 
-            Text("ORDER BY").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
-            TextField("id DESC", text: $model.orderClause)
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-                .frame(maxWidth: 180)
-                .onSubmit { model.applyFilters() }
+            FieldLabel(text: "Order by")
+            CompactField(
+                placeholder: "id desc", text: $model.orderClause,
+                area: .orderField, focus: $focus, onSubmit: model.applyFilters)
+                .frame(maxWidth: 190)
 
             Button("Apply") { model.applyFilters() }
                 .controlSize(.small)
                 .disabled(model.selected == nil || model.isBusy)
+                .help("Re-run the browse query with these filters (↩)")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.bar)
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.sm)
+        .background(Theme.surface.color)
     }
 }
 
@@ -298,51 +352,166 @@ struct QueryPane: View {
 
     var body: some View {
         VSplitView {
-            TextEditor(text: $model.queryText)
-                .font(.system(size: 13, design: .monospaced))
-                .focused($focus, equals: .editor)
-                // Bounded so the result keeps most of the pane; the split is
-                // still draggable when a longer statement needs the room.
-                .frame(minHeight: 80, idealHeight: 130, maxHeight: 260)
+            ZStack(alignment: .bottomTrailing) {
+                TextEditor(text: $model.queryText)
+                    .font(Theme.Typography.editor)
+                    .scrollContentBackground(.hidden)
+                    .padding(.horizontal, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.sm)
+                    .background(Theme.background.color)
+                    .focused($focus, equals: .editor)
+                    .accessibilityLabel("SQL editor")
 
-            MetalGridView(table: model.grid, generation: model.gridGeneration)
-                .frame(minHeight: 160)
+                Text("⌘R to run")
+                    .font(Theme.Typography.micro)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .padding(Theme.Space.sm)
+                    .accessibilityHidden(true)
+            }
+            // The split opens at `maxHeight`, so this is the editor's starting
+            // size as much as its ceiling: enough for a statement of about ten
+            // lines, with the result keeping the rest. Drag for more.
+            .frame(minHeight: 72, idealHeight: 120, maxHeight: 200)
+
+            VStack(spacing: 0) {
+                MetalGridView(
+                    table: model.grid,
+                    generation: model.gridGeneration,
+                    selection: $model.gridSelection)
+                    .overlay { LoadingVeil(isVisible: model.isBusy) }
+                    .accessibilityLabel("Query result grid")
+
+                CellInspector(cell: model.inspectedCell)
+            }
+            .frame(minHeight: 160)
         }
     }
 }
+
+// MARK: - Cell inspector
+
+/// The selected cell, spelled out in full.
+///
+/// The grid truncates a value to its column width, so this strip is the only
+/// place a long value can actually be read. It is always present rather than
+/// appearing on selection: a strip that materialises on click makes the grid
+/// resize under the cursor mid-interaction.
+struct CellInspector: View {
+    let cell: AppModel.InspectedCell?
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            if let cell {
+                Text(cell.column)
+                    .font(Theme.Typography.captionEmphasis)
+                    .foregroundStyle(Theme.textSecondary.color)
+
+                if !cell.type.isEmpty {
+                    Text(cell.type)
+                        .font(Theme.Typography.micro)
+                        .foregroundStyle(Theme.textTertiary.color)
+                }
+
+                Text(cell.value)
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(
+                        cell.isNull ? Theme.textTertiary.color : Theme.text.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(cell.isNull ? "" : cell.value, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10))
+                        .frame(width: 20, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.textSecondary.color)
+                .help("Copy value (⌘C)")
+                .accessibilityLabel("Copy cell value")
+            } else {
+                Text("Select a cell to inspect its value")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 26)
+        .background(Theme.surfaceRaised.color)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+// MARK: - Loading
+
+/// Dims the grid while a query runs.
+///
+/// Stale rows stay visible but visibly inactive: blanking the grid would lose
+/// the context the user is comparing against, and leaving it undimmed would
+/// present the previous result as if it were the answer.
+struct LoadingVeil: View {
+    let isVisible: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            if isVisible {
+                Theme.background.opacity(0.55).color
+                VStack(spacing: Theme.Space.sm) {
+                    ProgressView().controlSize(.small)
+                    Text("Running…")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.textSecondary.color)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .animation(Theme.Motion.ease(reduceMotion), value: isVisible)
+        .accessibilityHidden(!isVisible)
+        .accessibilityLabel("Running query")
+    }
+}
+
+// MARK: - Status bar
 
 struct StatusBar: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        HStack(spacing: 10) {
-            Text(model.status)
-                .font(.system(size: 11).monospacedDigit())
-                .foregroundStyle(.secondary)
-            Spacer()
-            if model.loadedRows > 0 {
-                Text("\(model.columns.count) cols")
-                    .font(.system(size: 11).monospacedDigit())
-                    .foregroundStyle(.tertiary)
+        HStack(spacing: Theme.Space.md) {
+            Text(model.statusLine)
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textSecondary.color)
+                .lineLimit(1)
+
+            Spacer(minLength: Theme.Space.sm)
+
+            if model.activeTab != .structure {
+                if let cell = model.inspectedCell {
+                    Text(cell.address)
+                        .font(Theme.Typography.digits)
+                        .foregroundStyle(Theme.textTertiary.color)
+                }
+
+                if !model.grid.columns.isEmpty {
+                    Text("\(model.grid.columns.count) cols")
+                        .font(Theme.Typography.digits)
+                        .foregroundStyle(Theme.textTertiary.color)
+                }
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.bar)
-    }
-}
-
-struct EmptyPane: View {
-    let message: String
-
-    var body: some View {
-        VStack {
-            Spacer()
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(.tertiary)
-            Spacer()
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 24)
+        .background(Theme.surface.color)
+        .accessibilityElement(children: .contain)
     }
 }

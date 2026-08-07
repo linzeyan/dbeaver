@@ -23,14 +23,9 @@ final class GridRenderer {
         var color: SIMD4<Float>
     }
 
-    private enum Palette {
-        static let headerBackground = SIMD4<Float>(0.14, 0.15, 0.18, 1)
-        static let headerText = SIMD4<Float>(0.62, 0.68, 0.78, 1)
-        static let rowBanding = SIMD4<Float>(1, 1, 1, 0.022)
-        static let separator = SIMD4<Float>(1, 1, 1, 0.06)
-        static let text = SIMD4<Float>(0.88, 0.90, 0.93, 1)
-        static let nullText = SIMD4<Float>(0.45, 0.48, 0.54, 1)
-    }
+    // Colours come from `Theme.Grid`, not from constants here. The grid and the
+    // SwiftUI chrome around it used to carry separate palettes, which is what
+    // made them look like two applications sharing a window.
 
     // Layout, in points.
     let rowHeight: Float = 20
@@ -60,6 +55,12 @@ final class GridRenderer {
     var scrollRow: Double = 0
     /// Horizontal scroll offset in points.
     var scrollX: Float = 0
+    /// The cell under the cursor keys. Drawn as a row band plus a stronger cell
+    /// fill, because a database grid is navigated by row and read by cell.
+    var selection: GridSelection?
+    /// Whether the grid holds keyboard focus. Drawn as an inset border: the
+    /// selection alone does not say which surface the arrow keys will move.
+    var isFocused = false
 
     /// Rolling frame-time stats, which are the measurement Phase 0 exists for.
     private(set) var lastFrameMs: Double = 0
@@ -180,12 +181,34 @@ final class GridRenderer {
         guard firstCol < lastCol else { return }
 
         let subRow = Float(scrollRow - scrollRow.rounded(.down))
+        func rowY(_ i: Int) -> Float {
+            headerHeight + Float(i) * rowHeight - subRow * rowHeight
+        }
 
         // Row banding, drawn first so text lands on top.
         for (i, r) in rows.enumerated() where r % 2 == 1 {
-            let y = headerHeight + Float(i) * rowHeight - subRow * rowHeight
+            let y = rowY(i)
             guard y + rowHeight > headerHeight, y < viewH else { continue }
-            fill(x: 0, y: y, w: viewW, h: rowHeight, color: Palette.rowBanding)
+            fill(x: 0, y: y, w: viewW, h: rowHeight, color: Theme.Grid.banding.simd)
+        }
+
+        // Selection, between the banding and the separators so that the band
+        // reads as continuous across the row and the grid lines stay on top.
+        if let selection, rows.contains(selection.row) {
+            let y = rowY(selection.row - rows.lowerBound)
+            if y + rowHeight > headerHeight, y < viewH {
+                fill(x: 0, y: y, w: viewW, h: rowHeight,
+                     color: Theme.Grid.selectedRow.simd)
+                let cx = Float(selection.column) * columnWidth - scrollX
+                if cx + columnWidth > 0, cx < viewW {
+                    fill(x: cx, y: y, w: columnWidth, h: rowHeight,
+                         color: Theme.Grid.selectedCell.simd)
+                    // A 1pt edge on the leading side marks the cell even where
+                    // the fill sits over a dark value and washes out.
+                    fill(x: cx, y: y, w: 1, h: rowHeight,
+                         color: Theme.Grid.cursor.simd)
+                }
+            }
         }
 
         // Column separators.
@@ -193,26 +216,82 @@ final class GridRenderer {
             let x = Float(c) * columnWidth - scrollX
             guard x >= 0, x < viewW else { continue }
             fill(x: x, y: headerHeight, w: 1, h: viewH - headerHeight,
-                 color: Palette.separator)
+                 color: Theme.Grid.separator.simd)
         }
 
         // Header band, opaque so rows scroll beneath it.
-        fill(x: 0, y: 0, w: viewW, h: headerHeight, color: Palette.headerBackground)
+        fill(x: 0, y: 0, w: viewW, h: headerHeight, color: Theme.Grid.header.simd)
+        fill(x: 0, y: headerHeight - 1, w: viewW, h: 1,
+             color: Theme.Grid.separator.simd)
         for c in firstCol..<lastCol {
             let x = Float(c) * columnWidth - scrollX + cellPadding
-            emit(text: table.columns[c].name, x: x, y: 5, color: Palette.headerText)
+            emit(text: table.columns[c].name, x: x, y: 5,
+                 color: Theme.Grid.headerText.simd)
         }
 
         // Cells.
         for (i, r) in rows.enumerated() {
-            let y = headerHeight + Float(i) * rowHeight - subRow * rowHeight
+            let y = rowY(i)
             guard y < viewH, y + rowHeight > headerHeight else { continue }
             for c in firstCol..<lastCol {
                 let x = Float(c) * columnWidth - scrollX + cellPadding
-                let s = table.text(row: r, column: c)
-                emit(text: s, x: x, y: y + 3, color: Palette.text)
+                // NULL is drawn as the word, dimmed. `text` returns "" for both
+                // NULL and an empty string, and rendering them the same way
+                // hides a distinction the user is querying on.
+                if table.isNull(row: r, column: c) {
+                    emit(text: "NULL", x: x, y: y + 3, color: Theme.Grid.nullText.simd)
+                } else {
+                    emit(text: table.text(row: r, column: c), x: x, y: y + 3,
+                         color: Theme.Grid.text.simd)
+                }
             }
         }
+
+        if isFocused {
+            let ring = Theme.Grid.cursor.opacity(0.7).simd
+            fill(x: 0, y: 0, w: viewW, h: 1, color: ring)
+            fill(x: 0, y: viewH - 1, w: viewW, h: 1, color: ring)
+            fill(x: 0, y: 0, w: 1, h: viewH, color: ring)
+            fill(x: viewW - 1, y: 0, w: 1, h: viewH, color: ring)
+        }
+    }
+
+    // MARK: - Hit testing
+
+    /// The cell at a point in view coordinates, or `nil` for the header and the
+    /// empty area past the last row or column.
+    func cell(at point: CGPoint, viewHeight: CGFloat, table: ArrowTable) -> GridSelection? {
+        let y = Float(point.y)
+        guard y >= headerHeight else { return nil }
+        let row = Int(scrollRow + Double((y - headerHeight) / rowHeight))
+        let column = Int((Float(point.x) + scrollX) / columnWidth)
+        guard row >= 0, row < table.rowCount,
+              column >= 0, column < table.columns.count
+        else { return nil }
+        return GridSelection(row: row, column: column)
+    }
+
+    /// Scrolls the minimum distance that brings `selection` fully into view.
+    ///
+    /// Minimum rather than centred: keyboard navigation that recentres on every
+    /// keystroke makes the surrounding rows impossible to track.
+    func scrollToVisible(_ selection: GridSelection, viewSize: CGSize, columns: Int) {
+        let visibleRows = Double(max(1, Int((Float(viewSize.height) - headerHeight) / rowHeight)))
+        let row = Double(selection.row)
+        if row < scrollRow {
+            scrollRow = row
+        } else if row >= scrollRow + visibleRows - 1 {
+            scrollRow = row - visibleRows + 2
+        }
+        scrollRow = max(0, scrollRow)
+
+        let left = Float(selection.column) * columnWidth
+        if left < scrollX {
+            scrollX = left
+        } else if left + columnWidth > scrollX + Float(viewSize.width) {
+            scrollX = left + columnWidth - Float(viewSize.width)
+        }
+        scrollX = max(0, min(scrollX, max(0, contentWidth(columns: columns) - Float(viewSize.width))))
     }
 
     private func fill(x: Float, y: Float, w: Float, h: Float, color: SIMD4<Float>) {

@@ -1,5 +1,11 @@
-import SwiftUI
 import MetalKit
+import SwiftUI
+
+/// The cell the grid's cursor is on.
+struct GridSelection: Equatable {
+    var row: Int
+    var column: Int
+}
 
 /// Bridges the Metal grid into SwiftUI.
 ///
@@ -12,10 +18,14 @@ struct MetalGridView: NSViewRepresentable {
     /// Changes when the underlying result is replaced, which is the signal to
     /// reset scroll position and redraw.
     let generation: Int
+    @Binding var selection: GridSelection?
+    /// See `GridView.claimsInitialFocus`.
+    var claimsInitialFocus = false
 
     final class Coordinator {
         var renderer: GridRenderer?
         var lastGeneration = -1
+        var onSelect: ((GridSelection) -> Void)?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -29,9 +39,13 @@ struct MetalGridView: NSViewRepresentable {
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let view = GridView(frame: .zero, device: device)
         view.colorPixelFormat = .bgra8Unorm
-        view.clearColor = MTLClearColor(red: 0.08, green: 0.09, blue: 0.11, alpha: 1)
+        view.clearColor = Theme.Grid.background.mtlClear
         view.isPaused = true
         view.enableSetNeedsDisplay = true
+        view.claimsInitialFocus = claimsInitialFocus
+        view.onSelect = { [weak coordinator = context.coordinator] hit in
+            coordinator?.onSelect?(hit)
+        }
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
@@ -45,6 +59,10 @@ struct MetalGridView: NSViewRepresentable {
     func updateNSView(_ view: GridView, context: Context) {
         guard let renderer = context.coordinator.renderer else { return }
         renderer.table = table
+        // Re-captured each update so the closure writes through the current
+        // binding rather than the one that existed when the view was made.
+        context.coordinator.onSelect = { selection = $0 }
+
         if context.coordinator.lastGeneration != generation {
             context.coordinator.lastGeneration = generation
             // A new result starts at the top; keeping the old offset would show
@@ -52,6 +70,10 @@ struct MetalGridView: NSViewRepresentable {
             renderer.scrollRow = 0
             renderer.scrollX = 0
         }
+        // The model owns the selection, including the one it sets when a result
+        // arrives, so the renderer follows the binding rather than being reset
+        // here — resetting would discard that initial selection every time.
+        if renderer.selection != selection { renderer.selection = selection }
         view.needsDisplay = true
     }
 }

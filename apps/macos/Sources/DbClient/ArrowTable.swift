@@ -76,6 +76,17 @@ final class ArrowTable {
         return columns[column].batches[batchIdx].text(at: localRow)
     }
 
+    /// Whether a cell is SQL NULL.
+    ///
+    /// `text` renders NULL and an empty string identically, and in a database
+    /// client those are different values — the caller has to be able to tell
+    /// them apart before deciding what to draw.
+    func isNull(row: Int, column: Int) -> Bool {
+        guard column < columns.count, row < rowCount else { return false }
+        guard let (batchIdx, localRow) = locate(row: row) else { return false }
+        return columns[column].batches[batchIdx].isNull(localRow)
+    }
+
     private func locate(row: Int) -> (Int, Int)? {
         // Batches are uniform except the last, but binary search keeps this
         // correct if that ever stops being true.

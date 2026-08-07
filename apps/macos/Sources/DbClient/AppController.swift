@@ -185,11 +185,50 @@ final class GridViewController: NSObject, MTKViewDelegate {
     }
 }
 
-/// MTKView subclass that turns scroll events into row offsets.
+/// MTKView subclass carrying the grid's pointer and keyboard interaction.
+///
+/// The grid is the surface a user spends the session in, so it has to answer
+/// clicks, arrow keys, and ⌘C the way every other table on the platform does.
+/// None of that can come from SwiftUI: the content is drawn, not composed of
+/// views, so there is nothing for SwiftUI to hit-test or focus.
 final class GridView: MTKView {
     weak var renderer: GridRenderer?
 
+    /// Called when the selected cell changes, so the chrome can show the full
+    /// value and the status bar can show where the cursor is.
+    var onSelect: ((GridSelection) -> Void)?
+
+    /// Whether this grid takes keyboard focus when it appears. Set only for the
+    /// browse pane: in the Query tab focus belongs to the editor, and a grid
+    /// that grabs it on every tab switch is worse than one that never does.
+    var claimsInitialFocus = false
+
     override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard claimsInitialFocus, let window else { return }
+        // Deferred by one turn: SwiftUI installs its own first responder while
+        // the hosting view lays out, and claiming focus before that happens
+        // just loses the race. Without this the window opens with the caret in
+        // the filter field, which reads as a text-entry app.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.window === window else { return }
+            window.makeFirstResponder(self)
+        }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        renderer?.isFocused = true
+        needsDisplay = true
+        return super.becomeFirstResponder()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        renderer?.isFocused = false
+        needsDisplay = true
+        return super.resignFirstResponder()
+    }
 
     override func scrollWheel(with event: NSEvent) {
         guard let renderer, let table = renderer.table else { return }
@@ -204,5 +243,71 @@ final class GridView: MTKView {
         renderer.scrollX = max(0, min(maxX, renderer.scrollX - Float(event.scrollingDeltaX)))
 
         needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let renderer, let table = renderer.table else { return }
+        window?.makeFirstResponder(self)
+        let point = convert(event.locationInWindow, from: nil)
+        guard let hit = renderer.cell(at: point, viewHeight: bounds.height, table: table)
+        else { return }
+        apply(hit)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard let renderer, let table = renderer.table, table.rowCount > 0 else { return }
+
+        // ⌘C on the selected cell. Routed here rather than through the Edit menu
+        // because the grid is not a text view and has no field editor to answer
+        // the standard copy: selector for it.
+        if event.modifierFlags.contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "c" {
+            copySelection()
+            return
+        }
+
+        let current = renderer.selection ?? GridSelection(row: Int(renderer.scrollRow), column: 0)
+        let lastRow = table.rowCount - 1
+        let lastColumn = max(0, table.columns.count - 1)
+        let page = max(1, Int(
+            (bounds.height - CGFloat(renderer.headerHeight)) / CGFloat(renderer.rowHeight)) - 1)
+
+        var next = current
+        switch event.specialKey {
+        case .upArrow: next.row -= 1
+        case .downArrow: next.row += 1
+        case .leftArrow: next.column -= 1
+        case .rightArrow: next.column += 1
+        case .pageUp: next.row -= page
+        case .pageDown: next.row += page
+        case .home: next.row = 0
+        case .end: next.row = lastRow
+        default:
+            // Silently ignored rather than passed to `super`, which would beep:
+            // typing into a read-only grid is a slip, not an error worth a sound.
+            return
+        }
+
+        next.row = min(max(0, next.row), lastRow)
+        next.column = min(max(0, next.column), lastColumn)
+        apply(next)
+        renderer.scrollToVisible(next, viewSize: bounds.size, columns: table.columns.count)
+    }
+
+    private func apply(_ selection: GridSelection) {
+        renderer?.selection = selection
+        needsDisplay = true
+        onSelect?(selection)
+    }
+
+    private func copySelection() {
+        guard let renderer, let table = renderer.table, let selection = renderer.selection
+        else { return }
+        // NULL copies as an empty string, not as the word: what is on the
+        // pasteboard should be the value, not the way the grid spells it.
+        let value = table.isNull(row: selection.row, column: selection.column)
+            ? "" : table.text(row: selection.row, column: selection.column)
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
     }
 }

@@ -17,15 +17,20 @@ let benchMode = CommandLine.arguments.contains("--bench")
 let verifyMode = CommandLine.arguments.contains("--verify")
 let benchFrames = 600
 
+/// Value following `flag` on the command line, if any.
+func argument(_ flag: String) -> String? {
+    guard let i = CommandLine.arguments.firstIndex(of: flag),
+          i + 1 < CommandLine.arguments.count
+    else { return nil }
+    return CommandLine.arguments[i + 1]
+}
+
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
 /// how rendering defects get caught here, and a screenshot cannot click.
-let initialTab: DetailTab = {
-    guard let i = CommandLine.arguments.firstIndex(of: "--tab"),
-          i + 1 < CommandLine.arguments.count,
-          let tab = DetailTab(rawValue: CommandLine.arguments[i + 1].capitalized)
-    else { return .content }
-    return tab
-}()
+let initialTab = argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized) } ?? .content
+
+/// `--sql "SELECT …"` opens on the Query tab with that statement already run.
+let initialSQL = argument("--sql")
 
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
@@ -69,14 +74,25 @@ if benchMode {
         controller.startBench(view: view)
     }
 } else {
+    // Pinned before the window is shown, so nothing lays out in the wrong
+    // appearance and flashes on the first frame.
+    Theme.apply(to: app)
+    AppMenu.install(into: app)
+
     window.titlebarAppearsTransparent = false
     window.toolbarStyle = .unified
+    window.backgroundColor = NSColor(Theme.background.color)
+    // Below this the grid shows one column and the filter bar wraps; there is
+    // no useful layout smaller, so the window is not allowed to reach it.
+    window.minSize = NSSize(width: 940, height: 580)
 
     // Top-level code runs on the main thread but is not statically isolated in
     // Swift 5 mode; assert the isolation the model requires rather than hop.
     MainActor.assumeIsolated {
-        let model = AppModel(connString: connString, initialTab: initialTab)
+        let model = AppModel(
+            connString: connString, initialTab: initialTab, initialSQL: initialSQL)
         window.contentView = NSHostingView(rootView: MainView(model: model))
+        window.center()
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         model.connect()

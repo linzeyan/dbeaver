@@ -34,6 +34,9 @@ final class AppModel {
     private(set) var relations: [String: [RelationInfo]] = [:]
     var expanded: Set<String> = []
     var selected: RelationInfo? { didSet { selectionChanged(from: oldValue) } }
+    /// Name filter for the navigator. A schema with hundreds of objects is the
+    /// normal case, and scrolling to find one is the slowest thing a user does.
+    var navigatorFilter = ""
 
     // Detail
     var activeTab: DetailTab = .content
@@ -45,16 +48,23 @@ final class AppModel {
     private(set) var gridGeneration = 0
     private(set) var loadedRows = 0
     private(set) var loadMilliseconds: Double = 0
+    /// The cell the grid's cursor is on, mirrored here so the inspector and the
+    /// status bar can read it.
+    var gridSelection: GridSelection?
 
     // Content pane filters
     var whereClause = ""
     var orderClause = ""
 
     // Query pane
-    var queryText = "SELECT * FROM bench_wide LIMIT 1000"
+    var queryText = ""
+    /// The last statement `selectionChanged` put in the editor, so a later
+    /// selection can tell "untouched suggestion" from "the user's work".
+    private var suggestedQueryText = ""
 
     // Chrome
     private(set) var connectionLabel = "Not connected"
+    private(set) var connectionState: StatusDot.State = .connecting
     private(set) var status = "Connecting…"
     private(set) var isBusy = false
     var errorMessage: String?
@@ -69,9 +79,15 @@ final class AppModel {
     private let queue = DispatchQueue(label: "dev.dbclient.core", qos: .userInitiated)
     private let connString: String
 
-    init(connString: String, initialTab: DetailTab = .content) {
+    /// A statement to open with, from `--sql`. Runs once the connection is up,
+    /// in place of browsing the first table.
+    private let initialSQL: String?
+
+    init(connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil) {
         self.connString = connString
-        self.activeTab = initialTab
+        self.activeTab = initialSQL == nil ? initialTab : .query
+        self.initialSQL = initialSQL
+        if let initialSQL { queryText = initialSQL }
     }
 
     // MARK: - Lifecycle
@@ -92,6 +108,7 @@ final class AppModel {
             schemas = result.1
             relations = result.2
             connectionLabel = Self.label(for: connString)
+            connectionState = .connected
             // Open the schema a user most likely wants, and land on a table
             // rather than an empty pane. Opening to nothing makes every session
             // start with the same two clicks.
@@ -101,7 +118,72 @@ final class AppModel {
             }
             status = "\(schemas.count) schemas"
             isBusy = false
+            // Runs after the selection above, so an explicit `--sql` replaces
+            // the browse rather than racing it.
+            if let initialSQL { runQuery(initialSQL, describedAs: "query") }
         }
+    }
+
+    // MARK: - Navigator
+
+    /// Relations in `schema` matching the filter. Matching on a substring
+    /// rather than a prefix, because table names are usually reached by the
+    /// distinctive word in the middle rather than by what they start with.
+    func visibleRelations(in schema: String) -> [RelationInfo] {
+        let all = relations[schema] ?? []
+        let needle = navigatorFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !needle.isEmpty else { return all }
+        return all.filter { $0.name.lowercased().contains(needle) }
+    }
+
+    /// Whether a schema's disclosure is open.
+    ///
+    /// While a filter is active every schema with a match opens, so results are
+    /// never hidden inside a collapsed group the user cannot see to expand.
+    func isExpanded(_ schema: String) -> Bool {
+        if !navigatorFilter.trimmingCharacters(in: .whitespaces).isEmpty {
+            return !visibleRelations(in: schema).isEmpty
+        }
+        return expanded.contains(schema)
+    }
+
+    var matchedRelationCount: Int {
+        schemas.reduce(0) { $0 + visibleRelations(in: $1.name).count }
+    }
+
+    var totalRelationCount: Int {
+        relations.values.reduce(0) { $0 + $1.count }
+    }
+
+    // MARK: - Cell inspection
+
+    /// What the selected cell holds, spelled out for the inspector strip.
+    ///
+    /// The grid clips a cell to the column width, so without this a value wider
+    /// than its column simply cannot be read.
+    struct InspectedCell {
+        let column: String
+        let type: String
+        let value: String
+        let isNull: Bool
+        let address: String
+    }
+
+    var inspectedCell: InspectedCell? {
+        guard let s = gridSelection,
+              s.column < grid.columns.count,
+              s.row < grid.rowCount
+        else { return nil }
+        let name = grid.columns[s.column].name
+        let isNull = grid.isNull(row: s.row, column: s.column)
+        return InspectedCell(
+            column: name,
+            // The relation's declared type where we have it; the Query tab may
+            // return computed columns that no relation describes.
+            type: columns.first { $0.name == name }?.dataType ?? "",
+            value: isNull ? "NULL" : grid.text(row: s.row, column: s.column),
+            isNull: isNull,
+            address: "row \(Self.formatted(s.row + 1))")
     }
 
     // MARK: - Selection
@@ -114,7 +196,15 @@ final class AppModel {
         orderClause = ""
         loadColumns(for: selected)
         runQuery(browseSQL(for: selected), describedAs: selected.name)
-        queryText = "SELECT * FROM \(selected.qualifiedName) LIMIT 1000"
+
+        // Reseed the editor only when it still holds text this method wrote.
+        // Selecting a table used to overwrite the editor unconditionally, which
+        // silently discarded whatever statement the user was in the middle of.
+        let suggestion = "SELECT * FROM \(selected.qualifiedName) LIMIT 1000"
+        if queryText.isEmpty || queryText == suggestedQueryText {
+            queryText = suggestion
+            suggestedQueryText = suggestion
+        }
     }
 
     private func loadColumns(for relation: RelationInfo) {
@@ -145,6 +235,29 @@ final class AppModel {
         runQuery(browseSQL(for: selected), describedAs: selected.name)
     }
 
+    /// What the status bar reads. Tab-specific, because the panes are showing
+    /// different things: on the Structure tab, row count and elapsed time
+    /// describe a result the user is not currently looking at.
+    var statusLine: String {
+        switch activeTab {
+        case .structure:
+            guard !columns.isEmpty else { return status }
+            let keys = columns.filter(\.isPrimaryKey).count
+            let keyPart = keys == 0 ? "no primary key" : "\(keys) in primary key"
+            return "\(columns.count) columns · \(keyPart)"
+        case .content, .query:
+            return status
+        }
+    }
+
+    /// Whether ⌘R has anything to run. Drives the Run button's disabled state,
+    /// so the button is never offered when pressing it would do nothing.
+    var canRun: Bool {
+        activeTab == .query
+            ? !queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            : selected != nil
+    }
+
     func runCurrentQuery() {
         // ⌘R means "run what I am looking at": the query text in the Query tab,
         // the filtered browse elsewhere.
@@ -160,6 +273,9 @@ final class AppModel {
     private func runQuery(_ sql: String, describedAs label: String) {
         isBusy = true
         status = "Running…"
+        // A new run supersedes the previous failure; leaving the banner up
+        // would attribute an old error to the result now on screen.
+        errorMessage = nil
         let batchRows = self.batchRows
 
         // The grid is mutated on the main actor only; the background stage
@@ -177,6 +293,7 @@ final class AppModel {
                 milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
         } then: { [self] result in
             grid.reset()
+            gridSelection = nil
             grid.setSchema(result.schema)
             if let release = result.schema.pointee.release { release(result.schema) }
             result.schema.deallocate()
@@ -185,12 +302,15 @@ final class AppModel {
             }
             gridGeneration += 1
             loadedRows = grid.rowCount
+            // Land the cursor on the first cell. It gives the arrow keys a
+            // starting point and puts a real value in the inspector, instead of
+            // asking the user to click once before the pane says anything.
+            gridSelection = grid.rowCount > 0 ? GridSelection(row: 0, column: 0) : nil
             loadMilliseconds = result.milliseconds
             let ms = result.milliseconds
-            status = "\(Self.formatted(grid.rowCount)) rows · \(String(format: "%.2f", ms / 1000)) s"
+            status = "\(label) · \(Self.formatted(grid.rowCount)) rows · "
+                + "\(String(format: "%.2f", ms / 1000)) s"
             isBusy = false
-            if activeTab == .structure { activeTab = .structure } // keep tab
-            _ = label
         }
     }
 
@@ -227,14 +347,19 @@ final class AppModel {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        self?.errorMessage = String(describing: error)
-                        self?.status = "Failed"
-                        self?.isBusy = false
-                    }
+                    MainActor.assumeIsolated { self?.fail(with: error) }
                 }
             }
         }
+    }
+
+    private func fail(with error: Error) {
+        errorMessage = String(describing: error)
+        status = "Failed"
+        isBusy = false
+        // A failed statement says nothing about the connection; only a failure
+        // before one exists does.
+        if db == nil { connectionState = .failed }
     }
 
     private static func label(for connString: String) -> String {
