@@ -5,6 +5,9 @@
 //! there are two implementations to derive it from.
 
 mod arrow_map;
+mod metadata;
+
+pub use metadata::{ColumnInfo, RelationInfo, RelationKind, SchemaInfo};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
@@ -42,6 +45,21 @@ impl PgSource {
             }
         });
         Ok(Self { client })
+    }
+
+    /// Non-system schemas, for the navigator root.
+    pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, PgError> {
+        metadata::schemas(&self.client).await
+    }
+
+    /// Tables, views, and other relations within a schema.
+    pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, PgError> {
+        metadata::relations(&self.client, schema).await
+    }
+
+    /// Column definitions for one relation.
+    pub async fn columns(&self, schema: &str, relation: &str) -> Result<Vec<ColumnInfo>, PgError> {
+        metadata::columns(&self.client, schema, relation).await
     }
 
     /// Prepare `sql` and begin streaming results as Arrow batches of

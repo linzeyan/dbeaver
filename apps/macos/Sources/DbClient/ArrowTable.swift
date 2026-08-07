@@ -30,6 +30,18 @@ final class ArrowTable {
 
     // MARK: - Ingest
 
+    /// Drops all batches and columns.
+    ///
+    /// Releasing the retained batches here is what returns the Rust-side
+    /// buffers; without it, switching tables would accumulate every result ever
+    /// loaded.
+    func reset() {
+        columns.removeAll()
+        batchStarts.removeAll()
+        retained.removeAll()
+        rowCount = 0
+    }
+
     func setSchema(_ schema: UnsafeMutablePointer<ArrowSchema>) {
         columns = (0..<Int(schema.pointee.n_children)).map { i in
             let child = schema.pointee.children![i]!

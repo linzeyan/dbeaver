@@ -58,6 +58,13 @@ typedef struct DbQuery DbQuery;
 DbHandle* db_connect(const char* conn_str, char** err);
 void db_free(DbHandle* handle);
 
+// Metadata crosses as JSON, not Arrow: it is small, and Arrow buys nothing for
+// a few thousand short rows. Returned strings are released with db_string_free.
+char* db_schemas_json(DbHandle* handle, char** err);
+char* db_relations_json(DbHandle* handle, const char* schema, char** err);
+char* db_columns_json(DbHandle* handle, const char* schema, const char* relation,
+                      char** err);
+
 DbQuery* db_query(DbHandle* handle, const char* sql, size_t batch_rows, char** err);
 
 // Fills `out` with the result schema (a struct type whose children are the

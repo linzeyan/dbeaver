@@ -77,6 +77,119 @@ pub unsafe extern "C" fn db_free(handle: *mut DbHandle) {
     }
 }
 
+/// Serializes `value` as JSON into a caller-owned C string.
+///
+/// Metadata crosses as JSON rather than Arrow: it is a few thousand short rows
+/// at most, so the encoding cost is irrelevant and the Swift side stays a
+/// `JSONDecoder` call instead of a column reader.
+fn json_result<T: serde::Serialize>(value: &T, err: *mut *mut c_char) -> *mut c_char {
+    match serde_json::to_string(value) {
+        Ok(s) => match CString::new(s) {
+            Ok(c) => c.into_raw(),
+            Err(e) => {
+                unsafe { set_err(err, e) };
+                ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Non-system schemas as a JSON array. Release with `db_string_free`.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_schemas_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.source.schemas()) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Relations in `schema` as a JSON array. Release with `db_string_free`.
+///
+/// # Safety
+/// `handle` must be live; `schema` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_relations_json(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() {
+        unsafe { set_err(err, "null handle or schema") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let s = match unsafe { CStr::from_ptr(schema) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    match runtime().block_on(h.source.relations(s)) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Columns of one relation as a JSON array. Release with `db_string_free`.
+///
+/// # Safety
+/// `handle` must be live; `schema` and `relation` must be valid NUL-terminated
+/// C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_columns_json(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() {
+        unsafe { set_err(err, "null handle, schema, or relation") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let (s, r) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+        ) {
+            (Ok(s), Ok(r)) => (s, r),
+            _ => {
+                set_err(err, "schema or relation is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    match runtime().block_on(h.source.columns(s, r)) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// # Safety
 /// `handle` must be live; `sql` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]

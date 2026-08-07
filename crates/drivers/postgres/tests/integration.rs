@@ -11,7 +11,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use driver_postgres::{PgError, PgSource};
+use driver_postgres::{PgError, PgSource, RelationKind};
 
 const CONN: &str = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench";
 
@@ -252,6 +252,86 @@ async fn unsupported_column_type_is_rejected_at_prepare() {
         PgError::UnsupportedType { pg_type, .. } => assert_eq!(pg_type, "point"),
         other => panic!("expected UnsupportedType, got {other:?}"),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn schemas_exclude_catalog_namespaces() {
+    let src = connect().await;
+    let schemas = src.schemas().await.expect("schemas failed");
+    let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+
+    assert!(names.contains(&"public"), "public schema should be listed");
+    // Catalog schemas would bury the user's own objects in the navigator.
+    assert!(
+        !names.iter().any(|n| n.starts_with("pg_")),
+        "pg_* schemas should be filtered out, got {names:?}"
+    );
+    assert!(!names.contains(&"information_schema"));
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn relations_report_kind_and_row_estimate() {
+    let src = connect().await;
+    let rels = src.relations("public").await.expect("relations failed");
+
+    let bench = rels
+        .iter()
+        .find(|r| r.name == "bench_wide")
+        .expect("bench_wide should be listed");
+    assert_eq!(bench.kind, RelationKind::Table);
+    assert_eq!(bench.schema, "public");
+    // The planner estimate is approximate by design, but should be the right
+    // order of magnitude after the seed's ANALYZE.
+    assert!(
+        bench.estimated_rows > 900_000 && bench.estimated_rows < 1_100_000,
+        "estimate {} is not near 1M",
+        bench.estimated_rows
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn columns_describe_types_keys_and_nullability() {
+    let src = connect().await;
+    let cols = src
+        .columns("public", "bench_wide")
+        .await
+        .expect("columns failed");
+
+    assert_eq!(cols.len(), 20);
+    assert_eq!(cols[0].position, 1, "positions start at 1 and are ordered");
+
+    let id = &cols[0];
+    assert_eq!(id.name, "id");
+    assert!(id.is_primary_key, "id is the declared primary key");
+    assert!(!id.nullable, "a primary key column cannot be null");
+
+    let num = cols.iter().find(|c| c.name == "num_val").unwrap();
+    assert_eq!(
+        num.data_type, "numeric(18,4)",
+        "type should carry its modifiers, not just the base name"
+    );
+
+    let nullable = cols.iter().find(|c| c.name == "nullable_text").unwrap();
+    assert!(nullable.nullable);
+
+    assert!(
+        cols.iter().filter(|c| c.is_primary_key).count() == 1,
+        "exactly one column is in the primary key"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn unknown_relation_yields_no_columns() {
+    let src = connect().await;
+    let cols = src
+        .columns("public", "no_such_table")
+        .await
+        .expect("missing relation should be empty, not an error");
+    assert!(cols.is_empty());
 }
 
 #[tokio::test]

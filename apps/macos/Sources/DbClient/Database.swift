@@ -23,6 +23,37 @@ final class Database {
 
     deinit { db_free(handle) }
 
+    // MARK: - Metadata
+
+    func schemas() throws -> [SchemaInfo] {
+        try decodeJSON(db_schemas_json(handle, &errOut), as: [SchemaInfo].self)
+    }
+
+    func relations(schema: String) throws -> [RelationInfo] {
+        try decodeJSON(db_relations_json(handle, schema, &errOut), as: [RelationInfo].self)
+    }
+
+    func columns(schema: String, relation: String) throws -> [ColumnInfo] {
+        try decodeJSON(
+            db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)
+    }
+
+    /// Scratch storage for the C error out-parameter. Calls are serialized by
+    /// the caller (all metadata access happens on one background queue), so a
+    /// single slot is sufficient and keeps the call sites readable.
+    private var errOut: UnsafeMutablePointer<CChar>?
+
+    private func decodeJSON<T: Decodable>(
+        _ raw: UnsafeMutablePointer<CChar>?, as type: T.Type
+    ) throws -> T {
+        guard let raw else {
+            throw DbError(description: Database.take(&errOut) ?? "metadata call failed")
+        }
+        defer { db_string_free(raw) }
+        let data = Data(bytes: raw, count: strlen(raw))
+        return try JSONDecoder().decode(type, from: data)
+    }
+
     func query(_ sql: String, batchRows: Int) throws -> Query {
         var err: UnsafeMutablePointer<CChar>?
         guard let q = db_query(handle, sql, batchRows, &err) else {

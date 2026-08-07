@@ -143,18 +143,36 @@ final class GridViewController: NSObject, MTKViewDelegate {
         }
     }
 
-    func startBench() {
+    /// Drives the benchmark's frames explicitly instead of leaving them to the
+    /// display link.
+    ///
+    /// macOS throttles drawing for occluded and background windows down to a
+    /// frame or two per second, so a display-link-driven bench silently depends
+    /// on whether the window happens to be frontmost — it hangs when run from a
+    /// script. Frame samples time the render call itself, never the wait
+    /// between vsyncs, so pacing by the display link contributed nothing to the
+    /// number in the first place.
+    func startBench(view: MTKView) {
         // Skip the first frames: pipeline warm-up and the initial texture
         // upload are not steady-state scrolling.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [self] in
             renderer.resetStats()
             benchStarted = true
+            while benchFrameCount < benchFrames {
+                view.draw()
+            }
         }
     }
 
     private func report() {
         let s = renderer.frameSamples.sorted()
-        guard !s.isEmpty else { return }
+        // A frame that could not acquire a drawable records no sample. Missing
+        // samples mean the run measured less than it claims, so say so instead
+        // of printing a confident average over whatever survived.
+        guard s.count == benchFrames else {
+            print("bench incomplete: \(s.count) of \(benchFrames) frames sampled")
+            exit(1)
+        }
         func pct(_ p: Double) -> Double { s[min(s.count - 1, Int(Double(s.count) * p))] }
         let mean = s.reduce(0, +) / Double(s.count)
         print("frames           \(s.count)")
