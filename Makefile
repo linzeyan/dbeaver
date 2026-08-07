@@ -15,7 +15,13 @@ APP_DEBUG := $(APP_DIR)/.build/debug/DbClient
 # SwiftPM emits a bare executable, which macOS hands to Terminal instead of
 # launching as an application. The shippable artefact is the bundle assembled by
 # `make package`, not $(APP_BIN).
-APP_BUNDLE := dist/DbClient.app
+#
+# Running the bundle's inner executable directly gives full bundle context —
+# `Bundle.main` resolves from the executable's path — while keeping stdout on
+# the terminal and LaunchServices out of the way. That is what the screenshot
+# tooling wants: the artefact users get, without the launch indirection.
+APP_BUNDLE     := dist/DbClient.app
+APP_BUNDLE_BIN := $(APP_BUNDLE)/Contents/MacOS/DbClient
 
 # Benchmark database. Ports are non-default to avoid colliding with a local
 # PostgreSQL install.
@@ -44,14 +50,14 @@ build: ## Debug build of core and app
 release: ## Release build of core and app
 	cargo build --release
 	swift build --package-path $(APP_DIR) -c release
-	@echo "binary: $(APP_BIN)"
+	@echo "binary: $(APP_BIN)  (run 'make package' for the launchable .app)"
 
 .PHONY: core
 core: ## Release build of the Rust core only
 	cargo build --release
 
 .PHONY: package
-package: ## Build + bundle + code-sign dist/DbClient.app (ad-hoc; CODESIGN_IDENTITY=... for Developer ID)
+package: release ## Bundle + code-sign dist/DbClient.app (ad-hoc; CODESIGN_IDENTITY=... for Developer ID)
 	bash $(APP_DIR)/scripts/package.sh
 
 .PHONY: run
@@ -135,6 +141,10 @@ bench-core: db-check ## Core throughput: PostgreSQL to Arrow
 	@echo
 	cargo run --release --example bench -p driver-postgres -- 8192 --retain
 
+# The benchmarks stay on $(APP_BIN) deliberately. They measure the render path,
+# where nothing in the bundle participates, and keeping them off `package` keeps
+# a code-signing step out of the measurement loop.
+
 .PHONY: bench-app
 bench-app: release db-check ## Scroll frame times over 1M rows
 	./$(APP_BIN) --bench
@@ -143,9 +153,13 @@ bench-app: release db-check ## Scroll frame times over 1M rows
 bench-verify: release db-check ## Prove result buffers cross the FFI without copying
 	./$(APP_BIN) --bench --verify
 
+# Screenshots are how rendering and layout defects get caught, so they capture
+# the bundled app: Info.plist decides appearance and the menu's name, and a
+# screenshot of the unbundled binary would not show either.
 .PHONY: screenshot
-screenshot: release db-check ## Capture the grid window: make screenshot OUT=/tmp/grid.png
-	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/grid.png)" ./$(APP_BIN)
+screenshot: package db-check ## Capture the app window: make screenshot OUT=/tmp/grid.png TAB=content
+	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/grid.png)" \
+		./$(APP_BUNDLE_BIN) --tab "$(or $(TAB),content)"
 
 ##@ Baseline
 

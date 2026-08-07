@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 #
-# Build, bundle, and code-sign the macOS app into dist/DbClient.app.
+# Assemble and code-sign the macOS app into dist/DbClient.app.
 #
 # SwiftPM emits a bare Mach-O executable, and macOS hands one of those to
 # Terminal instead of launching it as an application. The bundle assembled here
 # is the shippable artefact.
+#
+# Does NOT build. The Makefile owns that — two build systems are involved and
+# the Swift target links the Rust staticlib, so a second copy of the build order
+# here is a second thing to keep in step. Run `make package`, which builds first.
 #
 # Signing identity (env CODESIGN_IDENTITY):
 #   unset / "-"  -> ad-hoc signature: runs on THIS machine, no Apple account needed.
@@ -21,18 +25,16 @@ BUNDLE="$DIST/$APP_NAME.app"
 IDENTITY="${CODESIGN_IDENTITY:--}"
 ENTITLEMENTS="$APP_DIR/Resources/$APP_NAME.entitlements"
 
-# The Swift target links the Rust staticlib, so the core has to be current or
-# the bundle ships a binary built against a stale library.
-echo "==> Building core"
-( cd "$ROOT_DIR" && cargo build --release )
-
-echo "==> Building release binary"
-swift build --package-path "$APP_DIR" -c release
+BINARY="$APP_DIR/.build/release/$BIN_NAME"
+if [ ! -x "$BINARY" ]; then
+    echo "no release binary at $BINARY — run 'make package'" >&2
+    exit 1
+fi
 
 echo "==> Assembling $BUNDLE"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
-cp "$APP_DIR/.build/release/$BIN_NAME" "$BUNDLE/Contents/MacOS/$BIN_NAME"
+cp "$BINARY" "$BUNDLE/Contents/MacOS/$BIN_NAME"
 cp "$APP_DIR/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 # Optional icon: drop an AppIcon.icns into Resources/ to brand the app.
 if [ -f "$APP_DIR/Resources/AppIcon.icns" ]; then
