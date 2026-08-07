@@ -1,0 +1,8 @@
+/target
+**/.build
+**/*.rs.bk
+.DS_Store
+
+# Symlink into the dev_docs repository, where documentation is managed.
+/docs
+tools/baseline/.cache/

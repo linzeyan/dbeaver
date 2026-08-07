@@ -1,0 +1,5 @@
+module CDbFfi {
+    header "include/dbffi.h"
+    link "dbffi"
+    export *
+}

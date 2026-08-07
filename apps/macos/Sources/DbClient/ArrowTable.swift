@@ -1,0 +1,282 @@
+import CDbFfi
+import Foundation
+
+/// Read-only view over Arrow batches received from the core.
+///
+/// Nothing here copies buffer contents. A column holds the pointers Arrow
+/// handed us and reads through them; only `text(row:)` allocates, and only for
+/// the handful of cells actually on screen.
+final class ArrowTable {
+    struct Column {
+        let name: String
+        let kind: Kind
+        /// Cached per-batch accessors, indexed by batch.
+        fileprivate var batches: [ColumnBatch] = []
+    }
+
+    enum Kind {
+        case bool, int16, int32, int64, float32, float64
+        case utf8, binary
+        case decimal128(scale: Int32)
+        case timestamp(tz: Bool), date32, time64
+        case unsupported(String)
+    }
+
+    private(set) var columns: [Column] = []
+    private(set) var rowCount: Int = 0
+    /// Row offset at which each batch starts, for locating a global row index.
+    private var batchStarts: [Int] = []
+    private var retained: [RetainedBatch] = []
+
+    // MARK: - Ingest
+
+    func setSchema(_ schema: UnsafeMutablePointer<ArrowSchema>) {
+        columns = (0..<Int(schema.pointee.n_children)).map { i in
+            let child = schema.pointee.children![i]!
+            let name = child.pointee.name.map { String(cString: $0) } ?? "col\(i)"
+            return Column(name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)))
+        }
+    }
+
+    func append(batch: UnsafeMutablePointer<ArrowArray>) {
+        let retainedBatch = RetainedBatch(array: batch)
+        batchStarts.append(rowCount)
+        let length = Int(batch.pointee.length)
+
+        for i in columns.indices {
+            let child = batch.pointee.children![i]!
+            columns[i].batches.append(
+                ColumnBatch(array: child, kind: columns[i].kind, length: length)
+            )
+        }
+
+        retained.append(retainedBatch)
+        rowCount += length
+    }
+
+    // MARK: - Access
+
+    /// Displayable text for a cell. The only allocating path, called once per
+    /// visible cell per frame.
+    func text(row: Int, column: Int) -> String {
+        guard column < columns.count, row < rowCount else { return "" }
+        guard let (batchIdx, localRow) = locate(row: row) else { return "" }
+        return columns[column].batches[batchIdx].text(at: localRow)
+    }
+
+    private func locate(row: Int) -> (Int, Int)? {
+        // Batches are uniform except the last, but binary search keeps this
+        // correct if that ever stops being true.
+        var lo = 0, hi = batchStarts.count - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            let start = batchStarts[mid]
+            let end = start + (columns.first?.batches[mid].length ?? 0)
+            if row < start { hi = mid - 1 }
+            else if row >= end { lo = mid + 1 }
+            else { return (mid, row - start) }
+        }
+        return nil
+    }
+
+    // MARK: - Zero-copy verification
+
+    struct BufferProbe {
+        let column: String
+        let address: UInt
+        /// Allocation size as reported by the allocator that owns this pointer.
+        /// A non-zero value means the pointer refers to a live heap block we did
+        /// not allocate — i.e. Rust's Arrow buffer, read in place.
+        let mallocSize: Int
+        let rows: Int
+    }
+
+    /// Reports where each column's data buffer actually lives for a given batch.
+    ///
+    /// This exists to make the zero-copy claim falsifiable: if Swift were
+    /// copying, these addresses would move into Swift-owned allocations and the
+    /// process RSS would carry a second full copy of the result.
+    func probe(batch: Int) -> [BufferProbe] {
+        columns.compactMap { col in
+            guard batch < col.batches.count else { return nil }
+            let cb = col.batches[batch]
+            guard let ptr = cb.dataBufferAddress else { return nil }
+            return BufferProbe(
+                column: col.name,
+                address: UInt(bitPattern: ptr),
+                mallocSize: malloc_size(ptr),
+                rows: cb.length)
+        }
+    }
+
+    private static func kind(fromFormat f: String) -> Kind {
+        switch f {
+        case "b": return .bool
+        case "s": return .int16
+        case "i": return .int32
+        case "l": return .int64
+        case "f": return .float32
+        case "g": return .float64
+        case "u", "U": return .utf8
+        case "z", "Z": return .binary
+        case "tdD": return .date32
+        case "ttu": return .time64
+        default:
+            if f.hasPrefix("d:") {
+                // "d:precision,scale"
+                let parts = f.dropFirst(2).split(separator: ",")
+                let scale = parts.count > 1 ? Int32(parts[1]) ?? 0 : 0
+                return .decimal128(scale: scale)
+            }
+            if f.hasPrefix("tsu:") {
+                return .timestamp(tz: f.count > 4)
+            }
+            return .unsupported(f)
+        }
+    }
+}
+
+/// Owns an ArrowArray's lifetime. Releasing is what returns the Rust-side
+/// buffers, so it must happen exactly once, at deinit.
+private final class RetainedBatch {
+    private let array: UnsafeMutablePointer<ArrowArray>
+
+    init(array: UnsafeMutablePointer<ArrowArray>) {
+        self.array = array
+    }
+
+    deinit {
+        if let release = array.pointee.release {
+            release(array)
+        }
+        array.deallocate()
+    }
+}
+
+/// One column within one batch: raw pointers into Arrow buffers.
+private struct ColumnBatch {
+    let kind: ArrowTable.Kind
+    let length: Int
+    let offset: Int
+    let validity: UnsafePointer<UInt8>?
+    let buffer1: UnsafeRawPointer?
+    let buffer2: UnsafeRawPointer?
+
+    init(array: UnsafeMutablePointer<ArrowArray>, kind: ArrowTable.Kind, length: Int) {
+        self.kind = kind
+        self.length = Int(array.pointee.length)
+        self.offset = Int(array.pointee.offset)
+        let buffers = array.pointee.buffers
+        let n = Int(array.pointee.n_buffers)
+        self.validity = n > 0 ? buffers?[0]?.assumingMemoryBound(to: UInt8.self) : nil
+        self.buffer1 = n > 1 ? buffers?[1].map { UnsafeRawPointer($0) } : nil
+        self.buffer2 = n > 2 ? buffers?[2].map { UnsafeRawPointer($0) } : nil
+    }
+
+    /// Address of the column's primary data buffer, for the zero-copy probe.
+    var dataBufferAddress: UnsafeMutableRawPointer? {
+        buffer1.map { UnsafeMutableRawPointer(mutating: $0) }
+    }
+
+    func isNull(_ i: Int) -> Bool {
+        guard let validity else { return false }
+        let bit = offset + i
+        return (validity[bit / 8] >> UInt8(bit % 8)) & 1 == 0
+    }
+
+    func text(at i: Int) -> String {
+        if isNull(i) { return "" }
+        let idx = offset + i
+        switch kind {
+        case .bool:
+            guard let b = buffer1?.assumingMemoryBound(to: UInt8.self) else { return "" }
+            return (b[idx / 8] >> UInt8(idx % 8)) & 1 == 1 ? "true" : "false"
+        case .int16:
+            return String(load(Int16.self, idx))
+        case .int32, .date32:
+            let v = load(Int32.self, idx)
+            if case .date32 = kind { return Self.dateText(days: v) }
+            return String(v)
+        case .int64, .time64:
+            let v = load(Int64.self, idx)
+            if case .time64 = kind { return Self.timeText(micros: v) }
+            return String(v)
+        case .float32:
+            return String(load(Float.self, idx))
+        case .float64:
+            return String(load(Double.self, idx))
+        case .timestamp:
+            return Self.timestampText(micros: load(Int64.self, idx))
+        case .decimal128(let scale):
+            return Self.decimalText(load(Int128Bits.self, idx), scale: scale)
+        case .utf8:
+            guard let offsets = buffer1?.assumingMemoryBound(to: Int32.self),
+                  let data = buffer2?.assumingMemoryBound(to: UInt8.self) else { return "" }
+            let start = Int(offsets[idx]), end = Int(offsets[idx + 1])
+            guard end > start else { return "" }
+            return String(decoding: UnsafeBufferPointer(start: data + start, count: end - start),
+                          as: UTF8.self)
+        case .binary:
+            guard let offsets = buffer1?.assumingMemoryBound(to: Int32.self) else { return "" }
+            let start = Int(offsets[idx]), end = Int(offsets[idx + 1])
+            return "0x… (\(end - start) B)"
+        case .unsupported(let f):
+            return "<\(f)>"
+        }
+    }
+
+    private func load<T>(_ type: T.Type, _ idx: Int) -> T {
+        guard let b = buffer1 else { return withUnsafeTemporaryAllocation(of: T.self, capacity: 1) { $0[0] } }
+        return b.load(fromByteOffset: idx * MemoryLayout<T>.stride, as: T.self)
+    }
+
+    // Formatting kept minimal for Phase 0: correct enough to eyeball, cheap
+    // enough not to distort the frame-time measurement.
+
+    private static func dateText(days: Int32) -> String {
+        let secs = TimeInterval(days) * 86400
+        return isoDate.string(from: Date(timeIntervalSince1970: secs))
+    }
+
+    private static func timeText(micros: Int64) -> String {
+        let s = micros / 1_000_000
+        return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+    }
+
+    private static func timestampText(micros: Int64) -> String {
+        isoDateTime.string(from: Date(timeIntervalSince1970: TimeInterval(micros) / 1e6))
+    }
+
+    private static func decimalText(_ bits: Int128Bits, scale: Int32) -> String {
+        let v = bits.value
+        let divisor = pow(10.0, Double(scale))
+        return String(format: "%.\(scale)f", Double(v) / divisor)
+    }
+
+    private static let isoDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+
+    private static let isoDateTime: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+}
+
+/// Arrow decimal128 is a 16-byte little-endian two's-complement integer.
+private struct Int128Bits {
+    let lo: UInt64
+    let hi: Int64
+
+    /// Phase 0 renders through Double, which is lossy past 2^53 but adequate
+    /// for eyeballing. A correct decimal formatter belongs in phase 4, with the
+    /// editing path that actually needs exactness.
+    var value: Double {
+        Double(hi) * 18_446_744_073_709_551_616.0 + Double(lo)
+    }
+}
