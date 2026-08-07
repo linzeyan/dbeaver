@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>DbClient</string>
+    <key>CFBundleDisplayName</key>
+    <string>DbClient</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.ricky.dbclient</string>
+    <key>CFBundleExecutable</key>
+    <string>DbClient</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <!-- Stamped with the commit by package.sh, so a screenshot or a bug report
+         identifies an exact tree. -->
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <!-- v15 for Int128, which exact decimal formatting needs; see Package.swift. -->
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <!-- Dark is the committed appearance; see Theme.swift. Declaring it stops
+         AppKit from drawing the first frame in light and then flipping. -->
+    <key>NSRequiresAquaSystemAppearance</key>
+    <false/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>

@@ -11,7 +11,10 @@ import AppKit
 /// commands that are not implemented is worse than a short one.
 enum AppMenu {
     static func install(into app: NSApplication) {
-        let name = ProcessInfo.processInfo.processName
+        // `CFBundleName` when running as a bundle, which is what the menu should
+        // say; the process name is the fallback for the unbundled dev binary.
+        let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? ProcessInfo.processInfo.processName
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(editMenu())

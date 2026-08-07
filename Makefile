@@ -12,6 +12,11 @@ APP_DIR   := apps/macos
 APP_BIN   := $(APP_DIR)/.build/release/DbClient
 APP_DEBUG := $(APP_DIR)/.build/debug/DbClient
 
+# SwiftPM emits a bare executable, which macOS hands to Terminal instead of
+# launching as an application. The shippable artefact is the bundle assembled by
+# `make package`, not $(APP_BIN).
+APP_BUNDLE := dist/DbClient.app
+
 # Benchmark database. Ports are non-default to avoid colliding with a local
 # PostgreSQL install.
 PG_CONTAINER := pg-bench
@@ -45,8 +50,16 @@ release: ## Release build of core and app
 core: ## Release build of the Rust core only
 	cargo build --release
 
+.PHONY: package
+package: ## Build + bundle + code-sign dist/DbClient.app (ad-hoc; CODESIGN_IDENTITY=... for Developer ID)
+	bash $(APP_DIR)/scripts/package.sh
+
 .PHONY: run
-run: release ## Build and launch the app
+run: package ## Build and launch the app
+	open "$(APP_BUNDLE)"
+
+.PHONY: run-console
+run-console: release ## Launch the raw binary, keeping stdout in the terminal
 	./$(APP_BIN)
 
 ##@ Test
@@ -153,4 +166,4 @@ baseline-startup: ## Startup time of a GUI binary: make baseline-startup EXE=/pa
 .PHONY: clean
 clean: ## Remove build artifacts
 	cargo clean
-	rm -rf $(APP_DIR)/.build
+	rm -rf $(APP_DIR)/.build dist

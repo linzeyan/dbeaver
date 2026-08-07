@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The app opens TCP connections to database servers. Deliberately NOT
+         sandboxed: a database client reaches arbitrary hosts and, once import
+         and export land, arbitrary paths — both of which App Sandbox blocks
+         without a file-access model this project has not designed yet. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

@@ -1,4 +1,5 @@
 /target
+/dist
 **/.build
 **/*.rs.bk
 .DS_Store
