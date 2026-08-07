@@ -61,7 +61,10 @@ final class GridViewController: NSObject, MTKViewDelegate {
         }
     }
 
-    func loadInBackground(onReady: @escaping @Sendable () -> Void) {
+    /// `onReady` is `@MainActor` because it is only ever invoked from the main
+    /// queue below, and callers legitimately want to touch the view from it.
+    /// A plain `@Sendable` closure would compile but forbid exactly that.
+    func loadInBackground(onReady: @escaping @MainActor () -> Void) {
         let connString = self.connString
         let sql = self.sql
         DispatchQueue.global(qos: .userInitiated).async { [self] in
@@ -107,7 +110,9 @@ final class GridViewController: NSObject, MTKViewDelegate {
                     print("first_batch_ms   \(String(format: "%.1f", first))")
                     print("load_total_ms    \(String(format: "%.1f", total))")
                     if wantProbe { self.printZeroCopyProbe() }
-                    onReady()
+                    // Already on the main queue; assert that rather than hop
+                    // again, which would delay the first frame by a runloop turn.
+                    MainActor.assumeIsolated { onReady() }
                 }
             } catch {
                 print("load failed: \(error)")

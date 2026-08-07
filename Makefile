@@ -39,6 +39,7 @@ build: ## Debug build of core and app
 release: ## Release build of core and app
 	cargo build --release
 	swift build --package-path $(APP_DIR) -c release
+	@echo "binary: $(APP_BIN)"
 
 .PHONY: core
 core: ## Release build of the Rust core only
