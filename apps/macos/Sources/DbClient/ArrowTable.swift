@@ -247,10 +247,32 @@ private struct ColumnBatch {
         isoDateTime.string(from: Date(timeIntervalSince1970: TimeInterval(micros) / 1e6))
     }
 
+    /// Formats a decimal exactly, by placing a point in the integer's digits.
+    ///
+    /// Going through `Double` loses precision past 2^53 and renders a
+    /// `numeric(18,4)` value as eighteen digits of noise. Decimal columns are
+    /// usually money, so being visibly wrong here is not acceptable even in a
+    /// preview.
     private static func decimalText(_ bits: Int128Bits, scale: Int32) -> String {
         let v = bits.value
-        let divisor = pow(10.0, Double(scale))
-        return String(format: "%.\(scale)f", Double(v) / divisor)
+        var digits = String(v.magnitude)
+        let sign = v < 0 ? "-" : ""
+
+        guard scale > 0 else { return sign + digits }
+
+        // Left-pad so there is at least one integer digit before the point.
+        while digits.count <= Int(scale) {
+            digits = "0" + digits
+        }
+        let split = digits.index(digits.endIndex, offsetBy: -Int(scale))
+        let whole = String(digits[..<split])
+        var fraction = String(digits[split...])
+
+        // PostgreSQL's own scale is usually smaller than the column's fixed
+        // scale, so the padding zeros we added carry no information.
+        while fraction.hasSuffix("0") { fraction.removeLast() }
+
+        return fraction.isEmpty ? sign + whole : sign + whole + "." + fraction
     }
 
     private static let isoDate: DateFormatter = {
@@ -269,14 +291,14 @@ private struct ColumnBatch {
 }
 
 /// Arrow decimal128 is a 16-byte little-endian two's-complement integer.
+///
+/// Loaded as two halves and recombined rather than read as `Int128` directly,
+/// because the Arrow buffer is only guaranteed 8-byte aligned.
 private struct Int128Bits {
     let lo: UInt64
     let hi: Int64
 
-    /// Phase 0 renders through Double, which is lossy past 2^53 but adequate
-    /// for eyeballing. A correct decimal formatter belongs in phase 4, with the
-    /// editing path that actually needs exactness.
-    var value: Double {
-        Double(hi) * 18_446_744_073_709_551_616.0 + Double(lo)
+    var value: Int128 {
+        Int128(hi) << 64 | Int128(lo)
     }
 }

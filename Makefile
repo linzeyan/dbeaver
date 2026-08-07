@@ -129,6 +129,10 @@ bench-app: release db-check ## Scroll frame times over 1M rows
 bench-verify: release db-check ## Prove result buffers cross the FFI without copying
 	./$(APP_BIN) --bench --verify
 
+.PHONY: screenshot
+screenshot: release db-check ## Capture the grid window: make screenshot OUT=/tmp/grid.png
+	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/grid.png)" ./$(APP_BIN)
+
 ##@ Baseline
 
 .PHONY: baseline

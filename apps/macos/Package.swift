@@ -9,7 +9,9 @@ let rustLibDir = "../../target/\(rustProfile)"
 
 let package = Package(
     name: "DbClient",
-    platforms: [.macOS(.v14)],
+    // v15 for Int128, which decimal formatting needs to stay exact. There is no
+    // reason for a new native client to target older than that.
+    platforms: [.macOS(.v15)],
     targets: [
         .systemLibrary(name: "CDbFfi"),
         .executableTarget(

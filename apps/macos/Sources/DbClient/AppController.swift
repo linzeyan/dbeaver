@@ -170,9 +170,16 @@ final class GridView: MTKView {
 
     override func scrollWheel(with event: NSEvent) {
         guard let renderer, let table = renderer.table else { return }
+
         renderer.scrollRow = max(0, min(
             Double(table.rowCount - 1),
             renderer.scrollRow - Double(event.scrollingDeltaY) / Double(renderer.rowHeight) * 3))
+
+        // Clamp so the last column cannot be scrolled off the right edge.
+        let maxX = max(0, renderer.contentWidth(columns: table.columns.count)
+            - Float(bounds.width))
+        renderer.scrollX = max(0, min(maxX, renderer.scrollX - Float(event.scrollingDeltaX)))
+
         needsDisplay = true
     }
 }
