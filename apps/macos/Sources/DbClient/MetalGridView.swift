@@ -1,10 +1,23 @@
 import MetalKit
 import SwiftUI
 
-/// The cell the grid's cursor is on.
+/// The cell the grid's cursor is on, plus the range it was extended over.
+///
+/// The cursor stays a single cell even when many rows are selected: the cell
+/// inspector, the scroll-into-view and the keyboard all need one point to work
+/// from, and a range without a moving end has nothing to extend.
 struct GridSelection: Equatable {
     var row: Int
     var column: Int
+    /// The row a shift-extended range grew from. Nil for a plain single-cell
+    /// selection, so an unshifted arrow key collapses the range by clearing it.
+    var anchor: Int?
+
+    /// Selected rows, ordered — the anchor may sit below the cursor.
+    var rows: ClosedRange<Int> {
+        guard let anchor else { return row...row }
+        return min(anchor, row)...max(anchor, row)
+    }
 }
 
 /// Which column the result is ordered by, by index into the current result.
@@ -88,8 +101,6 @@ struct MetalGridView: NSViewRepresentable {
             // an arbitrary window of unrelated data.
             renderer.scrollRow = 0
             renderer.scrollX = 0
-            // The stored widths describe the previous result's columns.
-            renderer.invalidateColumnLayout()
         }
         // The model owns the selection, including the one it sets when a result
         // arrives, so the renderer follows the binding rather than being reset

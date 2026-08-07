@@ -48,6 +48,9 @@ final class AppModel {
     private(set) var gridGeneration = 0
     private(set) var loadedRows = 0
     private(set) var loadMilliseconds: Double = 0
+    /// Whether the result hit the browse limit, so what is on screen is a window
+    /// onto the table rather than all of it.
+    private(set) var resultCapped = false
     /// The cell the grid's cursor is on, mirrored here so the inspector and the
     /// status bar can read it.
     var gridSelection: GridSelection?
@@ -192,7 +195,11 @@ final class AppModel {
             type: columns.first { $0.name == name }?.dataType ?? "",
             value: isNull ? "NULL" : grid.text(row: s.row, column: s.column),
             isNull: isNull,
-            address: "row \(Self.formatted(s.row + 1))")
+            // A multi-row selection extends far past the viewport, so the count
+            // is the only place it is legible before ⌘C makes it obvious.
+            address: s.rows.count > 1
+                ? "\(Self.formatted(s.rows.count)) rows selected"
+                : "row \(Self.formatted(s.row + 1))")
     }
 
     // MARK: - Selection
@@ -206,7 +213,7 @@ final class AppModel {
         orderClause = appliedInitialFilters ? "" : (initialFilters.order ?? "")
         appliedInitialFilters = true
         loadColumns(for: selected)
-        runQuery(browseSQL(for: selected), describedAs: selected.name)
+        runQuery(browseSQL(for: selected), describedAs: selected.name, cappedAt: browseLimit)
 
         // Reseed the editor only when it still holds text this method wrote.
         // Selecting a table used to overwrite the editor unconditionally, which
@@ -243,7 +250,7 @@ final class AppModel {
     func applyFilters() {
         guard let selected else { return }
         activeTab = .content
-        runQuery(browseSQL(for: selected), describedAs: selected.name)
+        runQuery(browseSQL(for: selected), describedAs: selected.name, cappedAt: browseLimit)
     }
 
     // MARK: - Sorting
@@ -319,13 +326,20 @@ final class AppModel {
         if activeTab == .query {
             runQuery(queryText, describedAs: "query")
         } else if let selected {
-            runQuery(browseSQL(for: selected), describedAs: selected.name)
+            runQuery(browseSQL(for: selected), describedAs: selected.name, cappedAt: browseLimit)
         }
     }
 
     // MARK: - Query execution
 
-    private func runQuery(_ sql: String, describedAs label: String) {
+    /// Runs `sql` and installs the result.
+    ///
+    /// `cappedAt` is the LIMIT this query carries, when it was imposed by the
+    /// browse rather than written by the user. Landing exactly on it means the
+    /// grid is showing a window, not an answer, and the status bar has to say
+    /// so — a row count that silently means "the first hundred thousand" is the
+    /// same class of lie as a cell that truncates without a marker.
+    private func runQuery(_ sql: String, describedAs label: String, cappedAt: Int? = nil) {
         isBusy = true
         status = "Running…"
         // A new run supersedes the previous failure; leaving the banner up
@@ -362,9 +376,17 @@ final class AppModel {
             // asking the user to click once before the pane says anything.
             gridSelection = grid.rowCount > 0 ? GridSelection(row: 0, column: 0) : nil
             loadMilliseconds = result.milliseconds
+            resultCapped = cappedAt.map { grid.rowCount >= $0 } ?? false
             let ms = result.milliseconds
-            status = "\(label) · \(Self.formatted(grid.rowCount)) rows · "
-                + "\(String(format: "%.2f", ms / 1000)) s"
+            let count = Self.formatted(grid.rowCount)
+            let elapsed = String(format: "%.2f", ms / 1000)
+            if resultCapped, let estimate = selected?.estimatedRows, estimate > Int64(grid.rowCount) {
+                status = "\(label) · first \(count) of ~\(Self.formatted(estimate)) rows · \(elapsed) s"
+            } else if resultCapped {
+                status = "\(label) · first \(count) rows · \(elapsed) s"
+            } else {
+                status = "\(label) · \(count) rows · \(elapsed) s"
+            }
             isBusy = false
         }
     }

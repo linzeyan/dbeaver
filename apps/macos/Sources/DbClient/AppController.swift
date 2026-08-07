@@ -308,8 +308,14 @@ final class GridView: MTKView {
             return
         }
 
-        guard let hit = renderer.cell(at: point, viewHeight: bounds.height, table: table)
+        guard var hit = renderer.cell(at: point, viewHeight: bounds.height, table: table)
         else { return }
+        // Shift-click extends from wherever the range already starts, so a
+        // second shift-click re-aims the same range instead of chaining a new
+        // one off the last click.
+        if event.modifierFlags.contains(.shift), let current = renderer.selection {
+            hit.anchor = current.anchor ?? current.row
+        }
         apply(hit)
     }
 
@@ -342,21 +348,25 @@ final class GridView: MTKView {
     override func keyDown(with event: NSEvent) {
         guard let renderer, let table = renderer.table, table.rowCount > 0 else { return }
 
-        // ⌘C on the selected cell. Routed here rather than through the Edit menu
-        // because the grid is not a text view and has no field editor to answer
-        // the standard copy: selector for it.
-        if event.modifierFlags.contains(.command),
-           event.charactersIgnoringModifiers?.lowercased() == "c" {
-            copySelection()
-            return
-        }
-
         let current = renderer.selection ?? GridSelection(row: Int(renderer.scrollRow), column: 0)
         let lastRow = table.rowCount - 1
         let lastColumn = max(0, table.columns.count - 1)
         let page = max(1, Int(
             (bounds.height - CGFloat(renderer.headerHeight)) / CGFloat(renderer.rowHeight)) - 1)
 
+        // ⌘C and ⌘A are routed here rather than through the Edit menu because
+        // the grid is not a text view and has no field editor to answer the
+        // standard copy:/selectAll: selectors for it.
+        if event.modifierFlags.contains(.command) {
+            switch event.charactersIgnoringModifiers?.lowercased() {
+            case "c": copySelection()
+            case "a": apply(GridSelection(row: lastRow, column: current.column, anchor: 0))
+            default: break
+            }
+            return
+        }
+
+        let extending = event.modifierFlags.contains(.shift)
         var next = current
         switch event.specialKey {
         case .upArrow: next.row -= 1
@@ -375,6 +385,9 @@ final class GridView: MTKView {
 
         next.row = min(max(0, next.row), lastRow)
         next.column = min(max(0, next.column), lastColumn)
+        // Shift keeps the range's fixed end where it was; an unshifted key drops
+        // it, which is how every other list on the platform collapses a range.
+        next.anchor = extending ? (current.anchor ?? current.row) : nil
         apply(next)
         renderer.scrollToVisible(next, viewSize: bounds.size)
     }
@@ -388,11 +401,47 @@ final class GridView: MTKView {
     private func copySelection() {
         guard let renderer, let table = renderer.table, let selection = renderer.selection
         else { return }
-        // NULL copies as an empty string, not as the word: what is on the
-        // pasteboard should be the value, not the way the grid spells it.
-        let value = table.isNull(row: selection.row, column: selection.column)
-            ? "" : table.text(row: selection.row, column: selection.column)
+        let rows = selection.rows
+        let text = rows.count > 1
+            ? tsv(table, rows: rows)
+            : cellText(table, row: selection.row, column: selection.column)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// A cell as it should land on the pasteboard: the value, not the way the
+    /// grid spells it. NULL is empty rather than the word, which would paste
+    /// into the next tool as a literal four-character string.
+    private func cellText(_ table: ArrowTable, row: Int, column: Int) -> String {
+        table.isNull(row: row, column: column) ? "" : table.text(row: row, column: column)
+    }
+
+    /// A multi-row selection copies as TSV with a header line — the one format
+    /// a spreadsheet, a SQL console and a plain text editor all read unchanged.
+    ///
+    /// Built on the calling thread on purpose. A full 100,000-row selection
+    /// takes a visible beat, but the alternative — building it in the
+    /// background and filling the pasteboard when it finishes — means a paste
+    /// issued in that window silently yields the previous clipboard. A slow
+    /// copy is a worse experience than a fast one; a wrong copy is a bug.
+    private func tsv(_ table: ArrowTable, rows: ClosedRange<Int>) -> String {
+        var out = table.columns.map(\.name).joined(separator: "\t")
+        out.reserveCapacity(rows.count * table.columns.count * 12)
+        for r in rows {
+            out.append("\n")
+            for c in table.columns.indices {
+                if c > 0 { out.append("\t") }
+                out.append(sanitized(cellText(table, row: r, column: c)))
+            }
+        }
+        return out
+    }
+
+    /// A tab or newline inside a value would add columns and rows that were
+    /// never selected, so they collapse to spaces. The alternative — quoting —
+    /// is CSV's answer and would stop this being pasteable as plain text.
+    private func sanitized(_ value: String) -> String {
+        guard value.contains(where: { $0.isNewline || $0 == "\t" }) else { return value }
+        return String(value.map { $0.isNewline || $0 == "\t" ? " " : $0 })
     }
 }

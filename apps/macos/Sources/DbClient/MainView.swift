@@ -516,7 +516,20 @@ struct StatusBar: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        HStack(spacing: Theme.Space.md) {
+        HStack(spacing: Theme.Space.sm) {
+            // A truncated result is worth catching out of the corner of an eye,
+            // not only on a careful read of the count.
+            if model.resultCapped && model.activeTab != .structure {
+                Image(systemName: "rectangle.compress.vertical")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.warning.color)
+                    .help("Showing the first \(AppModel.formatted(model.loadedRows)) rows")
+                    .accessibilityLabel("Result truncated")
+            }
+
+            // The text stays neutral. A partial view is the normal state for a
+            // large table, not a warning, and an amber status line that is
+            // always on becomes wallpaper.
             Text(model.statusLine)
                 .font(Theme.Typography.digits)
                 .foregroundStyle(Theme.textSecondary.color)

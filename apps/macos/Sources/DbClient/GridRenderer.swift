@@ -64,7 +64,9 @@ final class GridRenderer {
 
     private var instances: [GlyphInstance] = []
 
-    var table: ArrowTable?
+    var table: ArrowTable? {
+        didSet { reconcileColumnLayout() }
+    }
     var scrollRow: Double = 0
     /// Horizontal scroll offset in points.
     var scrollX: Float = 0
@@ -130,9 +132,20 @@ final class GridRenderer {
         index < columnWidths.count ? columnWidths[index] : minColumnWidth
     }
 
-    /// Discards the current widths so the next frame sizes them again. Called
-    /// when a new result arrives: the old widths describe the old columns.
-    func invalidateColumnLayout() {
+    /// Column names the current widths were built for.
+    private var layoutSignature: [String] = []
+
+    /// Drops the widths only when the columns themselves changed.
+    ///
+    /// Re-running a browse with a new filter replaces the table, but the columns
+    /// are the same columns. Re-deriving widths from the new sample would undo a
+    /// header drag every time the user hits Apply, which makes dragging feel
+    /// broken rather than sticky. A different set of names is a different result
+    /// and its old widths mean nothing, so those go.
+    private func reconcileColumnLayout() {
+        let signature = table?.columns.map(\.name) ?? []
+        guard signature != layoutSignature else { return }
+        layoutSignature = signature
         columnWidths.removeAll()
         columnOffsets = [0]
     }
@@ -304,11 +317,21 @@ final class GridRenderer {
 
         // Selection, between the banding and the separators so that the band
         // reads as continuous across the row and the grid lines stay on top.
+        if let selection {
+            let selected = selection.rows
+            for (i, r) in rows.enumerated() where selected.contains(r) {
+                let y = rowY(i)
+                guard y + rowHeight > headerHeight, y < viewH else { continue }
+                fill(x: 0, y: y, w: viewW, h: rowHeight,
+                     color: Theme.Grid.selectedRow.simd)
+            }
+        }
+        // The cursor cell is drawn separately: within a multi-row selection it
+        // is the one cell the keyboard and the inspector act on, so it needs to
+        // stay distinguishable from the band around it.
         if let selection, rows.contains(selection.row) {
             let y = rowY(selection.row - rows.lowerBound)
             if y + rowHeight > headerHeight, y < viewH {
-                fill(x: 0, y: y, w: viewW, h: rowHeight,
-                     color: Theme.Grid.selectedRow.simd)
                 let cx = columnX(selection.column) - scrollX
                 let cw = columnWidth(selection.column)
                 if cx + cw > 0, cx < viewW {
