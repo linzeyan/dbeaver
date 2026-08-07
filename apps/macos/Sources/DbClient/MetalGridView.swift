@@ -69,6 +69,8 @@ struct MetalGridView: NSViewRepresentable {
             // an arbitrary window of unrelated data.
             renderer.scrollRow = 0
             renderer.scrollX = 0
+            // The stored widths describe the previous result's columns.
+            renderer.invalidateColumnLayout()
         }
         // The model owns the selection, including the one it sets when a result
         // arrives, so the renderer follows the binding rather than being reset

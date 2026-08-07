@@ -69,10 +69,12 @@ final class GlyphAtlas {
         self.advance = Float(advanceDevice / scale)
         self.quadInset = Float(Self.pad)
 
-        // One extra cell holds a solid block, so filled rectangles (row banding,
-        // header background, selection) draw through the same pipeline as text
-        // instead of needing a second one.
-        let cellCount = Self.count + 1
+        // Two cells past the printable range. The first holds a solid block, so
+        // filled rectangles (row banding, header background, selection) draw
+        // through the same pipeline as text instead of needing a second one. The
+        // second holds an ellipsis, which the grid needs to mark a truncated
+        // value and which is not ASCII.
+        let cellCount = Self.count + 2
         let cols = 16
         self.atlasColumns = cols
         let rows = (cellCount + cols - 1) / cols
@@ -118,6 +120,19 @@ final class GlyphAtlas {
             y: CGFloat(texH) - CGFloat(solidRow + 1) * ch,
             width: cw, height: ch))
 
+        // Ellipsis cell. Drawn from U+2026 rather than three periods so it fits
+        // the one character-width the truncation marker is allowed to occupy.
+        var ellipsis = UniChar(0x2026)
+        var ellipsisGlyph = CGGlyph()
+        if CTFontGetGlyphsForCharacters(font, &ellipsis, &ellipsisGlyph, 1) {
+            let col = (Self.count + 1) % cols
+            let row = (Self.count + 1) / cols
+            var pos = CGPoint(
+                x: CGFloat(col) * cw + Self.pad,
+                y: CGFloat(texH) - CGFloat(row + 1) * ch + Self.pad + descent)
+            CTFontDrawGlyphs(font, &ellipsisGlyph, &pos, 1, ctx)
+        }
+
         let desc = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r8Unorm, width: texW, height: texH, mipmapped: false)
         desc.usage = .shaderRead
@@ -147,12 +162,20 @@ final class GlyphAtlas {
         )
     }
 
+    /// The truncation marker.
+    var ellipsisUV: (x: Float, y: Float, w: Float, h: Float) {
+        cellUV(at: Self.count + 1)
+    }
+
     /// Normalized atlas rect for an ASCII byte, or nil if out of range.
     func uv(for byte: UInt8) -> (x: Float, y: Float, w: Float, h: Float)? {
         guard byte >= Self.firstChar, byte <= Self.lastChar else { return nil }
-        let i = Int(byte - Self.firstChar)
-        let col = i % atlasColumns
-        let row = i / atlasColumns
+        return cellUV(at: Int(byte - Self.firstChar))
+    }
+
+    private func cellUV(at index: Int) -> (x: Float, y: Float, w: Float, h: Float) {
+        let col = index % atlasColumns
+        let row = index / atlasColumns
         let texW = Float(texture.width), texH = Float(texture.height)
         return (
             x: Float(col) * cellWidth / texW,

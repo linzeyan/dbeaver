@@ -20,6 +20,18 @@ final class ArrowTable {
         case decimal128(scale: Int32)
         case timestamp(tz: Bool), date32, time64
         case unsupported(String)
+
+        /// Whether values of this kind are compared by magnitude, and so should
+        /// be right-aligned: digits only line up for scanning when the units
+        /// column does.
+        var isNumeric: Bool {
+            switch self {
+            case .int16, .int32, .int64, .float32, .float64, .decimal128:
+                return true
+            case .bool, .utf8, .binary, .timestamp, .date32, .time64, .unsupported:
+                return false
+            }
+        }
     }
 
     private(set) var columns: [Column] = []

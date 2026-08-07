@@ -203,7 +203,30 @@ final class GridView: MTKView {
     /// that grabs it on every tab switch is worse than one that never does.
     var claimsInitialFocus = false
 
+    /// Column being resized by a header drag, with the geometry the drag started
+    /// from — widths follow the pointer's total travel rather than accumulating
+    /// per-event deltas, which drift.
+    private var resizing: (column: Int, startX: CGFloat, startWidth: Float)?
+    /// How close to a boundary counts as grabbing it. Wide enough to hit with a
+    /// mouse, narrow enough not to swallow clicks meant for the header itself.
+    private let edgeTolerance: Float = 4
+
+    private var trackingArea: NSTrackingArea?
+
     override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        // Needed for the resize cursor: without mouse-moved events there is no
+        // way to show that a boundary is grabbable before it is grabbed.
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .mouseMoved, .mouseEnteredAndExited, .inVisibleRect],
+            owner: self)
+        addTrackingArea(area)
+        trackingArea = area
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -238,20 +261,61 @@ final class GridView: MTKView {
             renderer.scrollRow - Double(event.scrollingDeltaY) / Double(renderer.rowHeight) * 3))
 
         // Clamp so the last column cannot be scrolled off the right edge.
-        let maxX = max(0, renderer.contentWidth(columns: table.columns.count)
-            - Float(bounds.width))
+        let maxX = max(0, renderer.contentWidth - Float(bounds.width))
         renderer.scrollX = max(0, min(maxX, renderer.scrollX - Float(event.scrollingDeltaX)))
 
         needsDisplay = true
+    }
+
+    // MARK: - Pointer
+
+    override func mouseMoved(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if resizeTarget(at: point) != nil {
+            NSCursor.resizeLeftRight.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
     }
 
     override func mouseDown(with event: NSEvent) {
         guard let renderer, let table = renderer.table else { return }
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
+
+        if let column = resizeTarget(at: point) {
+            resizing = (column, point.x, renderer.columnWidth(column))
+            return
+        }
+
         guard let hit = renderer.cell(at: point, viewHeight: bounds.height, table: table)
         else { return }
         apply(hit)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let resizing, let renderer else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        renderer.setColumnWidth(
+            resizing.startWidth + Float(point.x - resizing.startX), at: resizing.column)
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        resizing = nil
+    }
+
+    /// The column whose trailing edge is under `point`, if the point is in the
+    /// header. Resize handles live only there, so a drag inside the data area is
+    /// never mistaken for one.
+    private func resizeTarget(at point: CGPoint) -> Int? {
+        guard let renderer, Float(point.y) < renderer.headerHeight else { return nil }
+        return renderer.columnEdge(
+            nearX: Float(point.x) + renderer.scrollX, tolerance: edgeTolerance)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -291,7 +355,7 @@ final class GridView: MTKView {
         next.row = min(max(0, next.row), lastRow)
         next.column = min(max(0, next.column), lastColumn)
         apply(next)
-        renderer.scrollToVisible(next, viewSize: bounds.size, columns: table.columns.count)
+        renderer.scrollToVisible(next, viewSize: bounds.size)
     }
 
     private func apply(_ selection: GridSelection) {

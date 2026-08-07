@@ -30,18 +30,31 @@ final class GridRenderer {
     // Layout, in points.
     let rowHeight: Float = 20
     let headerHeight: Float = 24
-    let columnWidth: Float = 130
     let cellPadding: Float = 6
+
+    /// Bounds for an auto-sized column. The floor keeps a narrow column
+    /// clickable; the ceiling stops one long text value from pushing every
+    /// other column off screen.
+    private let minColumnWidth: Float = 56
+    private let maxColumnWidth: Float = 340
+    /// Rows sampled when sizing columns. Enough to catch the common width
+    /// without walking a million rows to lay out a screenful.
+    private let widthSampleRows = 120
 
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
     private let atlas: GlyphAtlas
     private let scale: Float
-    /// Characters that fit in a cell. Derived from the column width rather than
-    /// fixed, so text can never spill into the neighbouring column and be
-    /// misread as that column's value.
-    private let maxCellChars: Int
+
+    /// Per-column widths in points, sized to content when a result arrives and
+    /// adjustable by dragging a header edge. A uniform width is wrong in both
+    /// directions at once: it clips a timestamp while wasting half a screen on
+    /// a boolean.
+    private(set) var columnWidths: [Float] = []
+    /// Prefix sums of `columnWidths`, so a column's x is a lookup rather than a
+    /// running total recomputed per cell per frame.
+    private var columnOffsets: [Float] = [0]
 
     /// Triple-buffered instance storage so the CPU never waits on the GPU.
     private var instanceBuffers: [MTLBuffer] = []
@@ -74,7 +87,6 @@ final class GridRenderer {
         else { return nil }
         self.queue = queue
         self.atlas = atlas
-        self.maxCellChars = max(1, Int((columnWidth - cellPadding * 2) / atlas.advance))
 
         guard let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
               let vfn = library.makeFunction(name: "grid_vertex"),
@@ -102,9 +114,103 @@ final class GridRenderer {
         instances.reserveCapacity(maxInstances)
     }
 
+    // MARK: - Column geometry
+
     /// Total scrollable width in points, for clamping horizontal scroll.
-    func contentWidth(columns: Int) -> Float {
-        Float(columns) * columnWidth
+    var contentWidth: Float { columnOffsets.last ?? 0 }
+
+    func columnX(_ index: Int) -> Float {
+        columnOffsets[min(index, columnOffsets.count - 1)]
+    }
+
+    func columnWidth(_ index: Int) -> Float {
+        index < columnWidths.count ? columnWidths[index] : minColumnWidth
+    }
+
+    /// Discards the current widths so the next frame sizes them again. Called
+    /// when a new result arrives: the old widths describe the old columns.
+    func invalidateColumnLayout() {
+        columnWidths.removeAll()
+        columnOffsets = [0]
+    }
+
+    func setColumnWidth(_ width: Float, at index: Int) {
+        guard index < columnWidths.count else { return }
+        columnWidths[index] = min(maxColumnWidth, max(minColumnWidth, width))
+        rebuildColumnOffsets()
+    }
+
+    /// Sizes every column to the wider of its header and a sample of its values.
+    ///
+    /// Sampling rather than scanning: the width that matters is the one the
+    /// visible rows need, and walking a million rows to lay out a screenful
+    /// would cost more than every frame it saves.
+    private func layoutColumns(for table: ArrowTable) {
+        let sample = min(table.rowCount, widthSampleRows)
+        columnWidths = table.columns.indices.map { c in
+            var chars = table.columns[c].name.utf8.count
+            for r in 0..<sample {
+                // NULL renders as the word, so it sets a floor of four.
+                let len = table.isNull(row: r, column: c)
+                    ? 4 : table.text(row: r, column: c).utf8.count
+                chars = max(chars, len)
+            }
+            // One character of slack keeps the longest value off the separator.
+            let width = cellPadding * 2 + Float(chars + 1) * atlas.advance
+            return min(maxColumnWidth, max(minColumnWidth, width))
+        }
+        rebuildColumnOffsets()
+    }
+
+    /// Characters that fit in a column of `width`.
+    private func charsFitting(_ width: Float) -> Int {
+        max(1, Int((width - cellPadding * 2) / atlas.advance))
+    }
+
+    private func rebuildColumnOffsets() {
+        columnOffsets = [0]
+        columnOffsets.reserveCapacity(columnWidths.count + 1)
+        var x: Float = 0
+        for w in columnWidths {
+            x += w
+            columnOffsets.append(x)
+        }
+    }
+
+    /// Index of the column containing `x` in content coordinates.
+    func columnIndex(atX x: Float) -> Int? {
+        guard x >= 0, x < contentWidth, !columnWidths.isEmpty else { return nil }
+        var lo = 0, hi = columnWidths.count - 1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if x < columnOffsets[mid] {
+                hi = mid - 1
+            } else if x >= columnOffsets[mid + 1] {
+                lo = mid + 1
+            } else {
+                return mid
+            }
+        }
+        return nil
+    }
+
+    /// The column boundary within `tolerance` points of `x`, as the index of the
+    /// column to its left. Drives the header's resize handles.
+    func columnEdge(nearX x: Float, tolerance: Float) -> Int? {
+        for c in columnWidths.indices where abs(columnOffsets[c + 1] - x) <= tolerance {
+            return c
+        }
+        return nil
+    }
+
+    private func visibleColumns(viewWidth: Float) -> Range<Int> {
+        guard !columnWidths.isEmpty else { return 0..<0 }
+        let first = columnIndex(atX: max(0, min(scrollX, contentWidth - 1))) ?? 0
+        var last = first
+        while last < columnWidths.count, columnOffsets[last] < scrollX + viewWidth {
+            last += 1
+        }
+        return first..<last
     }
 
     func draw(in view: MTKView) {
@@ -168,17 +274,18 @@ final class GridRenderer {
     private func buildInstances(viewSize: CGSize, table: ArrowTable) {
         instances.removeAll(keepingCapacity: true)
 
+        if columnWidths.count != table.columns.count {
+            layoutColumns(for: table)
+        }
+
         let viewW = Float(viewSize.width)
         let viewH = Float(viewSize.height)
         let rows = visibleRowRange(viewHeight: viewSize.height, rowCount: table.rowCount)
 
         // Only the horizontal slice actually on screen; without this the whole
         // schema would be built every frame regardless of what is visible.
-        let firstCol = max(0, Int(scrollX / columnWidth))
-        let lastCol = min(
-            table.columns.count,
-            Int((scrollX + viewW) / columnWidth) + 1)
-        guard firstCol < lastCol else { return }
+        let cols = visibleColumns(viewWidth: viewW)
+        guard !cols.isEmpty else { return }
 
         let subRow = Float(scrollRow - scrollRow.rounded(.down))
         func rowY(_ i: Int) -> Float {
@@ -199,9 +306,10 @@ final class GridRenderer {
             if y + rowHeight > headerHeight, y < viewH {
                 fill(x: 0, y: y, w: viewW, h: rowHeight,
                      color: Theme.Grid.selectedRow.simd)
-                let cx = Float(selection.column) * columnWidth - scrollX
-                if cx + columnWidth > 0, cx < viewW {
-                    fill(x: cx, y: y, w: columnWidth, h: rowHeight,
+                let cx = columnX(selection.column) - scrollX
+                let cw = columnWidth(selection.column)
+                if cx + cw > 0, cx < viewW {
+                    fill(x: cx, y: y, w: cw, h: rowHeight,
                          color: Theme.Grid.selectedCell.simd)
                     // A 1pt edge on the leading side marks the cell even where
                     // the fill sits over a dark value and washes out.
@@ -212,8 +320,8 @@ final class GridRenderer {
         }
 
         // Column separators.
-        for c in firstCol..<lastCol {
-            let x = Float(c) * columnWidth - scrollX
+        for c in cols {
+            let x = columnOffsets[c + 1] - scrollX
             guard x >= 0, x < viewW else { continue }
             fill(x: x, y: headerHeight, w: 1, h: viewH - headerHeight,
                  color: Theme.Grid.separator.simd)
@@ -223,26 +331,33 @@ final class GridRenderer {
         fill(x: 0, y: 0, w: viewW, h: headerHeight, color: Theme.Grid.header.simd)
         fill(x: 0, y: headerHeight - 1, w: viewW, h: 1,
              color: Theme.Grid.separator.simd)
-        for c in firstCol..<lastCol {
-            let x = Float(c) * columnWidth - scrollX + cellPadding
-            emit(text: table.columns[c].name, x: x, y: 5,
-                 color: Theme.Grid.headerText.simd)
-        }
+        // Cells, column-major so per-column geometry is resolved once rather
+        // than per cell. Draw order within the cell block does not matter: the
+        // fills beneath them are already in the buffer.
+        for c in cols {
+            let x = columnX(c) - scrollX
+            let w = columnWidth(c)
+            let maxChars = charsFitting(w)
+            let alignRight = table.columns[c].kind.isNumeric
 
-        // Cells.
-        for (i, r) in rows.enumerated() {
-            let y = rowY(i)
-            guard y < viewH, y + rowHeight > headerHeight else { continue }
-            for c in firstCol..<lastCol {
-                let x = Float(c) * columnWidth - scrollX + cellPadding
+            emitCell(
+                table.columns[c].name, x: x, width: w, maxChars: maxChars, y: 5,
+                color: Theme.Grid.headerText.simd, alignRight: false)
+
+            for (i, r) in rows.enumerated() {
+                let y = rowY(i)
+                guard y < viewH, y + rowHeight > headerHeight else { continue }
                 // NULL is drawn as the word, dimmed. `text` returns "" for both
                 // NULL and an empty string, and rendering them the same way
                 // hides a distinction the user is querying on.
                 if table.isNull(row: r, column: c) {
-                    emit(text: "NULL", x: x, y: y + 3, color: Theme.Grid.nullText.simd)
+                    emitCell("NULL", x: x, width: w, maxChars: maxChars, y: y + 3,
+                             color: Theme.Grid.nullText.simd, alignRight: false)
                 } else {
-                    emit(text: table.text(row: r, column: c), x: x, y: y + 3,
-                         color: Theme.Grid.text.simd)
+                    emitCell(
+                        table.text(row: r, column: c), x: x, width: w,
+                        maxChars: maxChars, y: y + 3,
+                        color: Theme.Grid.text.simd, alignRight: alignRight)
                 }
             }
         }
@@ -264,9 +379,8 @@ final class GridRenderer {
         let y = Float(point.y)
         guard y >= headerHeight else { return nil }
         let row = Int(scrollRow + Double((y - headerHeight) / rowHeight))
-        let column = Int((Float(point.x) + scrollX) / columnWidth)
         guard row >= 0, row < table.rowCount,
-              column >= 0, column < table.columns.count
+              let column = columnIndex(atX: Float(point.x) + scrollX)
         else { return nil }
         return GridSelection(row: row, column: column)
     }
@@ -275,7 +389,7 @@ final class GridRenderer {
     ///
     /// Minimum rather than centred: keyboard navigation that recentres on every
     /// keystroke makes the surrounding rows impossible to track.
-    func scrollToVisible(_ selection: GridSelection, viewSize: CGSize, columns: Int) {
+    func scrollToVisible(_ selection: GridSelection, viewSize: CGSize) {
         let visibleRows = Double(max(1, Int((Float(viewSize.height) - headerHeight) / rowHeight)))
         let row = Double(selection.row)
         if row < scrollRow {
@@ -285,13 +399,14 @@ final class GridRenderer {
         }
         scrollRow = max(0, scrollRow)
 
-        let left = Float(selection.column) * columnWidth
+        let left = columnX(selection.column)
+        let width = columnWidth(selection.column)
         if left < scrollX {
             scrollX = left
-        } else if left + columnWidth > scrollX + Float(viewSize.width) {
-            scrollX = left + columnWidth - Float(viewSize.width)
+        } else if left + width > scrollX + Float(viewSize.width) {
+            scrollX = left + width - Float(viewSize.width)
         }
-        scrollX = max(0, min(scrollX, max(0, contentWidth(columns: columns) - Float(viewSize.width))))
+        scrollX = max(0, min(scrollX, max(0, contentWidth - Float(viewSize.width))))
     }
 
     private func fill(x: Float, y: Float, w: Float, h: Float, color: SIMD4<Float>) {
@@ -304,6 +419,35 @@ final class GridRenderer {
             color: color))
     }
 
+    /// Draws one cell's text within `[x, x + width]`.
+    ///
+    /// A value too wide for its column ends in an ellipsis rather than simply
+    /// stopping. Silent truncation is the worst failure this grid can have:
+    /// `123456789` clipped to `12345` does not look truncated, it looks like a
+    /// different number.
+    private func emitCell(
+        _ s: String, x: Float, width: Float, maxChars: Int, y: Float,
+        color: SIMD4<Float>, alignRight: Bool
+    ) {
+        let count = s.utf8.count
+
+        if count > maxChars {
+            // Truncated values always start at the leading edge, even numeric
+            // ones: right-aligning would cut the most significant digits.
+            emit(text: s, x: x + cellPadding, y: y, color: color, maxChars: maxChars - 1)
+            emitGlyph(
+                uv: atlas.ellipsisUV,
+                x: x + cellPadding + Float(maxChars - 1) * atlas.advance,
+                y: y, color: color)
+            return
+        }
+
+        let startX = alignRight
+            ? x + width - cellPadding - Float(count) * atlas.advance
+            : x + cellPadding
+        emit(text: s, x: startX, y: y, color: color, maxChars: maxChars)
+    }
+
     /// Appends one quad per visible glyph.
     ///
     /// Positions are snapped to whole device pixels and derived from the
@@ -312,22 +456,28 @@ final class GridRenderer {
     ///
     /// Non-ASCII bytes are skipped but still consume a column. Phase 0 data is
     /// ASCII; real text handling arrives with the value formatters in phase 4.
-    private func emit(text: String, x: Float, y: Float, color: SIMD4<Float>) {
-        let py = (y * scale).rounded() - atlas.quadInset
+    private func emit(text: String, x: Float, y: Float, color: SIMD4<Float>, maxChars: Int) {
         var n = 0
         for byte in text.utf8 {
-            if n >= maxCellChars { break }
+            if n >= maxChars { break }
             let index = n
             n += 1
             guard byte != 32, let uv = atlas.uv(for: byte) else { continue }
-            let px = ((x + Float(index) * atlas.advance) * scale).rounded() - atlas.quadInset
-            instances.append(GlyphInstance(
-                pos: SIMD2(px, py),
-                size: SIMD2(atlas.cellWidth, atlas.cellHeight),
-                uvOrigin: SIMD2(uv.x, uv.y),
-                uvSize: SIMD2(uv.w, uv.h),
-                color: color))
+            emitGlyph(uv: uv, x: x + Float(index) * atlas.advance, y: y, color: color)
         }
+    }
+
+    private func emitGlyph(
+        uv: (x: Float, y: Float, w: Float, h: Float), x: Float, y: Float,
+        color: SIMD4<Float>
+    ) {
+        instances.append(GlyphInstance(
+            pos: SIMD2((x * scale).rounded() - atlas.quadInset,
+                       (y * scale).rounded() - atlas.quadInset),
+            size: SIMD2(atlas.cellWidth, atlas.cellHeight),
+            uvOrigin: SIMD2(uv.x, uv.y),
+            uvSize: SIMD2(uv.w, uv.h),
+            color: color))
     }
 
     private static let shaderSource = """
