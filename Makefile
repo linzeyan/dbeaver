@@ -56,6 +56,10 @@ release: ## Release build of core and app
 core: ## Release build of the Rust core only
 	cargo build --release
 
+.PHONY: icon
+icon: ## Regenerate the app icon from tools/make-icon.swift
+	swift $(TOOLS)/make-icon.swift $(APP_DIR)/Resources/AppIcon.icns
+
 .PHONY: package
 package: release ## Bundle + code-sign dist/DbClient.app (ad-hoc; CODESIGN_IDENTITY=... for Developer ID)
 	bash $(APP_DIR)/scripts/package.sh

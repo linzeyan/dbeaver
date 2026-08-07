@@ -198,6 +198,12 @@ final class GridView: MTKView {
     /// value and the status bar can show where the cursor is.
     var onSelect: ((GridSelection) -> Void)?
 
+    /// Called when a header is clicked away from a resize handle.
+    var onHeaderClick: ((Int) -> Void)?
+    /// Whether headers respond to a click at all. Drives the cursor as well as
+    /// the action: a pointing hand over a header that does nothing is a lie.
+    var sortsOnHeaderClick = false
+
     /// Whether this grid takes keyboard focus when it appears. Set only for the
     /// browse pane: in the Query tab focus belongs to the editor, and a grid
     /// that grabs it on every tab switch is worse than one that never does.
@@ -273,6 +279,8 @@ final class GridView: MTKView {
         let point = convert(event.locationInWindow, from: nil)
         if resizeTarget(at: point) != nil {
             NSCursor.resizeLeftRight.set()
+        } else if sortsOnHeaderClick, isInHeader(point) {
+            NSCursor.pointingHand.set()
         } else {
             NSCursor.arrow.set()
         }
@@ -289,6 +297,14 @@ final class GridView: MTKView {
 
         if let column = resizeTarget(at: point) {
             resizing = (column, point.x, renderer.columnWidth(column))
+            return
+        }
+
+        if isInHeader(point) {
+            if sortsOnHeaderClick,
+               let column = renderer.columnIndex(atX: Float(point.x) + renderer.scrollX) {
+                onHeaderClick?(column)
+            }
             return
         }
 
@@ -313,9 +329,14 @@ final class GridView: MTKView {
     /// header. Resize handles live only there, so a drag inside the data area is
     /// never mistaken for one.
     private func resizeTarget(at point: CGPoint) -> Int? {
-        guard let renderer, Float(point.y) < renderer.headerHeight else { return nil }
+        guard let renderer, isInHeader(point) else { return nil }
         return renderer.columnEdge(
             nearX: Float(point.x) + renderer.scrollX, tolerance: edgeTolerance)
+    }
+
+    private func isInHeader(_ point: CGPoint) -> Bool {
+        guard let renderer else { return false }
+        return point.y >= 0 && Float(point.y) < renderer.headerHeight
     }
 
     override func keyDown(with event: NSEvent) {

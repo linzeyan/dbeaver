@@ -74,6 +74,9 @@ final class GridRenderer {
     /// Whether the grid holds keyboard focus. Drawn as an inset border: the
     /// selection alone does not say which surface the arrow keys will move.
     var isFocused = false
+    /// Which column the result is ordered by, if any. Drawn in the header so the
+    /// order the rows are in is visible from the rows themselves.
+    var sort: GridSort?
 
     /// Rolling frame-time stats, which are the measurement Phase 0 exists for.
     private(set) var lastFrameMs: Double = 0
@@ -340,9 +343,22 @@ final class GridRenderer {
             let maxChars = charsFitting(w)
             let alignRight = table.columns[c].kind.isNumeric
 
+            // The sorted column's header is tinted as well as marked, so the
+            // ordering is legible without resolving a 6pt triangle.
+            let isSorted = sort?.column == c
+            if isSorted, let sort {
+                emitGlyph(
+                    uv: sort.descending ? atlas.sortDescendingUV : atlas.sortAscendingUV,
+                    x: x + w - cellPadding - atlas.advance, y: 5,
+                    color: Theme.Grid.cursor.simd)
+            }
             emitCell(
-                table.columns[c].name, x: x, width: w, maxChars: maxChars, y: 5,
-                color: Theme.Grid.headerText.simd, alignRight: false)
+                table.columns[c].name, x: x,
+                // Never run the label under the marker.
+                width: isSorted ? w - atlas.advance : w,
+                maxChars: isSorted ? maxChars - 1 : maxChars, y: 5,
+                color: isSorted ? Theme.Grid.sortedHeaderText.simd : Theme.Grid.headerText.simd,
+                alignRight: false)
 
             for (i, r) in rows.enumerated() {
                 let y = rowY(i)

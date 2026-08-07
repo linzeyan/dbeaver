@@ -32,6 +32,11 @@ let initialTab = argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized)
 /// `--sql "SELECT …"` opens on the Query tab with that statement already run.
 let initialSQL = argument("--sql")
 
+/// `--where` and `--order` seed the browse filters, for the same reason `--tab`
+/// exists: reproducing a particular view without clicking into it.
+let initialWhere = argument("--where")
+let initialOrder = argument("--order")
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -90,7 +95,8 @@ if benchMode {
     // Swift 5 mode; assert the isolation the model requires rather than hop.
     MainActor.assumeIsolated {
         let model = AppModel(
-            connString: connString, initialTab: initialTab, initialSQL: initialSQL)
+            connString: connString, initialTab: initialTab, initialSQL: initialSQL,
+            initialWhere: initialWhere, initialOrder: initialOrder)
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)

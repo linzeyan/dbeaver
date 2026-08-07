@@ -7,6 +7,12 @@ struct GridSelection: Equatable {
     var column: Int
 }
 
+/// Which column the result is ordered by, by index into the current result.
+struct GridSort: Equatable {
+    var column: Int
+    var descending: Bool
+}
+
 /// Bridges the Metal grid into SwiftUI.
 ///
 /// The grid stays AppKit + Metal rather than becoming a SwiftUI `Table`: no
@@ -21,11 +27,18 @@ struct MetalGridView: NSViewRepresentable {
     @Binding var selection: GridSelection?
     /// See `GridView.claimsInitialFocus`.
     var claimsInitialFocus = false
+    var sort: GridSort?
+    /// Called with a column index when its header is clicked. Nil means this
+    /// grid does not sort — the Query pane shows the result of a statement the
+    /// user wrote, and appending an ORDER BY to arbitrary SQL is not something
+    /// this can do correctly.
+    var onSortColumn: ((Int) -> Void)?
 
     final class Coordinator {
         var renderer: GridRenderer?
         var lastGeneration = -1
         var onSelect: ((GridSelection) -> Void)?
+        var onSortColumn: ((Int) -> Void)?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -46,6 +59,9 @@ struct MetalGridView: NSViewRepresentable {
         view.onSelect = { [weak coordinator = context.coordinator] hit in
             coordinator?.onSelect?(hit)
         }
+        view.onHeaderClick = { [weak coordinator = context.coordinator] column in
+            coordinator?.onSortColumn?(column)
+        }
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
@@ -62,6 +78,9 @@ struct MetalGridView: NSViewRepresentable {
         // Re-captured each update so the closure writes through the current
         // binding rather than the one that existed when the view was made.
         context.coordinator.onSelect = { selection = $0 }
+        context.coordinator.onSortColumn = onSortColumn
+        view.sortsOnHeaderClick = onSortColumn != nil
+        renderer.sort = sort
 
         if context.coordinator.lastGeneration != generation {
             context.coordinator.lastGeneration = generation

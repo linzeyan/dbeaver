@@ -83,10 +83,19 @@ final class AppModel {
     /// in place of browsing the first table.
     private let initialSQL: String?
 
-    init(connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil) {
+    /// Browse filters to open with, from `--where` / `--order`. Applied by the
+    /// first browse rather than as a second query.
+    private let initialFilters: (where: String?, order: String?)
+    private var appliedInitialFilters = false
+
+    init(
+        connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil,
+        initialWhere: String? = nil, initialOrder: String? = nil
+    ) {
         self.connString = connString
         self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
+        self.initialFilters = (initialWhere, initialOrder)
         if let initialSQL { queryText = initialSQL }
     }
 
@@ -192,8 +201,10 @@ final class AppModel {
         guard let selected, selected != previous else { return }
         // Filters describe the previous table's columns and cannot be assumed
         // to apply here; carrying them over would produce confusing errors.
-        whereClause = ""
-        orderClause = ""
+        // The first selection is the exception: it is where --where/--order land.
+        whereClause = appliedInitialFilters ? "" : (initialFilters.where ?? "")
+        orderClause = appliedInitialFilters ? "" : (initialFilters.order ?? "")
+        appliedInitialFilters = true
         loadColumns(for: selected)
         runQuery(browseSQL(for: selected), describedAs: selected.name)
 
@@ -233,6 +244,50 @@ final class AppModel {
         guard let selected else { return }
         activeTab = .content
         runQuery(browseSQL(for: selected), describedAs: selected.name)
+    }
+
+    // MARK: - Sorting
+
+    /// The single-column ordering the ORDER BY field currently expresses, or
+    /// nil if it is empty or says something this cannot summarise.
+    ///
+    /// Derived rather than stored. The field is the state: a header click edits
+    /// it and the marker reads it back, so the two cannot drift, and an order
+    /// typed by hand gets the same marker as one that was clicked.
+    private var parsedOrder: (column: String, descending: Bool)? {
+        var text = orderClause.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !text.contains(",") else { return nil }
+
+        var descending = false
+        for suffix in [" desc", " asc"] where text.lowercased().hasSuffix(suffix) {
+            descending = suffix == " desc"
+            text = String(text.dropLast(suffix.count)).trimmingCharacters(in: .whitespaces)
+            break
+        }
+        text = text.trimmingCharacters(in: CharacterSet(charactersIn: "\""))
+        return text.isEmpty ? nil : (text, descending)
+    }
+
+    /// Where to draw the ordering marker, as an index into the current result.
+    var gridSort: GridSort? {
+        guard let order = parsedOrder,
+              let index = grid.columns.firstIndex(where: { $0.name == order.column })
+        else { return nil }
+        return GridSort(column: index, descending: order.descending)
+    }
+
+    /// Cycles a column through ascending, descending, and unsorted.
+    func toggleSort(column index: Int) {
+        guard selected != nil, index < grid.columns.count else { return }
+        let name = grid.columns[index].name
+        let current = parsedOrder
+
+        if current?.column == name {
+            orderClause = current?.descending == true ? "" : "\"\(name)\" DESC"
+        } else {
+            orderClause = "\"\(name)\""
+        }
+        applyFilters()
     }
 
     /// What the status bar reads. Tab-specific, because the panes are showing

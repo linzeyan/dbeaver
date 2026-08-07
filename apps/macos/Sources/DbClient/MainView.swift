@@ -9,6 +9,7 @@ import SwiftUI
 /// does not survive the custom field backgrounds this window uses.
 enum FocusArea: Hashable {
     case navigatorFilter
+    case structureTable
     case whereField
     case orderField
     case editor
@@ -205,7 +206,7 @@ struct DetailPane: View {
 
             Group {
                 switch model.activeTab {
-                case .structure: StructurePane(model: model)
+                case .structure: StructurePane(model: model, focus: $focus)
                 case .content: ContentPane(model: model, focus: $focus)
                 case .query: QueryPane(model: model, focus: $focus)
                 }
@@ -217,6 +218,25 @@ struct DetailPane: View {
         }
         .background(Theme.background.color)
         .animation(Theme.Motion.ease(reduceMotion), value: model.errorMessage)
+        // Focus follows the tab. Without this, switching to Query leaves the
+        // caret wherever it was and the editor needs a click before it accepts
+        // typing; and on the other tabs SwiftUI parks focus on the first text
+        // field it finds, which puts a ring on the sidebar filter.
+        //
+        // Set explicitly rather than through `.defaultFocus`, which does not
+        // take effect under an `NSHostingView`. Run from `.task` rather than
+        // `.onChange(initial:)` because the automatic assignment this is
+        // overriding happens after the first layout pass, and an override that
+        // runs before it simply loses.
+        .task(id: model.activeTab) {
+            switch model.activeTab {
+            case .query: focus = .editor
+            case .structure: focus = .structureTable
+            // Content hands focus to the Metal grid, which claims first
+            // responder itself; clearing SwiftUI's focus is what lets it.
+            case .content: focus = nil
+            }
+        }
     }
 }
 
@@ -224,6 +244,7 @@ struct DetailPane: View {
 
 struct StructurePane: View {
     @Bindable var model: AppModel
+    @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
         if model.columns.isEmpty {
@@ -282,6 +303,12 @@ struct StructurePane: View {
             // table's whole height, so the area past the last column renders as
             // a stack of empty bars that read as rows the table failed to fill.
             .tableStyle(.inset(alternatesRowBackgrounds: false))
+            // A focus target so this pane has somewhere for focus to be.
+            // Clearing focus is not enough — SwiftUI then falls back to the
+            // only text field on screen, which is the sidebar's filter, and the
+            // tab opens with a ring on a control in a different pane.
+            .focusable()
+            .focused($focus, equals: .structureTable)
         }
     }
 }
@@ -302,7 +329,9 @@ struct ContentPane: View {
                     table: model.grid,
                     generation: model.gridGeneration,
                     selection: $model.gridSelection,
-                    claimsInitialFocus: true)
+                    claimsInitialFocus: true,
+                    sort: model.gridSort,
+                    onSortColumn: { model.toggleSort(column: $0) })
                     .overlay { LoadingVeil(isVisible: model.isBusy) }
                     .accessibilityLabel("Result grid")
 

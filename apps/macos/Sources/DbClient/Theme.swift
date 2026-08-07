@@ -85,6 +85,9 @@ enum Theme {
         static let background = Theme.background
         static let header = Theme.surface
         static let headerText = Theme.textSecondary
+        /// Brighter than the other headers, so the sorted column is identifiable
+        /// without having to resolve the direction marker beside it.
+        static let sortedHeaderText = Theme.text
         static let banding = Tone(0xFFFF_FF, alpha: 0.022)
         static let separator = Tone(0xFFFF_FF, alpha: 0.06)
         static let text = Tone(0xE2E8_F0)

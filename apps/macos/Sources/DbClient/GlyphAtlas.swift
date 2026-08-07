@@ -18,6 +18,14 @@ final class GlyphAtlas {
     static let lastChar: UInt8 = 126
     static let count = Int(lastChar - firstChar) + 1
 
+    /// Glyphs the grid needs that ASCII does not have. Each gets a cell past the
+    /// printable range, in this order, after the solid block.
+    private static let extras: [UniChar] = [
+        0x2026,  // … truncation marker
+        0x25B2,  // ▲ sort ascending
+        0x25BC,  // ▼ sort descending
+    ]
+
     /// Padding around each glyph in the atlas, in device pixels. Without it a
     /// glyph wider than its advance bleeds into the neighbouring cell and gets
     /// sampled as part of the wrong character.
@@ -69,12 +77,11 @@ final class GlyphAtlas {
         self.advance = Float(advanceDevice / scale)
         self.quadInset = Float(Self.pad)
 
-        // Two cells past the printable range. The first holds a solid block, so
-        // filled rectangles (row banding, header background, selection) draw
-        // through the same pipeline as text instead of needing a second one. The
-        // second holds an ellipsis, which the grid needs to mark a truncated
-        // value and which is not ASCII.
-        let cellCount = Self.count + 2
+        // Past the printable range: first a solid block, so filled rectangles
+        // (row banding, header background, selection) draw through the same
+        // pipeline as text instead of needing a second one, then one cell per
+        // entry in `extras`.
+        let cellCount = Self.count + 1 + Self.extras.count
         let cols = 16
         self.atlasColumns = cols
         let rows = (cellCount + cols - 1) / cols
@@ -120,17 +127,26 @@ final class GlyphAtlas {
             y: CGFloat(texH) - CGFloat(solidRow + 1) * ch,
             width: cw, height: ch))
 
-        // Ellipsis cell. Drawn from U+2026 rather than three periods so it fits
-        // the one character-width the truncation marker is allowed to occupy.
-        var ellipsis = UniChar(0x2026)
-        var ellipsisGlyph = CGGlyph()
-        if CTFontGetGlyphsForCharacters(font, &ellipsis, &ellipsisGlyph, 1) {
-            let col = (Self.count + 1) % cols
-            let row = (Self.count + 1) / cols
+        // Extra glyphs, each centred in its cell: unlike the ASCII range these
+        // are not necessarily the font's advance width, and drawing them at the
+        // left edge would leave them visibly off-centre next to monospaced text.
+        for (offset, scalar) in Self.extras.enumerated() {
+            var char = scalar
+            var glyph = CGGlyph()
+            guard CTFontGetGlyphsForCharacters(font, &char, &glyph, 1), glyph != 0 else {
+                assertionFailure("font lacks U+\(String(scalar, radix: 16)); grid marker missing")
+                continue
+            }
+            var advance = CGSize.zero
+            CTFontGetAdvancesForGlyphs(font, .horizontal, &glyph, &advance, 1)
+
+            let index = Self.count + 1 + offset
+            let col = index % cols
+            let row = index / cols
             var pos = CGPoint(
-                x: CGFloat(col) * cw + Self.pad,
+                x: CGFloat(col) * cw + Self.pad + (advanceDevice - advance.width) / 2,
                 y: CGFloat(texH) - CGFloat(row + 1) * ch + Self.pad + descent)
-            CTFontDrawGlyphs(font, &ellipsisGlyph, &pos, 1, ctx)
+            CTFontDrawGlyphs(font, &glyph, &pos, 1, ctx)
         }
 
         let desc = MTLTextureDescriptor.texture2DDescriptor(
@@ -163,8 +179,12 @@ final class GlyphAtlas {
     }
 
     /// The truncation marker.
-    var ellipsisUV: (x: Float, y: Float, w: Float, h: Float) {
-        cellUV(at: Self.count + 1)
+    var ellipsisUV: (x: Float, y: Float, w: Float, h: Float) { extraUV(0) }
+    var sortAscendingUV: (x: Float, y: Float, w: Float, h: Float) { extraUV(1) }
+    var sortDescendingUV: (x: Float, y: Float, w: Float, h: Float) { extraUV(2) }
+
+    private func extraUV(_ offset: Int) -> (x: Float, y: Float, w: Float, h: Float) {
+        cellUV(at: Self.count + 1 + offset)
     }
 
     /// Normalized atlas rect for an ASCII byte, or nil if out of range.
