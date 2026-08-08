@@ -22,6 +22,10 @@ echo "seeding $ROWS rows into bench_wide..."
 docker exec -i "$CONTAINER" psql -U bench -d bench -v ON_ERROR_STOP=1 \
     -v rows="$ROWS" <<'SQL'
 \timing on
+-- Dropped before bench_wide, not with the rest of its own fixture below:
+-- bench_child's foreign key makes bench_wide undroppable while it exists, so
+-- the other order only works on a database that has never been seeded.
+DROP TABLE IF EXISTS bench_child;
 DROP TABLE IF EXISTS bench_wide;
 
 CREATE TABLE bench_wide AS
@@ -55,7 +59,6 @@ ANALYZE bench_wide;
 -- A relation with no primary key, and so no order total enough for the browse
 -- to page in. The client refuses to page it rather than paging it wrongly, and
 -- that refusal needs something to refuse.
-DROP TABLE IF EXISTS bench_child;
 DROP TABLE IF EXISTS no_key;
 CREATE TABLE no_key AS
 SELECT g AS n, 'row-' || g AS label FROM generate_series(1, 250000) g;
@@ -102,6 +105,22 @@ SELECT g, 1, g, 'sku-' || g, 'user' || g || '@example.com', 1 + g % 5,
        CASE WHEN g % 3 = 0 THEN NULL ELSE timestamp '2024-01-01' + (g % 90) * interval '1 day' END
 FROM generate_series(1, 5000) g;
 ANALYZE bench_child;
+
+-- A second schema. Every metadata query takes a schema argument and nothing
+-- hardcodes "public", but with one schema in the database that is a property of
+-- the code nobody has watched hold. This gives the navigator a second branch,
+-- and gives the browse a relation whose qualified name is not its bare name.
+DROP SCHEMA IF EXISTS reporting CASCADE;
+CREATE SCHEMA reporting;
+CREATE TABLE reporting.daily_totals (
+  day     date        PRIMARY KEY,
+  orders  int         NOT NULL,
+  revenue numeric(12,2) NOT NULL
+);
+INSERT INTO reporting.daily_totals
+SELECT date '2024-01-01' + g, 10 + g % 40, (1000 + g * 13)::numeric(12,2)
+FROM generate_series(0, 364) g;
+ANALYZE reporting.daily_totals;
 
 SELECT count(*) AS rows FROM bench_wide;
 SELECT pg_size_pretty(pg_total_relation_size('bench_wide')) AS size;

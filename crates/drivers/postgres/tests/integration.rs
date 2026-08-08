@@ -268,6 +268,37 @@ async fn schemas_exclude_catalog_namespaces() {
         "pg_* schemas should be filtered out, got {names:?}"
     );
     assert!(!names.contains(&"information_schema"));
+    assert!(
+        names.contains(&"reporting"),
+        "a non-public user schema should be listed too, got {names:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn relations_are_scoped_to_the_schema_asked_for() {
+    let src = connect().await;
+    // Nothing hardcodes "public", but with one schema in the database that is
+    // untested. A schema argument quietly ignored would show every table under
+    // every branch of the navigator.
+    let rels = src.relations("reporting").await.expect("relations failed");
+    let names: Vec<&str> = rels.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["daily_totals"]);
+
+    let cols = src
+        .columns("reporting", "daily_totals")
+        .await
+        .expect("columns failed");
+    assert_eq!(cols.len(), 3);
+    assert!(cols[0].is_primary_key, "day is the key");
+
+    assert!(
+        src.columns("public", "daily_totals")
+            .await
+            .expect("columns failed")
+            .is_empty(),
+        "a relation must not be findable under a schema it is not in"
+    );
 }
 
 #[tokio::test]

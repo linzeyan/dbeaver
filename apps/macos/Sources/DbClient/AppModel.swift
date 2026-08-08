@@ -200,13 +200,14 @@ final class AppModel {
             connectionState = .connected
             // Open the schema a user most likely wants, and land on a table
             // rather than an empty pane. Opening to nothing makes every session
-            // start with the same two clicks.
-            if let first = schemas.first(where: { $0.name == "public" }) ?? schemas.first {
-                expanded.insert(first.name)
-                let open = relations[first.name] ?? []
-                selected = initialRelation.flatMap { name in
-                    open.first { $0.name == name }
-                } ?? open.first
+            // start with the same two clicks. `--relation` overrides both, and
+            // may name a schema of its own.
+            let requested = initialRelation.flatMap(findRelation)
+            let opening = requested.map(\.schema)
+                ?? (schemas.first(where: { $0.name == "public" }) ?? schemas.first)?.name
+            if let opening {
+                expanded.insert(opening)
+                selected = requested ?? relations[opening]?.first
             }
             status = Self.pluralized(schemas.count, "schema")
             isBusy = false
@@ -216,6 +217,21 @@ final class AppModel {
                 runQuery(initialSQL, describedAs: "query", into: queryResult)
             }
         }
+    }
+
+    /// Resolves `--relation`, which is either a bare name or `schema.name`.
+    /// Unqualified searches every schema so a capture does not have to know
+    /// where a table lives, but prefers the one that opens by default.
+    private func findRelation(named requested: String) -> RelationInfo? {
+        if let dot = requested.firstIndex(of: ".") {
+            let schema = String(requested[..<dot])
+            let name = String(requested[requested.index(after: dot)...])
+            return relations[schema]?.first { $0.name == name }
+        }
+        let preferred = relations["public"]?.first { $0.name == requested }
+        return preferred ?? relations.values.lazy.compactMap { list in
+            list.first { $0.name == requested }
+        }.first
     }
 
     // MARK: - Navigator
