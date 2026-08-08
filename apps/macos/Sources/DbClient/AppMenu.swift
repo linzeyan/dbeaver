@@ -18,7 +18,8 @@ enum AppMenu {
     static func install(into app: NSApplication, model: AppModel) {
         // `CFBundleName` when running as a bundle, which is what the menu should
         // say; the process name is the fallback for the unbundled dev binary.
-        let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
+        let name =
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
             ?? ProcessInfo.processInfo.processName
         let commands = ExportCommands(model: model)
         exportCommands = commands

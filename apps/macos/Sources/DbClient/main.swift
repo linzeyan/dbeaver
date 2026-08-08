@@ -20,7 +20,7 @@ let benchFrames = 600
 /// Value following `flag` on the command line, if any.
 func argument(_ flag: String) -> String? {
     guard let i = CommandLine.arguments.firstIndex(of: flag),
-          i + 1 < CommandLine.arguments.count
+        i + 1 < CommandLine.arguments.count
     else { return nil }
     return CommandLine.arguments[i + 1]
 }

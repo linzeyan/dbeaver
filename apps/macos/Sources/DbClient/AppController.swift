@@ -1,6 +1,6 @@
 import AppKit
-import MetalKit
 import CDbFfi
+import MetalKit
 
 // Kept out of main.swift deliberately: types declared in a file with top-level
 // code inherit @MainActor isolation, which is wrong for a controller whose
@@ -28,8 +28,10 @@ final class GridViewController: NSObject, MTKViewDelegate {
     private var benchFrameCount = 0
     private var benchStarted = false
 
-    init(renderer: GridRenderer, connString: String, sql: String,
-         benchMode: Bool, benchFrames: Int, verifyMode: Bool) {
+    init(
+        renderer: GridRenderer, connString: String, sql: String,
+        benchMode: Bool, benchFrames: Int, verifyMode: Bool
+    ) {
         self.renderer = renderer
         self.connString = connString
         self.sql = sql
@@ -55,8 +57,10 @@ final class GridViewController: NSObject, MTKViewDelegate {
             print("  rows           \(probes.first?.rows ?? 0)")
             print("  buffer_bytes   \(totalMalloc)")
             for p in probes.prefix(4) {
-                print(String(format: "  %-14@ @0x%llx  alloc=%d",
-                             p.column as NSString, UInt64(p.address), p.mallocSize))
+                print(
+                    String(
+                        format: "  %-14@ @0x%llx  alloc=%d",
+                        p.column as NSString, UInt64(p.address), p.mallocSize))
             }
         }
     }
@@ -270,13 +274,18 @@ final class GridView: MTKView {
         // Clamped so the last row lands at the bottom rather than scrolling up
         // into blank space. It is also what lets the scrollbar reach its end
         // exactly when the data does.
-        renderer.scrollRow = max(0, min(
-            renderer.maxScrollRow(viewSize: bounds.size),
-            renderer.scrollRow - Double(event.scrollingDeltaY) / Double(renderer.rowHeight) * 3))
+        renderer.scrollRow = max(
+            0,
+            min(
+                renderer.maxScrollRow(viewSize: bounds.size),
+                renderer.scrollRow - Double(event.scrollingDeltaY) / Double(renderer.rowHeight) * 3)
+        )
 
-        renderer.scrollX = max(0, min(
-            renderer.maxScrollX(viewWidth: bounds.width),
-            renderer.scrollX - Float(event.scrollingDeltaX)))
+        renderer.scrollX = max(
+            0,
+            min(
+                renderer.maxScrollX(viewWidth: bounds.width),
+                renderer.scrollX - Float(event.scrollingDeltaX)))
 
         needsDisplay = true
     }
@@ -306,9 +315,11 @@ final class GridView: MTKView {
         // Before anything else: the gutters sit over the data, so a click there
         // must not also land on the cell underneath.
         if let axis = renderer.scrollbarAxis(at: point, viewSize: bounds.size),
-           let metrics = renderer.scrollbar(axis, viewSize: bounds.size) {
+            let metrics = renderer.scrollbar(axis, viewSize: bounds.size)
+        {
             let coord = renderer.scrollbarCoordinate(axis, of: point)
-            let onThumb = coord >= metrics.thumbStart
+            let onThumb =
+                coord >= metrics.thumbStart
                 && coord <= metrics.thumbStart + metrics.thumbLength
             // A click on the track goes where it points rather than paging
             // towards it. On a million rows, paging there takes all afternoon.
@@ -327,7 +338,8 @@ final class GridView: MTKView {
 
         if isInHeader(point) {
             if sortsOnHeaderClick,
-               let column = renderer.columnIndex(atX: Float(point.x) + renderer.scrollX) {
+                let column = renderer.columnIndex(atX: Float(point.x) + renderer.scrollX)
+            {
                 onHeaderClick?(column)
             }
             return
@@ -391,8 +403,10 @@ final class GridView: MTKView {
         let current = renderer.selection ?? GridSelection(row: Int(renderer.scrollRow), column: 0)
         let lastRow = table.rowCount - 1
         let lastColumn = max(0, table.columns.count - 1)
-        let page = max(1, Int(
-            (bounds.height - CGFloat(renderer.headerHeight)) / CGFloat(renderer.rowHeight)) - 1)
+        let page = max(
+            1,
+            Int(
+                (bounds.height - CGFloat(renderer.headerHeight)) / CGFloat(renderer.rowHeight)) - 1)
 
         // ⌘C and ⌘A are routed here rather than through the Edit menu because
         // the grid is not a text view and has no field editor to answer the
@@ -442,7 +456,8 @@ final class GridView: MTKView {
         guard let renderer, let table = renderer.table, let selection = renderer.selection
         else { return }
         let rows = selection.rows
-        let text = rows.count > 1
+        let text =
+            rows.count > 1
             ? tsv(table, rows: rows)
             : cellText(table, row: selection.row, column: selection.column)
         NSPasteboard.general.clearContents()

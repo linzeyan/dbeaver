@@ -18,7 +18,8 @@ final class ArrowTable {
         case bool, int16, int32, int64, float32, float64
         case utf8, binary
         case decimal128(precision: Int32, scale: Int32)
-        case timestamp(tz: Bool), date32, time64
+        case timestamp(tz: Bool)
+        case date32, time64
         case unsupported(String)
 
         /// Whether values of this kind are compared by magnitude, and so should
@@ -58,7 +59,8 @@ final class ArrowTable {
         columns = (0..<Int(schema.pointee.n_children)).map { i in
             let child = schema.pointee.children![i]!
             let name = child.pointee.name.map { String(cString: $0) } ?? "col\(i)"
-            return Column(name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)))
+            return Column(
+                name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)))
         }
     }
 
@@ -84,8 +86,10 @@ final class ArrowTable {
     /// visible cell per frame.
     func text(row: Int, column: Int) -> String {
         guard column < columns.count, row < rowCount else { return "" }
-        guard let (batchIdx, localRow) = Self.locate(
-            row: row, batchStarts: batchStarts, columns: columns) else { return "" }
+        guard
+            let (batchIdx, localRow) = Self.locate(
+                row: row, batchStarts: batchStarts, columns: columns)
+        else { return "" }
         return columns[column].batches[batchIdx].text(at: localRow)
     }
 
@@ -96,8 +100,10 @@ final class ArrowTable {
     /// them apart before deciding what to draw.
     func isNull(row: Int, column: Int) -> Bool {
         guard column < columns.count, row < rowCount else { return false }
-        guard let (batchIdx, localRow) = Self.locate(
-            row: row, batchStarts: batchStarts, columns: columns) else { return false }
+        guard
+            let (batchIdx, localRow) = Self.locate(
+                row: row, batchStarts: batchStarts, columns: columns)
+        else { return false }
         return columns[column].batches[batchIdx].isNull(localRow)
     }
 
@@ -110,14 +116,19 @@ final class ArrowTable {
     ) -> (Int, Int)? {
         // Batches are uniform except the last, but binary search keeps this
         // correct if that ever stops being true.
-        var lo = 0, hi = batchStarts.count - 1
+        var lo = 0
+        var hi = batchStarts.count - 1
         while lo <= hi {
             let mid = (lo + hi) / 2
             let start = batchStarts[mid]
             let end = start + (columns.first?.batches[mid].length ?? 0)
-            if row < start { hi = mid - 1 }
-            else if row >= end { lo = mid + 1 }
-            else { return (mid, row - start) }
+            if row < start {
+                hi = mid - 1
+            } else if row >= end {
+                lo = mid + 1
+            } else {
+                return (mid, row - start)
+            }
         }
         return nil
     }
@@ -157,8 +168,8 @@ final class ArrowTable {
         /// not free.
         func value(row: Int, column: Int) -> String? {
             guard column < columns.count, row < rowCount,
-                  let (batchIdx, localRow) = ArrowTable.locate(
-                      row: row, batchStarts: batchStarts, columns: columns)
+                let (batchIdx, localRow) = ArrowTable.locate(
+                    row: row, batchStarts: batchStarts, columns: columns)
             else { return nil }
             let batch = columns[column].batches[batchIdx]
             return batch.isNull(localRow) ? nil : batch.text(at: localRow)
@@ -304,14 +315,18 @@ private struct ColumnBatch {
                 load(Int128Bits.self, idx), precision: precision, scale: scale)
         case .utf8:
             guard let offsets = buffer1?.assumingMemoryBound(to: Int32.self),
-                  let data = buffer2?.assumingMemoryBound(to: UInt8.self) else { return "" }
-            let start = Int(offsets[idx]), end = Int(offsets[idx + 1])
+                let data = buffer2?.assumingMemoryBound(to: UInt8.self)
+            else { return "" }
+            let start = Int(offsets[idx])
+            let end = Int(offsets[idx + 1])
             guard end > start else { return "" }
-            return String(decoding: UnsafeBufferPointer(start: data + start, count: end - start),
-                          as: UTF8.self)
+            return String(
+                decoding: UnsafeBufferPointer(start: data + start, count: end - start),
+                as: UTF8.self)
         case .binary:
             guard let offsets = buffer1?.assumingMemoryBound(to: Int32.self) else { return "" }
-            let start = Int(offsets[idx]), end = Int(offsets[idx + 1])
+            let start = Int(offsets[idx])
+            let end = Int(offsets[idx + 1])
             return "0x… (\(end - start) B)"
         case .unsupported(let f):
             return "<\(f)>"
@@ -319,7 +334,9 @@ private struct ColumnBatch {
     }
 
     private func load<T>(_ type: T.Type, _ idx: Int) -> T {
-        guard let b = buffer1 else { return withUnsafeTemporaryAllocation(of: T.self, capacity: 1) { $0[0] } }
+        guard let b = buffer1 else {
+            return withUnsafeTemporaryAllocation(of: T.self, capacity: 1) { $0[0] }
+        }
         return b.load(fromByteOffset: idx * MemoryLayout<T>.stride, as: T.self)
     }
 

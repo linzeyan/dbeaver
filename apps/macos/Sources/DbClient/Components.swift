@@ -59,7 +59,8 @@ private struct TabButton: View {
             .frame(height: 24)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
-                    .fill(background))
+                    .fill(background)
+            )
             .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
         }
         .buttonStyle(.plain)
@@ -254,7 +255,8 @@ struct SidebarFilterField: View {
         .frame(height: 22)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
-                .fill(Theme.background.opacity(0.6).color))
+                .fill(Theme.background.opacity(0.6).color)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
                 .strokeBorder(
@@ -301,7 +303,8 @@ struct CompactField: View {
             .frame(height: 22)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
-                    .fill(Theme.background.opacity(0.6).color))
+                    .fill(Theme.background.opacity(0.6).color)
+            )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
                     .strokeBorder(

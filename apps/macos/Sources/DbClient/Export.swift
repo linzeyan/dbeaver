@@ -66,9 +66,11 @@ enum DelimitedWriter {
     static func field(_ value: String?, delimiter: Unicode.Scalar) -> String {
         guard let value else { return "" }
         guard !value.isEmpty else { return "\"\"" }
-        guard value.unicodeScalars.contains(where: {
-            $0 == delimiter || $0 == "\"" || $0 == "\r" || $0 == "\n"
-        }) else { return value }
+        guard
+            value.unicodeScalars.contains(where: {
+                $0 == delimiter || $0 == "\"" || $0 == "\r" || $0 == "\n"
+            })
+        else { return value }
 
         var quoted = "\""
         quoted.reserveCapacity(value.utf8.count + 4)

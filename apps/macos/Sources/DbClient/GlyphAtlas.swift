@@ -1,7 +1,7 @@
-import CoreText
-import Metal
-import Foundation
 import AppKit
+import CoreText
+import Foundation
+import Metal
 
 /// Monospaced ASCII glyphs rasterized once into a single texture.
 ///
@@ -23,7 +23,7 @@ final class GlyphAtlas {
     private static let extras: [UniChar] = [
         0x2026,  // … truncation marker
         0x25B2,  // ▲ sort ascending
-        0x25BC,  // ▼ sort descending
+        0x25BC  // ▼ sort descending
     ]
 
     /// Padding around each glyph in the atlas, in device pixels. Without it a
@@ -47,8 +47,9 @@ final class GlyphAtlas {
         // named family is absent, and a proportional face corrupts every pen
         // position in the grid. monospacedSystemFont cannot fail that way.
         // Created at the scaled size so rasterization is pure device pixels.
-        let font = NSFont.monospacedSystemFont(
-            ofSize: pointSize * scale, weight: .regular) as CTFont
+        let font =
+            NSFont.monospacedSystemFont(
+                ofSize: pointSize * scale, weight: .regular) as CTFont
 
         let ascent = CTFontGetAscent(font)
         let descent = CTFontGetDescent(font)
@@ -63,8 +64,8 @@ final class GlyphAtlas {
         CTFontGetAdvancesForGlyphs(
             font, .horizontal, sampleGlyphs, &sampleAdvances, samples.count)
         guard let advanceDevice = sampleAdvances.first?.width,
-              advanceDevice > 0,
-              sampleAdvances.allSatisfy({ abs($0.width - advanceDevice) < 0.01 })
+            advanceDevice > 0,
+            sampleAdvances.allSatisfy({ abs($0.width - advanceDevice) < 0.01 })
         else {
             assertionFailure("font is not monospaced; grid layout would be wrong")
             return nil
@@ -88,12 +89,14 @@ final class GlyphAtlas {
         let texW = Int(cw) * cols
         let texH = Int(ch) * rows
 
-        guard let ctx = CGContext(
-            data: nil, width: texW, height: texH,
-            bitsPerComponent: 8, bytesPerRow: texW,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return nil }
+        guard
+            let ctx = CGContext(
+                data: nil, width: texW, height: texH,
+                bitsPerComponent: 8, bytesPerRow: texW,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            )
+        else { return nil }
 
         ctx.setFillColor(CGColor(gray: 0, alpha: 1))
         ctx.fill(CGRect(x: 0, y: 0, width: texW, height: texH))
@@ -122,10 +125,11 @@ final class GlyphAtlas {
         // Solid cell, immediately after the printable range.
         let solidCol = Self.count % cols
         let solidRow = Self.count / cols
-        ctx.fill(CGRect(
-            x: CGFloat(solidCol) * cw,
-            y: CGFloat(texH) - CGFloat(solidRow + 1) * ch,
-            width: cw, height: ch))
+        ctx.fill(
+            CGRect(
+                x: CGFloat(solidCol) * cw,
+                y: CGFloat(texH) - CGFloat(solidRow + 1) * ch,
+                width: cw, height: ch))
 
         // Extra glyphs, each centred in its cell: unlike the ASCII range these
         // are not necessarily the font's advance width, and drawing them at the
@@ -170,7 +174,8 @@ final class GlyphAtlas {
     var solidUV: (x: Float, y: Float, w: Float, h: Float) {
         let col = Self.count % atlasColumns
         let row = Self.count / atlasColumns
-        let texW = Float(texture.width), texH = Float(texture.height)
+        let texW = Float(texture.width)
+        let texH = Float(texture.height)
         return (
             x: (Float(col) + 0.5) * cellWidth / texW,
             y: (Float(row) + 0.5) * cellHeight / texH,
@@ -196,7 +201,8 @@ final class GlyphAtlas {
     private func cellUV(at index: Int) -> (x: Float, y: Float, w: Float, h: Float) {
         let col = index % atlasColumns
         let row = index / atlasColumns
-        let texW = Float(texture.width), texH = Float(texture.height)
+        let texW = Float(texture.width)
+        let texH = Float(texture.height)
         return (
             x: Float(col) * cellWidth / texW,
             y: Float(row) * cellHeight / texH,

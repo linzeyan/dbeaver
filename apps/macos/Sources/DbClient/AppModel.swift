@@ -220,7 +220,8 @@ final class AppModel {
             // start with the same two clicks. `--relation` overrides both, and
             // may name a schema of its own.
             let requested = initialRelation.flatMap(findRelation)
-            let opening = requested.map(\.schema)
+            let opening =
+                requested.map(\.schema)
                 ?? (schemas.first(where: { $0.name == "public" }) ?? schemas.first)?.name
             if let opening {
                 expanded.insert(opening)
@@ -246,9 +247,10 @@ final class AppModel {
             return relations[schema]?.first { $0.name == name }
         }
         let preferred = relations["public"]?.first { $0.name == requested }
-        return preferred ?? relations.values.lazy.compactMap { list in
-            list.first { $0.name == requested }
-        }.first
+        return preferred
+            ?? relations.values.lazy.compactMap { list in
+                list.first { $0.name == requested }
+            }.first
     }
 
     // MARK: - Navigator
@@ -299,8 +301,8 @@ final class AppModel {
     func inspectedCell(in result: ResultSet) -> InspectedCell? {
         let grid = result.table
         guard let s = result.selection,
-              s.column < grid.columns.count,
-              s.row < grid.rowCount
+            s.column < grid.columns.count,
+            s.row < grid.rowCount
         else { return nil }
         let name = grid.columns[s.column].name
         let isNull = grid.isNull(row: s.row, column: s.column)
@@ -356,7 +358,8 @@ final class AppModel {
         }
     }
 
-    private func loadColumns(for relation: RelationInfo, then next: @escaping @MainActor () -> Void) {
+    private func loadColumns(for relation: RelationInfo, then next: @escaping @MainActor () -> Void)
+    {
         run { db in
             try db.columns(schema: relation.schema, relation: relation.name)
         } then: { [self] cols in
@@ -453,7 +456,8 @@ final class AppModel {
         let user = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
         // The user's own order may already name the key; repeating it is
         // harmless to Postgres but noise in the statement.
-        let keys = columns
+        let keys =
+            columns
             .filter { $0.isPrimaryKey && $0.name != parsedOrder?.column }
             .map { "\"\($0.name)\"" }
         let terms = user.isEmpty ? keys : [user] + keys
@@ -542,8 +546,8 @@ final class AppModel {
     /// and this cannot append an ORDER BY to arbitrary SQL correctly.
     var gridSort: GridSort? {
         guard let order = parsedOrder,
-              let index = browseResult.table.columns
-                  .firstIndex(where: { $0.name == order.column })
+            let index = browseResult.table.columns
+                .firstIndex(where: { $0.name == order.column })
         else { return nil }
         return GridSort(column: index, descending: order.descending)
     }
@@ -640,7 +644,8 @@ final class AppModel {
         guard current.capped else {
             return "Writes this result in full — \(Self.pluralized(current.rowCount, "row"))."
         }
-        let shown = "This result is the first \(count) rows, not the whole table. "
+        let shown =
+            "This result is the first \(count) rows, not the whole table. "
             + "Only those rows will be written."
         guard let obstacle = pagingObstacle else { return shown }
         return "\(shown) \(obstacle.detail)"
@@ -813,7 +818,8 @@ final class AppModel {
     private static func label(for connString: String) -> String {
         // "host=… dbname=…" → "dbname@host", which is how these tools name a
         // session and how users refer to one.
-        var host = "localhost", dbname = "database"
+        var host = "localhost"
+        var dbname = "database"
         for pair in connString.split(separator: " ") {
             let kv = pair.split(separator: "=", maxSplits: 1)
             guard kv.count == 2 else { continue }

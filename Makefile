@@ -23,6 +23,15 @@ APP_DEBUG := $(APP_DIR)/.build/debug/DbClient
 APP_BUNDLE     := dist/DbClient.app
 APP_BUNDLE_BIN := $(APP_BUNDLE)/Contents/MacOS/DbClient
 
+# swift-format ships inside the Xcode toolchain and is not on PATH, so the
+# `command -v` test this replaced never found it: `make fmt` printed a note and
+# exited 0 for as long as there have been Swift sources, and none of them were
+# ever formatted. A quality gate that silently does nothing is worse than no
+# gate, because it reports success — hence the fallback, and hence a missing
+# formatter being an error rather than a note.
+SWIFT_FORMAT := $(shell command -v swift-format 2>/dev/null || xcrun --find swift-format 2>/dev/null)
+SWIFT_FORMAT_MISSING := swift-format not found on PATH or in the Xcode toolchain (xcrun --find swift-format)
+
 # Benchmark database. Ports are non-default to avoid colliding with a local
 # PostgreSQL install.
 PG_CONTAINER := pg-bench
@@ -90,13 +99,17 @@ test-all: test test-integration ## Every test
 .PHONY: fmt
 fmt: ## Format Rust and Swift sources
 	cargo fmt --all
-	@command -v swift-format >/dev/null 2>&1 \
-		&& swift-format format -i -r $(APP_DIR)/Sources \
-		|| echo "swift-format not installed; skipped Swift sources"
+	@test -n "$(SWIFT_FORMAT)" || { echo "$(SWIFT_FORMAT_MISSING)"; exit 1; }
+	$(SWIFT_FORMAT) format -i -r $(APP_DIR)/Sources
 
 .PHONY: fmt-check
 fmt-check: ## Verify formatting without modifying files
 	cargo fmt --all -- --check
+	@test -n "$(SWIFT_FORMAT)" || { echo "$(SWIFT_FORMAT_MISSING)"; exit 1; }
+	@fail=0; for f in $$(find $(APP_DIR)/Sources -name '*.swift'); do \
+		$(SWIFT_FORMAT) format "$$f" | diff -q - "$$f" >/dev/null \
+			|| { echo "needs formatting: $$f"; fail=1; }; \
+	done; test $$fail -eq 0
 
 .PHONY: lint
 lint: ## Clippy with warnings denied

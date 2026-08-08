@@ -88,14 +88,14 @@ final class GridRenderer {
         self.device = device
         self.scale = Float(scale)
         guard let queue = device.makeCommandQueue(),
-              let atlas = GlyphAtlas(device: device, pointSize: 12, scale: scale)
+            let atlas = GlyphAtlas(device: device, pointSize: 12, scale: scale)
         else { return nil }
         self.queue = queue
         self.atlas = atlas
 
         guard let library = try? device.makeLibrary(source: Self.shaderSource, options: nil),
-              let vfn = library.makeFunction(name: "grid_vertex"),
-              let ffn = library.makeFunction(name: "grid_fragment")
+            let vfn = library.makeFunction(name: "grid_vertex"),
+            let ffn = library.makeFunction(name: "grid_fragment")
         else { return nil }
 
         let desc = MTLRenderPipelineDescriptor()
@@ -111,9 +111,11 @@ final class GridRenderer {
         self.pipeline = pipeline
 
         for _ in 0..<3 {
-            guard let b = device.makeBuffer(
-                length: MemoryLayout<GlyphInstance>.stride * maxInstances,
-                options: .storageModeShared) else { return nil }
+            guard
+                let b = device.makeBuffer(
+                    length: MemoryLayout<GlyphInstance>.stride * maxInstances,
+                    options: .storageModeShared)
+            else { return nil }
             instanceBuffers.append(b)
         }
         instances.reserveCapacity(maxInstances)
@@ -167,7 +169,8 @@ final class GridRenderer {
             var chars = table.columns[c].name.utf8.count
             for r in 0..<sample {
                 // NULL renders as the word, so it sets a floor of four.
-                let len = table.isNull(row: r, column: c)
+                let len =
+                    table.isNull(row: r, column: c)
                     ? 4 : table.text(row: r, column: c).utf8.count
                 chars = max(chars, len)
             }
@@ -196,7 +199,8 @@ final class GridRenderer {
     /// Index of the column containing `x` in content coordinates.
     func columnIndex(atX x: Float) -> Int? {
         guard x >= 0, x < contentWidth, !columnWidths.isEmpty else { return nil }
-        var lo = 0, hi = columnWidths.count - 1
+        var lo = 0
+        var hi = columnWidths.count - 1
         while lo <= hi {
             let mid = (lo + hi) / 2
             if x < columnOffsets[mid] {
@@ -231,9 +235,9 @@ final class GridRenderer {
 
     func draw(in view: MTKView) {
         guard let table,
-              let drawable = view.currentDrawable,
-              let passDesc = view.currentRenderPassDescriptor,
-              let cmd = queue.makeCommandBuffer()
+            let drawable = view.currentDrawable,
+            let passDesc = view.currentRenderPassDescriptor,
+            let cmd = queue.makeCommandBuffer()
         else { return }
 
         let start = CFAbsoluteTimeGetCurrent()
@@ -250,8 +254,9 @@ final class GridRenderer {
                 byteCount: count * MemoryLayout<GlyphInstance>.stride)
         }
 
-        var uniforms = Uniforms(viewport: SIMD2(
-            Float(view.drawableSize.width), Float(view.drawableSize.height)))
+        var uniforms = Uniforms(
+            viewport: SIMD2(
+                Float(view.drawableSize.width), Float(view.drawableSize.height)))
 
         guard let enc = cmd.makeRenderCommandEncoder(descriptor: passDesc) else {
             inFlight.signal()
@@ -262,8 +267,9 @@ final class GridRenderer {
         enc.setVertexBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 1)
         enc.setFragmentTexture(atlas.texture, index: 0)
         if count > 0 {
-            enc.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4,
-                               instanceCount: count)
+            enc.drawPrimitives(
+                type: .triangleStrip, vertexStart: 0, vertexCount: 4,
+                instanceCount: count)
         }
         enc.endEncoding()
 
@@ -374,13 +380,16 @@ final class GridRenderer {
 
     /// The axis whose gutter contains `point`, if any.
     func scrollbarAxis(at point: CGPoint, viewSize: CGSize) -> ScrollAxis? {
-        let x = Float(point.x), y = Float(point.y)
+        let x = Float(point.x)
+        let y = Float(point.y)
         if scrollbar(.vertical, viewSize: viewSize) != nil,
-           x >= Float(viewSize.width) - scrollbarGutter, y >= headerHeight {
+            x >= Float(viewSize.width) - scrollbarGutter, y >= headerHeight
+        {
             return .vertical
         }
         if scrollbar(.horizontal, viewSize: viewSize) != nil,
-           y >= Float(viewSize.height) - scrollbarGutter {
+            y >= Float(viewSize.height) - scrollbarGutter
+        {
             return .horizontal
         }
         return nil
@@ -413,20 +422,24 @@ final class GridRenderer {
 
         if let m = scrollbar(.vertical, viewSize: viewSize) {
             let x = viewW - scrollbarGutter
-            fill(x: x, y: m.trackStart, w: scrollbarGutter, h: m.trackLength,
-                 color: Theme.Grid.scrollTrack.simd)
-            fill(x: x + inset, y: m.thumbStart,
-                 w: scrollbarThumbThickness, h: m.thumbLength,
-                 color: thumbColor(for: .vertical))
+            fill(
+                x: x, y: m.trackStart, w: scrollbarGutter, h: m.trackLength,
+                color: Theme.Grid.scrollTrack.simd)
+            fill(
+                x: x + inset, y: m.thumbStart,
+                w: scrollbarThumbThickness, h: m.thumbLength,
+                color: thumbColor(for: .vertical))
         }
 
         if let m = scrollbar(.horizontal, viewSize: viewSize) {
             let y = viewH - scrollbarGutter
-            fill(x: m.trackStart, y: y, w: m.trackLength, h: scrollbarGutter,
-                 color: Theme.Grid.scrollTrack.simd)
-            fill(x: m.thumbStart, y: y + inset,
-                 w: m.thumbLength, h: scrollbarThumbThickness,
-                 color: thumbColor(for: .horizontal))
+            fill(
+                x: m.trackStart, y: y, w: m.trackLength, h: scrollbarGutter,
+                color: Theme.Grid.scrollTrack.simd)
+            fill(
+                x: m.thumbStart, y: y + inset,
+                w: m.thumbLength, h: scrollbarThumbThickness,
+                color: thumbColor(for: .horizontal))
         }
     }
 
@@ -478,8 +491,9 @@ final class GridRenderer {
             for (i, r) in rows.enumerated() where selected.contains(r) {
                 let y = rowY(i)
                 guard y + rowHeight > headerHeight, y < viewH else { continue }
-                fill(x: 0, y: y, w: viewW, h: rowHeight,
-                     color: Theme.Grid.selectedRow.simd)
+                fill(
+                    x: 0, y: y, w: viewW, h: rowHeight,
+                    color: Theme.Grid.selectedRow.simd)
             }
         }
         // The cursor cell is drawn separately: within a multi-row selection it
@@ -491,12 +505,14 @@ final class GridRenderer {
                 let cx = columnX(selection.column) - scrollX
                 let cw = columnWidth(selection.column)
                 if cx + cw > 0, cx < viewW {
-                    fill(x: cx, y: y, w: cw, h: rowHeight,
-                         color: Theme.Grid.selectedCell.simd)
+                    fill(
+                        x: cx, y: y, w: cw, h: rowHeight,
+                        color: Theme.Grid.selectedCell.simd)
                     // A 1pt edge on the leading side marks the cell even where
                     // the fill sits over a dark value and washes out.
-                    fill(x: cx, y: y, w: 1, h: rowHeight,
-                         color: Theme.Grid.cursor.simd)
+                    fill(
+                        x: cx, y: y, w: 1, h: rowHeight,
+                        color: Theme.Grid.cursor.simd)
                 }
             }
         }
@@ -505,14 +521,16 @@ final class GridRenderer {
         for c in cols {
             let x = columnOffsets[c + 1] - scrollX
             guard x >= 0, x < viewW else { continue }
-            fill(x: x, y: headerHeight, w: 1, h: viewH - headerHeight,
-                 color: Theme.Grid.separator.simd)
+            fill(
+                x: x, y: headerHeight, w: 1, h: viewH - headerHeight,
+                color: Theme.Grid.separator.simd)
         }
 
         // Header band, opaque so rows scroll beneath it.
         fill(x: 0, y: 0, w: viewW, h: headerHeight, color: Theme.Grid.header.simd)
-        fill(x: 0, y: headerHeight - 1, w: viewW, h: 1,
-             color: Theme.Grid.separator.simd)
+        fill(
+            x: 0, y: headerHeight - 1, w: viewW, h: 1,
+            color: Theme.Grid.separator.simd)
         // Cells, column-major so per-column geometry is resolved once rather
         // than per cell. Draw order within the cell block does not matter: the
         // fills beneath them are already in the buffer.
@@ -546,8 +564,9 @@ final class GridRenderer {
                 // NULL and an empty string, and rendering them the same way
                 // hides a distinction the user is querying on.
                 if table.isNull(row: r, column: c) {
-                    emitCell("NULL", x: x, width: w, maxChars: maxChars, y: y + 3,
-                             color: Theme.Grid.nullText.simd, alignRight: false)
+                    emitCell(
+                        "NULL", x: x, width: w, maxChars: maxChars, y: y + 3,
+                        color: Theme.Grid.nullText.simd, alignRight: false)
                 } else {
                     emitCell(
                         table.text(row: r, column: c), x: x, width: w,
@@ -579,7 +598,7 @@ final class GridRenderer {
         guard y >= headerHeight else { return nil }
         let row = Int(scrollRow + Double((y - headerHeight) / rowHeight))
         guard row >= 0, row < table.rowCount,
-              let column = columnIndex(atX: Float(point.x) + scrollX)
+            let column = columnIndex(atX: Float(point.x) + scrollX)
         else { return nil }
         return GridSelection(row: row, column: column)
     }
@@ -613,12 +632,13 @@ final class GridRenderer {
 
     private func fill(x: Float, y: Float, w: Float, h: Float, color: SIMD4<Float>) {
         let uv = atlas.solidUV
-        instances.append(GlyphInstance(
-            pos: SIMD2((x * scale).rounded(), (y * scale).rounded()),
-            size: SIMD2((w * scale).rounded(), (h * scale).rounded()),
-            uvOrigin: SIMD2(uv.x, uv.y),
-            uvSize: SIMD2(uv.w, uv.h),
-            color: color))
+        instances.append(
+            GlyphInstance(
+                pos: SIMD2((x * scale).rounded(), (y * scale).rounded()),
+                size: SIMD2((w * scale).rounded(), (h * scale).rounded()),
+                uvOrigin: SIMD2(uv.x, uv.y),
+                uvSize: SIMD2(uv.w, uv.h),
+                color: color))
     }
 
     /// Draws one cell's text within `[x, x + width]`.
@@ -644,7 +664,8 @@ final class GridRenderer {
             return
         }
 
-        let startX = alignRight
+        let startX =
+            alignRight
             ? x + width - cellPadding - Float(count) * atlas.advance
             : x + cellPadding
         emit(text: s, x: startX, y: y, color: color, maxChars: maxChars)
@@ -673,58 +694,60 @@ final class GridRenderer {
         uv: (x: Float, y: Float, w: Float, h: Float), x: Float, y: Float,
         color: SIMD4<Float>
     ) {
-        instances.append(GlyphInstance(
-            pos: SIMD2((x * scale).rounded() - atlas.quadInset,
-                       (y * scale).rounded() - atlas.quadInset),
-            size: SIMD2(atlas.cellWidth, atlas.cellHeight),
-            uvOrigin: SIMD2(uv.x, uv.y),
-            uvSize: SIMD2(uv.w, uv.h),
-            color: color))
+        instances.append(
+            GlyphInstance(
+                pos: SIMD2(
+                    (x * scale).rounded() - atlas.quadInset,
+                    (y * scale).rounded() - atlas.quadInset),
+                size: SIMD2(atlas.cellWidth, atlas.cellHeight),
+                uvOrigin: SIMD2(uv.x, uv.y),
+                uvSize: SIMD2(uv.w, uv.h),
+                color: color))
     }
 
     private static let shaderSource = """
-    #include <metal_stdlib>
-    using namespace metal;
+        #include <metal_stdlib>
+        using namespace metal;
 
-    struct Uniforms { float2 viewport; };
+        struct Uniforms { float2 viewport; };
 
-    struct GlyphInstance {
-        float2 pos;
-        float2 size;
-        float2 uvOrigin;
-        float2 uvSize;
-        float4 color;
-    };
+        struct GlyphInstance {
+            float2 pos;
+            float2 size;
+            float2 uvOrigin;
+            float2 uvSize;
+            float4 color;
+        };
 
-    struct VOut {
-        float4 position [[position]];
-        float2 uv;
-        float4 color;
-    };
+        struct VOut {
+            float4 position [[position]];
+            float2 uv;
+            float4 color;
+        };
 
-    vertex VOut grid_vertex(uint vid [[vertex_id]],
-                            uint iid [[instance_id]],
-                            const device GlyphInstance* inst [[buffer(0)]],
-                            constant Uniforms& u [[buffer(1)]]) {
-        float2 corner = float2(float(vid & 1), float(vid >> 1));
-        GlyphInstance g = inst[iid];
-        float2 px = g.pos + corner * g.size;
-        float2 ndc = float2(px.x / u.viewport.x * 2.0 - 1.0,
-                            1.0 - px.y / u.viewport.y * 2.0);
-        VOut o;
-        o.position = float4(ndc, 0.0, 1.0);
-        o.uv = g.uvOrigin + corner * g.uvSize;
-        o.color = g.color;
-        return o;
-    }
+        vertex VOut grid_vertex(uint vid [[vertex_id]],
+                                uint iid [[instance_id]],
+                                const device GlyphInstance* inst [[buffer(0)]],
+                                constant Uniforms& u [[buffer(1)]]) {
+            float2 corner = float2(float(vid & 1), float(vid >> 1));
+            GlyphInstance g = inst[iid];
+            float2 px = g.pos + corner * g.size;
+            float2 ndc = float2(px.x / u.viewport.x * 2.0 - 1.0,
+                                1.0 - px.y / u.viewport.y * 2.0);
+            VOut o;
+            o.position = float4(ndc, 0.0, 1.0);
+            o.uv = g.uvOrigin + corner * g.uvSize;
+            o.color = g.color;
+            return o;
+        }
 
-    fragment float4 grid_fragment(VOut in [[stage_in]],
-                                  texture2d<float> atlas [[texture(0)]]) {
-        // Nearest, not linear: quads are pixel-aligned and map 1:1 onto atlas
-        // texels, so filtering would only blur and pull in neighbouring glyphs.
-        constexpr sampler s(filter::nearest, address::clamp_to_edge);
-        float a = atlas.sample(s, in.uv).r;
-        return float4(in.color.rgb, in.color.a * a);
-    }
-    """
+        fragment float4 grid_fragment(VOut in [[stage_in]],
+                                      texture2d<float> atlas [[texture(0)]]) {
+            // Nearest, not linear: quads are pixel-aligned and map 1:1 onto atlas
+            // texels, so filtering would only blur and pull in neighbouring glyphs.
+            constexpr sampler s(filter::nearest, address::clamp_to_edge);
+            float a = atlas.sample(s, in.uv).r;
+            return float4(in.color.rgb, in.color.a * a);
+        }
+        """
 }

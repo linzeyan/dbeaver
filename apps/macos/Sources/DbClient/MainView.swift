@@ -162,7 +162,8 @@ struct NavigatorRow: View {
             Image(systemName: relation.kind.symbol)
                 .font(.system(size: 11))
                 .foregroundStyle(
-                    relation.kind == .table ? Theme.accent.color : Theme.textSecondary.color)
+                    relation.kind == .table ? Theme.accent.color : Theme.textSecondary.color
+                )
                 .frame(width: 14)
 
             Text(relation.name)
@@ -383,61 +384,61 @@ struct StructurePane: View {
 
     private var columnsTable: some View {
         Table(model.columns) {
-                TableColumn("") { column in
-                    // The key marker earns a column of its own: it is the first
-                    // thing anyone looks for in a structure view. The tooltip
-                    // and label carry it too, so it is not colour-only.
-                    if column.isPrimaryKey {
-                        Image(systemName: "key.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Theme.warning.color)
-                            .help("Primary key")
-                            .accessibilityLabel("Primary key")
-                    }
-                }
-                .width(18)
-
-                TableColumn("Column") { column in
-                    Text(column.name)
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.text.color)
-                }
-
-                TableColumn("Type") { column in
-                    Text(column.dataType)
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.textSecondary.color)
-                }
-
-                TableColumn("Null") { column in
-                    // Words, not a checkmark: "NO" is the constraint a reader
-                    // is scanning for, and a bare glyph makes them guess which
-                    // direction it means.
-                    Text(column.nullable ? "YES" : "NO")
-                        .font(Theme.Typography.monoSmall)
-                        .foregroundStyle(
-                            column.nullable
-                                ? Theme.textTertiary.color : Theme.text.color)
-                }
-                .width(48)
-
-                TableColumn("Default") { column in
-                    Text(column.defaultValue ?? "—")
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.textTertiary.color)
-                        .lineLimit(1)
+            TableColumn("") { column in
+                // The key marker earns a column of its own: it is the first
+                // thing anyone looks for in a structure view. The tooltip
+                // and label carry it too, so it is not colour-only.
+                if column.isPrimaryKey {
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.warning.color)
+                        .help("Primary key")
+                        .accessibilityLabel("Primary key")
                 }
             }
-            // Striping off. AppKit paints the alternating background across the
-            // table's whole height, so the area past the last column renders as
-            // a stack of empty bars that read as rows the table failed to fill.
-            .tableStyle(.inset(alternatesRowBackgrounds: false))
-            // A focus target so this pane has somewhere for focus to be.
-            // Clearing focus is not enough — SwiftUI then falls back to the
-            // only text field on screen, which is the sidebar's filter, and the
-            // tab opens with a ring on a control in a different pane.
-            .focusable()
-            .focused($focus, equals: .structureTable)
+            .width(18)
+
+            TableColumn("Column") { column in
+                Text(column.name)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+            }
+
+            TableColumn("Type") { column in
+                Text(column.dataType)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textSecondary.color)
+            }
+
+            TableColumn("Null") { column in
+                // Words, not a checkmark: "NO" is the constraint a reader
+                // is scanning for, and a bare glyph makes them guess which
+                // direction it means.
+                Text(column.nullable ? "YES" : "NO")
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(
+                        column.nullable
+                            ? Theme.textTertiary.color : Theme.text.color)
+            }
+            .width(48)
+
+            TableColumn("Default") { column in
+                Text(column.defaultValue ?? "—")
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+            }
+        }
+        // Striping off. AppKit paints the alternating background across the
+        // table's whole height, so the area past the last column renders as
+        // a stack of empty bars that read as rows the table failed to fill.
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        // A focus target so this pane has somewhere for focus to be.
+        // Clearing focus is not enough — SwiftUI then falls back to the
+        // only text field on screen, which is the sidebar's filter, and the
+        // tab opens with a ring on a control in a different pane.
+        .focusable()
+        .focused($focus, equals: .structureTable)
     }
 
     private var indexesTable: some View {
@@ -543,7 +544,8 @@ struct StructurePane: View {
                     .font(Theme.Typography.monoSmall)
                     .foregroundStyle(
                         key.onDelete == "CASCADE"
-                            ? Theme.warning.color : Theme.textTertiary.color)
+                            ? Theme.warning.color : Theme.textTertiary.color
+                    )
                     .lineLimit(1)
             }
             .width(min: 80, ideal: 150)
@@ -599,7 +601,8 @@ struct StructurePane: View {
                 Text(trigger.name)
                     .font(Theme.Typography.mono)
                     .foregroundStyle(
-                        trigger.enabled ? Theme.text.color : Theme.textTertiary.color)
+                        trigger.enabled ? Theme.text.color : Theme.textTertiary.color
+                    )
                     .lineLimit(1)
                     .help(trigger.name)
             }
@@ -655,8 +658,10 @@ private struct StructureDetailStrip: View {
                     .frame(height: 20)
                     .background(
                         RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                            .fill(selected == section
-                                ? Theme.surfaceRaised.color : Color.clear))
+                            .fill(
+                                selected == section
+                                    ? Theme.surfaceRaised.color : Color.clear)
+                    )
                     .foregroundStyle(
                         selected == section ? Theme.text.color : Theme.textSecondary.color)
                 }
@@ -694,9 +699,10 @@ struct ContentPane: View {
                     selection: $result.selection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
-                    onSortColumn: { model.toggleSort(column: $0) })
-                    .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
-                    .accessibilityLabel("Result grid")
+                    onSortColumn: { model.toggleSort(column: $0) }
+                )
+                .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
+                .accessibilityLabel("Result grid")
 
                 CellInspector(cell: model.inspectedCell(in: model.browseResult))
             }
@@ -726,8 +732,9 @@ struct FilterBar: View {
             FieldLabel(text: "Order by")
             CompactField(
                 placeholder: hint.order, text: $model.orderClause,
-                area: .orderField, focus: $focus, onSubmit: model.applyFilters)
-                .frame(maxWidth: 190)
+                area: .orderField, focus: $focus, onSubmit: model.applyFilters
+            )
+            .frame(maxWidth: 190)
 
             Button("Apply") { model.applyFilters() }
                 .controlSize(.small)
@@ -777,17 +784,19 @@ struct QueryPane: View {
                         table: model.queryResult.table,
                         generation: model.queryResult.generation,
                         rowCount: model.queryResult.rowCount,
-                        selection: $result.selection)
-                        .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
-                        .accessibilityLabel("Query result grid")
+                        selection: $result.selection
+                    )
+                    .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                    .accessibilityLabel("Query result grid")
 
                     CellInspector(cell: model.inspectedCell(in: model.queryResult))
                 } else {
                     EmptyState(
                         symbol: "terminal",
                         title: "No results yet",
-                        hint: "Press ⌘R to run the statement above.")
-                        .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                        hint: "Press ⌘R to run the statement above."
+                    )
+                    .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
                 }
             }
             .frame(minHeight: 160)
@@ -822,7 +831,8 @@ struct CellInspector: View {
                 Text(cell.value)
                     .font(Theme.Typography.monoSmall)
                     .foregroundStyle(
-                        cell.isNull ? Theme.textTertiary.color : Theme.text.color)
+                        cell.isNull ? Theme.textTertiary.color : Theme.text.color
+                    )
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .textSelection(.enabled)
