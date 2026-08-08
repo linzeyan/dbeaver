@@ -703,3 +703,39 @@ async fn invalid_sql_surfaces_the_database_error() {
         "expected a postgres error, got {err:?}"
     );
 }
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_located_error_says_where_it_is() {
+    let src = connect().await;
+    // The message says what is wrong and never where. The position is the other
+    // half of the answer, and it is the half a front end can act on: with it the
+    // caret goes to the character, without it the user re-reads a hundred lines
+    // of SQL looking for the one the server already found.
+    let sql = "SELECT id FROM bench_wide WHERE nosuchcolumn = 1";
+    let err = match src.query(sql, 8192).await {
+        Ok(_) => panic!("expected a database error"),
+        Err(e) => e,
+    };
+    let position = err
+        .statement_position()
+        .expect("a column that does not exist has a position");
+    // Counted in characters from 1, so it indexes the statement as sent.
+    assert_eq!(position, 33);
+    let at = position as usize - 1;
+    assert_eq!(
+        &sql[at..at + "nosuchcolumn".len()],
+        "nosuchcolumn",
+        "the position should land on the offending token, not near it"
+    );
+
+    // An error with nothing to point at must say so rather than guess. A caller
+    // that gets a plausible number for every failure moves the caret to a
+    // character that had nothing to do with it.
+    let unsupported = src
+        .query("SELECT point(1,2) AS p", 8192)
+        .await
+        .err()
+        .expect("point is unsupported");
+    assert_eq!(unsupported.statement_position(), None);
+}

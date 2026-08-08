@@ -91,8 +91,17 @@ test: ## Unit tests (no database required)
 test-integration: db-check ## Tests requiring the benchmark database
 	cargo test --workspace -- --ignored
 
+# The SQL statement splitter's checks live behind a flag on the app binary
+# rather than in a test target: Package.swift declares one executable target and
+# it links the Rust staticlib, so a test target would have to reproduce that
+# link. Kept out of `check`, which is a cargo-only gate that builds no Swift, and
+# in `test-all`, because a check nothing runs is not a check.
+.PHONY: test-swift
+test-swift: release ## Swift-side checks, run inside the app binary
+	./$(APP_BIN) --verify-splitter
+
 .PHONY: test-all
-test-all: test test-integration ## Every test
+test-all: test test-integration test-swift ## Every test
 
 ##@ Quality
 

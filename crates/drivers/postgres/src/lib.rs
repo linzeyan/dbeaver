@@ -18,6 +18,7 @@ use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use futures_util::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio_postgres::error::ErrorPosition;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, RowStream};
 
@@ -31,6 +32,29 @@ pub enum PgError {
     NumericOverflow(String),
     #[error("arrow: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+}
+
+impl PgError {
+    /// Where in the statement the server says the trouble is: a 1-based index,
+    /// counted in characters, into the SQL that was sent.
+    ///
+    /// The message alone says what is wrong and never where, which for a syntax
+    /// error is most of the answer missing. A front end that has the number can
+    /// put the caret on the character.
+    ///
+    /// `Internal` positions are dropped rather than passed on. They index a
+    /// query the server generated on our behalf — a PL/pgSQL body, say — not the
+    /// text we handed it, so applying one to an editor points confidently at the
+    /// wrong character. No position is better than a wrong one.
+    pub fn statement_position(&self) -> Option<u32> {
+        let PgError::Postgres(e) = self else {
+            return None;
+        };
+        match e.as_db_error()?.position()? {
+            ErrorPosition::Original(p) => Some(*p),
+            ErrorPosition::Internal { .. } => None,
+        }
+    }
 }
 
 /// Renders a driver error the way the server stated it.

@@ -3,6 +3,16 @@ import Foundation
 
 struct DbError: Error, CustomStringConvertible {
     let description: String
+    /// Where the server says the statement went wrong: 1-based, in characters,
+    /// and counted from the start of the SQL that was sent — which is the
+    /// statement, not the editor buffer it was cut from. Nil for every error
+    /// that is not about a place in a statement.
+    let position: Int?
+
+    init(description: String, position: Int? = nil) {
+        self.description = description
+        self.position = position
+    }
 }
 
 /// Swift wrapper over the core's C surface.
@@ -89,8 +99,13 @@ final class Database {
 
     func query(_ sql: String, batchRows: Int) throws -> Query {
         var err: UnsafeMutablePointer<CChar>?
-        guard let q = db_query(handle, sql, batchRows, &err) else {
-            throw DbError(description: Database.take(&err) ?? "query failed")
+        var position: Int32 = 0
+        guard let q = db_query(handle, sql, batchRows, &err, &position) else {
+            throw DbError(
+                description: Database.take(&err) ?? "query failed",
+                // The server counts from one, so zero is "nowhere in particular"
+                // rather than "the first character".
+                position: position > 0 ? Int(position) : nil)
         }
         return Query(handle: q)
     }
