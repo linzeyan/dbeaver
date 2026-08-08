@@ -351,6 +351,137 @@ async fn relations_report_kind_and_row_estimate() {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
+async fn views_are_reported_as_views_and_carry_their_definition() {
+    let src = connect().await;
+    let rels = src.relations("public").await.expect("relations failed");
+    let kind = |name: &str| {
+        rels.iter()
+            .find(|r| r.name == name)
+            .unwrap_or_else(|| panic!("{name} should be listed"))
+            .kind
+    };
+
+    // The two kinds are distinct in the navigator, not both "some sort of view":
+    // one is a stored query and the other is a stored result, and only one of
+    // them can go stale.
+    assert_eq!(kind("bench_open_lines"), RelationKind::View);
+    assert_eq!(
+        kind("bench_category_totals"),
+        RelationKind::MaterializedView
+    );
+
+    for name in ["bench_open_lines", "bench_category_totals"] {
+        let sql = src
+            .definition("public", name)
+            .await
+            .expect("definition failed")
+            .unwrap_or_else(|| panic!("{name} should have a definition"));
+        // The join is the reason the view exists, so it is the thing whose
+        // absence would mean the definition came back truncated or generic.
+        assert!(
+            sql.contains("JOIN bench_wide w ON w.id = c.parent_id"),
+            "{name} definition should carry its join: {sql}"
+        );
+        assert!(
+            sql.lines().count() > 1,
+            "pg_get_viewdef was asked for its pretty form, which is multi-line"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_relation_without_a_definition_reports_none_rather_than_empty() {
+    let src = connect().await;
+    // pg_get_viewdef answers an empty string for a table rather than refusing,
+    // so without the relkind filter every table would claim a definition it
+    // does not have — and the Structure tab would offer an empty section for it.
+    assert_eq!(
+        src.definition("public", "bench_wide")
+            .await
+            .expect("definition failed"),
+        None,
+        "a table has no definition, not a blank one"
+    );
+    assert_eq!(
+        src.definition("public", "no_such_relation")
+            .await
+            .expect("a missing relation should be empty, not an error"),
+        None
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn only_a_materialized_view_can_report_an_index() {
+    let src = connect().await;
+    // The one structural difference between the two kinds that the Structure
+    // tab can show: a materialized view stores its rows, so it can be indexed.
+    let idx = src
+        .indexes("public", "bench_category_totals")
+        .await
+        .expect("indexes failed");
+    assert_eq!(idx.len(), 1);
+    assert_eq!(idx[0].columns, vec!["category"]);
+    assert!(idx[0].is_unique);
+    assert!(
+        !idx[0].is_primary,
+        "a materialized view has no primary key to be"
+    );
+
+    assert!(
+        src.indexes("public", "bench_open_lines")
+            .await
+            .expect("indexes failed")
+            .is_empty(),
+        "a plain view stores nothing, so there is nothing to index"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_views_columns_are_described_like_a_tables() {
+    let src = connect().await;
+    // The Structure tab's upper table is the same code for both, but a view's
+    // columns come from pg_attribute entries the query's output types produced
+    // rather than from a CREATE TABLE, so it is worth watching that they arrive.
+    let cols = src
+        .columns("public", "bench_open_lines")
+        .await
+        .expect("columns failed");
+    let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "order_id",
+            "line_no",
+            "sku",
+            "qty",
+            "category",
+            "ordered_on"
+        ]
+    );
+    // Renamed in the view's select list; reporting the base column's name would
+    // describe a column the view does not expose.
+    assert_eq!(cols[5].name, "ordered_on");
+    assert_eq!(cols[5].data_type, "date");
+    assert!(
+        !cols.iter().any(|c| c.is_primary_key),
+        "a view has no primary key, which is why the browse cannot page one"
+    );
+
+    let agg = src
+        .columns("public", "bench_category_totals")
+        .await
+        .expect("columns failed");
+    assert_eq!(agg.len(), 4);
+    // count() is bigint however the counted column was typed.
+    assert_eq!(agg[1].name, "lines");
+    assert_eq!(agg[1].data_type, "bigint");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
 async fn columns_describe_types_keys_and_nullability() {
     let src = connect().await;
     let cols = src

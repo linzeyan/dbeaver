@@ -22,9 +22,12 @@ echo "seeding $ROWS rows into bench_wide..."
 docker exec -i "$CONTAINER" psql -U bench -d bench -v ON_ERROR_STOP=1 \
     -v rows="$ROWS" <<'SQL'
 \timing on
--- Dropped before bench_wide, not with the rest of its own fixture below:
--- bench_child's foreign key makes bench_wide undroppable while it exists, so
--- the other order only works on a database that has never been seeded.
+-- Dropped before what they read, not with the rest of their own fixture below:
+-- bench_child's foreign key makes bench_wide undroppable while it exists, and a
+-- view makes both of its base tables undroppable the same way. Any other order
+-- only works on a database that has never been seeded.
+DROP MATERIALIZED VIEW IF EXISTS bench_category_totals;
+DROP VIEW IF EXISTS bench_open_lines;
 DROP TABLE IF EXISTS bench_child;
 DROP TABLE IF EXISTS bench_wide;
 
@@ -105,6 +108,39 @@ SELECT g, 1, g, 'sku-' || g, 'user' || g || '@example.com', 1 + g % 5,
        CASE WHEN g % 3 = 0 THEN NULL ELSE timestamp '2024-01-01' + (g % 90) * interval '1 day' END
 FROM generate_series(1, 5000) g;
 ANALYZE bench_child;
+
+-- Views. The client claims to handle them — RelationKind carries both kinds,
+-- with an icon and a label of their own — but with none in the database that
+-- claim had never been rendered, and neither had the one thing anyone opens a
+-- view to see. Both are joins over the tables above rather than SELECT *, so
+-- the definition the Structure tab prints says something.
+CREATE VIEW bench_open_lines AS
+SELECT c.order_id,
+       c.line_no,
+       c.sku,
+       c.qty,
+       w.category,
+       w.created_on AS ordered_on
+FROM bench_child c
+JOIN bench_wide w ON w.id = c.parent_id
+WHERE c.shipped_at IS NULL;
+
+CREATE MATERIALIZED VIEW bench_category_totals AS
+SELECT w.category,
+       count(*)        AS lines,
+       sum(c.qty)      AS total_qty,
+       max(c.order_id) AS last_order
+FROM bench_child c
+JOIN bench_wide w ON w.id = c.parent_id
+GROUP BY w.category;
+
+-- The difference between the two kinds that the Structure tab can actually
+-- show: a materialized view stores rows, so it can be indexed, and a plain view
+-- cannot. Unique because that is also what REFRESH ... CONCURRENTLY needs to
+-- match rows on.
+CREATE UNIQUE INDEX bench_category_totals_category_idx
+  ON bench_category_totals (category);
+ANALYZE bench_category_totals;
 
 -- A second schema. Every metadata query takes a schema argument and nothing
 -- hardcodes "public", but with one schema in the database that is a property of

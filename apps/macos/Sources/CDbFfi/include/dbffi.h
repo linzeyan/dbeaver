@@ -66,6 +66,11 @@ char* db_columns_json(DbHandle* handle, const char* schema, const char* relation
                       char** err);
 char* db_indexes_json(DbHandle* handle, const char* schema, const char* relation,
                       char** err);
+// A JSON string, or JSON null when the relation is not a view. Null rather than
+// an empty string, so "has no definition" stays distinguishable from "has one
+// that is blank".
+char* db_definition_json(DbHandle* handle, const char* schema, const char* relation,
+                         char** err);
 char* db_foreign_keys_json(DbHandle* handle, const char* schema, const char* relation,
                            char** err);
 char* db_referenced_by_json(DbHandle* handle, const char* schema, const char* relation,

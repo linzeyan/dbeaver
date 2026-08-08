@@ -256,6 +256,8 @@ enum StructureDetail: String, CaseIterable, Identifiable {
     case referencedBy = "Referenced by"
     case constraints = "Constraints"
     case triggers = "Triggers"
+    /// Offered only for a relation that has one; see `AppModel.structureSections`.
+    case definition = "Definition"
 
     var id: String { rawValue }
 }
@@ -276,13 +278,15 @@ struct StructurePane: View {
                 columnsTable
                     .frame(minHeight: 160)
 
-                // Five sections will not fit side by side, so they share one
-                // area and the strip selects between them. Every section is
-                // listed even at zero: the count is the answer to "does this
-                // table have triggers", and hiding the row would make the
-                // strip's contents shift from table to table.
+                // The sections will not fit side by side, so they share one area
+                // and the strip selects between them. A list section is listed
+                // even at zero: the count is the answer to "does this table have
+                // triggers", and hiding the row would make the strip's contents
+                // shift from table to table.
                 VStack(spacing: 0) {
-                    StructureDetailStrip(model: model, selected: $detail)
+                    StructureDetailStrip(
+                        model: model,
+                        selected: Binding(get: { section }, set: { detail = $0 }))
                     detailTable
                 }
                 .frame(minHeight: 110, idealHeight: 190, maxHeight: 340)
@@ -293,9 +297,17 @@ struct StructurePane: View {
         }
     }
 
+    /// The section actually on screen. `detail` is the user's last pick, which
+    /// may name Definition while a table is selected — remembered on purpose, so
+    /// stepping through a list of views does not reset the strip on the one
+    /// table in the middle, but not something this can show.
+    private var section: StructureDetail {
+        model.structureSections.contains(detail) ? detail : .indexes
+    }
+
     @ViewBuilder
     private var detailTable: some View {
-        switch detail {
+        switch section {
         case .indexes:
             table(model.indexes, empty: "No indexes") { indexesTable }
         case .foreignKeys:
@@ -310,6 +322,15 @@ struct StructurePane: View {
             }
         case .triggers:
             table(model.triggers, empty: "No triggers") { triggersTable }
+        case .definition:
+            // `section` only names this for a relation that has one, so the
+            // fallback is unreachable — it exists because the switch must be
+            // total, not because a blank Definition section is a state.
+            if let sql = model.definition {
+                definitionText(sql)
+            } else {
+                emptyLine("No definition")
+            }
         }
     }
 
@@ -320,13 +341,44 @@ struct StructurePane: View {
         _ rows: [T], empty: String, @ViewBuilder content: () -> some View
     ) -> some View {
         if rows.isEmpty {
-            Text(empty)
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            emptyLine(empty)
         } else {
             content()
         }
+    }
+
+    private func emptyLine(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.Typography.caption)
+            .foregroundStyle(Theme.textTertiary.color)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// The view's defining statement, verbatim.
+    ///
+    /// The one section that is prose rather than rows, so it gets a scroll view
+    /// instead of a `Table`: the statement runs to tens of lines and the strip
+    /// is a few hundred points tall. Scrolls both ways and does not wrap —
+    /// re-flowing SQL destroys the indentation that the server put there to make
+    /// it readable, and a wrapped line reads as part of the one below it.
+    /// Selectable because the useful thing to do with a definition is paste it
+    /// into the Query tab.
+    private func definitionText(_ sql: String) -> some View {
+        ScrollView([.vertical, .horizontal]) {
+            Text(sql)
+                .font(Theme.Typography.mono)
+                .foregroundStyle(Theme.text.color)
+                .textSelection(.enabled)
+                .fixedSize()
+                .padding(.horizontal, Theme.Space.md)
+                .padding(.vertical, Theme.Space.sm)
+        }
+        // A two-axis scroll view centres content smaller than its viewport, so
+        // a short definition lands in the middle of the pane like a caption.
+        // The anchor puts it where reading starts.
+        .defaultScrollAnchor(.topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityLabel("View definition")
     }
 
     private var columnsTable: some View {
@@ -574,15 +626,16 @@ struct StructurePane: View {
 /// Selector for the Structure tab's lower sections, each with its count.
 ///
 /// The counts are the point: they answer "does this table have triggers"
-/// without a click, which is most of what anyone wants from four of these five
-/// sections most of the time.
+/// without a click, which is most of what anyone wants from the list sections
+/// most of the time. Definition has no count — it is one value, and the section
+/// being offered at all is already the answer.
 private struct StructureDetailStrip: View {
     let model: AppModel
     @Binding var selected: StructureDetail
 
     var body: some View {
         HStack(spacing: Theme.Space.xs) {
-            ForEach(StructureDetail.allCases) { section in
+            ForEach(model.structureSections) { section in
                 let count = model.structureDetailCount(section)
                 Button {
                     selected = section
@@ -590,11 +643,13 @@ private struct StructureDetailStrip: View {
                     HStack(spacing: Theme.Space.xs) {
                         Text(section.rawValue)
                             .font(Theme.Typography.caption)
-                        Text("\(count)")
-                            .font(Theme.Typography.digits)
-                            .foregroundStyle(
-                                selected == section
-                                    ? Theme.textSecondary.color : Theme.textTertiary.color)
+                        if let count {
+                            Text("\(count)")
+                                .font(Theme.Typography.digits)
+                                .foregroundStyle(
+                                    selected == section
+                                        ? Theme.textSecondary.color : Theme.textTertiary.color)
+                        }
                     }
                     .padding(.horizontal, Theme.Space.sm)
                     .frame(height: 20)
@@ -606,7 +661,7 @@ private struct StructureDetailStrip: View {
                         selected == section ? Theme.text.color : Theme.textSecondary.color)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(section.rawValue), \(count)")
+                .accessibilityLabel(count.map { "\(section.rawValue), \($0)" } ?? section.rawValue)
             }
             Spacer(minLength: 0)
         }

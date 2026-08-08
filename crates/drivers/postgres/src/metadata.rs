@@ -283,6 +283,31 @@ pub(crate) async fn columns(
         .collect())
 }
 
+/// The statement a view or materialized view is defined by, as the server
+/// renders it; `None` for anything else.
+///
+/// Absent rather than empty for a table, which is the distinction the UI hangs
+/// a section on. `pg_get_viewdef` does not object to a table's oid — it returns
+/// an empty string — so without the relkind filter every table would report a
+/// definition it does not have, and the pane would show an empty box instead of
+/// no box.
+pub(crate) async fn definition(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+) -> Result<Option<String>, PgError> {
+    let rows = client
+        .query(
+            "SELECT pg_catalog.pg_get_viewdef(c.oid, true) \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('v', 'm')",
+            &[&schema, &relation],
+        )
+        .await?;
+    Ok(rows.first().map(|r| r.get(0)))
+}
+
 pub(crate) async fn indexes(
     client: &Client,
     schema: &str,

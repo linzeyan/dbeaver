@@ -87,6 +87,15 @@ impl PgSource {
         metadata::columns(&self.client, schema, relation).await
     }
 
+    /// The statement a view is defined by; `None` for a relation that has none.
+    pub async fn definition(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Option<String>, PgError> {
+        metadata::definition(&self.client, schema, relation).await
+    }
+
     /// Indexes on one relation, primary key first.
     pub async fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<IndexInfo>, PgError> {
         metadata::indexes(&self.client, schema, relation).await

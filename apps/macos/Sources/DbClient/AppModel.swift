@@ -106,6 +106,9 @@ final class AppModel {
     private(set) var referencedBy: [RelationshipInfo] = []
     private(set) var constraints: [ConstraintInfo] = []
     private(set) var triggers: [TriggerInfo] = []
+    /// The statement a view is defined by. Nil for a table, which is what keeps
+    /// the Definition section off relations that cannot have one.
+    private(set) var definition: String?
 
     // Content pane
     let browseResult = ResultSet()
@@ -318,6 +321,7 @@ final class AppModel {
         referencedBy = []
         constraints = []
         triggers = []
+        definition = nil
         // The browse orders by the primary key, so the columns have to be known
         // before its statement can be written. Issuing both at once left the
         // first page in heap order and every later page in key order — two
@@ -361,23 +365,40 @@ final class AppModel {
                 foreignKeys: try db.foreignKeys(schema: schema, relation: name),
                 referencedBy: try db.referencedBy(schema: schema, relation: name),
                 constraints: try db.constraints(schema: schema, relation: name),
-                triggers: try db.triggers(schema: schema, relation: name))
+                triggers: try db.triggers(schema: schema, relation: name),
+                definition: try db.definition(schema: schema, relation: name))
         } then: { [self] detail in
             indexes = detail.indexes
             foreignKeys = detail.foreignKeys
             referencedBy = detail.referencedBy
             constraints = detail.constraints
             triggers = detail.triggers
+            definition = detail.definition
         }
     }
 
-    func structureDetailCount(_ section: StructureDetail) -> Int {
+    /// The sections the strip offers for the selected relation.
+    ///
+    /// Definition is the only conditional one. The other five are empty on a
+    /// relation that has none of them, and an empty section still answers a
+    /// question; a Definition section on a table would offer to show something
+    /// a table cannot have.
+    var structureSections: [StructureDetail] {
+        StructureDetail.allCases.filter { $0 != .definition || definition != nil }
+    }
+
+    /// How many rows a section holds, or nil for one that is not a list.
+    ///
+    /// A definition is a single value, and "1" beside it would answer a question
+    /// nobody asked — the section being offered at all is what says there is one.
+    func structureDetailCount(_ section: StructureDetail) -> Int? {
         switch section {
         case .indexes: return indexes.count
         case .foreignKeys: return foreignKeys.count
         case .referencedBy: return referencedBy.count
         case .constraints: return constraints.count
         case .triggers: return triggers.count
+        case .definition: return nil
         }
     }
 
@@ -387,6 +408,7 @@ final class AppModel {
         let referencedBy: [RelationshipInfo]
         let constraints: [ConstraintInfo]
         let triggers: [TriggerInfo]
+        let definition: String?
     }
 
     /// Builds the browse query from the filter bar.

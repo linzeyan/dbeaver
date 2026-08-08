@@ -43,6 +43,14 @@ final class Database {
             db_indexes_json(handle, schema, relation, &errOut), as: [IndexInfo].self)
     }
 
+    /// The statement a view is defined by, or nil for a relation that has none.
+    /// The one metadata call that answers with a value rather than a list, so
+    /// it decodes a bare JSON string instead of an array of mirrored structs.
+    func definition(schema: String, relation: String) throws -> String? {
+        try decodeJSON(
+            db_definition_json(handle, schema, relation, &errOut), as: String?.self)
+    }
+
     func foreignKeys(schema: String, relation: String) throws -> [RelationshipInfo] {
         try decodeJSON(
             db_foreign_keys_json(handle, schema, relation, &errOut), as: [RelationshipInfo].self)

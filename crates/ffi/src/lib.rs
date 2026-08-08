@@ -211,6 +211,12 @@ relation_metadata! {
 }
 
 relation_metadata! {
+    /// The statement a view is defined by, as a JSON string, or JSON `null` for
+    /// a relation that has none. Release with `db_string_free`.
+    db_definition_json => definition
+}
+
+relation_metadata! {
     /// Foreign keys of one relation as a JSON array. Release with `db_string_free`.
     db_foreign_keys_json => foreign_keys
 }
