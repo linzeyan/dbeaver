@@ -416,10 +416,30 @@ final class AppModel {
     }
 
     /// Why the truncation marker is not offering a next page, when it is not.
-    var pagingObstacle: String? {
+    ///
+    /// Two lengths because they go to two places that can't take the same text:
+    /// the status bar has one line already spent on counts, and the tooltip is
+    /// where the reason can be spelled out. Kept together so they cannot drift
+    /// into saying different things.
+    struct PagingObstacle {
+        let label: String
+        let detail: String
+    }
+
+    var pagingObstacle: PagingObstacle? {
         guard browseResult.capped, !columns.contains(where: \.isPrimaryKey) else { return nil }
-        return "\(selected?.name ?? "This relation") has no primary key, "
-            + "so there is no stable order to page in."
+        return PagingObstacle(
+            label: "no primary key",
+            detail: "\(selected?.name ?? "This relation") has no primary key, "
+                + "so there is no stable order to page in.")
+    }
+
+    /// Example filters, written against the selected relation. A fixed `id > 100`
+    /// hint names a column most tables do not have, which reads as the field
+    /// having been prefilled with something that will not run.
+    var filterHint: (where: String, order: String) {
+        guard let first = columns.first?.name else { return ("", "") }
+        return ("\(first) > 100", "\(first) desc")
     }
 
     private func runBrowse() {

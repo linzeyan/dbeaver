@@ -656,14 +656,16 @@ struct FilterBar: View {
 
     var body: some View {
         HStack(spacing: Theme.Space.sm) {
+            let hint = model.filterHint
+
             FieldLabel(text: "Where")
             CompactField(
-                placeholder: "id > 100", text: $model.whereClause,
+                placeholder: hint.where, text: $model.whereClause,
                 area: .whereField, focus: $focus, onSubmit: model.applyFilters)
 
             FieldLabel(text: "Order by")
             CompactField(
-                placeholder: "id desc", text: $model.orderClause,
+                placeholder: hint.order, text: $model.orderClause,
                 area: .orderField, focus: $focus, onSubmit: model.applyFilters)
                 .frame(maxWidth: 190)
 
@@ -859,6 +861,14 @@ struct StatusBar: View {
                     .buttonStyle(.link)
                     .font(Theme.Typography.micro)
                     .help("Fetch the next \(AppModel.formatted(model.pageSize)) rows")
+            } else if let obstacle = model.pagingObstacle, model.activeTab == .content {
+                // In the slot the button would occupy. A missing button with the
+                // reason only on hover reads as a bug; hover is not somewhere
+                // anyone looks to find out why nothing is there.
+                Text("· \(obstacle.label)")
+                    .font(Theme.Typography.micro)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .help(obstacle.detail)
             }
 
             Spacer(minLength: Theme.Space.sm)
@@ -888,6 +898,6 @@ struct StatusBar: View {
     private var truncationHelp: String {
         let shown = "Showing the first \(AppModel.formatted(model.current.rowCount)) rows"
         guard let obstacle = model.pagingObstacle else { return shown }
-        return "\(shown). \(obstacle)"
+        return "\(shown). \(obstacle.detail)"
     }
 }
