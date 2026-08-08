@@ -173,7 +173,12 @@ struct NavigatorRow: View {
             Spacer(minLength: Theme.Space.xs)
 
             if relation.estimatedRows > 0 {
-                Text(AppModel.formatted(relation.estimatedRows))
+                // Marked as approximate because it is: pg_class.reltuples is
+                // whatever the last ANALYZE saw, and every write since has
+                // drifted from it. The status bar already writes "~1,000,000"
+                // for the same number, and a bare figure here would leave the
+                // navigator as the one place claiming an exact count.
+                Text("~\(AppModel.formatted(relation.estimatedRows))")
                     .font(Theme.Typography.digits)
                     .foregroundStyle(Theme.textTertiary.color)
             }
