@@ -14,11 +14,11 @@ pub use metadata::{
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
-use arrow_map::{ColBuilder, arrow_field};
+use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use futures_util::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, RowStream};
 
 #[derive(Debug, thiserror::Error)]
@@ -133,12 +133,20 @@ impl PgSource {
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, PgError> {
         let stmt = self.client.prepare(sql).await?;
 
+        let types: Vec<ColumnType> = stmt
+            .columns()
+            .iter()
+            .map(|c| ColumnType {
+                pg_type: c.type_().clone(),
+                modifier: c.type_modifier(),
+            })
+            .collect();
         let fields = stmt
             .columns()
             .iter()
-            .map(|c| arrow_field(c.name(), c.type_()))
+            .zip(&types)
+            .map(|(c, t)| arrow_field(c.name(), t))
             .collect::<Result<Vec<_>, _>>()?;
-        let types: Vec<Type> = stmt.columns().iter().map(|c| c.type_().clone()).collect();
         let schema = Arc::new(Schema::new(fields));
 
         let no_params: [&(dyn ToSql + Sync); 0] = [];
@@ -159,7 +167,7 @@ impl PgSource {
 
 pub struct ArrowStream {
     schema: SchemaRef,
-    types: Vec<Type>,
+    types: Vec<ColumnType>,
     rows: Pin<Box<RowStream>>,
     batch_rows: usize,
     exhausted: bool,

@@ -53,7 +53,9 @@ async fn schema_maps_every_column_type() {
         ("id", DataType::Int32),
         ("big_val", DataType::Int64),
         ("int_val", DataType::Int32),
-        ("num_val", DataType::Decimal128(38, 10)),
+        // As declared: numeric(18,4). Reporting every NUMERIC at one normalized
+        // scale would make the schema describe a column the table does not have.
+        ("num_val", DataType::Decimal128(18, 4)),
         ("real_val", DataType::Float32),
         ("dbl_val", DataType::Float64),
         ("name", DataType::Utf8),
@@ -192,8 +194,33 @@ async fn decimals_keep_their_value_at_fixed_scale() {
         ("d", 123_456_789 * unit / 10_000),
     ] {
         let a = col::<Decimal128Array>(&batch, name);
+        // A cast with no declared precision has no scale to read, so these keep
+        // the normalized layout.
+        assert_eq!(a.scale(), 10, "undeclared numeric keeps the fallback scale");
         assert_eq!(a.value(0), expected, "decimal column {name}");
     }
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_declared_numeric_arrives_at_its_own_scale() {
+    let src = connect().await;
+    let mut stream = src
+        .query(
+            "SELECT revenue FROM reporting.daily_totals ORDER BY day LIMIT 1",
+            8192,
+        )
+        .await
+        .expect("query failed");
+    let batch = stream.next_batch().await.unwrap().unwrap();
+
+    let revenue = col::<Decimal128Array>(&batch, "revenue");
+    // Declared numeric(12,2). Normalizing it to scale 10 would leave the front
+    // end unable to tell 1000.00 from 1000, which for a money column is the
+    // difference between two column definitions.
+    assert_eq!(revenue.precision(), 12);
+    assert_eq!(revenue.scale(), 2);
+    assert_eq!(revenue.value(0), 100_000, "1000.00 at scale 2");
 }
 
 #[tokio::test]

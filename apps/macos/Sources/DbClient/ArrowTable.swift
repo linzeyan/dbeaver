@@ -17,7 +17,7 @@ final class ArrowTable {
     enum Kind {
         case bool, int16, int32, int64, float32, float64
         case utf8, binary
-        case decimal128(scale: Int32)
+        case decimal128(precision: Int32, scale: Int32)
         case timestamp(tz: Bool), date32, time64
         case unsupported(String)
 
@@ -160,8 +160,9 @@ final class ArrowTable {
             if f.hasPrefix("d:") {
                 // "d:precision,scale"
                 let parts = f.dropFirst(2).split(separator: ",")
+                let precision = parts.count > 0 ? Int32(parts[0]) ?? 0 : 0
                 let scale = parts.count > 1 ? Int32(parts[1]) ?? 0 : 0
-                return .decimal128(scale: scale)
+                return .decimal128(precision: precision, scale: scale)
             }
             if f.hasPrefix("tsu:") {
                 return .timestamp(tz: f.count > 4)
@@ -242,8 +243,9 @@ private struct ColumnBatch {
             return String(load(Double.self, idx))
         case .timestamp:
             return Self.timestampText(micros: load(Int64.self, idx))
-        case .decimal128(let scale):
-            return Self.decimalText(load(Int128Bits.self, idx), scale: scale)
+        case .decimal128(let precision, let scale):
+            return Self.decimalText(
+                load(Int128Bits.self, idx), precision: precision, scale: scale)
         case .utf8:
             guard let offsets = buffer1?.assumingMemoryBound(to: Int32.self),
                   let data = buffer2?.assumingMemoryBound(to: UInt8.self) else { return "" }
@@ -282,13 +284,22 @@ private struct ColumnBatch {
         isoDateTime.string(from: Date(timeIntervalSince1970: TimeInterval(micros) / 1e6))
     }
 
+    /// What the driver emits for a NUMERIC whose scale it could not read. Kept
+    /// in step with `NUMERIC_PRECISION`/`NUMERIC_SCALE` in arrow_map.rs: the
+    /// pair is how that side says "scale unknown", there being nowhere else in
+    /// an Arrow schema to say it.
+    private static let normalizedPrecision: Int32 = 38
+    private static let normalizedScale: Int32 = 10
+
     /// Formats a decimal exactly, by placing a point in the integer's digits.
     ///
     /// Going through `Double` loses precision past 2^53 and renders a
     /// `numeric(18,4)` value as eighteen digits of noise. Decimal columns are
     /// usually money, so being visibly wrong here is not acceptable even in a
     /// preview.
-    private static func decimalText(_ bits: Int128Bits, scale: Int32) -> String {
+    private static func decimalText(
+        _ bits: Int128Bits, precision: Int32, scale: Int32
+    ) -> String {
         let v = bits.value
         var digits = String(v.magnitude)
         let sign = v < 0 ? "-" : ""
@@ -303,9 +314,13 @@ private struct ColumnBatch {
         let whole = String(digits[..<split])
         var fraction = String(digits[split...])
 
-        // PostgreSQL's own scale is usually smaller than the column's fixed
-        // scale, so the padding zeros we added carry no information.
-        while fraction.hasSuffix("0") { fraction.removeLast() }
+        // A declared scale is part of what the column means: numeric(12,2) is
+        // money, and 1000.00 trimmed to 1000 reads as a different column. The
+        // driver's fallback pair is the one case where the scale was unknown
+        // and normalized, so its padding really is noise.
+        if precision == normalizedPrecision && scale == normalizedScale {
+            while fraction.hasSuffix("0") { fraction.removeLast() }
+        }
 
         return fraction.isEmpty ? sign + whole : sign + whole + "." + fraction
     }
