@@ -101,6 +101,8 @@ final class AppModel {
     // Detail
     var activeTab: DetailTab = .content
     private(set) var columns: [ColumnInfo] = []
+    private(set) var indexes: [IndexInfo] = []
+    private(set) var foreignKeys: [ForeignKeyInfo] = []
 
     // Content pane
     let browseResult = ResultSet()
@@ -275,12 +277,19 @@ final class AppModel {
         whereClause = appliedInitialFilters ? "" : (initialFilters.where ?? "")
         orderClause = appliedInitialFilters ? "" : (initialFilters.order ?? "")
         appliedInitialFilters = true
+        // Cleared rather than left showing the previous relation's structure
+        // while the new one loads.
+        indexes = []
+        foreignKeys = []
         // The browse orders by the primary key, so the columns have to be known
         // before its statement can be written. Issuing both at once left the
         // first page in heap order and every later page in key order — two
         // different orders across one result, which is how a page repeats rows
         // the previous one already showed.
-        loadColumns(for: selected) { [self] in runBrowse() }
+        loadColumns(for: selected) { [self] in
+            runBrowse()
+            loadRelationDetail(for: selected)
+        }
 
         // Reseed the editor only when it still holds text this method wrote.
         // Selecting a table used to overwrite the editor unconditionally, which
@@ -298,6 +307,24 @@ final class AppModel {
         } then: { [self] cols in
             columns = cols
             next()
+        }
+    }
+
+    /// Indexes and foreign keys, which only the Structure tab reads.
+    ///
+    /// Queued after the browse rather than before it. The core queue is serial,
+    /// so putting two more round trips in front of the rows would delay the
+    /// pane the user is actually looking at in order to fill one they may never
+    /// open.
+    private func loadRelationDetail(for relation: RelationInfo) {
+        run { db in
+            try (
+                db.indexes(schema: relation.schema, relation: relation.name),
+                db.foreignKeys(schema: relation.schema, relation: relation.name)
+            )
+        } then: { [self] detail in
+            indexes = detail.0
+            foreignKeys = detail.1
         }
     }
 

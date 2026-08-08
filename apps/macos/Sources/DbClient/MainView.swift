@@ -253,7 +253,34 @@ struct StructurePane: View {
                 title: "No structure to show",
                 hint: "Choose a table or view in the sidebar.")
         } else {
-            Table(model.columns) {
+            VSplitView {
+                columnsTable
+                    .frame(minHeight: 160)
+
+                // Indexes and foreign keys sit side by side under the columns,
+                // in the vertical space a twenty-column table leaves empty
+                // anyway. Absent entirely when the relation has neither: an
+                // empty pair of tables says "loading" when it means "none".
+                if !model.indexes.isEmpty || !model.foreignKeys.isEmpty {
+                    HStack(alignment: .top, spacing: 0) {
+                        if !model.indexes.isEmpty {
+                            indexesTable
+                        }
+                        if !model.indexes.isEmpty && !model.foreignKeys.isEmpty {
+                            Rectangle().fill(Theme.separator.color).frame(width: 1)
+                        }
+                        if !model.foreignKeys.isEmpty {
+                            foreignKeysTable
+                        }
+                    }
+                    .frame(minHeight: 96, idealHeight: 170, maxHeight: 300)
+                }
+            }
+        }
+    }
+
+    private var columnsTable: some View {
+        Table(model.columns) {
                 TableColumn("") { column in
                     // The key marker earns a column of its own: it is the first
                     // thing anyone looks for in a structure view. The tooltip
@@ -309,6 +336,113 @@ struct StructurePane: View {
             // tab opens with a ring on a control in a different pane.
             .focusable()
             .focused($focus, equals: .structureTable)
+    }
+
+    private var indexesTable: some View {
+        DetailSection(title: "Indexes", count: model.indexes.count) {
+            Table(model.indexes) {
+                TableColumn("") { index in
+                    if index.isPrimary {
+                        Image(systemName: "key.fill")
+                            .font(.system(size: 9))
+                            .foregroundStyle(Theme.warning.color)
+                            .help("Primary key")
+                            .accessibilityLabel("Primary key")
+                    }
+                }
+                .width(18)
+
+                TableColumn("Name") { index in
+                    // Index names are long and the column is narrow, so the
+                    // tooltip is what makes a truncated one recoverable.
+                    Text(index.name)
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.text.color)
+                        .lineLimit(1)
+                        .help(index.name)
+                }
+
+                TableColumn("Keys") { index in
+                    // The predicate is part of what the index covers, so it
+                    // rides with the keys rather than being dropped: a partial
+                    // index shown as a plain one claims coverage it lacks.
+                    Text(Self.keyLabel(index))
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.textSecondary.color)
+                        .lineLimit(1)
+                        .help(Self.keyLabel(index))
+                }
+
+                TableColumn("Kind") { index in
+                    Text(index.kindLabel)
+                        .font(Theme.Typography.monoSmall)
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .lineLimit(1)
+                }
+                .width(min: 70, ideal: 96)
+            }
+            .tableStyle(.inset(alternatesRowBackgrounds: false))
+        }
+    }
+
+    private static func keyLabel(_ index: IndexInfo) -> String {
+        index.columns.joined(separator: ", ")
+            + (index.predicate.map { " WHERE \($0)" } ?? "")
+    }
+
+    private var foreignKeysTable: some View {
+        DetailSection(title: "Foreign keys", count: model.foreignKeys.count) {
+            Table(model.foreignKeys) {
+                TableColumn("Columns") { key in
+                    Text(key.columns.joined(separator: ", "))
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.text.color)
+                        .lineLimit(1)
+                }
+
+                TableColumn("References") { key in
+                    Text(key.targetLabel(sameSchemaAs: model.selected?.schema ?? ""))
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.textSecondary.color)
+                        .lineLimit(1)
+                }
+
+                TableColumn("On") { key in
+                    Text(key.actionLabel.isEmpty ? "—" : key.actionLabel)
+                        .font(Theme.Typography.monoSmall)
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .lineLimit(1)
+                }
+                .width(min: 80, ideal: 150)
+            }
+            .tableStyle(.inset(alternatesRowBackgrounds: false))
+        }
+    }
+}
+
+/// A titled table below the main one. The count is in the header because these
+/// tables are short enough to be mistaken for complete when they are scrolled.
+private struct DetailSection<Content: View>: View {
+    let title: String
+    let count: Int
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Theme.Space.xs) {
+                Text(title)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary.color)
+                Text("\(count)")
+                    .font(Theme.Typography.digits)
+                    .foregroundStyle(Theme.textTertiary.color)
+            }
+            .padding(.horizontal, Theme.Space.md)
+            .frame(height: 22)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface.color)
+
+            content
         }
     }
 }

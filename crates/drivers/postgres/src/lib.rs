@@ -7,7 +7,7 @@
 mod arrow_map;
 mod metadata;
 
-pub use metadata::{ColumnInfo, RelationInfo, RelationKind, SchemaInfo};
+pub use metadata::{ColumnInfo, ForeignKeyInfo, IndexInfo, RelationInfo, RelationKind, SchemaInfo};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
@@ -82,6 +82,20 @@ impl PgSource {
     /// Column definitions for one relation.
     pub async fn columns(&self, schema: &str, relation: &str) -> Result<Vec<ColumnInfo>, PgError> {
         metadata::columns(&self.client, schema, relation).await
+    }
+
+    /// Indexes on one relation, primary key first.
+    pub async fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<IndexInfo>, PgError> {
+        metadata::indexes(&self.client, schema, relation).await
+    }
+
+    /// Foreign keys declared by one relation.
+    pub async fn foreign_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<ForeignKeyInfo>, PgError> {
+        metadata::foreign_keys(&self.client, schema, relation).await
     }
 
     /// Prepare `sql` and begin streaming results as Arrow batches of

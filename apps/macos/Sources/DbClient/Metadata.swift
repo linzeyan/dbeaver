@@ -58,6 +58,70 @@ struct RelationInfo: Decodable, Hashable, Identifiable {
     }
 }
 
+struct IndexInfo: Decodable, Hashable, Identifiable {
+    let name: String
+    /// Key expressions in index order, not plain column names: an index on
+    /// `lower(email)` is not an index on `email`.
+    let columns: [String]
+    let isUnique: Bool
+    let isPrimary: Bool
+    let method: String
+    /// WHERE clause of a partial index.
+    let predicate: String?
+
+    var id: String { name }
+
+    /// "UNIQUE · btree", or just the method. The primary key gets its own
+    /// column, so repeating "unique" for it would say the same thing twice.
+    var kindLabel: String {
+        isUnique && !isPrimary ? "UNIQUE · \(method)" : method
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, columns, method, predicate
+        case isUnique = "is_unique"
+        case isPrimary = "is_primary"
+    }
+}
+
+struct ForeignKeyInfo: Decodable, Hashable, Identifiable {
+    let name: String
+    let columns: [String]
+    let referencedSchema: String
+    let referencedTable: String
+    let referencedColumns: [String]
+    let onUpdate: String
+    let onDelete: String
+
+    var id: String { name }
+
+    /// `public.orders(id)` — the schema is dropped when it is the same one the
+    /// referencing table lives in, which is the ordinary case and reads as
+    /// noise when spelled out on every row.
+    func targetLabel(sameSchemaAs schema: String) -> String {
+        let table = referencedSchema == schema
+            ? referencedTable : "\(referencedSchema).\(referencedTable)"
+        return "\(table)(\(referencedColumns.joined(separator: ", ")))"
+    }
+
+    /// Only the actions that are not the default, so a row says something.
+    var actionLabel: String {
+        [("ON UPDATE", onUpdate), ("ON DELETE", onDelete)]
+            .filter { $0.1 != "NO ACTION" }
+            .map { "\($0.0) \($0.1)" }
+            .joined(separator: " · ")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, columns
+        case referencedSchema = "referenced_schema"
+        case referencedTable = "referenced_table"
+        case referencedColumns = "referenced_columns"
+        case onUpdate = "on_update"
+        case onDelete = "on_delete"
+    }
+}
+
 struct ColumnInfo: Decodable, Hashable, Identifiable {
     let name: String
     let dataType: String

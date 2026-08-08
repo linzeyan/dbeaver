@@ -325,6 +325,81 @@ async fn columns_describe_types_keys_and_nullability() {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
+async fn indexes_keep_key_order_and_describe_what_they_cover() {
+    let src = connect().await;
+    let idx = src
+        .indexes("public", "bench_child")
+        .await
+        .expect("indexes failed");
+
+    let pk = &idx[0];
+    assert!(pk.is_primary, "the primary key sorts first");
+    assert_eq!(
+        pk.columns,
+        vec!["order_id", "line_no"],
+        "composite keys are ordered by index position, not by attnum"
+    );
+
+    let expression = idx.iter().find(|i| i.name.contains("email_lower")).unwrap();
+    assert_eq!(
+        expression.columns,
+        vec!["lower(email)"],
+        "an expression key must not be reported as a plain column"
+    );
+
+    let partial = idx.iter().find(|i| i.name.contains("pending")).unwrap();
+    // Parenthesised because pg_get_expr renders it that way, which is also how
+    // psql's \d prints it. Passed through rather than unwrapped: the moment
+    // this starts editing the server's own rendering it can get it wrong.
+    assert_eq!(
+        partial.predicate.as_deref(),
+        Some("(shipped_at IS NULL)"),
+        "a partial index reported without its predicate claims coverage it lacks"
+    );
+
+    let unique = idx.iter().find(|i| i.name.contains("sku")).unwrap();
+    assert!(unique.is_unique && !unique.is_primary);
+    assert_eq!(unique.method, "btree");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn foreign_keys_carry_their_target_and_action() {
+    let src = connect().await;
+    let keys = src
+        .foreign_keys("public", "bench_child")
+        .await
+        .expect("foreign keys failed");
+
+    assert_eq!(keys.len(), 1);
+    let fk = &keys[0];
+    assert_eq!(fk.columns, vec!["parent_id"]);
+    assert_eq!(fk.referenced_schema, "public");
+    assert_eq!(fk.referenced_table, "bench_wide");
+    assert_eq!(fk.referenced_columns, vec!["id"]);
+    assert_eq!(fk.on_delete, "CASCADE");
+    assert_eq!(
+        fk.on_update, "NO ACTION",
+        "an undeclared action is NO ACTION, not an empty string"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_relation_referenced_by_another_declares_no_key_itself() {
+    let src = connect().await;
+    // bench_wide is the target of bench_child's key, not the holder of one.
+    // Reporting inbound references here would put a constraint on the wrong
+    // table's Structure tab.
+    let keys = src
+        .foreign_keys("public", "bench_wide")
+        .await
+        .expect("foreign keys failed");
+    assert!(keys.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
 async fn unknown_relation_yields_no_columns() {
     let src = connect().await;
     let cols = src

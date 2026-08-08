@@ -38,6 +38,16 @@ final class Database {
             db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)
     }
 
+    func indexes(schema: String, relation: String) throws -> [IndexInfo] {
+        try decodeJSON(
+            db_indexes_json(handle, schema, relation, &errOut), as: [IndexInfo].self)
+    }
+
+    func foreignKeys(schema: String, relation: String) throws -> [ForeignKeyInfo] {
+        try decodeJSON(
+            db_foreign_keys_json(handle, schema, relation, &errOut), as: [ForeignKeyInfo].self)
+    }
+
     /// Scratch storage for the C error out-parameter. Calls are serialized by
     /// the caller (all metadata access happens on one background queue), so a
     /// single slot is sufficient and keeps the call sites readable.

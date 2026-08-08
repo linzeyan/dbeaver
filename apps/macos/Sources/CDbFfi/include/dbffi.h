@@ -64,6 +64,10 @@ char* db_schemas_json(DbHandle* handle, char** err);
 char* db_relations_json(DbHandle* handle, const char* schema, char** err);
 char* db_columns_json(DbHandle* handle, const char* schema, const char* relation,
                       char** err);
+char* db_indexes_json(DbHandle* handle, const char* schema, const char* relation,
+                      char** err);
+char* db_foreign_keys_json(DbHandle* handle, const char* schema, const char* relation,
+                           char** err);
 
 DbQuery* db_query(DbHandle* handle, const char* sql, size_t batch_rows, char** err);
 

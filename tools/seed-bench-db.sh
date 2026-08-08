@@ -55,10 +55,34 @@ ANALYZE bench_wide;
 -- A relation with no primary key, and so no order total enough for the browse
 -- to page in. The client refuses to page it rather than paging it wrongly, and
 -- that refusal needs something to refuse.
+DROP TABLE IF EXISTS bench_child;
 DROP TABLE IF EXISTS no_key;
 CREATE TABLE no_key AS
 SELECT g AS n, 'row-' || g AS label FROM generate_series(1, 250000) g;
 ANALYZE no_key;
+
+-- Structure fixtures: the Structure tab shows indexes and foreign keys, and
+-- bench_wide has only a primary key. This carries one of each interesting
+-- shape — composite key, unique, partial, expression, and a foreign key with
+-- a non-default action — so the pane is exercised rather than assumed.
+CREATE TABLE bench_child (
+  order_id   int          NOT NULL,
+  line_no    smallint     NOT NULL,
+  parent_id  int          NOT NULL REFERENCES bench_wide(id) ON DELETE CASCADE,
+  sku        text         NOT NULL,
+  email      text,
+  qty        int          NOT NULL DEFAULT 1,
+  shipped_at timestamp,
+  PRIMARY KEY (order_id, line_no)
+);
+CREATE UNIQUE INDEX bench_child_sku_key ON bench_child (sku);
+CREATE INDEX bench_child_pending_idx ON bench_child (order_id) WHERE shipped_at IS NULL;
+CREATE INDEX bench_child_email_lower_idx ON bench_child (lower(email));
+INSERT INTO bench_child (order_id, line_no, parent_id, sku, email, qty, shipped_at)
+SELECT g, 1, g, 'sku-' || g, 'user' || g || '@example.com', 1 + g % 5,
+       CASE WHEN g % 3 = 0 THEN NULL ELSE timestamp '2024-01-01' + (g % 90) * interval '1 day' END
+FROM generate_series(1, 5000) g;
+ANALYZE bench_child;
 
 SELECT count(*) AS rows FROM bench_wide;
 SELECT pg_size_pretty(pg_total_relation_size('bench_wide')) AS size;

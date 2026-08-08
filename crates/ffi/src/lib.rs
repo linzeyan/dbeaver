@@ -152,42 +152,67 @@ pub unsafe extern "C" fn db_relations_json(
     }
 }
 
-/// Columns of one relation as a JSON array. Release with `db_string_free`.
+/// Defines one `(handle, schema, relation, err) -> JSON` entry point.
 ///
-/// # Safety
-/// `handle` must be live; `schema` and `relation` must be valid NUL-terminated
-/// C strings.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn db_columns_json(
-    handle: *mut DbHandle,
-    schema: *const c_char,
-    relation: *const c_char,
-    err: *mut *mut c_char,
-) -> *mut c_char {
-    if handle.is_null() || schema.is_null() || relation.is_null() {
-        unsafe { set_err(err, "null handle, schema, or relation") };
-        return ptr::null_mut();
-    }
-    let h = unsafe { &*handle };
-    let (s, r) = unsafe {
-        match (
-            CStr::from_ptr(schema).to_str(),
-            CStr::from_ptr(relation).to_str(),
-        ) {
-            (Ok(s), Ok(r)) => (s, r),
-            _ => {
-                set_err(err, "schema or relation is not valid UTF-8");
+/// The relation-scoped metadata calls differ only in which method they
+/// dispatch to. Written out one at a time, the null checks and the UTF-8
+/// handling become three copies of the same unsafe block — three places for
+/// one mistake to be fixed in two of them.
+macro_rules! relation_metadata {
+    ($(#[$doc:meta])* $name:ident => $method:ident) => {
+        $(#[$doc])*
+        ///
+        /// # Safety
+        /// `handle` must be live; `schema` and `relation` must be valid
+        /// NUL-terminated C strings.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            handle: *mut DbHandle,
+            schema: *const c_char,
+            relation: *const c_char,
+            err: *mut *mut c_char,
+        ) -> *mut c_char {
+            if handle.is_null() || schema.is_null() || relation.is_null() {
+                unsafe { set_err(err, "null handle, schema, or relation") };
                 return ptr::null_mut();
+            }
+            let h = unsafe { &*handle };
+            let (s, r) = unsafe {
+                match (
+                    CStr::from_ptr(schema).to_str(),
+                    CStr::from_ptr(relation).to_str(),
+                ) {
+                    (Ok(s), Ok(r)) => (s, r),
+                    _ => {
+                        set_err(err, "schema or relation is not valid UTF-8");
+                        return ptr::null_mut();
+                    }
+                }
+            };
+            match runtime().block_on(h.source.$method(s, r)) {
+                Ok(v) => json_result(&v, err),
+                Err(e) => {
+                    unsafe { set_err(err, e) };
+                    ptr::null_mut()
+                }
             }
         }
     };
-    match runtime().block_on(h.source.columns(s, r)) {
-        Ok(v) => json_result(&v, err),
-        Err(e) => {
-            unsafe { set_err(err, e) };
-            ptr::null_mut()
-        }
-    }
+}
+
+relation_metadata! {
+    /// Columns of one relation as a JSON array. Release with `db_string_free`.
+    db_columns_json => columns
+}
+
+relation_metadata! {
+    /// Indexes on one relation as a JSON array. Release with `db_string_free`.
+    db_indexes_json => indexes
+}
+
+relation_metadata! {
+    /// Foreign keys of one relation as a JSON array. Release with `db_string_free`.
+    db_foreign_keys_json => foreign_keys
 }
 
 /// # Safety

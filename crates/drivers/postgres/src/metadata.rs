@@ -67,6 +67,45 @@ pub struct ColumnInfo {
     pub default_value: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct IndexInfo {
+    pub name: String,
+    /// Key expressions in index order. Expressions rather than plain names,
+    /// because an index on `lower(email)` is not an index on `email` and
+    /// printing it as one would be a lie about what the planner can use.
+    pub columns: Vec<String>,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    /// Access method: btree, hash, gin, gist, brin.
+    pub method: String,
+    /// WHERE clause of a partial index, if any.
+    pub predicate: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ForeignKeyInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub referenced_schema: String,
+    pub referenced_table: String,
+    pub referenced_columns: Vec<String>,
+    pub on_update: String,
+    pub on_delete: String,
+}
+
+/// `confupdtype`/`confdeltype` spelled the way the DDL spells them.
+fn referential_action(c: i8) -> String {
+    match c as u8 as char {
+        'r' => "RESTRICT",
+        'c' => "CASCADE",
+        'n' => "SET NULL",
+        'd' => "SET DEFAULT",
+        // 'a' is the default, and writing it out on every row is noise.
+        _ => "NO ACTION",
+    }
+    .to_string()
+}
+
 pub(crate) async fn schemas(client: &Client) -> Result<Vec<SchemaInfo>, PgError> {
     // Excludes catalog and toast schemas; `pg_temp`/`pg_toast_temp` are matched
     // by the same prefix.
@@ -146,6 +185,97 @@ pub(crate) async fn columns(
             position: r.get(3),
             is_primary_key: r.get(4),
             default_value: r.get(5),
+        })
+        .collect())
+}
+
+pub(crate) async fn indexes(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<IndexInfo>, PgError> {
+    // Key expressions come from pg_get_indexdef one position at a time rather
+    // than by joining indkey against pg_attribute: that join silently drops
+    // expression keys, which appear in indkey as attnum 0.
+    let rows = client
+        .query(
+            "SELECT i.relname, \
+                    ix.indisunique, \
+                    ix.indisprimary, \
+                    am.amname, \
+                    pg_catalog.pg_get_expr(ix.indpred, ix.indrelid), \
+                    ARRAY(SELECT pg_catalog.pg_get_indexdef(ix.indexrelid, k::int, true) \
+                          FROM generate_series(1, ix.indnkeyatts) AS k \
+                          ORDER BY k) \
+             FROM pg_catalog.pg_index ix \
+             JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_catalog.pg_class c ON c.oid = ix.indrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_am am ON am.oid = i.relam \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+             ORDER BY ix.indisprimary DESC, i.relname",
+            &[&schema, &relation],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| IndexInfo {
+            name: r.get(0),
+            is_unique: r.get(1),
+            is_primary: r.get(2),
+            method: r.get(3),
+            predicate: r.get(4),
+            columns: r.get(5),
+        })
+        .collect())
+}
+
+pub(crate) async fn foreign_keys(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<ForeignKeyInfo>, PgError> {
+    // WITH ORDINALITY on both key arrays: a composite key's columns have to
+    // line up with the ones they reference, and attnum order is not that order.
+    let rows = client
+        .query(
+            "SELECT con.conname, \
+                    ARRAY(SELECT a.attname \
+                          FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord) \
+                          JOIN pg_catalog.pg_attribute a \
+                            ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
+                          ORDER BY k.ord), \
+                    fn.nspname, \
+                    f.relname, \
+                    ARRAY(SELECT a.attname \
+                          FROM unnest(con.confkey) WITH ORDINALITY AS k(attnum, ord) \
+                          JOIN pg_catalog.pg_attribute a \
+                            ON a.attrelid = con.confrelid AND a.attnum = k.attnum \
+                          ORDER BY k.ord), \
+                    con.confupdtype, \
+                    con.confdeltype \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_catalog.pg_class f ON f.oid = con.confrelid \
+             JOIN pg_catalog.pg_namespace fn ON fn.oid = f.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 AND con.contype = 'f' \
+             ORDER BY con.conname",
+            &[&schema, &relation],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| ForeignKeyInfo {
+            name: r.get(0),
+            columns: r.get(1),
+            referenced_schema: r.get(2),
+            referenced_table: r.get(3),
+            referenced_columns: r.get(4),
+            on_update: referential_action(r.get(5)),
+            on_delete: referential_action(r.get(6)),
         })
         .collect())
 }
