@@ -99,6 +99,11 @@ enum Theme {
         static let selectedRow = Theme.accent.opacity(0.18)
         static let selectedCell = Theme.accent.opacity(0.38)
         static let cursor = Theme.accent
+        /// The scrollbar sits over the data rather than beside it, so the track
+        /// is barely there and the thumb carries the whole signal.
+        static let scrollTrack = Tone(0xFFFF_FF, alpha: 0.035)
+        static let scrollThumb = Tone(0xFFFF_FF, alpha: 0.22)
+        static let scrollThumbActive = Tone(0xFFFF_FF, alpha: 0.38)
     }
 
     // MARK: - Spacing

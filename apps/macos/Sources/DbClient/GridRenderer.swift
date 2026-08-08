@@ -279,6 +279,162 @@ final class GridRenderer {
 
     func resetStats() { frameSamples.removeAll(keepingCapacity: true) }
 
+    // MARK: - Scrollbars
+
+    enum ScrollAxis { case vertical, horizontal }
+
+    /// Where a scrollbar's track and thumb sit along its own axis, in points.
+    struct ScrollbarMetrics {
+        let trackStart: Float
+        let trackLength: Float
+        let thumbStart: Float
+        let thumbLength: Float
+    }
+
+    /// Hit width. Wider than the drawn thumb: a 5pt target is a 5pt target
+    /// whether or not the paint is subtle.
+    let scrollbarGutter: Float = 12
+    private let scrollbarThumbThickness: Float = 5
+    /// A thumb sized purely by proportion vanishes on a million rows. Below this
+    /// it stops reporting extent honestly and starts being a grab handle, which
+    /// is the trade every platform makes.
+    private let minThumbLength: Float = 28
+
+    /// Which axis is being dragged, so its thumb can be drawn as engaged.
+    var activeScrollAxis: ScrollAxis?
+
+    /// Rows that fit below the header and above the horizontal gutter.
+    ///
+    /// The gutter is subtracted because the bar is drawn over the data: without
+    /// it, scrolling to the end would park the last row underneath the bar,
+    /// where it cannot be read.
+    private func visibleRowSpan(viewSize: CGSize) -> Float {
+        let gutter = contentWidth > Float(viewSize.width) ? scrollbarGutter : 0
+        return max(1, (Float(viewSize.height) - headerHeight - gutter) / rowHeight)
+    }
+
+    /// Largest `scrollRow` that still fills the view.
+    ///
+    /// Scrolling past this would leave blank space below the last row, and would
+    /// make the scrollbar reach its end before the data does.
+    func maxScrollRow(viewSize: CGSize) -> Double {
+        guard let table else { return 0 }
+        return max(0, Double(table.rowCount) - Double(visibleRowSpan(viewSize: viewSize)))
+    }
+
+    func maxScrollX(viewWidth: CGFloat) -> Float {
+        max(0, contentWidth - Float(viewWidth))
+    }
+
+    /// Whether each bar is needed. Computed together because each one shortens
+    /// the other's track.
+    private func scrollbarsNeeded(viewSize: CGSize) -> (vertical: Bool, horizontal: Bool) {
+        guard let table else { return (false, false) }
+        let vertical = Float(table.rowCount) > visibleRowSpan(viewSize: viewSize)
+        let horizontal = contentWidth > Float(viewSize.width)
+        return (vertical, horizontal)
+    }
+
+    func scrollbar(_ axis: ScrollAxis, viewSize: CGSize) -> ScrollbarMetrics? {
+        let needed = scrollbarsNeeded(viewSize: viewSize)
+        let viewW = Float(viewSize.width)
+        let viewH = Float(viewSize.height)
+
+        switch axis {
+        case .vertical:
+            guard needed.vertical, let table else { return nil }
+            let span = visibleRowSpan(viewSize: viewSize)
+            let trackStart = headerHeight
+            let trackLength = viewH - headerHeight - (needed.horizontal ? scrollbarGutter : 0)
+            guard trackLength > 0 else { return nil }
+            let thumbLength = min(
+                trackLength,
+                max(minThumbLength, trackLength * span / Float(table.rowCount)))
+            let maxScroll = maxScrollRow(viewSize: viewSize)
+            let progress = maxScroll > 0 ? Float(scrollRow / maxScroll) : 0
+            return ScrollbarMetrics(
+                trackStart: trackStart, trackLength: trackLength,
+                thumbStart: trackStart + (trackLength - thumbLength) * clamp01(progress),
+                thumbLength: thumbLength)
+
+        case .horizontal:
+            guard needed.horizontal else { return nil }
+            let trackLength = viewW - (needed.vertical ? scrollbarGutter : 0)
+            guard trackLength > 0 else { return nil }
+            let thumbLength = min(
+                trackLength, max(minThumbLength, trackLength * viewW / contentWidth))
+            let maxScroll = maxScrollX(viewWidth: CGFloat(viewW))
+            let progress = maxScroll > 0 ? scrollX / maxScroll : 0
+            return ScrollbarMetrics(
+                trackStart: 0, trackLength: trackLength,
+                thumbStart: (trackLength - thumbLength) * clamp01(progress),
+                thumbLength: thumbLength)
+        }
+    }
+
+    /// The axis whose gutter contains `point`, if any.
+    func scrollbarAxis(at point: CGPoint, viewSize: CGSize) -> ScrollAxis? {
+        let x = Float(point.x), y = Float(point.y)
+        if scrollbar(.vertical, viewSize: viewSize) != nil,
+           x >= Float(viewSize.width) - scrollbarGutter, y >= headerHeight {
+            return .vertical
+        }
+        if scrollbar(.horizontal, viewSize: viewSize) != nil,
+           y >= Float(viewSize.height) - scrollbarGutter {
+            return .horizontal
+        }
+        return nil
+    }
+
+    /// Point along `axis` that a drag is currently at.
+    func scrollbarCoordinate(_ axis: ScrollAxis, of point: CGPoint) -> Float {
+        axis == .vertical ? Float(point.y) : Float(point.x)
+    }
+
+    /// Moves the scroll so the thumb's leading edge lands on `thumbStart`.
+    func scrollTo(_ axis: ScrollAxis, thumbStart: Float, viewSize: CGSize) {
+        guard let m = scrollbar(axis, viewSize: viewSize) else { return }
+        let travel = m.trackLength - m.thumbLength
+        let progress = travel > 0 ? clamp01((thumbStart - m.trackStart) / travel) : 0
+        switch axis {
+        case .vertical:
+            scrollRow = Double(progress) * maxScrollRow(viewSize: viewSize)
+        case .horizontal:
+            scrollX = progress * maxScrollX(viewWidth: viewSize.width)
+        }
+    }
+
+    private func clamp01(_ v: Float) -> Float { min(1, max(0, v)) }
+
+    private func emitScrollbars(viewSize: CGSize) {
+        let viewW = Float(viewSize.width)
+        let viewH = Float(viewSize.height)
+        let inset = (scrollbarGutter - scrollbarThumbThickness) / 2
+
+        if let m = scrollbar(.vertical, viewSize: viewSize) {
+            let x = viewW - scrollbarGutter
+            fill(x: x, y: m.trackStart, w: scrollbarGutter, h: m.trackLength,
+                 color: Theme.Grid.scrollTrack.simd)
+            fill(x: x + inset, y: m.thumbStart,
+                 w: scrollbarThumbThickness, h: m.thumbLength,
+                 color: thumbColor(for: .vertical))
+        }
+
+        if let m = scrollbar(.horizontal, viewSize: viewSize) {
+            let y = viewH - scrollbarGutter
+            fill(x: m.trackStart, y: y, w: m.trackLength, h: scrollbarGutter,
+                 color: Theme.Grid.scrollTrack.simd)
+            fill(x: m.thumbStart, y: y + inset,
+                 w: m.thumbLength, h: scrollbarThumbThickness,
+                 color: thumbColor(for: .horizontal))
+        }
+    }
+
+    private func thumbColor(for axis: ScrollAxis) -> SIMD4<Float> {
+        activeScrollAxis == axis
+            ? Theme.Grid.scrollThumbActive.simd : Theme.Grid.scrollThumb.simd
+    }
+
     /// Visible rows for the current scroll position and view height.
     func visibleRowRange(viewHeight: CGFloat, rowCount: Int) -> Range<Int> {
         let usable = Float(viewHeight) - headerHeight
@@ -401,6 +557,10 @@ final class GridRenderer {
             }
         }
 
+        // Over the data, not beside it: reserving a gutter would shorten every
+        // column measurement in this file for eleven points of chrome.
+        emitScrollbars(viewSize: viewSize)
+
         if isFocused {
             let ring = Theme.Grid.cursor.opacity(0.7).simd
             fill(x: 0, y: 0, w: viewW, h: 1, color: ring)
@@ -436,7 +596,10 @@ final class GridRenderer {
         } else if row >= scrollRow + visibleRows - 1 {
             scrollRow = row - visibleRows + 2
         }
-        scrollRow = max(0, scrollRow)
+        // The upper clamp matters as much as the lower one: overshooting by the
+        // row or two this adds would leave blank space under the last row and
+        // put the scrollbar's thumb past the end of its own track.
+        scrollRow = max(0, min(scrollRow, maxScrollRow(viewSize: viewSize)))
 
         let left = columnX(selection.column)
         let width = columnWidth(selection.column)

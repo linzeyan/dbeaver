@@ -217,6 +217,11 @@ final class GridView: MTKView {
     /// mouse, narrow enough not to swallow clicks meant for the header itself.
     private let edgeTolerance: Float = 4
 
+    /// Scrollbar drag in progress, with where inside the thumb it was grabbed —
+    /// so the thumb stays under the pointer instead of jumping its own length on
+    /// the first move.
+    private var scrollDrag: (axis: GridRenderer.ScrollAxis, grabOffset: Float)?
+
     private var trackingArea: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { true }
@@ -260,15 +265,18 @@ final class GridView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
-        guard let renderer, let table = renderer.table else { return }
+        guard let renderer, renderer.table != nil else { return }
 
+        // Clamped so the last row lands at the bottom rather than scrolling up
+        // into blank space. It is also what lets the scrollbar reach its end
+        // exactly when the data does.
         renderer.scrollRow = max(0, min(
-            Double(table.rowCount - 1),
+            renderer.maxScrollRow(viewSize: bounds.size),
             renderer.scrollRow - Double(event.scrollingDeltaY) / Double(renderer.rowHeight) * 3))
 
-        // Clamp so the last column cannot be scrolled off the right edge.
-        let maxX = max(0, renderer.contentWidth - Float(bounds.width))
-        renderer.scrollX = max(0, min(maxX, renderer.scrollX - Float(event.scrollingDeltaX)))
+        renderer.scrollX = max(0, min(
+            renderer.maxScrollX(viewWidth: bounds.width),
+            renderer.scrollX - Float(event.scrollingDeltaX)))
 
         needsDisplay = true
     }
@@ -295,6 +303,23 @@ final class GridView: MTKView {
         window?.makeFirstResponder(self)
         let point = convert(event.locationInWindow, from: nil)
 
+        // Before anything else: the gutters sit over the data, so a click there
+        // must not also land on the cell underneath.
+        if let axis = renderer.scrollbarAxis(at: point, viewSize: bounds.size),
+           let metrics = renderer.scrollbar(axis, viewSize: bounds.size) {
+            let coord = renderer.scrollbarCoordinate(axis, of: point)
+            let onThumb = coord >= metrics.thumbStart
+                && coord <= metrics.thumbStart + metrics.thumbLength
+            // A click on the track goes where it points rather than paging
+            // towards it. On a million rows, paging there takes all afternoon.
+            let grabOffset = onThumb ? coord - metrics.thumbStart : metrics.thumbLength / 2
+            scrollDrag = (axis, grabOffset)
+            renderer.activeScrollAxis = axis
+            renderer.scrollTo(axis, thumbStart: coord - grabOffset, viewSize: bounds.size)
+            needsDisplay = true
+            return
+        }
+
         if let column = resizeTarget(at: point) {
             resizing = (column, point.x, renderer.columnWidth(column))
             return
@@ -320,8 +345,20 @@ final class GridView: MTKView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let resizing, let renderer else { return }
+        guard let renderer else { return }
         let point = convert(event.locationInWindow, from: nil)
+
+        if let scrollDrag {
+            renderer.scrollTo(
+                scrollDrag.axis,
+                thumbStart: renderer.scrollbarCoordinate(scrollDrag.axis, of: point)
+                    - scrollDrag.grabOffset,
+                viewSize: bounds.size)
+            needsDisplay = true
+            return
+        }
+
+        guard let resizing else { return }
         renderer.setColumnWidth(
             resizing.startWidth + Float(point.x - resizing.startX), at: resizing.column)
         needsDisplay = true
@@ -329,6 +366,9 @@ final class GridView: MTKView {
 
     override func mouseUp(with event: NSEvent) {
         resizing = nil
+        scrollDrag = nil
+        renderer?.activeScrollAxis = nil
+        needsDisplay = true
     }
 
     /// The column whose trailing edge is under `point`, if the point is in the
