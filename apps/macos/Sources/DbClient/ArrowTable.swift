@@ -84,7 +84,8 @@ final class ArrowTable {
     /// visible cell per frame.
     func text(row: Int, column: Int) -> String {
         guard column < columns.count, row < rowCount else { return "" }
-        guard let (batchIdx, localRow) = locate(row: row) else { return "" }
+        guard let (batchIdx, localRow) = Self.locate(
+            row: row, batchStarts: batchStarts, columns: columns) else { return "" }
         return columns[column].batches[batchIdx].text(at: localRow)
     }
 
@@ -95,11 +96,18 @@ final class ArrowTable {
     /// them apart before deciding what to draw.
     func isNull(row: Int, column: Int) -> Bool {
         guard column < columns.count, row < rowCount else { return false }
-        guard let (batchIdx, localRow) = locate(row: row) else { return false }
+        guard let (batchIdx, localRow) = Self.locate(
+            row: row, batchStarts: batchStarts, columns: columns) else { return false }
         return columns[column].batches[batchIdx].isNull(localRow)
     }
 
-    private func locate(row: Int) -> (Int, Int)? {
+    /// Which batch holds a global row index, and where inside it.
+    ///
+    /// Takes the state it searches rather than reading it off `self`, so a
+    /// `Snapshot` can run the same search over its own copy of it.
+    fileprivate static func locate(
+        row: Int, batchStarts: [Int], columns: [Column]
+    ) -> (Int, Int)? {
         // Batches are uniform except the last, but binary search keeps this
         // correct if that ever stops being true.
         var lo = 0, hi = batchStarts.count - 1
@@ -112,6 +120,54 @@ final class ArrowTable {
             else { return (mid, row - start) }
         }
         return nil
+    }
+
+    // MARK: - Snapshot
+
+    /// The rows the table holds right now, as a value another thread may read.
+    ///
+    /// Taking one costs four array retains. A batch never changes once it has
+    /// been appended, and holding `retained` here owns those batches
+    /// independently of the table they came from — so an export can walk a
+    /// million rows on a background queue while the main thread resets the same
+    /// table and loads something else into it. Without that retain, `reset()`
+    /// would hand the Arrow buffers back to Rust underneath the reader. The
+    /// unchecked conformance is that argument, not a shortcut.
+    struct Snapshot: @unchecked Sendable {
+        let columns: [Column]
+        let rowCount: Int
+        fileprivate let batchStarts: [Int]
+        /// Never read. Owning the batches for as long as this value lives is
+        /// the entire job of this property.
+        private let retained: [RetainedBatch]
+
+        fileprivate init(
+            columns: [Column], rowCount: Int, batchStarts: [Int], retained: [RetainedBatch]
+        ) {
+            self.columns = columns
+            self.rowCount = rowCount
+            self.batchStarts = batchStarts
+            self.retained = retained
+        }
+
+        /// The cell's value, or nil where it is SQL NULL.
+        ///
+        /// One lookup rather than `isNull` followed by `text`, because an
+        /// export asks this of every cell in the result and the batch search is
+        /// not free.
+        func value(row: Int, column: Int) -> String? {
+            guard column < columns.count, row < rowCount,
+                  let (batchIdx, localRow) = ArrowTable.locate(
+                      row: row, batchStarts: batchStarts, columns: columns)
+            else { return nil }
+            let batch = columns[column].batches[batchIdx]
+            return batch.isNull(localRow) ? nil : batch.text(at: localRow)
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        Snapshot(
+            columns: columns, rowCount: rowCount, batchStarts: batchStarts, retained: retained)
     }
 
     // MARK: - Zero-copy verification

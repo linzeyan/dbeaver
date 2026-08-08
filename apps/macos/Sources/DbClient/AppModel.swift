@@ -132,6 +132,15 @@ final class AppModel {
     private(set) var connectionState: StatusDot.State = .connecting
     private(set) var status = "Connecting…"
     private(set) var isBusy = false
+    /// Set while a result is being written to a file. The write happens off the
+    /// main thread, so without this the window would sit looking idle for
+    /// however long a million rows take to reach the disk.
+    private(set) var isExporting = false
+    /// What the status bar reads while that write is in progress. Kept apart
+    /// from `status` because a query started during an export overwrites that
+    /// one with "Running…" and never puts it back — the export would end up
+    /// described by a sentence about something else.
+    private(set) var exportStatus = ""
     var errorMessage: String?
 
     /// Rows fetched per browse page. A grid shows a window onto the data;
@@ -145,6 +154,11 @@ final class AppModel {
 
     private var db: Database?
     private let queue = DispatchQueue(label: "dev.dbclient.core", qos: .userInitiated)
+    /// Exports get a queue of their own. The core queue is serial because one
+    /// connection cannot service two statements; an export holds no connection,
+    /// and parking a million-row write in front of the next query would make
+    /// clicking a table in the navigator wait on a file.
+    private let exportQueue = DispatchQueue(label: "dev.dbclient.export", qos: .userInitiated)
     private let connString: String
 
     /// A statement to open with, from `--sql`. Runs once the connection is up,
@@ -531,6 +545,10 @@ final class AppModel {
     /// different things: on the Structure tab, row count and elapsed time
     /// describe a result the user is not currently looking at.
     var statusLine: String {
+        // An export outranks whatever the tab would otherwise say, and stops
+        // doing so the moment it finishes: nothing has to remember to clear it,
+        // and no stale "Exported…" can outlive the thing it described.
+        if isExporting { return exportStatus }
         switch activeTab {
         case .structure:
             guard !columns.isEmpty else { return status }
@@ -559,6 +577,71 @@ final class AppModel {
             runQuery(queryText, describedAs: "query", into: queryResult)
         } else {
             runBrowse()
+        }
+    }
+
+    // MARK: - Export
+
+    /// Whether there is a result to write out. The menu item is disabled when
+    /// there is not, rather than opening a save panel that can only produce a
+    /// file holding a header line.
+    var canExport: Bool { current.rowCount > 0 && !current.isLoading && !isExporting }
+
+    /// The name the save panel proposes.
+    ///
+    /// A capped result is a page of a table, not the table, and the name is
+    /// where that has to be said. The status bar's "first 100,000 of
+    /// ~1,000,000 rows" and the marker beside it stop existing the moment the
+    /// panel closes; the file goes on being opened, mailed and loaded by people
+    /// who were never in the room. `bench_wide.csv` holding a tenth of
+    /// bench_wide is the same lie `pagingObstacle` and `truncationHelp` exist
+    /// to prevent, except that it outlives the window.
+    ///
+    /// Refusing to export a capped result would be the wrong fix — the first
+    /// page is very often exactly what someone wants — and a comment row inside
+    /// the file would be worse still, because it is a row that is not data and
+    /// every parser downstream would read it as one.
+    func exportFilename(_ format: DelimitedFormat) -> String {
+        let base = activeTab == .query ? "query" : (selected?.name ?? "result")
+        // Raw digits, not `formatted`: a comma in the name of a CSV file is a
+        // joke that stops being funny at the first script that splits on one.
+        let suffix = current.capped ? "-first-\(current.rowCount)-rows" : ""
+        return "\(base)\(suffix).\(format.fileExtension)"
+    }
+
+    /// What the save panel says above the name field.
+    ///
+    /// Says the same thing as `truncationHelp`, in the same order and for the
+    /// same reason, because this is the last moment at which it can be said.
+    var exportMessage: String {
+        let count = Self.formatted(current.rowCount)
+        guard current.capped else {
+            return "Writes this result in full — \(Self.pluralized(current.rowCount, "row"))."
+        }
+        let shown = "This result is the first \(count) rows, not the whole table. "
+            + "Only those rows will be written."
+        guard let obstacle = pagingObstacle else { return shown }
+        return "\(shown) \(obstacle.detail)"
+    }
+
+    /// Writes the result the window is showing to `url`.
+    ///
+    /// The rows are snapshotted on the way out and formatted on the export
+    /// queue. The snapshot is what makes that safe: it owns the Arrow batches,
+    /// so re-running the query while the file is still being written replaces
+    /// the grid without pulling the buffers out from under the writer.
+    func exportCurrentResult(to url: URL, format: DelimitedFormat) {
+        guard canExport else { return }
+        let rows = current.table.snapshot()
+        isExporting = true
+        exportStatus =
+            "Exporting \(Self.pluralized(rows.rowCount, "row")) to \(url.lastPathComponent)…"
+        // A new export supersedes the previous failure, as a new query does.
+        errorMessage = nil
+        dispatch(on: exportQueue) {
+            try DelimitedWriter.write(rows, format: format, to: url)
+        } then: { [self] _ in
+            isExporting = false
         }
     }
 
@@ -662,17 +745,18 @@ final class AppModel {
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
         guard let db else { return }
-        dispatch({ try work(db) }, then: apply)
+        dispatch(on: queue, { try work(db) }, then: apply)
     }
 
     private func run<T>(
         _ work: @escaping @Sendable () throws -> T,
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
-        dispatch(work, then: apply)
+        dispatch(on: queue, work, then: apply)
     }
 
     private func dispatch<T>(
+        on queue: DispatchQueue,
         _ work: @escaping @Sendable () throws -> T,
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
@@ -694,6 +778,7 @@ final class AppModel {
         errorMessage = String(describing: error)
         status = "Failed"
         isBusy = false
+        isExporting = false
         // The core queue is serial, so at most one of these was running; clearing
         // both saves threading the target through the generic dispatch helper.
         browseResult.abandonLoading()
