@@ -33,7 +33,45 @@ final class ArrowTable {
                 return false
             }
         }
+
+        /// What to call this kind where no declared type is available.
+        ///
+        /// Deliberately the Arrow spelling rather than a SQL one: this is what
+        /// arrived, and a column with nothing behind it — `count(*)`, `a || b` —
+        /// has no declaration to borrow a name from. Calling it `int4` would be
+        /// inventing a declaration that does not exist.
+        var label: String {
+            switch self {
+            case .bool: return "bool"
+            case .int16: return "int16"
+            case .int32: return "int32"
+            case .int64: return "int64"
+            case .float32: return "float32"
+            case .float64: return "float64"
+            case .utf8: return "utf8"
+            case .binary: return "binary"
+            case .decimal128(let precision, let scale):
+                // The normalized pair is the driver saying it could not read the
+                // declared scale. Printing it would state a precision this
+                // column was never declared with, which is the one failure a
+                // type label must not have.
+                return precision == ArrowTable.normalizedPrecision
+                    && scale == ArrowTable.normalizedScale
+                    ? "decimal" : "decimal(\(precision),\(scale))"
+            case .timestamp(let tz): return tz ? "timestamptz" : "timestamp"
+            case .date32: return "date"
+            case .time64: return "time"
+            case .unsupported(let f): return "<\(f)>"
+            }
+        }
     }
+
+    /// What the driver emits for a NUMERIC whose scale it could not read. Kept
+    /// in step with `NUMERIC_PRECISION`/`NUMERIC_SCALE` in arrow_map.rs: the
+    /// pair is how that side says "scale unknown", there being nowhere else in
+    /// an Arrow schema to say it.
+    fileprivate static let normalizedPrecision: Int32 = 38
+    fileprivate static let normalizedScale: Int32 = 10
 
     private(set) var columns: [Column] = []
     private(set) var rowCount: Int = 0
@@ -357,13 +395,6 @@ private struct ColumnBatch {
         isoDateTime.string(from: Date(timeIntervalSince1970: TimeInterval(micros) / 1e6))
     }
 
-    /// What the driver emits for a NUMERIC whose scale it could not read. Kept
-    /// in step with `NUMERIC_PRECISION`/`NUMERIC_SCALE` in arrow_map.rs: the
-    /// pair is how that side says "scale unknown", there being nowhere else in
-    /// an Arrow schema to say it.
-    private static let normalizedPrecision: Int32 = 38
-    private static let normalizedScale: Int32 = 10
-
     /// Formats a decimal exactly, by placing a point in the integer's digits.
     ///
     /// Going through `Double` loses precision past 2^53 and renders a
@@ -391,7 +422,7 @@ private struct ColumnBatch {
         // money, and 1000.00 trimmed to 1000 reads as a different column. The
         // driver's fallback pair is the one case where the scale was unknown
         // and normalized, so its padding really is noise.
-        if precision == normalizedPrecision && scale == normalizedScale {
+        if precision == ArrowTable.normalizedPrecision && scale == ArrowTable.normalizedScale {
             while fraction.hasSuffix("0") { fraction.removeLast() }
         }
 

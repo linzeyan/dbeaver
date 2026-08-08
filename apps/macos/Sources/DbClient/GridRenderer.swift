@@ -29,14 +29,28 @@ final class GridRenderer {
 
     // Layout, in points.
     let rowHeight: Float = 20
-    let headerHeight: Float = 24
+    /// Two lines: the column name, and the type its values are in underneath.
+    ///
+    /// A type appended to the name would compete for width in a column already
+    /// sized to its own content, and the loser would be the name — the thing the
+    /// grid is navigated by. A second line spends eight points once per screen
+    /// instead of spending them again on every column with a long type name.
+    let headerHeight: Float = 32
     let cellPadding: Float = 6
+    /// The two header lines, in the same coordinate `emitCell` takes for a row.
+    private let headerNameY: Float = 2
+    private let headerTypeY: Float = 15
 
     /// Bounds for an auto-sized column. The floor keeps a narrow column
     /// clickable; the ceiling stops one long text value from pushing every
     /// other column off screen.
     private let minColumnWidth: Float = 56
     private let maxColumnWidth: Float = 340
+    /// How much of a column's width the type line may claim while auto-sizing.
+    /// Thirteen characters is `numeric(12,2)`, the longest spelling that still
+    /// reads as a type at a glance; past it the label truncates rather than the
+    /// layout deforming around a column that is mostly its own header.
+    private let maxTypeChars = 13
     /// Rows sampled when sizing columns. Enough to catch the common width
     /// without walking a million rows to lay out a screenful.
     private let widthSampleRows = 120
@@ -66,6 +80,16 @@ final class GridRenderer {
 
     var table: ArrowTable? {
         didSet { reconcileColumnLayout() }
+    }
+    /// PostgreSQL's declared type per column name, where the result came from a
+    /// relation that has one. Empty otherwise, which is not an error state — see
+    /// `rebuildTypeLabels`.
+    ///
+    /// Keyed by name because that is the only key the two sides share, and a
+    /// browse is `SELECT *`: within one relation the names are unique, so the
+    /// match is exact rather than positional-and-hopeful.
+    var declaredTypes: [String: String] = [:] {
+        didSet { if declaredTypes != oldValue { typeLabels.removeAll() } }
     }
     var scrollRow: Double = 0
     /// Horizontal scroll offset in points.
@@ -137,6 +161,11 @@ final class GridRenderer {
     /// Column names the current widths were built for.
     private var layoutSignature: [String] = []
 
+    /// One header type label per column, resolved when the result or the
+    /// declared types change rather than per frame: the header is re-emitted
+    /// every frame and a decimal's label allocates.
+    private var typeLabels: [String] = []
+
     /// Drops the widths only when the columns themselves changed.
     ///
     /// Re-running a browse with a new filter replaces the table, but the columns
@@ -150,6 +179,50 @@ final class GridRenderer {
         layoutSignature = signature
         columnWidths.removeAll()
         columnOffsets = [0]
+        typeLabels.removeAll()
+    }
+
+    /// Resolves what each column's header calls its type.
+    ///
+    /// The declared type wins wherever there is one. `numeric(12,2)` and
+    /// `character varying(64)` say what the column was created as — which is
+    /// what decides whether two values compare exactly — and the Arrow schema
+    /// cannot tell `text` from `varchar`, or either from `jsonb`, at all. The
+    /// Arrow kind is the fallback rather than a blank, because a computed column
+    /// has no declaration to show and "what actually arrived" is still a true
+    /// answer. Neither branch can state a type the column does not have, which
+    /// is the only outcome worse than saying nothing.
+    private func rebuildTypeLabels(for table: ArrowTable) {
+        typeLabels = table.columns.map { column in
+            declaredTypes[column.name].map(Self.shortened) ?? column.kind.label
+        }
+    }
+
+    /// PostgreSQL's own short spelling for a declared type.
+    ///
+    /// `format_type` renders the SQL-standard names, and two of those differ
+    /// only past the width a grid column has: `timestamp without time zone` and
+    /// `timestamp with time zone` both truncate to `timestam…`, which is exactly
+    /// the distinction a type label exists to draw. Every rewrite here is an
+    /// alias the server itself accepts — `varchar(64)` and `character
+    /// varying(64)` declare the same column — not an abbreviation invented here.
+    private static func shortened(_ declared: String) -> String {
+        // The length modifier can sit in the middle of the SQL spelling, as in
+        // `timestamp(3) with time zone`, so the suffix is stripped and the base
+        // word rewritten around whatever it left behind.
+        for (suffix, alias) in [(" without time zone", ""), (" with time zone", "tz")]
+        where declared.hasSuffix(suffix) {
+            let head = String(declared.dropLast(suffix.count))
+            guard !alias.isEmpty else { return head }
+            guard let paren = head.firstIndex(of: "(") else { return head + alias }
+            return String(head[..<paren]) + alias + String(head[paren...])
+        }
+        for (sql, alias) in [
+            ("character varying", "varchar"), ("bit varying", "varbit"), ("character", "char")
+        ] where declared.hasPrefix(sql) {
+            return alias + declared.dropFirst(sql.count)
+        }
+        return declared
     }
 
     func setColumnWidth(_ width: Float, at index: Int) {
@@ -163,10 +236,18 @@ final class GridRenderer {
     /// Sampling rather than scanning: the width that matters is the one the
     /// visible rows need, and walking a million rows to lay out a screenful
     /// would cost more than every frame it saves.
+    ///
+    /// Reads `typeLabels`, so the caller rebuilds those first.
     private func layoutColumns(for table: ArrowTable) {
         let sample = min(table.rowCount, widthSampleRows)
         columnWidths = table.columns.indices.map { c in
-            var chars = table.columns[c].name.utf8.count
+            // The type gets a say in the width, but a bounded one. It has to be
+            // recognisable, not complete, and a long type name is routinely
+            // longer than every value it describes — letting it size the column
+            // would push real data off screen to spell out a label.
+            var chars = max(
+                table.columns[c].name.utf8.count,
+                min(typeLabels[c].utf8.count, maxTypeChars))
             for r in 0..<sample {
                 // NULL renders as the word, so it sets a floor of four.
                 let len =
@@ -459,6 +540,10 @@ final class GridRenderer {
     private func buildInstances(viewSize: CGSize, table: ArrowTable) {
         instances.removeAll(keepingCapacity: true)
 
+        // Labels before widths: a column's width now depends on its type label.
+        if typeLabels.count != table.columns.count {
+            rebuildTypeLabels(for: table)
+        }
         if columnWidths.count != table.columns.count {
             layoutColumns(for: table)
         }
@@ -546,16 +631,21 @@ final class GridRenderer {
             if isSorted, let sort {
                 emitGlyph(
                     uv: sort.descending ? atlas.sortDescendingUV : atlas.sortAscendingUV,
-                    x: x + w - cellPadding - atlas.advance, y: 5,
+                    x: x + w - cellPadding - atlas.advance, y: headerNameY,
                     color: Theme.Grid.cursor.simd)
             }
             emitCell(
                 table.columns[c].name, x: x,
                 // Never run the label under the marker.
                 width: isSorted ? w - atlas.advance : w,
-                maxChars: isSorted ? maxChars - 1 : maxChars, y: 5,
+                maxChars: isSorted ? maxChars - 1 : maxChars, y: headerNameY,
                 color: isSorted ? Theme.Grid.sortedHeaderText.simd : Theme.Grid.headerText.simd,
                 alignRight: false)
+            // The full width, unlike the name: the sort marker sits on the name's
+            // line, so there is nothing on this one to keep clear of.
+            emitCell(
+                typeLabels[c], x: x, width: w, maxChars: maxChars, y: headerTypeY,
+                color: Theme.Grid.headerType.simd, alignRight: false)
 
             for (i, r) in rows.enumerated() {
                 let y = rowY(i)

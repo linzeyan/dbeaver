@@ -88,6 +88,11 @@ enum Theme {
         /// Brighter than the other headers, so the sorted column is identifiable
         /// without having to resolve the direction marker beside it.
         static let sortedHeaderText = Theme.text
+        /// The type line under each header name. Subordinate to the name — 4.2:1
+        /// on the header band where the name holds 5.7:1 — but deliberately not
+        /// the tertiary label tone, which would fall to 3.1:1 there. A type is
+        /// something the user came to read, not chrome.
+        static let headerType = Tone(0x7C8A_A0)
         static let banding = Tone(0xFFFF_FF, alpha: 0.022)
         static let separator = Tone(0xFFFF_FF, alpha: 0.06)
         static let text = Tone(0xE2E8_F0)
