@@ -298,6 +298,13 @@ final class AppModel {
         let address: String
     }
 
+    /// The browsed relation's declared types, keyed by column name, for the grid
+    /// header. A browse is `SELECT *`, so every column on screen is one of
+    /// these; the Query pane is given none, because its columns need not be.
+    var declaredColumnTypes: [String: String] {
+        columns.reduce(into: [:]) { $0[$1.name] = $1.dataType }
+    }
+
     func inspectedCell(in result: ResultSet) -> InspectedCell? {
         let grid = result.table
         guard let s = result.selection,

@@ -43,6 +43,14 @@ struct MetalGridView: NSViewRepresentable {
     /// also resets the scroll position, which is the last thing someone who
     /// just asked for more rows wants.
     let rowCount: Int
+    /// PostgreSQL's declared type per column name, for the header's type line.
+    ///
+    /// Left empty by the Query pane on purpose. A statement's columns need not
+    /// come from any relation, and matching them by name against the browsed
+    /// relation would label a computed `id` with that relation's `id` type — a
+    /// type it does not have. The header falls back to the Arrow kind there,
+    /// which is always true of whatever arrived.
+    var declaredTypes: [String: String] = [:]
     @Binding var selection: GridSelection?
     /// See `GridView.claimsInitialFocus`.
     var claimsInitialFocus = false
@@ -84,6 +92,7 @@ struct MetalGridView: NSViewRepresentable {
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
+            renderer.declaredTypes = declaredTypes
             view.renderer = renderer
             view.delegate = context.coordinator.makeDelegate(renderer: renderer)
             context.coordinator.renderer = renderer
@@ -94,6 +103,7 @@ struct MetalGridView: NSViewRepresentable {
     func updateNSView(_ view: GridView, context: Context) {
         guard let renderer = context.coordinator.renderer else { return }
         renderer.table = table
+        renderer.declaredTypes = declaredTypes
         // Re-captured each update so the closure writes through the current
         // binding rather than the one that existed when the view was made.
         context.coordinator.onSelect = { selection = $0 }

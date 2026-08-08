@@ -696,6 +696,7 @@ struct ContentPane: View {
                     table: model.browseResult.table,
                     generation: model.browseResult.generation,
                     rowCount: model.browseResult.rowCount,
+                    declaredTypes: model.declaredColumnTypes,
                     selection: $result.selection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
