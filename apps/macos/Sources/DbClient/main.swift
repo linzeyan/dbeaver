@@ -43,6 +43,57 @@ let initialOrder = argument("--order")
 /// `--relation bench_wide` opens on a named table instead of the first one.
 let initialRelation = argument("--relation")
 
+/// `--export out.csv` writes the opened result to a file and exits.
+///
+/// Exists for the same reason `--tab` and `--relation` do, one step further on:
+/// the export is otherwise reachable only through a save panel, and a script
+/// cannot click one. Without it there is no way to check what actually lands in
+/// a file. The format follows the extension.
+let exportPath = argument("--export")
+
+/// Drives `--export` once the opened result has landed, then exits.
+///
+/// Polls rather than observing: the result arrives through the model's own
+/// background pipeline, there is no completion hook to hang this on, and a
+/// capture switch does not justify inventing one. Progress goes to stderr
+/// because this process ends in `exit`, and stdout is block-buffered — a
+/// `print` here is lost exactly when it is most wanted.
+@MainActor
+func exportWhenReady(model: AppModel, to path: String) {
+    let url = URL(fileURLWithPath: path)
+    let format = DelimitedFormat(pathExtension: url.pathExtension) ?? .csv
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var started = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("export failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("export timed out waiting for a result\n", stderr)
+            exit(1)
+        }
+        if started {
+            if !model.isExporting {
+                fputs("export wrote    \(path)\n", stderr)
+                exit(0)
+            }
+        } else if model.canExport {
+            started = true
+            // The two things the save panel would have shown, printed where a
+            // script can assert on them.
+            fputs("export name     \(model.exportFilename(format))\n", stderr)
+            fputs("export message  \(model.exportMessage)\n", stderr)
+            model.exportCurrentResult(to: url, format: format)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 let initialSection = argument("--section").flatMap { requested in
     let wanted = requested.lowercased().filter { $0.isLetter }
     return StructureDetail.allCases.first {
@@ -95,7 +146,6 @@ if benchMode {
     // Pinned before the window is shown, so nothing lays out in the wrong
     // appearance and flashes on the first frame.
     Theme.apply(to: app)
-    AppMenu.install(into: app)
 
     window.titlebarAppearsTransparent = false
     window.toolbarStyle = .unified
@@ -111,11 +161,15 @@ if benchMode {
             connString: connString, initialTab: initialTab, initialSQL: initialSQL,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation)
+        // Installed here rather than before the window is built, because the
+        // File menu sends to the model and there is no model until now.
+        AppMenu.install(into: app, model: model)
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         model.connect()
+        if let exportPath { exportWhenReady(model: model, to: exportPath) }
     }
 }
 
