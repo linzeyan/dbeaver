@@ -60,6 +60,18 @@ let initialSection = argument("--section").flatMap { requested in
 /// a file. The format follows the extension.
 let exportPath = argument("--export")
 
+/// `--refresh-after 4` reloads the navigator that many seconds in, printing its
+/// contents before and after, then exits.
+///
+/// Exists for the reason `--export` does, one step further on: Refresh is
+/// reachable only from a menu item and a sidebar button, and a script can click
+/// neither — synthetic events need accessibility permission this environment
+/// does not grant. The delay is the window in which DDL gets applied out of
+/// band, so the two reports are a before and an after of one running process.
+/// That is the whole claim: a second launch would read the new catalogue anyway
+/// and prove nothing about whether the client noticed.
+let refreshAfter = argument("--refresh-after").flatMap(Double.init)
+
 /// Drives `--export` once the opened result has landed, then exits.
 ///
 /// Polls rather than observing: the result arrives through the model's own
@@ -101,6 +113,78 @@ func exportWhenReady(model: AppModel, to path: String) {
         }
     }
     poll()
+}
+
+/// Drives `--refresh-after`. Polls, and reports to stderr, for the reasons
+/// `exportWhenReady` does: there is no completion hook on the model's
+/// background pipeline, and this process ends in `exit`, which loses stdout.
+@MainActor
+func refreshWhenReady(model: AppModel, after seconds: Double) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    func report(_ phase: String) {
+        // Padded so the two reports line up in a terminal; the whole point of
+        // printing twice is that the difference is read by eye.
+        let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
+        let objects = model.schemas
+            .flatMap { model.relations[$0.name] ?? [] }
+            .map(\.id).sorted()
+        fputs("\(tag) objects  \(objects.joined(separator: ", "))\n", stderr)
+        fputs(
+            "\(tag) selected \(model.selected?.id ?? "(none)") · "
+                + "\(AppModel.pluralized(model.columns.count, "column")) · "
+                + "\(AppModel.pluralized(model.indexes.count, "index", "indexes")) · "
+                + "\(AppModel.pluralized(model.triggers.count, "trigger"))\n", stderr)
+        fputs("\(tag) expanded \(model.expanded.sorted().joined(separator: ", "))\n", stderr)
+        // The Query tab's rows, which a refresh must leave alone. Reported
+        // because the tempting wrong implementation — reconnecting — would
+        // silently take them, and nothing else here would notice.
+        fputs("\(tag) query    \(AppModel.pluralized(model.queryResult.rowCount, "row"))\n", stderr)
+        fputs("\(tag) status   \(model.statusLine)\n", stderr)
+        fputs("\(tag) filters  where=\(model.whereClause) order=\(model.orderClause)\n", stderr)
+        fputs("\(tag) message  \(model.errorMessage ?? "(none)")\n", stderr)
+    }
+
+    /// Waits for the browse to land, then gives the Structure sections a beat.
+    ///
+    /// `isBusy` alone is not the signal: the model is briefly idle between the
+    /// connection landing and the first browse being dispatched, and a report
+    /// from inside that gap describes a window nobody ever sees. The extra beat
+    /// is for the detail load, which rides behind the browse on the serial core
+    /// queue deliberately and so has no completion of its own to wait on —
+    /// giving it one would mean a second busy flag for the same state.
+    func whenSettled(_ next: @escaping @MainActor () -> Void) {
+        func poll() {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("refresh probe timed out waiting for the pane to settle\n", stderr)
+                exit(1)
+            }
+            guard model.browseResult.hasRun, !model.isBusy, !model.browseResult.isLoading
+            else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    MainActor.assumeIsolated(poll)
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated(next)
+            }
+        }
+        poll()
+    }
+
+    whenSettled {
+        report("before")
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            MainActor.assumeIsolated {
+                model.refresh()
+                whenSettled {
+                    report("after")
+                    exit(0)
+                }
+            }
+        }
+    }
 }
 
 let app = NSApplication.shared
@@ -172,6 +256,7 @@ if benchMode {
         app.activate(ignoringOtherApps: true)
         model.connect()
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
+        if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
 }
 

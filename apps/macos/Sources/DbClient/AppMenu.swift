@@ -13,6 +13,8 @@ enum AppMenu {
     /// Target of the File menu's export items. `NSMenuItem.target` is a weak
     /// reference, so the menu cannot be the thing that keeps this alive.
     private static var exportCommands: ExportCommands?
+    /// Target of the View menu's Refresh item, held for the same reason.
+    private static var refreshCommand: RefreshCommand?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -23,10 +25,13 @@ enum AppMenu {
             ?? ProcessInfo.processInfo.processName
         let commands = ExportCommands(model: model)
         exportCommands = commands
+        let refresh = RefreshCommand(model: model)
+        refreshCommand = refresh
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(fileMenu(target: commands))
         main.addItem(editMenu())
+        main.addItem(viewMenu(target: refresh))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -115,6 +120,31 @@ enum AppMenu {
         return item
     }
 
+    /// Bringing the window back in line with the database.
+    ///
+    /// The object tree and the Structure pane are read once and then believed,
+    /// so a CREATE or a DROP from anywhere — including this window's own Query
+    /// tab — leaves them describing a database that has moved on. Without this
+    /// item the only way to see current metadata is to quit and relaunch.
+    ///
+    /// ⇧⌘R rather than ⌘R, which the Run button already owns: running a
+    /// statement happens a hundred times an hour and reloading the tree a few
+    /// times a session, so the plain shortcut belongs to the frequent one. View
+    /// rather than File, because View is where a Mac user looks for a reload —
+    /// it is where Safari keeps one — and File is about getting things in and
+    /// out of the window.
+    private static func viewMenu(target: RefreshCommand) -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "View")
+        let refresh = menu.addItem(
+            withTitle: "Refresh",
+            action: #selector(RefreshCommand.refresh(_:)), keyEquivalent: "r")
+        refresh.keyEquivalentModifierMask = [.command, .shift]
+        refresh.target = target
+        item.submenu = menu
+        return item
+    }
+
     private static func windowMenu(for app: NSApplication) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Window")
@@ -127,6 +157,28 @@ enum AppMenu {
         app.windowsMenu = menu
         return item
     }
+}
+
+/// The View menu's Refresh item, as something a menu can send to.
+///
+/// Its own object rather than a second action on `ExportCommands`, because
+/// `validateMenuItem` answers for every item that targets it: one target per
+/// menu is what keeps that answer a sentence instead of a switch over selectors.
+@MainActor
+final class RefreshCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func refresh(_ sender: Any?) { model.refresh() }
+
+    /// Greyed out before the connection is up and while something is already
+    /// running, so the item is never offered when pressing it would only queue
+    /// a second read behind the first and land looking like nothing happened.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canRefresh }
 }
 
 /// The File menu's export items, as something a menu can send to.

@@ -106,6 +106,29 @@ struct NavigatorView: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary.color)
                 Spacer()
+                // Beside the count, because the two are about the same thing:
+                // what this tree currently holds, and how to make "currently"
+                // true again. ⇧⌘R reaches it too, but a shortcut is invisible,
+                // and a list that can silently go stale needs a visible way to
+                // un-stale it. Not in the toolbar — that side of the window is
+                // about the result, and this is about the sidebar.
+                Button {
+                    model.refresh()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                // Coloured rather than left to the button style's dimming, so
+                // the disabled state reads at 10pt on a dark background.
+                .foregroundStyle(
+                    model.canRefresh ? Theme.textSecondary.color : Theme.textTertiary.color
+                )
+                .disabled(!model.canRefresh)
+                .help("Reload schemas and objects from the database (⇧⌘R)")
+                .accessibilityLabel("Refresh objects")
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 2)

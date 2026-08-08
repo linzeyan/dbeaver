@@ -71,6 +71,23 @@ final class ResultSet {
         publish(capped: capped, milliseconds: milliseconds, summary: summary)
     }
 
+    /// Drops the rows and everything the chrome says about them.
+    ///
+    /// For a result whose subject has stopped existing. The rows themselves are
+    /// still what the server sent, but the summary names a relation — "victim ·
+    /// 3 rows" beside a table that has been dropped reads as a claim that it is
+    /// still there, and the status bar has no other way to stop making it.
+    func discard() {
+        table.reset()
+        generation += 1
+        rowCount = 0
+        capped = false
+        milliseconds = 0
+        summary = ""
+        selection = nil
+        isLoading = false
+    }
+
     private func publish(capped: Bool, milliseconds: Double, summary: String) {
         rowCount = table.rowCount
         self.capped = capped
@@ -94,6 +111,13 @@ final class AppModel {
     private(set) var relations: [String: [RelationInfo]] = [:]
     var expanded: Set<String> = []
     var selected: RelationInfo? { didSet { selectionChanged(from: oldValue) } }
+    /// Set while `refresh` swaps `selected` for the freshly read value naming
+    /// the same relation. The two are the same object to a user but not to
+    /// `==` — `estimatedRows` moves on its own — and that assignment must not
+    /// look like the user picking a table: `selectionChanged` clears the WHERE
+    /// and ORDER BY fields, and a refresh that threw the filters away would be
+    /// a worse answer than the stale pane it was pressed to fix.
+    private var isReselecting = false
     /// Name filter for the navigator. A schema with hundreds of objects is the
     /// normal case, and scrolling to find one is the slowest thing a user does.
     var navigatorFilter = ""
@@ -203,16 +227,11 @@ final class AppModel {
         status = "Connecting…"
         run { [connString] in
             let db = try Database(connString: connString)
-            let schemas = try db.schemas()
-            var relations: [String: [RelationInfo]] = [:]
-            for s in schemas {
-                relations[s.name] = try db.relations(schema: s.name)
-            }
-            return (db, schemas, relations)
+            return (db, try Self.inventory(of: db))
         } then: { [self] result in
             db = result.0
-            schemas = result.1
-            relations = result.2
+            schemas = result.1.schemas
+            relations = result.1.relations
             connectionLabel = Self.label(for: connString)
             connectionState = .connected
             // Open the schema a user most likely wants, and land on a table
@@ -235,6 +254,115 @@ final class AppModel {
                 runQuery(initialSQL, describedAs: "query", into: queryResult)
             }
         }
+    }
+
+    /// The navigator's whole contents, read in one pass.
+    ///
+    /// Shared by `connect` and `refresh` so the two cannot drift into loading
+    /// different things: a refresh that read less than the connection did would
+    /// quietly delete objects from a tree that is supposed to have become more
+    /// accurate, not less.
+    private nonisolated static func inventory(of db: Database) throws -> Inventory {
+        let schemas = try db.schemas()
+        var relations: [String: [RelationInfo]] = [:]
+        for schema in schemas {
+            relations[schema.name] = try db.relations(schema: schema.name)
+        }
+        return Inventory(schemas: schemas, relations: relations)
+    }
+
+    private struct Inventory: Sendable {
+        let schemas: [SchemaInfo]
+        let relations: [String: [RelationInfo]]
+    }
+
+    // MARK: - Refresh
+
+    /// Whether the object tree can be reloaded. False before the connection is
+    /// up, and while something is already running: the core queue is serial, so
+    /// a second refresh would only queue behind the first and land looking like
+    /// a button that did nothing.
+    var canRefresh: Bool { db != nil && !isBusy }
+
+    /// Rereads the object tree, and the selected relation with it.
+    ///
+    /// Deliberately not `connect()`. Only the metadata has gone stale;
+    /// reconnecting would throw away the connection and, with it, whatever the
+    /// Query tab is holding — a client that loses your result in order to show
+    /// you a new table is not one anybody presses twice. Nothing here caches on
+    /// the core side either, so every call is a fresh read of pg_catalog.
+    func refresh() {
+        guard canRefresh else { return }
+        isBusy = true
+        status = "Refreshing…"
+        // A refresh supersedes the previous failure, as a new query does. The
+        // "no longer in this database" note below is written from the answer
+        // that comes back, not carried over from the last one.
+        errorMessage = nil
+        // The rows on screen describe the table as it was. Dimming them for the
+        // whole reload rather than only for the browse at the end of it is what
+        // keeps several metadata round trips from looking like an idle window.
+        if selected != nil { browseResult.beginLoading() }
+        run { db in
+            try Self.inventory(of: db)
+        } then: { [self] inventory in
+            schemas = inventory.schemas
+            relations = inventory.relations
+            // A dropped schema should not come back already open if one of the
+            // same name is created later; the user never expanded that one.
+            expanded.formIntersection(inventory.schemas.map(\.name))
+            reselect()
+        }
+    }
+
+    /// Re-attaches the selection to the object list just read, and reloads what
+    /// the detail panes are showing from it.
+    private func reselect() {
+        guard let previous = selected else {
+            settleRefresh()
+            return
+        }
+        guard let current = relations[previous.schema]?.first(where: { $0.id == previous.id })
+        else {
+            // Keeping the panes as they are would leave them describing a table
+            // that is gone, and clearing them without a word would read as the
+            // refresh having failed. Nothing else will mention it either: the
+            // next thing to notice would be an error from a query the user did
+            // not know was already doomed.
+            errorMessage =
+                "\(previous.schema).\(previous.name) is no longer in this database — "
+                + "it was dropped or renamed while this window was open."
+            selected = nil
+            columns = []
+            clearRelationDetail()
+            browseResult.discard()
+            settleRefresh()
+            return
+        }
+        // Take the new value even though it names the same relation. Only
+        // `estimatedRows` can have moved and it is invisible at this size — but
+        // the navigator tags its rows with the whole `RelationInfo`, so holding
+        // the old one silently unhighlights the row the user is sitting on.
+        isReselecting = true
+        selected = current
+        isReselecting = false
+        // Same order as a fresh selection, and for the same reason: the browse
+        // orders by the primary key, so the columns have to land first. The
+        // detail sections are not cleared on the way — this is the same
+        // relation, so its old structure is context worth keeping under the
+        // veil rather than a different table's left on screen.
+        loadColumns(for: current) { [self] in
+            runBrowse()
+            loadRelationDetail(for: current)
+        }
+    }
+
+    /// Ends a refresh that has no relation left to reload. The path through
+    /// `runBrowse` clears `isBusy` itself when the rows land.
+    private func settleRefresh() {
+        status = Self.pluralized(schemas.count, "schema")
+        isBusy = false
+        browseResult.abandonLoading()
     }
 
     /// Resolves `--relation`, which is either a bare name or `schema.name`.
@@ -323,7 +451,7 @@ final class AppModel {
     // MARK: - Selection
 
     private func selectionChanged(from previous: RelationInfo?) {
-        guard let selected, selected != previous else { return }
+        guard !isReselecting, let selected, selected != previous else { return }
         // Filters describe the previous table's columns and cannot be assumed
         // to apply here; carrying them over would produce confusing errors.
         // The first selection is the exception: it is where --where/--order land.
@@ -332,12 +460,7 @@ final class AppModel {
         appliedInitialFilters = true
         // Cleared rather than left showing the previous relation's structure
         // while the new one loads.
-        indexes = []
-        foreignKeys = []
-        referencedBy = []
-        constraints = []
-        triggers = []
-        definition = nil
+        clearRelationDetail()
         // The browse orders by the primary key, so the columns have to be known
         // before its statement can be written. Issuing both at once left the
         // first page in heap order and every later page in key order — two
@@ -366,6 +489,17 @@ final class AppModel {
             columns = cols
             next()
         }
+    }
+
+    /// Empties every Structure section at once, so a section added later cannot
+    /// be forgotten at one of the two places that has to drop the old one.
+    private func clearRelationDetail() {
+        indexes = []
+        foreignKeys = []
+        referencedBy = []
+        constraints = []
+        triggers = []
+        definition = nil
     }
 
     /// Everything the Structure tab shows below the columns.
