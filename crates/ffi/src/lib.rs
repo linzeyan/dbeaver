@@ -238,15 +238,29 @@ relation_metadata! {
     db_triggers_json => triggers
 }
 
+/// Prepares `sql` and returns a stream over its results.
+///
+/// `err_position` carries the server's error cursor as a number rather than
+/// leaving it inside the message: it is the one part of an error the front end
+/// acts on rather than displays, and recovering it by re-reading the prose is
+/// how a caret ends up pointing at whatever the sentence happened to contain.
+/// Zero means the error has no position, which is unambiguous because the
+/// server counts from one.
+///
 /// # Safety
-/// `handle` must be live; `sql` must be a valid NUL-terminated C string.
+/// `handle` must be live; `sql` must be a valid NUL-terminated C string;
+/// `err_position` must be null or point to writable `int` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_query(
     handle: *mut DbHandle,
     sql: *const c_char,
     batch_rows: usize,
     err: *mut *mut c_char,
+    err_position: *mut c_int,
 ) -> *mut DbQuery {
+    if !err_position.is_null() {
+        unsafe { *err_position = 0 };
+    }
     if handle.is_null() || sql.is_null() {
         unsafe { set_err(err, "null handle or sql") };
         return ptr::null_mut();
@@ -262,6 +276,9 @@ pub unsafe extern "C" fn db_query(
     match runtime().block_on(h.source.query(s, batch_rows)) {
         Ok(stream) => Box::into_raw(Box::new(DbQuery { stream })),
         Err(e) => {
+            if let (false, Some(p)) = (err_position.is_null(), e.statement_position()) {
+                unsafe { *err_position = c_int::try_from(p).unwrap_or(0) };
+            }
             unsafe { set_err(err, e) };
             ptr::null_mut()
         }

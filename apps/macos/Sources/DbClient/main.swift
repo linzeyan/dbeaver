@@ -25,12 +25,27 @@ func argument(_ flag: String) -> String? {
     return CommandLine.arguments[i + 1]
 }
 
+// `--verify-splitter` runs the statement splitter's checks and exits with their
+// verdict. It needs no window and no database, so it runs before either exists.
+if CommandLine.arguments.contains("--verify-splitter") {
+    exit(SQLScriptChecks.run() ? 0 : 1)
+}
+
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
 /// how rendering defects get caught here, and a screenshot cannot click.
 let initialTab = argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized) } ?? .content
 
 /// `--sql "SELECT …"` opens on the Query tab with that statement already run.
 let initialSQL = argument("--sql")
+
+/// `--caret 42` puts the editor's caret at that offset, counted in Unicode
+/// scalars from the start of `--sql`.
+///
+/// ⌘R runs the statement the caret is in, and a capture cannot click into a
+/// buffer to move it. Without this there is no way to see a script's third
+/// statement run, or to check that a server error position lands in it rather
+/// than in the first.
+let initialCaret = argument("--caret").flatMap(Int.init)
 
 /// `--where` and `--order` seed the browse filters, for the same reason `--tab`
 /// exists: reproducing a particular view without clicking into it.
@@ -245,6 +260,7 @@ if benchMode {
     MainActor.assumeIsolated {
         let model = AppModel(
             connString: connString, initialTab: initialTab, initialSQL: initialSQL,
+            initialCaret: initialCaret,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation)
         // Installed here rather than before the window is built, because the

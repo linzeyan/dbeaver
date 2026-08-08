@@ -80,7 +80,12 @@ char* db_constraints_json(DbHandle* handle, const char* schema, const char* rela
 char* db_triggers_json(DbHandle* handle, const char* schema, const char* relation,
                        char** err);
 
-DbQuery* db_query(DbHandle* handle, const char* sql, size_t batch_rows, char** err);
+// On a server error that names a place in the statement, `err_position` receives
+// the cursor: 1-based, counted in characters, from the start of `sql`. Zero for
+// every error that has no such place. A number rather than a sentence, because
+// the caller moves a caret with it.
+DbQuery* db_query(DbHandle* handle, const char* sql, size_t batch_rows, char** err,
+                  int* err_position);
 
 // Fills `out` with the result schema (a struct type whose children are the
 // columns). Returns 0 on success, -1 on error.

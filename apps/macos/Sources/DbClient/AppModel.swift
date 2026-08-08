@@ -1,6 +1,7 @@
 import CDbFfi
 import Foundation
 import Observation
+import SwiftUI
 
 /// Which detail pane is showing. Mirrors the tab strip a Sequel Ace user
 /// expects: describe the object, browse its rows, or write SQL against it.
@@ -150,9 +151,40 @@ final class AppModel {
     var orderClause = ""
 
     var queryText = ""
+    /// Where the caret or selection is in the editor.
+    ///
+    /// Owned here rather than by the pane because the Run button lives in the
+    /// window's toolbar, which has no view of the editor. ⌘R has to know which
+    /// statement the user is standing in, and this is the only place both ends
+    /// can see.
+    var querySelection: TextSelection?
     /// The last statement `selectionChanged` put in the editor, so a later
     /// selection can tell "untouched suggestion" from "the user's work".
     private var suggestedQueryText = ""
+
+    /// A statement the Query pane sent, carried alongside its result so a server
+    /// error position can be turned back into a place in the editor.
+    private struct SentStatement: Sendable {
+        /// The buffer the statement was cut from. An error arrives after a round
+        /// trip, by which time the buffer may have been edited; an offset into
+        /// text that no longer exists points at a character nobody asked about,
+        /// so the caret only moves while this still matches.
+        let script: String
+        /// Scalar offsets of the statement within `script`.
+        let range: Range<Int>
+    }
+
+    /// A Query-pane failure with the statement that produced it.
+    ///
+    /// Wrapped around the error rather than parked in a property: the core queue
+    /// is serial, but a browse issued between ⌘R and its answer would overwrite
+    /// a shared slot, and the banner would then point into whichever statement
+    /// happened to be there. Travelling with the error, the two cannot come
+    /// apart.
+    private struct StatementFailure: Error {
+        let error: Error
+        let sent: SentStatement
+    }
 
     // Chrome
     private(set) var connectionLabel = "Not connected"
@@ -208,6 +240,7 @@ final class AppModel {
 
     init(
         connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil,
+        initialCaret: Int? = nil,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil
     ) {
@@ -218,6 +251,16 @@ final class AppModel {
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
         if let initialSQL { queryText = initialSQL }
+        // `--caret` is the only way to put the caret anywhere but the start
+        // without a click, and clicking is what a capture cannot do. It defaults
+        // to the start whenever there is a statement to open with: left unset,
+        // the editor drops the caret at the end of the text the first time it
+        // takes it, and a multi-statement `--sql` would then run whichever
+        // statement that happened to land in.
+        let caret = initialCaret ?? (initialSQL == nil ? nil : 0)
+        if let caret, let index = SQLScript.range(caret..<caret, in: queryText) {
+            querySelection = TextSelection(insertionPoint: index.lowerBound)
+        }
     }
 
     // MARK: - Lifecycle
@@ -249,10 +292,10 @@ final class AppModel {
             status = Self.pluralized(schemas.count, "schema")
             isBusy = false
             // Runs after the selection above, so an explicit `--sql` replaces
-            // the browse rather than racing it.
-            if let initialSQL {
-                runQuery(initialSQL, describedAs: "query", into: queryResult)
-            }
+            // the browse rather than racing it. Through the same path ⌘R takes,
+            // so a multi-statement `--sql` runs the one `--caret` names rather
+            // than the whole buffer.
+            if initialSQL != nil { runCurrentQuery() }
         }
     }
 
@@ -731,20 +774,59 @@ final class AppModel {
 
     /// Whether ⌘R has anything to run. Drives the Run button's disabled state,
     /// so the button is never offered when pressing it would do nothing.
+    ///
+    /// A buffer holding only comments has text in it and nothing to run, which
+    /// is why this asks the splitter rather than measuring the string.
     var canRun: Bool {
-        activeTab == .query
-            ? !queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            : selected != nil
+        activeTab == .query ? !SQLScript.statements(in: queryText).isEmpty : selected != nil
+    }
+
+    /// The caret or selection as scalar offsets into `queryText`.
+    ///
+    /// `TextSelection` carries `String.Index` values, which mean nothing away
+    /// from the string they were made against. Converting on read rather than
+    /// storing offsets is what keeps them from outliving an edit.
+    private var editorSelection: Range<Int> {
+        func offset(_ index: String.Index) -> Int {
+            let bounded = min(index, queryText.endIndex)
+            return queryText.unicodeScalars.distance(from: queryText.startIndex, to: bounded)
+        }
+        guard let indices = querySelection?.indices else { return 0..<0 }
+        switch indices {
+        case .selection(let range):
+            return offset(range.lowerBound)..<offset(range.upperBound)
+        case .multiSelection(let set):
+            // A discontiguous selection names no single statement; its first run
+            // is what ⌘R acts on.
+            guard let first = set.ranges.first else { return 0..<0 }
+            return offset(first.lowerBound)..<offset(first.upperBound)
+        @unknown default:
+            // A shape this build does not know how to read is no worse than no
+            // selection: the caret rule takes over from the start of the buffer.
+            return 0..<0
+        }
+    }
+
+    /// What ⌘R would send right now. The editor's corner reads it out, because
+    /// "which of these five is about to run" is the question a script raises and
+    /// a blinking caret does not answer.
+    var runTarget: SQLScript.Target? {
+        SQLScript.target(in: queryText, selection: editorSelection)
     }
 
     func runCurrentQuery() {
-        // ⌘R means "run what I am looking at": the query text in the Query tab,
-        // the filtered browse elsewhere.
-        if activeTab == .query {
-            runQuery(queryText, describedAs: "query", into: queryResult)
-        } else {
+        // ⌘R means "run what I am looking at". In the Query tab that is one
+        // statement — the selection if there is one, otherwise the statement the
+        // caret sits in — not the whole buffer, which stopped being a sensible
+        // reading the moment a buffer could hold a script.
+        guard activeTab == .query else {
             runBrowse()
+            return
         }
+        guard let target = runTarget else { return }
+        runQuery(
+            SQLScript.text(target.range, in: queryText), describedAs: target.label,
+            into: queryResult, sent: SentStatement(script: queryText, range: target.range))
     }
 
     // MARK: - Export
@@ -822,9 +904,14 @@ final class AppModel {
     /// grid is showing a window, not an answer, and the status bar has to say
     /// so — a row count that silently means "the first hundred thousand" is the
     /// same class of lie as a cell that truncates without a marker.
+    ///
+    /// `sent` is the statement in the editor this came from, for a Query-pane
+    /// run and nothing else. It travels back out attached to any failure, so a
+    /// browse issued in the meantime cannot leave the banner measuring an error
+    /// against a statement that did not cause it.
     private func runQuery(
         _ sql: String, describedAs label: String, into result: ResultSet,
-        cappedAt: Int? = nil, appending: Bool = false
+        cappedAt: Int? = nil, appending: Bool = false, sent: SentStatement? = nil
     ) {
         isBusy = true
         result.beginLoading()
@@ -837,16 +924,21 @@ final class AppModel {
         // The grid is mutated on the main actor only; the background stage
         // returns batches and the main stage installs them.
         run { db -> QueryResult in
-            let started = CFAbsoluteTimeGetCurrent()
-            let query = try db.query(sql, batchRows: batchRows)
-            let schema = try query.schema()
-            var batches: [UnsafeMutablePointer<ArrowArray>] = []
-            while let batch = try query.nextBatch() {
-                batches.append(batch)
+            do {
+                let started = CFAbsoluteTimeGetCurrent()
+                let query = try db.query(sql, batchRows: batchRows)
+                let schema = try query.schema()
+                var batches: [UnsafeMutablePointer<ArrowArray>] = []
+                while let batch = try query.nextBatch() {
+                    batches.append(batch)
+                }
+                return QueryResult(
+                    schema: schema, batches: batches,
+                    milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
+            } catch {
+                guard let sent else { throw error }
+                throw StatementFailure(error: error, sent: sent)
             }
-            return QueryResult(
-                schema: schema, batches: batches,
-                milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
         } then: { [self] fetched in
             let grid = result.table
             if appending {
@@ -943,7 +1035,10 @@ final class AppModel {
     }
 
     private func fail(with error: Error) {
-        errorMessage = String(describing: error)
+        // A Query-pane failure arrives wrapped in the statement that caused it;
+        // everything else is its own error.
+        let statement = error as? StatementFailure
+        errorMessage = String(describing: statement?.error ?? error)
         status = "Failed"
         isBusy = false
         isExporting = false
@@ -954,6 +1049,39 @@ final class AppModel {
         // A failed statement says nothing about the connection; only a failure
         // before one exists does.
         if db == nil { connectionState = .failed }
+        if let statement { pointAtSyntaxError(statement) }
+    }
+
+    /// Says where the server found the trouble, and puts the editor's selection
+    /// on it.
+    ///
+    /// The banner has always said what is wrong and never where, which for a
+    /// syntax error in a hundred lines of SQL is most of the answer missing.
+    ///
+    /// The arithmetic is the whole difficulty. PostgreSQL counts from 1, in
+    /// characters, from the start of the string it was handed — and what it was
+    /// handed is one statement, not the buffer. Applying the number to the
+    /// buffer points confidently at a character in the wrong statement, and
+    /// looks right every time the statement that failed happened to be the
+    /// first. `SQLScript.errorOffset` is where that translation lives, and the
+    /// buffer is checked against the one the statement was cut from before any
+    /// of it is trusted: pointing at the wrong character is worse than not
+    /// pointing, so an edited buffer gets the bare position and no caret move.
+    private func pointAtSyntaxError(_ statement: StatementFailure) {
+        guard let failure = statement.error as? DbError, let position = failure.position
+        else { return }
+        let sent = statement.sent
+        guard sent.script == queryText,
+            let offset = SQLScript.errorOffset(ofPosition: position, in: sent.range),
+            let selection = SQLScript.range(
+                SQLScript.tokenRange(at: offset, in: queryText), in: queryText)
+        else {
+            errorMessage = "\(failure.description) · at position \(position) of the statement"
+            return
+        }
+        let place = SQLScript.lineColumn(of: offset, in: queryText)
+        errorMessage = "\(failure.description) · line \(place.line), column \(place.column)"
+        querySelection = TextSelection(range: selection)
     }
 
     private static func label(for connString: String) -> String {

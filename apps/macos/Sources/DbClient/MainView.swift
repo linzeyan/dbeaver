@@ -779,7 +779,10 @@ struct QueryPane: View {
         @Bindable var result = model.queryResult
         return VSplitView {
             ZStack(alignment: .bottomTrailing) {
-                TextEditor(text: $model.queryText)
+                // The selection binding is what makes ⌘R mean "this statement":
+                // without it the pane knows the text and not where in it the
+                // user is standing.
+                TextEditor(text: $model.queryText, selection: $model.querySelection)
                     .font(Theme.Typography.editor)
                     .scrollContentBackground(.hidden)
                     .padding(.horizontal, Theme.Space.md)
@@ -788,7 +791,10 @@ struct QueryPane: View {
                     .focused($focus, equals: .editor)
                     .accessibilityLabel("SQL editor")
 
-                Text("⌘R to run")
+                // Says which statement is about to run, before it runs. A buffer
+                // of five makes ⌘R a guess otherwise, and the wrong guess is a
+                // statement the user did not mean to execute.
+                Text(model.runTarget?.hint ?? "nothing to run")
                     .font(Theme.Typography.micro)
                     .foregroundStyle(Theme.textTertiary.color)
                     .padding(Theme.Space.sm)
