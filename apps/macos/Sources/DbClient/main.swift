@@ -37,6 +37,19 @@ let initialSQL = argument("--sql")
 let initialWhere = argument("--where")
 let initialOrder = argument("--order")
 
+/// `--section triggers` opens the Structure tab on one of its lower sections.
+/// Matched loosely so `foreignkeys`, `foreign-keys` and `Foreign keys` all work
+/// — this is a capture switch, not a parser.
+/// `--relation bench_wide` opens on a named table instead of the first one.
+let initialRelation = argument("--relation")
+
+let initialSection = argument("--section").flatMap { requested in
+    let wanted = requested.lowercased().filter { $0.isLetter }
+    return StructureDetail.allCases.first {
+        $0.rawValue.lowercased().filter(\.isLetter) == wanted
+    }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -96,7 +109,8 @@ if benchMode {
     MainActor.assumeIsolated {
         let model = AppModel(
             connString: connString, initialTab: initialTab, initialSQL: initialSQL,
-            initialWhere: initialWhere, initialOrder: initialOrder)
+            initialWhere: initialWhere, initialOrder: initialOrder,
+            initialStructureDetail: initialSection, initialRelation: initialRelation)
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)

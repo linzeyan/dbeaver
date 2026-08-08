@@ -7,7 +7,10 @@
 mod arrow_map;
 mod metadata;
 
-pub use metadata::{ColumnInfo, ForeignKeyInfo, IndexInfo, RelationInfo, RelationKind, SchemaInfo};
+pub use metadata::{
+    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    RelationshipInfo, SchemaInfo, TriggerInfo,
+};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
@@ -94,8 +97,35 @@ impl PgSource {
         &self,
         schema: &str,
         relation: &str,
-    ) -> Result<Vec<ForeignKeyInfo>, PgError> {
+    ) -> Result<Vec<RelationshipInfo>, PgError> {
         metadata::foreign_keys(&self.client, schema, relation).await
+    }
+
+    /// Foreign keys other relations declare against this one.
+    pub async fn referenced_by(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<RelationshipInfo>, PgError> {
+        metadata::referenced_by(&self.client, schema, relation).await
+    }
+
+    /// CHECK, UNIQUE, and EXCLUDE constraints.
+    pub async fn constraints(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<ConstraintInfo>, PgError> {
+        metadata::constraints(&self.client, schema, relation).await
+    }
+
+    /// User-defined triggers, excluding constraint enforcement machinery.
+    pub async fn triggers(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<TriggerInfo>, PgError> {
+        metadata::triggers(&self.client, schema, relation).await
     }
 
     /// Prepare `sql` and begin streaming results as Arrow batches of

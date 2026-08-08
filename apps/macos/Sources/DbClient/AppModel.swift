@@ -102,7 +102,10 @@ final class AppModel {
     var activeTab: DetailTab = .content
     private(set) var columns: [ColumnInfo] = []
     private(set) var indexes: [IndexInfo] = []
-    private(set) var foreignKeys: [ForeignKeyInfo] = []
+    private(set) var foreignKeys: [RelationshipInfo] = []
+    private(set) var referencedBy: [RelationshipInfo] = []
+    private(set) var constraints: [ConstraintInfo] = []
+    private(set) var triggers: [TriggerInfo] = []
 
     // Content pane
     let browseResult = ResultSet()
@@ -148,6 +151,15 @@ final class AppModel {
     /// in place of browsing the first table.
     private let initialSQL: String?
 
+    /// Structure section to open on, from `--section`. Exists for the same
+    /// reason `--tab` does: rendering defects here are only caught by looking
+    /// at a screenshot, and a screenshot cannot click a strip.
+    let initialStructureDetail: StructureDetail?
+
+    /// Relation to open on, from `--relation`. Without it a capture can only
+    /// ever show whichever relation sorts first.
+    private let initialRelation: String?
+
     /// Browse filters to open with, from `--where` / `--order`. Applied by the
     /// first browse rather than as a second query.
     private let initialFilters: (where: String?, order: String?)
@@ -155,8 +167,11 @@ final class AppModel {
 
     init(
         connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil,
-        initialWhere: String? = nil, initialOrder: String? = nil
+        initialWhere: String? = nil, initialOrder: String? = nil,
+        initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil
     ) {
+        self.initialStructureDetail = initialStructureDetail
+        self.initialRelation = initialRelation
         self.connString = connString
         self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
@@ -188,7 +203,10 @@ final class AppModel {
             // start with the same two clicks.
             if let first = schemas.first(where: { $0.name == "public" }) ?? schemas.first {
                 expanded.insert(first.name)
-                selected = relations[first.name]?.first
+                let open = relations[first.name] ?? []
+                selected = initialRelation.flatMap { name in
+                    open.first { $0.name == name }
+                } ?? open.first
             }
             status = Self.pluralized(schemas.count, "schema")
             isBusy = false
@@ -281,6 +299,9 @@ final class AppModel {
         // while the new one loads.
         indexes = []
         foreignKeys = []
+        referencedBy = []
+        constraints = []
+        triggers = []
         // The browse orders by the primary key, so the columns have to be known
         // before its statement can be written. Issuing both at once left the
         // first page in heap order and every later page in key order — two
@@ -310,22 +331,46 @@ final class AppModel {
         }
     }
 
-    /// Indexes and foreign keys, which only the Structure tab reads.
+    /// Everything the Structure tab shows below the columns.
     ///
     /// Queued after the browse rather than before it. The core queue is serial,
-    /// so putting two more round trips in front of the rows would delay the
+    /// so putting five more round trips in front of the rows would delay the
     /// pane the user is actually looking at in order to fill one they may never
-    /// open.
+    /// open. Fetched as one unit so the sections cannot appear one at a time.
     private func loadRelationDetail(for relation: RelationInfo) {
+        let (schema, name) = (relation.schema, relation.name)
         run { db in
-            try (
-                db.indexes(schema: relation.schema, relation: relation.name),
-                db.foreignKeys(schema: relation.schema, relation: relation.name)
-            )
+            RelationDetail(
+                indexes: try db.indexes(schema: schema, relation: name),
+                foreignKeys: try db.foreignKeys(schema: schema, relation: name),
+                referencedBy: try db.referencedBy(schema: schema, relation: name),
+                constraints: try db.constraints(schema: schema, relation: name),
+                triggers: try db.triggers(schema: schema, relation: name))
         } then: { [self] detail in
-            indexes = detail.0
-            foreignKeys = detail.1
+            indexes = detail.indexes
+            foreignKeys = detail.foreignKeys
+            referencedBy = detail.referencedBy
+            constraints = detail.constraints
+            triggers = detail.triggers
         }
+    }
+
+    func structureDetailCount(_ section: StructureDetail) -> Int {
+        switch section {
+        case .indexes: return indexes.count
+        case .foreignKeys: return foreignKeys.count
+        case .referencedBy: return referencedBy.count
+        case .constraints: return constraints.count
+        case .triggers: return triggers.count
+        }
+    }
+
+    private struct RelationDetail: Sendable {
+        let indexes: [IndexInfo]
+        let foreignKeys: [RelationshipInfo]
+        let referencedBy: [RelationshipInfo]
+        let constraints: [ConstraintInfo]
+        let triggers: [TriggerInfo]
     }
 
     /// Builds the browse query from the filter bar.

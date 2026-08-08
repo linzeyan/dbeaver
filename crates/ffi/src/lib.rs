@@ -215,6 +215,23 @@ relation_metadata! {
     db_foreign_keys_json => foreign_keys
 }
 
+relation_metadata! {
+    /// Foreign keys pointing at one relation, as a JSON array. Release with
+    /// `db_string_free`.
+    db_referenced_by_json => referenced_by
+}
+
+relation_metadata! {
+    /// CHECK, UNIQUE and EXCLUDE constraints as a JSON array. Release with
+    /// `db_string_free`.
+    db_constraints_json => constraints
+}
+
+relation_metadata! {
+    /// User-defined triggers as a JSON array. Release with `db_string_free`.
+    db_triggers_json => triggers
+}
+
 /// # Safety
 /// `handle` must be live; `sql` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]

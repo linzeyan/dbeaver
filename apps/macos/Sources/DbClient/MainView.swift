@@ -242,9 +242,23 @@ struct DetailPane: View {
 
 // MARK: - Panes
 
+/// Which of the Structure tab's lower sections is showing. Not reset when the
+/// relation changes: someone comparing triggers across tables is doing exactly
+/// that, and snapping back to Indexes on every click would fight them.
+enum StructureDetail: String, CaseIterable, Identifiable {
+    case indexes = "Indexes"
+    case foreignKeys = "Foreign keys"
+    case referencedBy = "Referenced by"
+    case constraints = "Constraints"
+    case triggers = "Triggers"
+
+    var id: String { rawValue }
+}
+
 struct StructurePane: View {
     @Bindable var model: AppModel
     @FocusState.Binding var focus: FocusArea?
+    @State private var detail: StructureDetail = .indexes
 
     var body: some View {
         if model.columns.isEmpty {
@@ -257,25 +271,56 @@ struct StructurePane: View {
                 columnsTable
                     .frame(minHeight: 160)
 
-                // Indexes and foreign keys sit side by side under the columns,
-                // in the vertical space a twenty-column table leaves empty
-                // anyway. Absent entirely when the relation has neither: an
-                // empty pair of tables says "loading" when it means "none".
-                if !model.indexes.isEmpty || !model.foreignKeys.isEmpty {
-                    HStack(alignment: .top, spacing: 0) {
-                        if !model.indexes.isEmpty {
-                            indexesTable
-                        }
-                        if !model.indexes.isEmpty && !model.foreignKeys.isEmpty {
-                            Rectangle().fill(Theme.separator.color).frame(width: 1)
-                        }
-                        if !model.foreignKeys.isEmpty {
-                            foreignKeysTable
-                        }
-                    }
-                    .frame(minHeight: 96, idealHeight: 170, maxHeight: 300)
+                // Five sections will not fit side by side, so they share one
+                // area and the strip selects between them. Every section is
+                // listed even at zero: the count is the answer to "does this
+                // table have triggers", and hiding the row would make the
+                // strip's contents shift from table to table.
+                VStack(spacing: 0) {
+                    StructureDetailStrip(model: model, selected: $detail)
+                    detailTable
+                }
+                .frame(minHeight: 110, idealHeight: 190, maxHeight: 340)
+                .task {
+                    if let opened = model.initialStructureDetail { detail = opened }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var detailTable: some View {
+        switch detail {
+        case .indexes:
+            table(model.indexes, empty: "No indexes") { indexesTable }
+        case .foreignKeys:
+            table(model.foreignKeys, empty: "No foreign keys") { foreignKeysTable }
+        case .referencedBy:
+            table(model.referencedBy, empty: "Nothing references this table") {
+                referencedByTable
+            }
+        case .constraints:
+            table(model.constraints, empty: "No check or unique constraints") {
+                constraintsTable
+            }
+        case .triggers:
+            table(model.triggers, empty: "No triggers") { triggersTable }
+        }
+    }
+
+    /// A section's table, or a line saying it is empty. An empty `Table` draws
+    /// a bare header over nothing, which reads as a table that failed to load.
+    @ViewBuilder
+    private func table<T>(
+        _ rows: [T], empty: String, @ViewBuilder content: () -> some View
+    ) -> some View {
+        if rows.isEmpty {
+            Text(empty)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textTertiary.color)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            content()
         }
     }
 
@@ -339,50 +384,48 @@ struct StructurePane: View {
     }
 
     private var indexesTable: some View {
-        DetailSection(title: "Indexes", count: model.indexes.count) {
-            Table(model.indexes) {
-                TableColumn("") { index in
-                    if index.isPrimary {
-                        Image(systemName: "key.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(Theme.warning.color)
-                            .help("Primary key")
-                            .accessibilityLabel("Primary key")
-                    }
+        Table(model.indexes) {
+            TableColumn("") { index in
+                if index.isPrimary {
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.warning.color)
+                        .help("Primary key")
+                        .accessibilityLabel("Primary key")
                 }
-                .width(18)
-
-                TableColumn("Name") { index in
-                    // Index names are long and the column is narrow, so the
-                    // tooltip is what makes a truncated one recoverable.
-                    Text(index.name)
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.text.color)
-                        .lineLimit(1)
-                        .help(index.name)
-                }
-
-                TableColumn("Keys") { index in
-                    // The predicate is part of what the index covers, so it
-                    // rides with the keys rather than being dropped: a partial
-                    // index shown as a plain one claims coverage it lacks.
-                    Text(Self.keyLabel(index))
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.textSecondary.color)
-                        .lineLimit(1)
-                        .help(Self.keyLabel(index))
-                }
-
-                TableColumn("Kind") { index in
-                    Text(index.kindLabel)
-                        .font(Theme.Typography.monoSmall)
-                        .foregroundStyle(Theme.textTertiary.color)
-                        .lineLimit(1)
-                }
-                .width(min: 70, ideal: 96)
             }
-            .tableStyle(.inset(alternatesRowBackgrounds: false))
+            .width(18)
+
+            TableColumn("Name") { index in
+                // Index names are long and the column is narrow, so the
+                // tooltip is what makes a truncated one recoverable.
+                Text(index.name)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .lineLimit(1)
+                    .help(index.name)
+            }
+
+            TableColumn("Keys") { index in
+                // The predicate is part of what the index covers, so it rides
+                // with the keys rather than being dropped: a partial index
+                // shown as a plain one claims coverage it lacks.
+                Text(Self.keyLabel(index))
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+                    .help(Self.keyLabel(index))
+            }
+
+            TableColumn("Kind") { index in
+                Text(index.kindLabel)
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+            }
+            .width(min: 70, ideal: 96)
         }
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
     }
 
     private static func keyLabel(_ index: IndexInfo) -> String {
@@ -391,58 +434,182 @@ struct StructurePane: View {
     }
 
     private var foreignKeysTable: some View {
-        DetailSection(title: "Foreign keys", count: model.foreignKeys.count) {
-            Table(model.foreignKeys) {
-                TableColumn("Columns") { key in
-                    Text(key.columns.joined(separator: ", "))
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.text.color)
-                        .lineLimit(1)
-                }
-
-                TableColumn("References") { key in
-                    Text(key.targetLabel(sameSchemaAs: model.selected?.schema ?? ""))
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.textSecondary.color)
-                        .lineLimit(1)
-                }
-
-                TableColumn("On") { key in
-                    Text(key.actionLabel.isEmpty ? "—" : key.actionLabel)
-                        .font(Theme.Typography.monoSmall)
-                        .foregroundStyle(Theme.textTertiary.color)
-                        .lineLimit(1)
-                }
-                .width(min: 80, ideal: 150)
+        Table(model.foreignKeys) {
+            TableColumn("Columns") { key in
+                Text(key.localColumns.joined(separator: ", "))
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .lineLimit(1)
             }
-            .tableStyle(.inset(alternatesRowBackgrounds: false))
+
+            TableColumn("References") { key in
+                Text(key.otherLabel(sameSchemaAs: model.selected?.schema ?? ""))
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+            }
+
+            TableColumn("On") { key in
+                Text(key.actionLabel.isEmpty ? "—" : key.actionLabel)
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+            }
+            .width(min: 80, ideal: 150)
         }
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
+    }
+
+    private var referencedByTable: some View {
+        Table(model.referencedBy) {
+            // The referencing table leads, because the question this section
+            // answers is "who depends on me", not "through which of my
+            // columns".
+            TableColumn("From") { key in
+                Text(key.otherLabel(sameSchemaAs: model.selected?.schema ?? ""))
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .lineLimit(1)
+            }
+
+            TableColumn("To columns") { key in
+                Text(key.localColumns.joined(separator: ", "))
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+            }
+
+            TableColumn("On") { key in
+                // ON DELETE CASCADE on an inbound key is the one that decides
+                // what happens to other people's rows when you delete yours.
+                Text(key.actionLabel.isEmpty ? "—" : key.actionLabel)
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(
+                        key.onDelete == "CASCADE"
+                            ? Theme.warning.color : Theme.textTertiary.color)
+                    .lineLimit(1)
+            }
+            .width(min: 80, ideal: 150)
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
+    }
+
+    private var constraintsTable: some View {
+        Table(model.constraints) {
+            TableColumn("Kind") { constraint in
+                Text(constraint.kind.label)
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(Theme.textTertiary.color)
+            }
+            .width(min: 56, ideal: 66)
+
+            TableColumn("Name") { constraint in
+                Text(constraint.name)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .lineLimit(1)
+                    .help(constraint.name)
+            }
+
+            TableColumn("Definition") { constraint in
+                Text(constraint.definition)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+                    .help(constraint.definition)
+            }
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
+    }
+
+    private var triggersTable: some View {
+        Table(model.triggers) {
+            TableColumn("") { trigger in
+                // A disabled trigger listed like any other makes the reader
+                // expect behaviour that will not happen, so the state shows
+                // before the name does.
+                if !trigger.enabled {
+                    Image(systemName: "pause.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .help("Disabled")
+                        .accessibilityLabel("Disabled")
+                }
+            }
+            .width(18)
+
+            TableColumn("Name") { trigger in
+                Text(trigger.name)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(
+                        trigger.enabled ? Theme.text.color : Theme.textTertiary.color)
+                    .lineLimit(1)
+                    .help(trigger.name)
+            }
+
+            TableColumn("When") { trigger in
+                Text(trigger.whenLabel)
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+            }
+
+            TableColumn("Runs") { trigger in
+                Text("\(trigger.function)()")
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+                    .help(trigger.function)
+            }
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: false))
     }
 }
 
-/// A titled table below the main one. The count is in the header because these
-/// tables are short enough to be mistaken for complete when they are scrolled.
-private struct DetailSection<Content: View>: View {
-    let title: String
-    let count: Int
-    @ViewBuilder let content: Content
+/// Selector for the Structure tab's lower sections, each with its count.
+///
+/// The counts are the point: they answer "does this table have triggers"
+/// without a click, which is most of what anyone wants from four of these five
+/// sections most of the time.
+private struct StructureDetailStrip: View {
+    let model: AppModel
+    @Binding var selected: StructureDetail
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: Theme.Space.xs) {
-                Text(title)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
-                Text("\(count)")
-                    .font(Theme.Typography.digits)
-                    .foregroundStyle(Theme.textTertiary.color)
+        HStack(spacing: Theme.Space.xs) {
+            ForEach(StructureDetail.allCases) { section in
+                let count = model.structureDetailCount(section)
+                Button {
+                    selected = section
+                } label: {
+                    HStack(spacing: Theme.Space.xs) {
+                        Text(section.rawValue)
+                            .font(Theme.Typography.caption)
+                        Text("\(count)")
+                            .font(Theme.Typography.digits)
+                            .foregroundStyle(
+                                selected == section
+                                    ? Theme.textSecondary.color : Theme.textTertiary.color)
+                    }
+                    .padding(.horizontal, Theme.Space.sm)
+                    .frame(height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                            .fill(selected == section
+                                ? Theme.surfaceRaised.color : Color.clear))
+                    .foregroundStyle(
+                        selected == section ? Theme.text.color : Theme.textSecondary.color)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(section.rawValue), \(count)")
             }
-            .padding(.horizontal, Theme.Space.md)
-            .frame(height: 22)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.surface.color)
-
-            content
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Theme.Space.sm)
+        .frame(height: 26)
+        .background(Theme.surface.color)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
         }
     }
 }

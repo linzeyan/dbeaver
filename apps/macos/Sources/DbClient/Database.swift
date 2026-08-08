@@ -43,9 +43,24 @@ final class Database {
             db_indexes_json(handle, schema, relation, &errOut), as: [IndexInfo].self)
     }
 
-    func foreignKeys(schema: String, relation: String) throws -> [ForeignKeyInfo] {
+    func foreignKeys(schema: String, relation: String) throws -> [RelationshipInfo] {
         try decodeJSON(
-            db_foreign_keys_json(handle, schema, relation, &errOut), as: [ForeignKeyInfo].self)
+            db_foreign_keys_json(handle, schema, relation, &errOut), as: [RelationshipInfo].self)
+    }
+
+    func referencedBy(schema: String, relation: String) throws -> [RelationshipInfo] {
+        try decodeJSON(
+            db_referenced_by_json(handle, schema, relation, &errOut), as: [RelationshipInfo].self)
+    }
+
+    func constraints(schema: String, relation: String) throws -> [ConstraintInfo] {
+        try decodeJSON(
+            db_constraints_json(handle, schema, relation, &errOut), as: [ConstraintInfo].self)
+    }
+
+    func triggers(schema: String, relation: String) throws -> [TriggerInfo] {
+        try decodeJSON(
+            db_triggers_json(handle, schema, relation, &errOut), as: [TriggerInfo].self)
     }
 
     /// Scratch storage for the C error out-parameter. Calls are serialized by

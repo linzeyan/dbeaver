@@ -61,10 +61,12 @@ CREATE TABLE no_key AS
 SELECT g AS n, 'row-' || g AS label FROM generate_series(1, 250000) g;
 ANALYZE no_key;
 
--- Structure fixtures: the Structure tab shows indexes and foreign keys, and
--- bench_wide has only a primary key. This carries one of each interesting
--- shape — composite key, unique, partial, expression, and a foreign key with
--- a non-default action — so the pane is exercised rather than assumed.
+-- Structure fixtures. The Structure tab reports indexes, foreign keys, inbound
+-- references, constraints and triggers, and bench_wide has only a primary key.
+-- This carries one of each interesting shape — composite key, unique, partial,
+-- expression, a foreign key with a non-default action, CHECK and UNIQUE
+-- constraints, and both an enabled and a disabled trigger — so the pane is
+-- exercised rather than assumed.
 CREATE TABLE bench_child (
   order_id   int          NOT NULL,
   line_no    smallint     NOT NULL,
@@ -73,8 +75,25 @@ CREATE TABLE bench_child (
   email      text,
   qty        int          NOT NULL DEFAULT 1,
   shipped_at timestamp,
-  PRIMARY KEY (order_id, line_no)
+  PRIMARY KEY (order_id, line_no),
+  CONSTRAINT bench_child_qty_positive CHECK (qty > 0),
+  CONSTRAINT bench_child_order_line_uniq UNIQUE (order_id, line_no, sku)
 );
+
+CREATE OR REPLACE FUNCTION bench_child_touch() RETURNS trigger AS $fn$
+BEGIN
+  RETURN NEW;
+END;
+$fn$ LANGUAGE plpgsql;
+
+CREATE TRIGGER bench_child_before_write
+  BEFORE INSERT OR UPDATE ON bench_child
+  FOR EACH ROW EXECUTE FUNCTION bench_child_touch();
+
+CREATE TRIGGER bench_child_after_delete
+  AFTER DELETE ON bench_child
+  FOR EACH STATEMENT EXECUTE FUNCTION bench_child_touch();
+ALTER TABLE bench_child DISABLE TRIGGER bench_child_after_delete;
 CREATE UNIQUE INDEX bench_child_sku_key ON bench_child (sku);
 CREATE INDEX bench_child_pending_idx ON bench_child (order_id) WHERE shipped_at IS NULL;
 CREATE INDEX bench_child_email_lower_idx ON bench_child (lower(email));

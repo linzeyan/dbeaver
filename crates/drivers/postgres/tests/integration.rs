@@ -11,7 +11,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use driver_postgres::{PgError, PgSource, RelationKind};
+use driver_postgres::{ConstraintKind, PgError, PgSource, RelationKind};
 
 const CONN: &str = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench";
 
@@ -373,10 +373,10 @@ async fn foreign_keys_carry_their_target_and_action() {
 
     assert_eq!(keys.len(), 1);
     let fk = &keys[0];
-    assert_eq!(fk.columns, vec!["parent_id"]);
-    assert_eq!(fk.referenced_schema, "public");
-    assert_eq!(fk.referenced_table, "bench_wide");
-    assert_eq!(fk.referenced_columns, vec!["id"]);
+    assert_eq!(fk.local_columns, vec!["parent_id"]);
+    assert_eq!(fk.other_schema, "public");
+    assert_eq!(fk.other_table, "bench_wide");
+    assert_eq!(fk.other_columns, vec!["id"]);
     assert_eq!(fk.on_delete, "CASCADE");
     assert_eq!(
         fk.on_update, "NO ACTION",
@@ -386,16 +386,105 @@ async fn foreign_keys_carry_their_target_and_action() {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
-async fn a_relation_referenced_by_another_declares_no_key_itself() {
+async fn the_two_directions_of_a_key_do_not_bleed_into_each_other() {
     let src = connect().await;
     // bench_wide is the target of bench_child's key, not the holder of one.
-    // Reporting inbound references here would put a constraint on the wrong
-    // table's Structure tab.
-    let keys = src
+    // Reporting it as an outbound key would put a constraint on the wrong
+    // table's Structure tab; failing to report it inbound would hide the
+    // dependency that makes deleting a row cascade.
+    let outbound = src
         .foreign_keys("public", "bench_wide")
         .await
         .expect("foreign keys failed");
-    assert!(keys.is_empty());
+    assert!(outbound.is_empty());
+
+    let inbound = src
+        .referenced_by("public", "bench_wide")
+        .await
+        .expect("referenced by failed");
+    assert_eq!(inbound.len(), 1);
+    let r = &inbound[0];
+    // Named for the vantage point: from bench_wide, "local" is its own id and
+    // "other" is the referencing side. Swapping these would draw the arrow
+    // backwards.
+    assert_eq!(r.local_columns, vec!["id"]);
+    assert_eq!(r.other_table, "bench_child");
+    assert_eq!(r.other_columns, vec!["parent_id"]);
+    assert_eq!(r.on_delete, "CASCADE");
+
+    assert!(
+        src.referenced_by("public", "bench_child")
+            .await
+            .expect("referenced by failed")
+            .is_empty(),
+        "nothing references bench_child"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn constraints_report_check_and_unique_but_not_keys() {
+    let src = connect().await;
+    let all = src
+        .constraints("public", "bench_child")
+        .await
+        .expect("constraints failed");
+
+    // The primary and foreign keys have sections of their own. Repeating them
+    // here would make one table's rules look like two sets of rules.
+    assert_eq!(all.len(), 2, "only the CHECK and the UNIQUE: {all:?}");
+
+    let check = all
+        .iter()
+        .find(|c| c.name.contains("qty_positive"))
+        .unwrap();
+    assert_eq!(check.kind, ConstraintKind::Check);
+    // Single-parenthesised: pg_get_constraintdef is asked for its pretty form,
+    // which drops the redundant pair that pg_get_expr leaves in an index
+    // predicate. Passed through as the server renders it either way.
+    assert_eq!(check.definition, "CHECK (qty > 0)");
+
+    let unique = all.iter().find(|c| c.name.contains("order_line")).unwrap();
+    assert_eq!(unique.kind, ConstraintKind::Unique);
+    assert_eq!(
+        unique.definition, "UNIQUE (order_id, line_no, sku)",
+        "the column list is what makes a unique constraint readable"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn triggers_decode_their_bitmask_and_admit_when_disabled() {
+    let src = connect().await;
+    let all = src
+        .triggers("public", "bench_child")
+        .await
+        .expect("triggers failed");
+
+    // bench_child's foreign key installs constraint triggers of its own. They
+    // are the server enforcing a key that is already listed, not behaviour
+    // anyone wrote, so they must not appear.
+    assert_eq!(all.len(), 2, "internal constraint triggers are excluded");
+
+    let before = all.iter().find(|t| t.name.contains("before")).unwrap();
+    assert_eq!(before.timing, "BEFORE");
+    assert_eq!(
+        before.events,
+        vec!["INSERT", "UPDATE"],
+        "a multi-event trigger fires on every event in its mask"
+    );
+    assert_eq!(before.level, "ROW");
+    assert_eq!(before.function, "bench_child_touch");
+    assert!(before.enabled);
+
+    let after = all.iter().find(|t| t.name.contains("after")).unwrap();
+    assert_eq!(after.timing, "AFTER");
+    assert_eq!(after.events, vec!["DELETE"]);
+    assert_eq!(after.level, "STATEMENT");
+    assert!(
+        !after.enabled,
+        "a disabled trigger shown as active promises behaviour that will not happen"
+    );
 }
 
 #[tokio::test]

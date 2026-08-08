@@ -84,24 +84,27 @@ struct IndexInfo: Decodable, Hashable, Identifiable {
     }
 }
 
-struct ForeignKeyInfo: Decodable, Hashable, Identifiable {
+/// One foreign key, from the vantage point of the relation that was asked
+/// about. The same constraint is this table's own key when read from the
+/// referencing side and an inbound reference when read from the referenced
+/// side, so `local` and `other` are accurate in both directions where
+/// "referenced" would be wrong half the time.
+struct RelationshipInfo: Decodable, Hashable, Identifiable {
     let name: String
-    let columns: [String]
-    let referencedSchema: String
-    let referencedTable: String
-    let referencedColumns: [String]
+    let localColumns: [String]
+    let otherSchema: String
+    let otherTable: String
+    let otherColumns: [String]
     let onUpdate: String
     let onDelete: String
 
-    var id: String { name }
+    var id: String { "\(otherSchema).\(otherTable).\(name)" }
 
-    /// `public.orders(id)` — the schema is dropped when it is the same one the
-    /// referencing table lives in, which is the ordinary case and reads as
-    /// noise when spelled out on every row.
-    func targetLabel(sameSchemaAs schema: String) -> String {
-        let table = referencedSchema == schema
-            ? referencedTable : "\(referencedSchema).\(referencedTable)"
-        return "\(table)(\(referencedColumns.joined(separator: ", ")))"
+    /// `orders(id)` — the schema is dropped when it matches the relation being
+    /// viewed, which is the ordinary case and reads as noise on every row.
+    func otherLabel(sameSchemaAs schema: String) -> String {
+        let table = otherSchema == schema ? otherTable : "\(otherSchema).\(otherTable)"
+        return "\(table)(\(otherColumns.joined(separator: ", ")))"
     }
 
     /// Only the actions that are not the default, so a row says something.
@@ -113,12 +116,51 @@ struct ForeignKeyInfo: Decodable, Hashable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, columns
-        case referencedSchema = "referenced_schema"
-        case referencedTable = "referenced_table"
-        case referencedColumns = "referenced_columns"
+        case name
+        case localColumns = "local_columns"
+        case otherSchema = "other_schema"
+        case otherTable = "other_table"
+        case otherColumns = "other_columns"
         case onUpdate = "on_update"
         case onDelete = "on_delete"
+    }
+}
+
+struct ConstraintInfo: Decodable, Hashable, Identifiable {
+    enum Kind: String, Decodable {
+        case check, unique, exclude, other
+
+        var label: String {
+            switch self {
+            case .check: return "CHECK"
+            case .unique: return "UNIQUE"
+            case .exclude: return "EXCLUDE"
+            case .other: return "—"
+            }
+        }
+    }
+
+    let name: String
+    let kind: Kind
+    /// The server's own rendering. Shown verbatim rather than rebuilt.
+    let definition: String
+
+    var id: String { name }
+}
+
+struct TriggerInfo: Decodable, Hashable, Identifiable {
+    let name: String
+    let timing: String
+    let events: [String]
+    let level: String
+    let function: String
+    let enabled: Bool
+
+    var id: String { name }
+
+    /// "BEFORE INSERT, UPDATE · ROW".
+    var whenLabel: String {
+        "\(timing) \(events.joined(separator: ", ")) · \(level)"
     }
 }
 
