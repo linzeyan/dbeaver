@@ -467,6 +467,37 @@ final class AppModel {
         let value: String
         let isNull: Bool
         let address: String
+        /// How the viewer should draw this value when it is open.
+        let rendering: ValueRendering
+        /// Whether the viewer under the strip is open.
+        ///
+        /// Carried in the cell rather than passed to the strip, because the
+        /// strip is drawn by two panes and neither of them owns this: it is a
+        /// window-wide View command, and threading a binding through every pane
+        /// that happens to show a grid would make each of them responsible for
+        /// state it has no part in.
+        let isExpanded: Bool
+        /// Opens or closes that viewer, for the chevron in the strip. The menu
+        /// item flips the same flag, so the two cannot disagree about which way
+        /// the chevron points.
+        let toggleExpanded: @MainActor () -> Void
+    }
+
+    /// Whether the value viewer under the inspector strip is open.
+    ///
+    /// Window state rather than pane state: someone comparing a long value
+    /// against a query result should not have to reopen it on the way across.
+    var isValueViewerOpen = false
+
+    /// Whether there is a value for the viewer to show. Drives the menu item's
+    /// enabled state, so the command is never offered when pressing it would
+    /// open a pane with nothing in it.
+    ///
+    /// Deliberately not `inspectedCell(in:) != nil`: answering a Bool would then
+    /// copy a whole binary cell out of its Arrow buffer, and menu validation
+    /// runs on every ⌥⌘V whether the item is wanted or not.
+    var canInspectValue: Bool {
+        activeTab != .structure && selectedCell(in: current) != nil
     }
 
     /// The browsed relation's declared types, keyed by column name, for the grid
@@ -476,26 +507,74 @@ final class AppModel {
         columns.reduce(into: [:]) { $0[$1.name] = $1.dataType }
     }
 
+    /// The selected cell's coordinates, once bounds-checked against the result.
+    ///
+    /// A result can be replaced while a selection points into the last one, so
+    /// every reader of a selection has to do this; sharing it keeps the two
+    /// readers from disagreeing about what counts as selected.
+    private func selectedCell(in result: ResultSet) -> GridSelection? {
+        guard let s = result.selection,
+            s.column < result.table.columns.count,
+            s.row < result.table.rowCount
+        else { return nil }
+        return s
+    }
+
     func inspectedCell(in result: ResultSet) -> InspectedCell? {
         let grid = result.table
-        guard let s = result.selection,
-            s.column < grid.columns.count,
-            s.row < grid.rowCount
-        else { return nil }
+        guard let s = selectedCell(in: result) else { return nil }
         let name = grid.columns[s.column].name
         let isNull = grid.isNull(row: s.row, column: s.column)
+        // The relation's declared type where we have it; the Query tab may
+        // return computed columns that no relation describes.
+        let declared = columns.first { $0.name == name }?.dataType ?? ""
+        // Nothing to render for a NULL, and asking would copy a binary cell out
+        // of Arrow to describe a value that is not there.
+        let rendering: ValueRendering =
+            isNull
+            ? .text
+            : Self.rendering(
+                kind: grid.columns[s.column].kind, declared: declared,
+                bytes: { grid.bytes(row: s.row, column: s.column) ?? [] })
         return InspectedCell(
             column: name,
-            // The relation's declared type where we have it; the Query tab may
-            // return computed columns that no relation describes.
-            type: columns.first { $0.name == name }?.dataType ?? "",
-            value: isNull ? "NULL" : grid.text(row: s.row, column: s.column),
+            type: declared,
+            value: isNull ? "NULL" : Self.text(of: rendering, in: grid, at: s),
             isNull: isNull,
             // A multi-row selection extends far past the viewport, so the count
             // is the only place it is legible before ⌘C makes it obvious.
             address: s.rows.count > 1
                 ? "\(Self.formatted(s.rows.count)) rows selected"
-                : "row \(Self.formatted(s.row + 1))")
+                : "row \(Self.formatted(s.row + 1))",
+            rendering: rendering,
+            isExpanded: isValueViewerOpen,
+            toggleExpanded: { [weak self] in self?.isValueViewerOpen.toggle() })
+    }
+
+    /// Which rendering a cell gets, from the two type sources this has.
+    ///
+    /// The Arrow kind is always true of what arrived and is what identifies a
+    /// binary column; the declared type is the only thing that can say `jsonb`,
+    /// because the driver maps it to Utf8 like any other string. Neither is the
+    /// string itself — a `text` column holding `{}` is text.
+    private static func rendering(
+        kind: ArrowTable.Kind, declared: String, bytes: () -> [UInt8]
+    ) -> ValueRendering {
+        switch kind {
+        case .binary: return .binary(bytes())
+        case .utf8 where ValueRendering.isJSONType(declared): return .json
+        default: return .text
+        }
+    }
+
+    /// The strip's one-line form of a cell, which for a binary column is not
+    /// what the grid draws: "12 B" is the most a column-width cell can say, and
+    /// the strip has room for the bytes themselves.
+    private static func text(
+        of rendering: ValueRendering, in grid: ArrowTable, at s: GridSelection
+    ) -> String {
+        if case .binary(let bytes) = rendering { return ValueRendering.preview(bytes: bytes) }
+        return grid.text(row: s.row, column: s.column)
     }
 
     // MARK: - Selection

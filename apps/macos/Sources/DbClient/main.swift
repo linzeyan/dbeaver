@@ -67,6 +67,16 @@ let initialSection = argument("--section").flatMap { requested in
     }
 }
 
+/// `--cell json_val:17` selects a cell by column name and 1-based row, and opens
+/// the value viewer on it.
+///
+/// Exists for the reason `--section` does. The viewer is reachable by clicking a
+/// cell and then a chevron, or by a menu item's shortcut, and a capture can do
+/// neither — synthetic events need accessibility permission this environment
+/// does not grant. Without it the one thing that catches a rendering defect in
+/// the viewer, a screenshot of the viewer, cannot be taken.
+let initialCell = argument("--cell")
+
 /// `--export out.csv` writes the opened result to a file and exits.
 ///
 /// Exists for the same reason `--tab` and `--relation` do, one step further on:
@@ -122,6 +132,67 @@ func exportWhenReady(model: AppModel, to path: String) {
             fputs("export name     \(model.exportFilename(format))\n", stderr)
             fputs("export message  \(model.exportMessage)\n", stderr)
             model.exportCurrentResult(to: url, format: format)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// Drives `--cell`. Polls for the same reason `exportWhenReady` does: the result
+/// arrives through the model's own background pipeline and there is no
+/// completion hook to hang this on.
+///
+/// Unlike the other probes this does not exit — the window has to stay up for
+/// the shutter — so a failure to find the column has to be loud, or a capture of
+/// an unopened viewer would read as the viewer failing to draw.
+@MainActor
+func openValueViewer(model: AppModel, on spec: String) {
+    let parts = spec.split(separator: ":", maxSplits: 1)
+    let column = String(parts[0])
+    let row = parts.count > 1 ? (Int(parts[1]) ?? 1) : 1
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    /// Opens the viewer the way ⌥⌘V does rather than by setting the flag.
+    ///
+    /// The flag is one assignment and would prove nothing about the command:
+    /// this walks the menu bar for the item, checks validation lets it fire, and
+    /// sends its action to its target, which is every link in the chain except
+    /// AppKit's own key-equivalent dispatch. A capture cannot press the keys, so
+    /// that last link is the only part left to trust.
+    func openViewerThroughMenu() {
+        let items = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items) ?? []
+        guard
+            let item = items.first(where: {
+                $0.action == #selector(ValueViewerCommand.toggleValueViewer(_:))
+            }), let action = item.action
+        else {
+            fputs("no value-viewer item in the menu bar\n", stderr)
+            exit(1)
+        }
+        guard (item.target as? NSMenuItemValidation)?.validateMenuItem(item) == true else {
+            fputs("the value-viewer item is disabled with a cell selected\n", stderr)
+            exit(1)
+        }
+        fputs("menu item      “\(item.title)”\n", stderr)
+        NSApp.sendAction(action, to: item.target, from: item)
+    }
+
+    func poll() {
+        let result = model.current
+        if let index = result.table.columns.firstIndex(where: { $0.name == column }),
+            result.hasRun, !result.isLoading, result.rowCount > 0
+        {
+            result.selection = GridSelection(
+                row: min(max(0, row - 1), result.rowCount - 1), column: index)
+            openViewerThroughMenu()
+            fputs("cell selected   \(column) (column \(index)) row \(row)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("no column named \(column) in the opened result\n", stderr)
+            exit(1)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -271,6 +342,7 @@ if benchMode {
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         model.connect()
+        if let initialCell { openValueViewer(model: model, on: initialCell) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }

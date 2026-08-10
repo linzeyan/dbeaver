@@ -15,6 +15,8 @@ enum AppMenu {
     private static var exportCommands: ExportCommands?
     /// Target of the View menu's Refresh item, held for the same reason.
     private static var refreshCommand: RefreshCommand?
+    /// Target of the View menu's value-viewer item, held for the same reason.
+    private static var valueViewerCommand: ValueViewerCommand?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -27,11 +29,13 @@ enum AppMenu {
         exportCommands = commands
         let refresh = RefreshCommand(model: model)
         refreshCommand = refresh
+        let valueViewer = ValueViewerCommand(model: model)
+        valueViewerCommand = valueViewer
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(fileMenu(target: commands))
         main.addItem(editMenu())
-        main.addItem(viewMenu(target: refresh))
+        main.addItem(viewMenu(target: refresh, valueViewer: valueViewer))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -133,7 +137,16 @@ enum AppMenu {
     /// rather than File, because View is where a Mac user looks for a reload —
     /// it is where Safari keeps one — and File is about getting things in and
     /// out of the window.
-    private static func viewMenu(target: RefreshCommand) -> NSMenuItem {
+    ///
+    /// The value viewer is here for the same reason: it changes what this window
+    /// shows without changing anything in the database. ⌥⌘V because ⌘V is Paste
+    /// and always will be, and ⇧⌘V is the paste variant every other application
+    /// puts there — a value viewer bound to either would be a trap in a window
+    /// whose main pane is a text editor. The item is what makes the shortcut
+    /// findable at all; nothing else in the interface can announce a keystroke.
+    private static func viewMenu(target: RefreshCommand, valueViewer: ValueViewerCommand)
+        -> NSMenuItem
+    {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
         let refresh = menu.addItem(
@@ -141,6 +154,15 @@ enum AppMenu {
             action: #selector(RefreshCommand.refresh(_:)), keyEquivalent: "r")
         refresh.keyEquivalentModifierMask = [.command, .shift]
         refresh.target = target
+
+        menu.addItem(.separator())
+        // Titled for the closed state; `validateMenuItem` rewrites it.
+        let value = menu.addItem(
+            withTitle: "Show Value in Full",
+            action: #selector(ValueViewerCommand.toggleValueViewer(_:)), keyEquivalent: "v")
+        value.keyEquivalentModifierMask = [.command, .option]
+        value.target = valueViewer
+
         item.submenu = menu
         return item
     }
@@ -179,6 +201,32 @@ final class RefreshCommand: NSObject, NSMenuItemValidation {
     /// running, so the item is never offered when pressing it would only queue
     /// a second read behind the first and land looking like nothing happened.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canRefresh }
+}
+
+/// The View menu's value-viewer item, as something a menu can send to.
+///
+/// Its own object rather than a second action on `RefreshCommand`, for the
+/// reason that class gives: `validateMenuItem` answers for every item that
+/// targets it, and these two answer differently.
+@MainActor
+final class ValueViewerCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func toggleValueViewer(_ sender: Any?) { model.isValueViewerOpen.toggle() }
+
+    /// Greyed out while no cell is selected, and re-titled to say what pressing
+    /// it will do. A toggle whose title never changes leaves the reader working
+    /// out which way it points from a pane they may not be able to see, and this
+    /// is the only place the shortcut is written down.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.title = model.isValueViewerOpen ? "Hide Value" : "Show Value in Full"
+        return model.canInspectValue
+    }
 }
 
 /// The File menu's export items, as something a menu can send to.

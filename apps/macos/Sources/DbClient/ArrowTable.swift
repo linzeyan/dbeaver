@@ -145,6 +145,23 @@ final class ArrowTable {
         return columns[column].batches[batchIdx].isNull(localRow)
     }
 
+    /// A binary cell's bytes, or nil where the column is not binary or the cell
+    /// is NULL.
+    ///
+    /// `text` renders a binary cell as a byte count, which is all that fits in a
+    /// grid cell and tells a reader nothing about what is in it. Copied out
+    /// rather than handed over as a pointer into the Arrow buffer: the caller
+    /// holds the value past the frame it asked in, and a `reset()` in between
+    /// would return that buffer to Rust underneath it.
+    func bytes(row: Int, column: Int) -> [UInt8]? {
+        guard column < columns.count, row < rowCount else { return nil }
+        guard
+            let (batchIdx, localRow) = Self.locate(
+                row: row, batchStarts: batchStarts, columns: columns)
+        else { return nil }
+        return columns[column].batches[batchIdx].bytes(at: localRow)
+    }
+
     /// Which batch holds a global row index, and where inside it.
     ///
     /// Takes the state it searches rather than reading it off `self`, so a
@@ -369,6 +386,19 @@ private struct ColumnBatch {
         case .unsupported(let f):
             return "<\(f)>"
         }
+    }
+
+    /// See `ArrowTable.bytes(row:column:)`.
+    func bytes(at i: Int) -> [UInt8]? {
+        guard case .binary = kind, !isNull(i) else { return nil }
+        let idx = offset + i
+        guard let offsets = buffer1?.assumingMemoryBound(to: Int32.self),
+            let data = buffer2?.assumingMemoryBound(to: UInt8.self)
+        else { return nil }
+        let start = Int(offsets[idx])
+        let end = Int(offsets[idx + 1])
+        guard end > start else { return [] }
+        return Array(UnsafeBufferPointer(start: data + start, count: end - start))
     }
 
     private func load<T>(_ type: T.Type, _ idx: Int) -> T {

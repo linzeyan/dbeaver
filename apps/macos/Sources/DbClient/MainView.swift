@@ -842,12 +842,46 @@ struct QueryPane: View {
 /// place a long value can actually be read. It is always present rather than
 /// appearing on selection: a strip that materialises on click makes the grid
 /// resize under the cursor mid-interaction.
+///
+/// One line is enough for a number and for nothing else, so the strip opens into
+/// `CellValueViewer` — see that file for why the viewer lives here rather than
+/// in a sheet. While it is open the strip stops repeating the first fragment of
+/// the value the pane below is already showing, and says what was done to it
+/// instead.
 struct CellInspector: View {
     let cell: AppModel.InspectedCell?
 
     var body: some View {
+        // Rendered once and handed to both halves. The strip's descriptor and
+        // the pane are two readings of the same work, and doing it twice would
+        // re-indent a document twice on every arrow key.
+        let rendered = cell.flatMap { $0.isExpanded ? RenderedValue.make(from: $0) : nil }
+        VStack(spacing: 0) {
+            strip(rendered)
+            if let rendered {
+                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                CellValueViewer(rendered: rendered)
+            }
+        }
+    }
+
+    private func strip(_ rendered: RenderedValue?) -> some View {
         HStack(spacing: Theme.Space.sm) {
             if let cell {
+                // The shortcut is the fast way in and an invisible one. A strip
+                // that can open has to show that it can, or the viewer is a
+                // feature only the menu knows about.
+                Button(action: cell.toggleExpanded) {
+                    Image(systemName: cell.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 14, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.textSecondary.color)
+                .help(cell.isExpanded ? "Hide the value (⌥⌘V)" : "Show the value in full (⌥⌘V)")
+                .accessibilityLabel(cell.isExpanded ? "Hide value" : "Show value in full")
+
                 Text(cell.column)
                     .font(Theme.Typography.captionEmphasis)
                     .foregroundStyle(Theme.textSecondary.color)
@@ -858,19 +892,27 @@ struct CellInspector: View {
                         .foregroundStyle(Theme.textTertiary.color)
                 }
 
-                Text(cell.value)
-                    .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(
-                        cell.isNull ? Theme.textTertiary.color : Theme.text.color
-                    )
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let rendered {
+                    Text(rendered.descriptor)
+                        .font(Theme.Typography.micro)
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(cell.value)
+                        .font(Theme.Typography.monoSmall)
+                        .foregroundStyle(
+                            cell.isNull ? Theme.textTertiary.color : Theme.text.color
+                        )
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
 
                 Button {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cell.isNull ? "" : cell.value, forType: .string)
+                    NSPasteboard.general.setString(Self.copyText(of: cell), forType: .string)
                 } label: {
                     Image(systemName: "doc.on.doc")
                         .font(.system(size: 10))
@@ -895,6 +937,21 @@ struct CellInspector: View {
             Rectangle().fill(Theme.separator.color).frame(height: 1)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    /// What the copy button puts on the pasteboard.
+    ///
+    /// Never the strip's own rendering. NULL copies as empty rather than as the
+    /// word, which the grid's ⌘C decided first and for the same reason; a binary
+    /// value copies as the whole `\x…` literal PostgreSQL accepts back, rather
+    /// than as the bounded preview on screen — a copy that silently drops the
+    /// end of a value is the worst kind of wrong.
+    private static func copyText(of cell: AppModel.InspectedCell) -> String {
+        guard !cell.isNull else { return "" }
+        if case .binary(let bytes) = cell.rendering {
+            return "\\x" + ValueRendering.hex(bytes)
+        }
+        return cell.value
     }
 }
 
