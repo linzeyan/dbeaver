@@ -88,6 +88,28 @@ let initialSection = argument("--section").flatMap { requested in
 /// the viewer, a screenshot of the viewer, cannot be taken.
 let initialCell = argument("--cell")
 
+/// `--history-store dev.dbclient.capture` keeps the query history in a named
+/// defaults suite, emptied at launch, instead of the user's own.
+///
+/// The history is the one thing in this window that outlives the process, which
+/// makes it the one thing a capture cannot simply launch into. Reading
+/// `UserDefaults.standard` would put whatever this machine last ran into the
+/// picture — different on every machine and different on the second run of the
+/// same command — and writing there would file a capture's props in somebody's
+/// real history.
+let historyStore = argument("--history-store")
+
+/// `--history` opens the history panel, through the menu item that owns it.
+let showHistory = CommandLine.arguments.contains("--history")
+
+/// `--history-pick 2` recalls the nth-newest statement into the editor.
+///
+/// Both exist for the reason `--cell` does: the panel is opened with a keystroke
+/// or a click and a row is chosen with another, and a capture can do neither.
+/// Both wait for the run that fills the history, so they are only useful
+/// alongside something that runs — `--sql`, with or without `--run-script`.
+let historyPick = argument("--history-pick").flatMap(Int.init)
+
 /// `--export out.csv` writes the opened result to a file and exits.
 ///
 /// Exists for the same reason `--tab` and `--relation` do, one step further on:
@@ -351,6 +373,74 @@ func runScriptWhenReady(model: AppModel) {
     poll()
 }
 
+/// Drives `--history` and `--history-pick`. Polls, and reports to stderr, for
+/// the reasons `exportWhenReady` does: the model's background pipeline has no
+/// completion hook, and a capture switch does not justify inventing one.
+///
+/// Unlike the other probes this does not exit on success — the window has to
+/// stay up for the shutter — so waiting for a history that never fills has to be
+/// loud, or a capture of an empty panel would read as the panel failing to draw.
+@MainActor
+func driveHistory(model: AppModel, open: Bool, pick: Int?) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    // Counted from 1, like the list it indexes and like every other ordinal in
+    // this window. Rejected rather than clamped: a probe that quietly picked a
+    // different row than it was asked for would put the wrong statement in a
+    // screenshot taken to prove which statement came back.
+    if let pick, pick < 1 {
+        fputs("--history-pick counts from 1\n", stderr)
+        exit(1)
+    }
+    let wanted = pick ?? 1
+
+    /// Opens the panel the way ⇧⌘H does rather than by setting the flag, for the
+    /// reason `openValueViewer` walks the menu: the flag is one assignment and
+    /// would prove nothing about the command behind it.
+    func openThroughMenu() {
+        let items = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items) ?? []
+        guard
+            let item = items.first(where: {
+                $0.action == #selector(QueryHistoryCommand.showQueryHistory(_:))
+            }), let action = item.action
+        else {
+            fputs("no query-history item in the menu bar\n", stderr)
+            exit(1)
+        }
+        guard (item.target as? NSMenuItemValidation)?.validateMenuItem(item) == true else {
+            fputs("the query-history item is disabled on the Query tab\n", stderr)
+            exit(1)
+        }
+        fputs("history item    “\(item.title)”\n", stderr)
+        NSApp.sendAction(action, to: item.target, from: item)
+    }
+
+    func poll() {
+        guard !model.isBusy, model.history.entries.count >= wanted else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs(
+                    "history probe timed out waiting for \(wanted) recorded "
+                        + "statement(s); the history holds "
+                        + "\(model.history.entries.count)\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        for (i, entry) in model.history.entries.enumerated() {
+            fputs("history \(i + 1)       \(entry.outcome.label) · \(entry.preview)\n", stderr)
+        }
+        if open { openThroughMenu() }
+        if let pick {
+            let entry = model.history.entries[pick - 1]
+            model.recall(entry)
+            fputs("history recalled \(entry.preview)\n", stderr)
+        }
+    }
+    poll()
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -407,8 +497,23 @@ if benchMode {
     // Top-level code runs on the main thread but is not statically isolated in
     // Swift 5 mode; assert the isolation the model requires rather than hop.
     MainActor.assumeIsolated {
+        let history: QueryHistory
+        if let historyStore {
+            // Emptied rather than merely kept apart: a suite is a persistent
+            // defaults domain like any other, so a second capture would
+            // otherwise open on the first one's entries.
+            UserDefaults.standard.removePersistentDomain(forName: historyStore)
+            guard let scratch = UserDefaults(suiteName: historyStore) else {
+                fputs("--history-store \(historyStore) is not a usable suite name\n", stderr)
+                exit(1)
+            }
+            history = QueryHistory(defaults: scratch)
+        } else {
+            history = QueryHistory()
+        }
         let model = AppModel(
-            connString: connString, initialTab: initialTab, initialSQL: initialSQL,
+            connString: connString, history: history,
+            initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation)
@@ -422,6 +527,9 @@ if benchMode {
         model.connect()
         if let initialCell { openValueViewer(model: model, on: initialCell) }
         if runScriptMode { runScriptWhenReady(model: model) }
+        if showHistory || historyPick != nil {
+            driveHistory(model: model, open: showHistory, pick: historyPick)
+        }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }

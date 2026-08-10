@@ -177,6 +177,19 @@ final class AppModel {
     var whereClause = ""
     var orderClause = ""
 
+    /// Every statement this window has sent, newest first, kept across launches.
+    ///
+    /// Held rather than created here so a capture can hand in a scratch store;
+    /// see `--history-store`.
+    let history: QueryHistory
+
+    /// Whether the history panel under the editor is open.
+    ///
+    /// Pane state rather than window state, unlike the value viewer: the list
+    /// only ever feeds the editor, and there is nothing to read from it on the
+    /// other tabs.
+    var isHistoryOpen = false
+
     var queryText = ""
     /// Where the caret or selection is in the editor.
     ///
@@ -272,11 +285,13 @@ final class AppModel {
     private let initialSQLIsScript: Bool
 
     init(
-        connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil,
+        connString: String, history: QueryHistory, initialTab: DetailTab = .content,
+        initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil
     ) {
+        self.history = history
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
@@ -1095,6 +1110,14 @@ final class AppModel {
         }
 
         scriptSteps = steps
+        // Recorded in the order the statements went out, and only those that
+        // did: this is the one place every statement the Query pane sends passes
+        // through, whether ⌘R sent one or ⌥⌘R sent forty, and the steps past a
+        // failure never reached the server.
+        for step in steps {
+            guard let outcome = QueryHistoryOutcome(step.outcome) else { continue }
+            history.record(step.sql, outcome: outcome)
+        }
         // Where the eye should go. A run that stopped has exactly one place
         // worth looking and it is the statement that stopped it; a run that
         // finished lands on the last statement that returned anything, which is
@@ -1127,6 +1150,41 @@ final class AppModel {
             // for the other the number would sit beside "failed" looking like a
             // measurement of the answer rather than of the wait.
             return "\(label) · \(outcome.label)"
+        }
+    }
+
+    // MARK: - History
+
+    /// Whether the history can be shown. The panel lives in the Query pane, so
+    /// off that tab the menu item would open something nobody can see.
+    var canShowHistory: Bool { activeTab == .query }
+
+    /// Puts a statement from the history back in the editor, selected so that
+    /// ⌘R sends exactly it.
+    ///
+    /// Appended rather than swapped in. Selecting a table in the navigator used
+    /// to overwrite this buffer and silently discard whatever the user was in
+    /// the middle of; a history that did the same would be a second way to lose
+    /// the same work, reached from a list they opened to avoid retyping. The
+    /// editor already holds scripts and ⌘R already means "the statement I am
+    /// standing in", so a recalled statement arriving as one more of them needs
+    /// no new idea — and the selection is what makes it the one that runs.
+    ///
+    /// The panel closes on the way out: the pick is the whole transaction, and
+    /// the rows it was occupying are worth more to the result below it.
+    func recall(_ entry: QueryHistoryEntry) {
+        activeTab = .query
+        isHistoryOpen = false
+        let existing = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The splitter strips the terminator from a statement, so a buffer that
+        // ends without one would run straight into what is being appended and
+        // the two would go to the server as a single statement.
+        let prefix = existing.isEmpty ? "" : existing + (existing.hasSuffix(";") ? "\n\n" : ";\n\n")
+        queryText = prefix + entry.sql
+        let start = prefix.unicodeScalars.count
+        let end = start + entry.sql.unicodeScalars.count
+        if let selection = SQLScript.range(start..<end, in: queryText) {
+            querySelection = TextSelection(range: selection)
         }
     }
 

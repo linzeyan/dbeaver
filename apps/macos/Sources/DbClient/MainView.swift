@@ -789,14 +789,37 @@ struct QueryPane: View {
                     .focused($focus, equals: .editor)
                     .accessibilityLabel("SQL editor")
 
-                // Says which statement is about to run, before it runs. A buffer
-                // of five makes ⌘R a guess otherwise, and the wrong guess is a
-                // statement the user did not mean to execute.
-                Text(model.runTarget?.hint ?? "nothing to run")
-                    .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.textTertiary.color)
-                    .padding(Theme.Space.sm)
-                    .accessibilityHidden(true)
+                HStack(spacing: Theme.Space.sm) {
+                    // Says which statement is about to run, before it runs. A
+                    // buffer of five makes ⌘R a guess otherwise, and the wrong
+                    // guess is a statement the user did not mean to execute.
+                    Text(model.runTarget?.hint ?? "nothing to run")
+                        .font(Theme.Typography.micro)
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .accessibilityHidden(true)
+
+                    // The corner of the editor is where this belongs: it is
+                    // about the buffer, not about the result. ⇧⌘H reaches it
+                    // too, but a shortcut is invisible, and a list nothing on
+                    // screen mentions is a feature only the menu bar knows
+                    // about — the same argument the inspector strip's chevron
+                    // settled for the value viewer.
+                    Button {
+                        model.isHistoryOpen.toggle()
+                    } label: {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 18, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(
+                        model.isHistoryOpen ? Theme.accent.color : Theme.textSecondary.color
+                    )
+                    .help("Statements this window has run (⇧⌘H)")
+                    .accessibilityLabel("Query history")
+                }
+                .padding(Theme.Space.sm)
             }
             // The split opens at `maxHeight`, so this is the editor's starting
             // size as much as its ceiling: enough for a statement of about ten
@@ -804,6 +827,13 @@ struct QueryPane: View {
             .frame(minHeight: 72, idealHeight: 120, maxHeight: 200)
 
             VStack(spacing: 0) {
+                // Directly under the editor it feeds, and above the outcome
+                // list, which describes the run rather than the buffer.
+                if model.isHistoryOpen {
+                    QueryHistoryPanel(model: model)
+                    Rectangle().fill(Theme.separator.color).frame(height: 1)
+                }
+
                 // Only for a run of several. A ⌘R over one statement has one
                 // outcome and the grid is already showing it; a list of one
                 // would be chrome charged to the common case to describe the
@@ -846,6 +876,211 @@ struct QueryPane: View {
                 }
             }
             .frame(minHeight: 160)
+        }
+    }
+}
+
+/// What this window has run, newest first, with a way back into the editor.
+///
+/// It sits in the pane rather than in a popover or a sheet, and that is the
+/// load-bearing decision. `CellValueViewer` gives most of the argument — a sheet
+/// takes the key window and a popover closes on the first key that is not its
+/// own — and this list adds one of its own: a screenshot is how everything in
+/// this window is checked, `tools/capture-window.swift` captures a single window
+/// by id, and a popover is a window of its own. A history nobody can capture is
+/// a history nobody can review.
+///
+/// It is toggled rather than always present because the pane's vertical space is
+/// already contested between the editor and the result, and a list of past
+/// statements is worth less than either while it is not being read. Picking a
+/// statement closes it again, so the cost is bounded to the moment it is in use.
+private struct QueryHistoryPanel: View {
+    @Bindable var model: AppModel
+    /// Set by the Clear button, cleared by either answer. Clearing is
+    /// irreversible, so it is asked in the panel's own header rather than
+    /// through an alert: a modal would take the window away from the thing it
+    /// is about, which is the objection `InlineBanner` already carries.
+    @State private var confirmingClear = false
+    @State private var hovered: UUID?
+
+    /// Seven rows before it scrolls, two more than the outcome list gets: this
+    /// is a list someone is searching, where that one is a run being read.
+    private static let rowHeight: CGFloat = 22
+    private static let maxRows = 7
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            if model.history.entries.isEmpty {
+                // Says what fills the list rather than that it is empty. This is
+                // where someone who found the panel before they needed it is
+                // standing.
+                Text("Nothing has run yet — ⌘R sends the statement the caret is in.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Self.rowHeight * 2)
+            } else {
+                list
+            }
+        }
+        .background(Theme.surface.color)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Query history")
+    }
+
+    private var header: some View {
+        HStack(spacing: Theme.Space.sm) {
+            if confirmingClear {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.dangerText.color)
+                Text(
+                    "Delete all \(AppModel.pluralized(model.history.entries.count, "statement"))? "
+                        + "This cannot be undone."
+                )
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.text.color)
+
+                Spacer(minLength: Theme.Space.sm)
+
+                Button("Cancel") { confirmingClear = false }
+                    .controlSize(.small)
+                Button("Delete") {
+                    model.history.clear()
+                    confirmingClear = false
+                }
+                .controlSize(.small)
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.danger.color)
+            } else {
+                Text("History")
+                    .font(Theme.Typography.captionEmphasis)
+                    .foregroundStyle(Theme.textSecondary.color)
+                Text(AppModel.pluralized(model.history.entries.count, "statement"))
+                    .font(Theme.Typography.digits)
+                    .foregroundStyle(Theme.textTertiary.color)
+
+                Spacer(minLength: Theme.Space.sm)
+
+                if !model.history.entries.isEmpty {
+                    Button("Clear…") { confirmingClear = true }
+                        .controlSize(.small)
+                        .help("Delete every statement in the history")
+                }
+
+                Button {
+                    model.isHistoryOpen = false
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.textSecondary.color)
+                .help("Hide the history (⇧⌘H)")
+                .accessibilityLabel("Hide query history")
+            }
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 26)
+        .background(Theme.surfaceRaised.color)
+    }
+
+    private var list: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(model.history.entries) { entry in
+                    Button {
+                        model.recall(entry)
+                    } label: {
+                        row(entry)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(
+            height: Self.rowHeight
+                * CGFloat(min(model.history.entries.count, Self.maxRows))
+        )
+    }
+
+    private func row(_ entry: QueryHistoryEntry) -> some View {
+        let failed = entry.outcome.isFailure
+        return HStack(spacing: Theme.Space.sm) {
+            // Shape as well as colour, for the reason `StatusDot` carries one:
+            // the row still reads as a failure without colour vision.
+            Image(systemName: failed ? "exclamationmark.triangle.fill" : "checkmark.circle")
+                .font(.system(size: 9))
+                .foregroundStyle(failed ? Theme.dangerText.color : Theme.run.color)
+                .frame(width: 12)
+
+            // The statement keeps the content tone whatever happened to it. It
+            // is what the row is being scanned for, and a red line of SQL reads
+            // as the text itself being the problem.
+            Text(entry.preview)
+                .font(Theme.Typography.monoSmall)
+                .foregroundStyle(Theme.text.color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(entry.outcome.label)
+                .font(Theme.Typography.digits)
+                .foregroundStyle(failed ? Theme.dangerText.color : Theme.textSecondary.color)
+                .lineLimit(1)
+
+            Text(Self.age(of: entry))
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+                .frame(width: 62, alignment: .trailing)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: Self.rowHeight)
+        .background(hovered == entry.id ? Theme.surfaceRaised.color : Color.clear)
+        .overlay(alignment: .leading) {
+            // The same 2pt rule `InlineBanner` wears, so a failure is findable
+            // by running an eye down the edge rather than by reading four
+            // columns of every row.
+            Rectangle()
+                .fill(failed ? Theme.danger.color : Color.clear)
+                .frame(width: 2)
+        }
+        .contentShape(Rectangle())
+        // Every row is one line of a statement that may be twenty; the tooltip
+        // is what makes the rest of it reachable without recalling it first.
+        .help(entry.sql)
+        .onHover { inside in
+            if inside {
+                hovered = entry.id
+            } else if hovered == entry.id {
+                hovered = nil
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(entry.preview), \(entry.outcome.label), \(Self.age(of: entry))")
+    }
+
+    /// How long ago a statement went out, to one unit.
+    ///
+    /// Written out rather than handed to `RelativeDateTimeFormatter`, which gets
+    /// two things wrong here. It follows the system locale, so on a Mac set to
+    /// anything but English it drops a translated phrase into a window that is
+    /// English everywhere else; and for a statement sent a moment ago it answers
+    /// "in 0 sec.", which points the wrong way in time. One unit, because the
+    /// question this column answers is which of two runs a row is, and it is
+    /// answered by the number nearest the top.
+    private static func age(of entry: QueryHistoryEntry) -> String {
+        let seconds = Date().timeIntervalSince(entry.ranAt)
+        switch seconds {
+        case ..<60: return "just now"
+        case ..<3600: return "\(Int(seconds / 60))m ago"
+        case ..<86400: return "\(Int(seconds / 3600))h ago"
+        default: return "\(Int(seconds / 86400))d ago"
         }
     }
 }
