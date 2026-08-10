@@ -783,8 +783,6 @@ struct QueryPane: View {
                 // without it the pane knows the text and not where in it the
                 // user is standing.
                 SQLEditor(text: $model.queryText, selection: $model.querySelection)
-                    .font(Theme.Typography.editor)
-                    .scrollContentBackground(.hidden)
                     .padding(.horizontal, Theme.Space.md)
                     .padding(.vertical, Theme.Space.sm)
                     .background(Theme.background.color)
