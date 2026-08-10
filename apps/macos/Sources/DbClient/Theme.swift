@@ -38,6 +38,10 @@ enum Theme {
 
         var color: Color { Color(.sRGB, red: r, green: g, blue: b, opacity: a) }
 
+        /// For the AppKit views the SwiftUI layer wraps. sRGB explicitly, so a
+        /// tone means the same thing on both sides of the boundary.
+        var nsColor: NSColor { NSColor(srgbRed: r, green: g, blue: b, alpha: a) }
+
         /// Straight, non-premultiplied alpha — which is what the grid's blend
         /// state expects.
         var simd: SIMD4<Float> { SIMD4(Float(r), Float(g), Float(b), Float(a)) }
@@ -111,6 +115,50 @@ enum Theme {
         static let scrollThumbActive = Tone(0xFFFF_FF, alpha: 0.38)
     }
 
+    /// Colours for the SQL editor's syntax. Its own namespace for the same
+    /// reason `Grid` has one: a surface with a vocabulary of its own, drawn from
+    /// the same palette.
+    ///
+    /// Contrast is against `Theme.background`, measured rather than assumed, and
+    /// the numbers below are the ratios. All of them clear 4.5:1, because every
+    /// one of these is text somebody is reading rather than a label beside it.
+    ///
+    /// The ordering is deliberate. Plain identifiers — the table and column
+    /// names a reader is actually hunting for — stay brightest at 14.5:1 and
+    /// take no colour at all; keywords are the most frequent thing on screen and
+    /// sit lowest, so that colouring them separates the sentence without
+    /// shouting over its nouns.
+    enum Editor {
+        /// Anything with no token of its own: identifiers, operators,
+        /// punctuation. The grid's data tone, since both are content.
+        static let text = Tone(0xE2E8_F0)  // 14.5:1
+        static let keyword = Tone(0xA78B_FA)  // 6.6:1
+        /// Warm and bright on purpose. An unclosed quote turns everything after
+        /// it into a literal, and that is the mistake this whole feature exists
+        /// to make visible, so it gets the loudest colour here.
+        static let string = Tone(0xFDBA_74)  // 10.6:1
+        /// A `$fn$ … $fn$` body is a string to the server, so it takes the
+        /// string's hue — but dimmed, because a function body runs to dozens of
+        /// lines and a literal at full strength over that much text glows.
+        /// Its contents are deliberately left flat: the server sees one string
+        /// there, and a second language lexed inside the first is a much larger
+        /// promise than this makes.
+        static let dollarQuoted = Tone(0xD9A0_66)  // 7.8:1
+        static let number = Tone(0x5EEA_D4)  // 12.1:1
+        /// A quoted identifier is a name, not a value, so it is cool where the
+        /// literals are warm.
+        static let quotedIdentifier = Tone(0x93C5_FD)  // 9.9:1
+        /// Subordinate but not decorative: a comment is prose the author wrote
+        /// to be read, so it stays above the 4.5:1 line rather than dropping to
+        /// the tertiary label tone.
+        static let comment = Tone(0x7C8F_A6)  // 5.4:1
+        /// The caret and the selection band, which `pointAtSyntaxError` uses to
+        /// put the offending token on screen. Indigo is already "this is where
+        /// you are" everywhere else in the window.
+        static let caret = Theme.accent
+        static let selection = Theme.accent.opacity(0.32)
+    }
+
     // MARK: - Spacing
     //
     // A 4pt rhythm at dashboard density. A database client trades whitespace for
@@ -145,8 +193,14 @@ enum Theme {
         static let title = Font.system(size: 13, weight: .semibold)
         static let mono = Font.system(size: 12, design: .monospaced)
         static let monoSmall = Font.system(size: 11, design: .monospaced)
-        static let editor = Font.system(size: 13, design: .monospaced)
+        static let editor = Font.system(size: editorSize, design: .monospaced)
+        /// The same face as `editor`, for the `NSTextView` the SQL editor is
+        /// built on. A SwiftUI `Font` cannot be handed to AppKit, so the size is
+        /// named once above rather than written twice and left to drift.
+        static let editorFont = NSFont.monospacedSystemFont(ofSize: editorSize, weight: .regular)
         static let digits = Font.system(size: 11).monospacedDigit()
+
+        private static let editorSize: CGFloat = 13
     }
 
     // MARK: - Motion

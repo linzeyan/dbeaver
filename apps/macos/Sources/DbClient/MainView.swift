@@ -782,7 +782,7 @@ struct QueryPane: View {
                 // The selection binding is what makes ⌘R mean "this statement":
                 // without it the pane knows the text and not where in it the
                 // user is standing.
-                TextEditor(text: $model.queryText, selection: $model.querySelection)
+                SQLEditor(text: $model.queryText, selection: $model.querySelection)
                     .font(Theme.Typography.editor)
                     .scrollContentBackground(.hidden)
                     .padding(.horizontal, Theme.Space.md)
