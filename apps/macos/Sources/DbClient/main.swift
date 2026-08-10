@@ -47,6 +47,17 @@ let initialSQL = argument("--sql")
 /// than in the first.
 let initialCaret = argument("--caret").flatMap(Int.init)
 
+/// `--run-script` runs the whole of `--sql` instead of the statement `--caret`
+/// is in, by sending the Query menu's own item.
+///
+/// Exists for the reason `--refresh-after` does: Run Script is reachable only
+/// from a menu item, and a synthetic click needs accessibility permission this
+/// environment does not grant. Sending the item rather than calling the model is
+/// the point — an item wired to nothing would pass the second check and fail
+/// this one. The outcomes are printed as they land and the window is left up,
+/// because the thing being verified is what the screen says.
+let runScriptMode = CommandLine.arguments.contains("--run-script")
+
 /// `--where` and `--order` seed the browse filters, for the same reason `--tab`
 /// exists: reproducing a particular view without clicking into it.
 let initialWhere = argument("--where")
@@ -202,6 +213,73 @@ func refreshWhenReady(model: AppModel, after seconds: Double) {
     }
 }
 
+/// Drives `--run-script`. Polls, and reports to stderr, for the reasons
+/// `exportWhenReady` does: the model's background pipeline has no completion
+/// hook, and a capture switch does not justify inventing one.
+@MainActor
+func runScriptWhenReady(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    /// The Query menu's Run Script item, found the way a user finds it.
+    func menuItem() -> NSMenuItem? {
+        NSApp.mainMenu?.items
+            .compactMap(\.submenu)
+            .first { $0.title == "Query" }?
+            .items.first { $0.title == "Run Script" }
+    }
+
+    func poll() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("script probe timed out\n", stderr)
+            exit(1)
+        }
+        guard let item = menuItem() else {
+            fputs("script probe found no Run Script item in the Query menu\n", stderr)
+            exit(1)
+        }
+        // The item's own target is asked, which is what AppKit asks when the
+        // menu opens. `NSApp.validateMenuItem` answers for the application and
+        // says yes to anything, so a probe that consulted it would fire the
+        // command mid-connection and then wait forever for a run the disabled
+        // command never started.
+        guard let validator = item.target as? NSMenuItemValidation,
+            validator.validateMenuItem(item), let action = item.action
+        else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        fputs("script item     \(item.title) · enabled\n", stderr)
+        NSApp.sendAction(action, to: item.target, from: item)
+        report()
+    }
+
+    func report() {
+        func settled() {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("script probe timed out waiting for the run\n", stderr)
+                exit(1)
+            }
+            guard !model.isBusy, !model.scriptSteps.isEmpty else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    MainActor.assumeIsolated(settled)
+                }
+                return
+            }
+            for step in model.scriptSteps {
+                fputs("script step \(step.id)   \(step.summary) · \(step.preview)\n", stderr)
+            }
+            fputs("script showing  \(model.selectedStep + 1)\n", stderr)
+            fputs("script status   \(model.statusLine)\n", stderr)
+            fputs("script message  \(model.errorMessage ?? "(none)")\n", stderr)
+        }
+        settled()
+    }
+
+    poll()
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -260,7 +338,7 @@ if benchMode {
     MainActor.assumeIsolated {
         let model = AppModel(
             connString: connString, initialTab: initialTab, initialSQL: initialSQL,
-            initialCaret: initialCaret,
+            initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation)
         // Installed here rather than before the window is built, because the
@@ -271,6 +349,7 @@ if benchMode {
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
         model.connect()
+        if runScriptMode { runScriptWhenReady(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }

@@ -139,7 +139,34 @@ final class AppModel {
     let browseResult = ResultSet()
 
     // Query pane
-    let queryResult = ResultSet()
+
+    /// The statements the pane last ran, in order, each with what it did.
+    ///
+    /// A run of one is what ⌘R makes and a run of five is what ⌥⌘R makes. Five
+    /// statements produce five outcomes and this pane has one grid, so the list
+    /// is where the other four go: showing one and saying nothing about the rest
+    /// is the class of lie the status bar's "first 100,000 of ~1,000,000 rows"
+    /// exists to prevent.
+    private(set) var scriptSteps: [ScriptStep] = []
+
+    /// Which step the pane is showing, as an index into `scriptSteps`.
+    var selectedStep = 0
+
+    var selectedScriptStep: ScriptStep? {
+        scriptSteps.indices.contains(selectedStep) ? scriptSteps[selectedStep] : nil
+    }
+
+    /// The Query pane's rows: whichever step is selected.
+    ///
+    /// Computed rather than one grid the run writes into, because choosing
+    /// another statement out of the list must not re-run anything — each step
+    /// holds the batches it was handed until the next run replaces the lot.
+    var queryResult: ResultSet { selectedScriptStep?.result ?? pristine }
+
+    /// Stands in before anything has run here. A result that has never run is a
+    /// different state from a statement that returned nothing, and the pane
+    /// draws them differently.
+    private let pristine = ResultSet()
 
     /// The result the chrome is currently describing. Structure has no result of
     /// its own, so it borrows the browse's — the status bar overrides what it
@@ -238,12 +265,19 @@ final class AppModel {
     private let initialFilters: (where: String?, order: String?)
     private var appliedInitialFilters = false
 
+    /// Set by `--run-script`: the opening `--sql` is a whole script, and nothing
+    /// here runs it. main.swift sends the Query menu's own item once the window
+    /// has settled, which is what makes the capture a check of that item's
+    /// wiring rather than only of the model behind it.
+    private let initialSQLIsScript: Bool
+
     init(
         connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil,
-        initialCaret: Int? = nil,
+        initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil
     ) {
+        self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
         self.connString = connString
@@ -294,8 +328,9 @@ final class AppModel {
             // Runs after the selection above, so an explicit `--sql` replaces
             // the browse rather than racing it. Through the same path ⌘R takes,
             // so a multi-statement `--sql` runs the one `--caret` names rather
-            // than the whole buffer.
-            if initialSQL != nil { runCurrentQuery() }
+            // than the whole buffer — unless `--run-script` says otherwise, and
+            // then the menu item is what runs it.
+            if initialSQL != nil, !initialSQLIsScript { runCurrentQuery() }
         }
     }
 
@@ -766,6 +801,10 @@ final class AppModel {
             let keyPart = keys == 0 ? "no primary key" : "\(keys) in primary key"
             return "\(Self.pluralized(columns.count, "column")) · \(keyPart)"
         case .content, .query:
+            // A Query step is asked rather than the grid behind it: a statement
+            // that returned no rows has no row count to report and a sentence of
+            // its own instead, and one that never ran has neither.
+            if activeTab == .query, let step = selectedScriptStep { return step.summary }
             // Each pane reports its own result. Falling back to `status` covers
             // the connection messages and the window before anything has run.
             return current.summary.isEmpty ? status : current.summary
@@ -824,9 +863,192 @@ final class AppModel {
             return
         }
         guard let target = runTarget else { return }
-        runQuery(
-            SQLScript.text(target.range, in: queryText), describedAs: target.label,
-            into: queryResult, sent: SentStatement(script: queryText, range: target.range))
+        runStatements([target.range], labelled: [target.label])
+    }
+
+    /// Whether ⌥⌘R has anything to run. Includes `isBusy`, unlike `canRun`,
+    /// because this is what greys the menu item out: the core queue is serial,
+    /// so a second run would only queue behind the first and land looking like a
+    /// command that did nothing.
+    var canRunScript: Bool {
+        activeTab == .query && !isBusy && !SQLScript.statements(in: queryText).isEmpty
+    }
+
+    /// Runs every statement in the buffer, in order, stopping at the first that
+    /// fails.
+    ///
+    /// Deliberately not wrapped in a transaction. Each statement goes out on its
+    /// own, exactly as ⌘R sends it, so a script that half-succeeds has half
+    /// happened — and the outcome list is what says which half. An implicit
+    /// BEGIN…COMMIT around the buffer would change the atomicity of what the
+    /// user typed without being asked, and it cannot even be done honestly:
+    /// CREATE INDEX CONCURRENTLY and VACUUM refuse to run inside a transaction
+    /// block, so statements that work in psql would start failing here; and a
+    /// script containing its own COMMIT would end the client's wrapper halfway
+    /// through, leaving the rest unwrapped while the window went on claiming
+    /// otherwise. The statements share one connection, which is what makes a
+    /// BEGIN the user wrote cover the statements after it — atomicity stays
+    /// something a script asks for rather than something this imposes.
+    func runScript() {
+        guard canRunScript else { return }
+        let all = SQLScript.statements(in: queryText)
+        guard !all.isEmpty else { return }
+        // A buffer holding one statement is "query" here as it is under ⌘R, so
+        // running a one-liner whole is described exactly as it always was.
+        let labels =
+            all.count == 1
+            ? ["query"] : all.indices.map { "statement \($0 + 1) of \(all.count)" }
+        runStatements(all, labelled: labels)
+    }
+
+    /// Runs `ranges` of the editor buffer in order on the one connection, and
+    /// installs an outcome for each.
+    ///
+    /// The whole run is a single trip to the core queue rather than one trip per
+    /// statement. The queue is serial anyway — one connection cannot service two
+    /// statements — so hopping back to the main actor between them would buy
+    /// nothing but a chance for a browse to interleave into the middle of
+    /// somebody's script.
+    private func runStatements(_ ranges: [Range<Int>], labelled labels: [String]) {
+        isBusy = true
+        // The step on screen dims for the duration. Blanking the pane would lose
+        // the result the user is comparing against, and the veil is the
+        // vocabulary the browse already uses for exactly this.
+        queryResult.beginLoading()
+        status = "Running…"
+        // A new run supersedes the previous failure; leaving the banner up would
+        // attribute an old error to the outcomes now on screen.
+        errorMessage = nil
+        let batchRows = self.batchRows
+        // The buffer as it is now. An error arrives after a round trip, and the
+        // caret may only be moved while the text it indexes still exists.
+        let script = queryText
+        let sql = ranges.map { SQLScript.text($0, in: script) }
+
+        run { db -> ScriptOutput in
+            var completed: [StatementOutput] = []
+            for text in sql {
+                let started = CFAbsoluteTimeGetCurrent()
+                do {
+                    let query = try db.query(text, batchRows: batchRows)
+                    let schema = try query.schema()
+                    var batches: [UnsafeMutablePointer<ArrowArray>] = []
+                    // Pulled to exhaustion even when there is nothing to pull.
+                    // `query` returns once the server has acknowledged the bind,
+                    // which is before it executes anything — so a duplicate
+                    // relation or a violated constraint is still ahead of us,
+                    // and so is the count a statement without rows reports.
+                    while let batch = try query.nextBatch() {
+                        batches.append(batch)
+                    }
+                    completed.append(
+                        StatementOutput(
+                            schema: schema, batches: batches,
+                            rowsAffected: query.rowsAffected ?? 0,
+                            milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000))
+                } catch {
+                    // Returned rather than thrown: the statements that already
+                    // ran are results the user needs, and `dispatch` discards
+                    // the value of a throwing stage. Stopping here is the point
+                    // — the statements after this one are not sent.
+                    return ScriptOutput(
+                        completed: completed,
+                        failure: error as? DbError
+                            ?? DbError(description: String(describing: error)))
+                }
+            }
+            return ScriptOutput(completed: completed, failure: nil)
+        } then: { [self] output in
+            install(output, ranges: ranges, statements: sql, labels: labels, script: script)
+        }
+    }
+
+    /// Turns a finished run into the steps the pane shows.
+    private func install(
+        _ output: ScriptOutput, ranges: [Range<Int>], statements: [String], labels: [String],
+        script: String
+    ) {
+        var steps: [ScriptStep] = []
+        for (i, out) in output.completed.enumerated() {
+            let result = ResultSet()
+            let grid = result.table
+            grid.setSchema(out.schema)
+            if let release = out.schema.pointee.release { release(out.schema) }
+            out.schema.deallocate()
+            for batch in out.batches {
+                grid.append(batch: batch)
+            }
+            // No columns at all is the server's own answer to "did this return
+            // rows", and it is not the same answer as a result set that happened
+            // to be empty. An UPDATE and a SELECT that matched nothing both show
+            // no rows, and only one of them changed the database.
+            let outcome: StatementOutcome =
+                grid.columns.isEmpty
+                ? .completed(affected: out.rowsAffected) : .rows(grid.rowCount)
+            let summary = Self.stepSummary(
+                label: labels[i], outcome: outcome, milliseconds: out.milliseconds)
+            // Nothing in the Query pane imposes a LIMIT, so nothing it returns
+            // is capped: what is on screen is the whole of what the statement
+            // produced.
+            result.finish(capped: false, milliseconds: out.milliseconds, summary: summary)
+            steps.append(
+                ScriptStep(
+                    id: i + 1, sql: statements[i], range: ranges[i], summary: summary,
+                    outcome: outcome, result: result))
+        }
+
+        // A run stops at the first failure, so the failed statement is the one
+        // after the last that completed, and everything past it never ran. Those
+        // rows have to say so: a list that goes on looking the same below the
+        // failure claims work that did not happen.
+        let stopped = output.failure.map { _ in output.completed.count }
+        if let failure = output.failure, let stopped {
+            for i in stopped..<ranges.count {
+                let outcome: StatementOutcome =
+                    i == stopped ? .failed(failure.description) : .notRun
+                steps.append(
+                    ScriptStep(
+                        id: i + 1, sql: statements[i], range: ranges[i],
+                        summary: Self.stepSummary(
+                            label: labels[i], outcome: outcome, milliseconds: 0),
+                        outcome: outcome, result: ResultSet()))
+            }
+        }
+
+        scriptSteps = steps
+        // Where the eye should go. A run that stopped has exactly one place
+        // worth looking and it is the statement that stopped it; a run that
+        // finished lands on the last statement that returned anything, which is
+        // where a script that ends by checking its own work keeps the answer.
+        selectedStep =
+            stopped
+            ?? steps.lastIndex { $0.outcome.hasGrid }
+            ?? max(steps.count - 1, 0)
+        isBusy = false
+
+        if let failure = output.failure, let stopped {
+            // Through `fail`, so the banner, the status word and the caret are
+            // the same ones every other failure gets.
+            self.fail(
+                with: StatementFailure(
+                    error: failure, sent: SentStatement(script: script, range: ranges[stopped])))
+        }
+    }
+
+    /// What the status bar reads for one step of a run.
+    private static func stepSummary(
+        label: String, outcome: StatementOutcome, milliseconds: Double
+    ) -> String {
+        switch outcome {
+        case .rows, .completed:
+            let elapsed = String(format: "%.2f", milliseconds / 1000)
+            return "\(label) · \(outcome.label) · \(elapsed) s"
+        case .failed, .notRun:
+            // No elapsed time: for one of these there is nothing to time, and
+            // for the other the number would sit beside "failed" looking like a
+            // measurement of the answer rather than of the wait.
+            return "\(label) · \(outcome.label)"
+        }
     }
 
     // MARK: - Export
@@ -905,13 +1127,11 @@ final class AppModel {
     /// so — a row count that silently means "the first hundred thousand" is the
     /// same class of lie as a cell that truncates without a marker.
     ///
-    /// `sent` is the statement in the editor this came from, for a Query-pane
-    /// run and nothing else. It travels back out attached to any failure, so a
-    /// browse issued in the meantime cannot leave the banner measuring an error
-    /// against a statement that did not cause it.
+    /// The browse's path. The Query pane runs through `runStatements`, which has
+    /// to keep N results rather than install one.
     private func runQuery(
         _ sql: String, describedAs label: String, into result: ResultSet,
-        cappedAt: Int? = nil, appending: Bool = false, sent: SentStatement? = nil
+        cappedAt: Int? = nil, appending: Bool = false
     ) {
         isBusy = true
         result.beginLoading()
@@ -924,21 +1144,16 @@ final class AppModel {
         // The grid is mutated on the main actor only; the background stage
         // returns batches and the main stage installs them.
         run { db -> QueryResult in
-            do {
-                let started = CFAbsoluteTimeGetCurrent()
-                let query = try db.query(sql, batchRows: batchRows)
-                let schema = try query.schema()
-                var batches: [UnsafeMutablePointer<ArrowArray>] = []
-                while let batch = try query.nextBatch() {
-                    batches.append(batch)
-                }
-                return QueryResult(
-                    schema: schema, batches: batches,
-                    milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
-            } catch {
-                guard let sent else { throw error }
-                throw StatementFailure(error: error, sent: sent)
+            let started = CFAbsoluteTimeGetCurrent()
+            let query = try db.query(sql, batchRows: batchRows)
+            let schema = try query.schema()
+            var batches: [UnsafeMutablePointer<ArrowArray>] = []
+            while let batch = try query.nextBatch() {
+                batches.append(batch)
             }
+            return QueryResult(
+                schema: schema, batches: batches,
+                milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
         } then: { [self] fetched in
             let grid = result.table
             if appending {
@@ -1125,4 +1340,26 @@ private struct QueryResult: @unchecked Sendable {
     let schema: UnsafeMutablePointer<ArrowSchema>
     let batches: [UnsafeMutablePointer<ArrowArray>]
     let milliseconds: Double
+}
+
+/// One statement of a script run, on the same journey and for the same reason.
+private struct StatementOutput: @unchecked Sendable {
+    let schema: UnsafeMutablePointer<ArrowSchema>
+    let batches: [UnsafeMutablePointer<ArrowArray>]
+    /// What the server said the statement affected. Meaningful only where the
+    /// schema has no columns; a statement that returned rows is described by the
+    /// rows it returned.
+    let rowsAffected: Int
+    let milliseconds: Double
+}
+
+/// A whole run: what completed, and what stopped it.
+///
+/// The failure rides in the value rather than being thrown, because the
+/// statements that already ran are results the user needs and a thrown error
+/// takes the value with it. Its index is `completed.count` — a run stops at the
+/// first failure, so there is nowhere else it can be.
+private struct ScriptOutput: @unchecked Sendable {
+    let completed: [StatementOutput]
+    let failure: DbError?
 }

@@ -806,30 +806,185 @@ struct QueryPane: View {
             .frame(minHeight: 72, idealHeight: 120, maxHeight: 200)
 
             VStack(spacing: 0) {
+                // Only for a run of several. A ⌘R over one statement has one
+                // outcome and the grid is already showing it; a list of one
+                // would be chrome charged to the common case to describe the
+                // rare one.
+                if model.scriptSteps.count > 1 {
+                    ScriptOutcomeList(model: model)
+                    Rectangle().fill(Theme.separator.color).frame(height: 1)
+                }
+
                 // Until this pane has run something there is nothing to show.
                 // It used to fall back to the browse's grid, which put rows
                 // under a statement that had not produced them.
-                if model.queryResult.hasRun {
-                    MetalGridView(
-                        table: model.queryResult.table,
-                        generation: model.queryResult.generation,
-                        rowCount: model.queryResult.rowCount,
-                        selection: $result.selection
-                    )
-                    .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
-                    .accessibilityLabel("Query result grid")
+                if let step = model.selectedScriptStep {
+                    if step.outcome.hasGrid {
+                        MetalGridView(
+                            table: model.queryResult.table,
+                            generation: model.queryResult.generation,
+                            rowCount: model.queryResult.rowCount,
+                            selection: $result.selection
+                        )
+                        .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                        .accessibilityLabel("Query result grid")
 
-                    CellInspector(cell: model.inspectedCell(in: model.queryResult))
+                        CellInspector(cell: model.inspectedCell(in: model.queryResult))
+                    } else {
+                        // A statement that returned no rows still has an answer,
+                        // and an empty grid with no columns is not it — that
+                        // reads as a query that broke rather than as an UPDATE
+                        // that worked.
+                        StatementNote(step: step)
+                            .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                    }
                 } else {
                     EmptyState(
                         symbol: "terminal",
                         title: "No results yet",
-                        hint: "Press ⌘R to run the statement above."
+                        hint: "Press ⌘R to run the statement above, ⌥⌘R for all of them."
                     )
                     .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
                 }
             }
             .frame(minHeight: 160)
+        }
+    }
+}
+
+/// Every statement of a run, in order, with what each one did.
+///
+/// The pane has one grid and a script has N results, so this is where the other
+/// N-1 go. It may show a subset of the rows — one statement's at a time — but
+/// never a subset of the statements: a run that stopped at the third of five
+/// lists all five, and says of the last two that they did not run.
+private struct ScriptOutcomeList: View {
+    @Bindable var model: AppModel
+
+    /// Six rows before it scrolls. Enough for the scripts people actually
+    /// paste, and past that the editor above is worth more than a seventh row
+    /// of chrome.
+    private static let rowHeight: CGFloat = 20
+    private static let maxRows = 6
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(model.scriptSteps.enumerated()), id: \.element.id) { index, step in
+                    Button {
+                        model.selectedStep = index
+                    } label: {
+                        row(step, isSelected: index == model.selectedStep)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(
+            height: Self.rowHeight
+                * CGFloat(min(model.scriptSteps.count, Self.maxRows))
+        )
+        .background(Theme.surface.color)
+        .accessibilityLabel("Statement outcomes")
+    }
+
+    private func row(_ step: ScriptStep, isSelected: Bool) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            // The ordinal, because the status bar and the editor's corner both
+            // count statements and this is the same numbering.
+            Text("\(step.id)")
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+                .frame(width: 18, alignment: .trailing)
+
+            Text(step.preview)
+                .font(Theme.Typography.monoSmall)
+                .foregroundStyle(tone(step, isSelected: isSelected))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            Text(step.outcome.label)
+                .font(Theme.Typography.digits)
+                .foregroundStyle(outcomeTone(step.outcome))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: Self.rowHeight)
+        // The chrome's own selected tone, not the grid's. A row tinted with
+        // `Grid.selectedRow` reads through the sidebar's vibrancy as a blue band
+        // across the navigator at the same height, which is the data surface's
+        // vocabulary leaking into a place it was never mixed for.
+        .background(isSelected ? Theme.surfaceRaised.color : Color.clear)
+        .overlay(alignment: .leading) {
+            // The accent bar carries the selection where the fill is subtle by
+            // design, and puts it at the edge the eye runs down when scanning a
+            // list of ordinals.
+            Rectangle()
+                .fill(isSelected ? Theme.accent.color : Color.clear)
+                .frame(width: 2)
+        }
+        .contentShape(Rectangle())
+        .help(step.summary)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Statement \(step.id), \(step.outcome.label)")
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+    }
+
+    /// A statement that never ran is dimmed to the tone used for labels rather
+    /// than content, because that is what it has become: text describing
+    /// something that did not happen.
+    private func tone(_ step: ScriptStep, isSelected: Bool) -> Color {
+        if case .notRun = step.outcome { return Theme.textTertiary.color }
+        return isSelected ? Theme.text.color : Theme.textSecondary.color
+    }
+
+    private func outcomeTone(_ outcome: StatementOutcome) -> Color {
+        switch outcome {
+        case .failed: return Theme.dangerText.color
+        case .notRun: return Theme.textTertiary.color
+        case .rows, .completed: return Theme.textSecondary.color
+        }
+    }
+}
+
+/// What the pane says in place of a grid, for a statement that has no rows.
+///
+/// The three cases it covers are answers, not absences: an UPDATE that touched
+/// four rows, a statement that failed, and one that never ran because of it.
+private struct StatementNote: View {
+    let step: ScriptStep
+
+    var body: some View {
+        VStack(spacing: Theme.Space.sm) {
+            Image(systemName: symbol)
+                .font(.system(size: 22, weight: .light))
+                .foregroundStyle(tint)
+            Text(step.note)
+                .font(Theme.Typography.body)
+                .foregroundStyle(Theme.textSecondary.color)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 420)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.background.color)
+        .accessibilityElement(children: .combine)
+    }
+
+    private var symbol: String {
+        switch step.outcome {
+        case .failed: return "exclamationmark.triangle"
+        case .notRun: return "minus.circle"
+        case .rows, .completed: return "checkmark.circle"
+        }
+    }
+
+    private var tint: Color {
+        switch step.outcome {
+        case .failed: return Theme.dangerText.color
+        case .notRun: return Theme.textTertiary.color
+        case .rows, .completed: return Theme.run.color
         }
     }
 }

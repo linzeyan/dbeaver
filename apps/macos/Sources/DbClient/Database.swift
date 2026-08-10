@@ -140,8 +140,27 @@ final class Query {
         return out
     }
 
+    /// Rows the server said this statement affected, or nil until the result has
+    /// been read to the end.
+    ///
+    /// What a statement returning no rows has to say for itself: an UPDATE
+    /// reports what it touched, a CREATE reports zero and still happened. The
+    /// verb is not part of it — the driver keeps the count out of the command
+    /// tag and drops the rest — so a caller that wants to say "UPDATE 3" would
+    /// have to invent the word, and this is not the place that gets to.
+    var rowsAffected: Int? {
+        let n = db_query_rows_affected(handle)
+        return n < 0 ? nil : Int(n)
+    }
+
     /// Next batch, or nil when the result is exhausted. Ownership of the
     /// returned array transfers to the caller.
+    ///
+    /// Where a statement fails, more often than not. `Database.query` returns
+    /// once the server has acknowledged the bind, which is before it executes
+    /// anything, so a duplicate relation or a violated constraint surfaces from
+    /// here rather than from there. A statement with no rows to fetch still has
+    /// to be pulled once for that reason.
     func nextBatch() throws -> UnsafeMutablePointer<ArrowArray>? {
         let out = UnsafeMutablePointer<ArrowArray>.allocate(capacity: 1)
         var err: UnsafeMutablePointer<CChar>?

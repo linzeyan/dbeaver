@@ -281,6 +281,155 @@ async fn unsupported_column_type_is_rejected_at_prepare() {
     }
 }
 
+/// Runs `sql` for its effect, draining the stream so the command tag lands.
+///
+/// Returns what the server said it affected. The drain is not incidental: the
+/// count arrives with the end of the result, so a caller that stops early gets
+/// `None` and has no way to tell that from a statement that touched nothing.
+async fn run(src: &PgSource, sql: &str) -> u64 {
+    let mut stream = src.query(sql, 8192).await.expect("statement failed");
+    while stream.next_batch().await.expect("batch error").is_some() {}
+    stream
+        .rows_affected()
+        .expect("an exhausted statement has reported its count")
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_statement_returning_no_rows_still_runs_and_says_what_it_touched() {
+    let src = connect().await;
+    // A schema of its own, dropped at the end. The seeded fixtures are shared,
+    // and a test that writes to them is a test that breaks somebody's screenshot.
+    run(&src, "DROP SCHEMA IF EXISTS script_probe_counts CASCADE").await;
+    run(&src, "CREATE SCHEMA script_probe_counts").await;
+
+    // DDL prepares to no columns at all. That is the server's own answer to
+    // "does this return rows", and it is what lets a front end tell a statement
+    // with an empty result from one that has no result to speak of — the
+    // alternative being to guess from the verb it thinks it sees in the SQL.
+    let mut created = src
+        .query(
+            "CREATE TABLE script_probe_counts.t (id int primary key, n int)",
+            8192,
+        )
+        .await
+        .expect("CREATE should be accepted, not just SELECT");
+    assert!(
+        created.schema().fields().is_empty(),
+        "a CREATE describes no columns"
+    );
+    assert!(created.next_batch().await.expect("batch error").is_none());
+
+    // `query` returning `Ok` is not the statement having succeeded. It awaits
+    // BindComplete and no further, and Bind is before Execute — so everything a
+    // statement can fail at while running (a duplicate relation, a constraint,
+    // a division by zero) is still ahead of it. The error arrives out of
+    // `next_batch`, which is why a caller that wants to know whether a statement
+    // worked has to read the result to the end even when there is nothing in it.
+    let mut duplicate = src
+        .query("CREATE TABLE script_probe_counts.t (id int)", 8192)
+        .await
+        .expect("the collision is not detected this early");
+    let err = duplicate
+        .next_batch()
+        .await
+        .expect_err("the first CREATE ran, so the second must collide");
+    assert!(
+        err.to_string().contains("already exists"),
+        "expected a duplicate-relation error, got {err}"
+    );
+
+    assert_eq!(
+        run(
+            &src,
+            "INSERT INTO script_probe_counts.t SELECT g, g * 2 FROM generate_series(1, 5) g"
+        )
+        .await,
+        5,
+        "an INSERT reports the rows it wrote"
+    );
+    assert_eq!(
+        run(
+            &src,
+            "UPDATE script_probe_counts.t SET n = n + 1 WHERE id <= 3"
+        )
+        .await,
+        3,
+        "an UPDATE reports the rows it matched"
+    );
+    assert_eq!(
+        run(&src, "DELETE FROM script_probe_counts.t WHERE id > 100").await,
+        0,
+        "nothing matched is a real answer, not a missing one"
+    );
+
+    // The distinction the front end has to draw: rows returned versus rows
+    // affected. A SELECT reports both and they agree; a DELETE has only the
+    // second, and calling it a row count would put rows in a grid that has none.
+    let mut selected = src
+        .query("SELECT id FROM script_probe_counts.t ORDER BY id", 8192)
+        .await
+        .expect("select failed");
+    let batch = selected.next_batch().await.unwrap().unwrap();
+    assert_eq!(batch.num_rows(), 5);
+    assert!(selected.next_batch().await.unwrap().is_none());
+    assert_eq!(selected.rows_affected(), Some(5));
+
+    run(&src, "DROP SCHEMA script_probe_counts CASCADE").await;
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn statements_share_the_connection_and_the_transaction_the_user_opened() {
+    let src = connect().await;
+    run(&src, "DROP SCHEMA IF EXISTS script_probe_tx CASCADE").await;
+    run(&src, "CREATE SCHEMA script_probe_tx").await;
+    run(&src, "CREATE TABLE script_probe_tx.t (id int)").await;
+
+    // Why a script run does not wrap itself in a transaction: it does not have
+    // to. Statements go out one after another on one connection, so a BEGIN the
+    // user typed opens a block that the statements after it are inside, and a
+    // ROLLBACK they typed takes those statements back. Atomicity stays a thing
+    // the script asks for rather than a thing the client silently imposes.
+    run(&src, "BEGIN").await;
+    run(&src, "INSERT INTO script_probe_tx.t VALUES (1)").await;
+    run(&src, "ROLLBACK").await;
+    let mut after = src
+        .query("SELECT id FROM script_probe_tx.t", 8192)
+        .await
+        .expect("select failed");
+    assert!(
+        after.next_batch().await.unwrap().is_none(),
+        "the rollback the script asked for must actually roll the insert back"
+    );
+
+    run(&src, "BEGIN").await;
+    run(&src, "INSERT INTO script_probe_tx.t VALUES (2)").await;
+    run(&src, "COMMIT").await;
+    let mut kept = src
+        .query("SELECT id FROM script_probe_tx.t", 8192)
+        .await
+        .expect("select failed");
+    assert_eq!(kept.next_batch().await.unwrap().unwrap().num_rows(), 1);
+
+    run(&src, "DROP SCHEMA script_probe_tx CASCADE").await;
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_failed_statement_leaves_the_connection_usable() {
+    let src = connect().await;
+    // Stop-on-error only means anything if the connection survives the error:
+    // the run has to be able to report what the earlier statements did, and the
+    // window has to go on working afterwards without a reconnect.
+    assert!(src.query("SELECT nosuchcolumn", 8192).await.is_err());
+    let mut ok = src
+        .query("SELECT 1 AS one", 8192)
+        .await
+        .expect("the connection should still be good after a failed statement");
+    assert_eq!(ok.next_batch().await.unwrap().unwrap().num_rows(), 1);
+}
+
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
 async fn schemas_exclude_catalog_namespaces() {

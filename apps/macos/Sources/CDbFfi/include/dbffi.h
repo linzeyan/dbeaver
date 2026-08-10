@@ -93,7 +93,19 @@ int db_query_schema(DbQuery* query, struct ArrowSchema* out, char** err);
 
 // Returns 1 and fills `out` with the next batch, 0 when exhausted, -1 on error.
 // The caller owns `out` and must invoke its release callback.
+//
+// db_query returning a handle is not the statement having succeeded: it awaits
+// the server's BindComplete, which is before execution. Everything a statement
+// fails at while running — a duplicate relation, a constraint, a divide by zero
+// — arrives here instead. A statement with no rows to fetch still has to be
+// pulled to exhaustion for that reason, and for the count below.
 int db_query_next(DbQuery* query, struct ArrowArray* out, char** err);
+
+// Rows the statement reported affecting, or -1 until its result has been read to
+// the end. Zero is a real answer — an UPDATE that matched nothing — so "not yet
+// known" cannot be spelled with it. The count is all a statement returning no
+// rows says about itself; the verb that produced it does not survive the driver.
+int64_t db_query_rows_affected(DbQuery* query);
 
 void db_query_free(DbQuery* query);
 void db_string_free(char* s);
