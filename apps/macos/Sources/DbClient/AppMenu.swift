@@ -21,6 +21,8 @@ enum AppMenu {
     private static var navigatorCommand: NavigatorCommand?
     /// Target of the Query menu's items, held for the same reason.
     private static var queryCommands: QueryCommands?
+    /// Target of the Query menu's history item, held for the same reason.
+    private static var historyCommand: QueryHistoryCommand?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -39,12 +41,14 @@ enum AppMenu {
         navigatorCommand = navigator
         let query = QueryCommands(model: model)
         queryCommands = query
+        let queryHistory = QueryHistoryCommand(model: model)
+        historyCommand = queryHistory
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(fileMenu(target: commands))
         main.addItem(editMenu())
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
-        main.addItem(queryMenu(target: query))
+        main.addItem(queryMenu(target: query, history: queryHistory))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -198,7 +202,19 @@ enum AppMenu {
     /// declares ⌘R for it. Two declarations of one key equivalent is a race
     /// between AppKit's menu and SwiftUI's shortcut that nobody would win twice
     /// in a row.
-    private static func queryMenu(target: QueryCommands) -> NSMenuItem {
+    ///
+    /// The history is here rather than under View, which is where Refresh and
+    /// the value viewer sit: those change what the window shows about the
+    /// database, and this is a list of what was sent to it — the same subject as
+    /// the two items above it. ⇧⌘H because ⌘H is Hide and ⌥⌘H is Hide Others on
+    /// every Mac and always will be, which leaves the shift variant as the
+    /// nearest free key that still spells History; nothing else in this window
+    /// binds it. The item opens the panel and does not close it: a list that
+    /// closes when a statement is picked, and carries its own dismiss button,
+    /// has no question left for a menu to answer.
+    private static func queryMenu(target: QueryCommands, history: QueryHistoryCommand)
+        -> NSMenuItem
+    {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Query")
         let script = menu.addItem(
@@ -206,6 +222,14 @@ enum AppMenu {
             action: #selector(QueryCommands.runScript(_:)), keyEquivalent: "r")
         script.keyEquivalentModifierMask = [.command, .option]
         script.target = target
+
+        menu.addItem(.separator())
+        let recent = menu.addItem(
+            withTitle: "Query History",
+            action: #selector(QueryHistoryCommand.showQueryHistory(_:)), keyEquivalent: "h")
+        recent.keyEquivalentModifierMask = [.command, .shift]
+        recent.target = history
+
         item.submenu = menu
         return item
     }
@@ -317,6 +341,30 @@ final class QueryCommands: NSObject, NSMenuItemValidation {
     /// text and no statements, which is why this asks the model rather than
     /// measuring the string.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canRunScript }
+}
+
+/// The Query menu's history item, as something a menu can send to.
+///
+/// Its own object rather than a second action on `QueryCommands`, for the reason
+/// `RefreshCommand` is one: `validateMenuItem` answers for every item pointed at
+/// it, and these two answer differently — a run in flight greys out Run Script
+/// and has no bearing at all on reading what already ran.
+@MainActor
+final class QueryHistoryCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func showQueryHistory(_ sender: Any?) { model.isHistoryOpen = true }
+
+    /// Greyed out away from the Query tab, where the panel is drawn. Offered
+    /// with an empty history on purpose: the panel then says what fills it,
+    /// which is the only way a user finds out the feature exists before they
+    /// need it.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canShowHistory }
 }
 
 /// The File menu's export items, as something a menu can send to.
