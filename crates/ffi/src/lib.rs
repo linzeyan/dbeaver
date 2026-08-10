@@ -346,6 +346,27 @@ pub unsafe extern "C" fn db_query_next(
     }
 }
 
+/// Rows the statement reported affecting, or -1 while the result has not been
+/// read to the end.
+///
+/// The only thing a statement returning no rows says about itself. Negative for
+/// "not known yet" rather than zero, because zero is a real answer — an UPDATE
+/// that matched nothing — and a front end that cannot tell those apart reports a
+/// statement as having done nothing when it has not finished doing it.
+///
+/// # Safety
+/// `query` must come from `db_query` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_query_rows_affected(query: *mut DbQuery) -> i64 {
+    if query.is_null() {
+        return -1;
+    }
+    let q = unsafe { &*query };
+    q.stream
+        .rows_affected()
+        .map_or(-1, |n| i64::try_from(n).unwrap_or(i64::MAX))
+}
+
 fn batch_to_ffi(batch: RecordBatch) -> FFI_ArrowArray {
     let struct_array: StructArray = batch.into();
     FFI_ArrowArray::new(&struct_array.to_data())

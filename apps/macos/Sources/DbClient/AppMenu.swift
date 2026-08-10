@@ -17,6 +17,8 @@ enum AppMenu {
     private static var refreshCommand: RefreshCommand?
     /// Target of the View menu's value-viewer item, held for the same reason.
     private static var valueViewerCommand: ValueViewerCommand?
+    /// Target of the Query menu's items, held for the same reason.
+    private static var queryCommands: QueryCommands?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -31,11 +33,14 @@ enum AppMenu {
         refreshCommand = refresh
         let valueViewer = ValueViewerCommand(model: model)
         valueViewerCommand = valueViewer
+        let query = QueryCommands(model: model)
+        queryCommands = query
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(fileMenu(target: commands))
         main.addItem(editMenu())
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer))
+        main.addItem(queryMenu(target: query))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -167,6 +172,26 @@ enum AppMenu {
         return item
     }
 
+    /// Running more than the statement the caret is in.
+    ///
+    /// ⌥⌘R rather than a shortcut of its own: it is ⌘R with more of the buffer,
+    /// and the modifier says so. Run itself is not repeated here — it belongs to
+    /// the toolbar's Run button, which is where the eye already goes and which
+    /// declares ⌘R for it. Two declarations of one key equivalent is a race
+    /// between AppKit's menu and SwiftUI's shortcut that nobody would win twice
+    /// in a row.
+    private static func queryMenu(target: QueryCommands) -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Query")
+        let script = menu.addItem(
+            withTitle: "Run Script",
+            action: #selector(QueryCommands.runScript(_:)), keyEquivalent: "r")
+        script.keyEquivalentModifierMask = [.command, .option]
+        script.target = target
+        item.submenu = menu
+        return item
+    }
+
     private static func windowMenu(for app: NSApplication) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Window")
@@ -227,6 +252,29 @@ final class ValueViewerCommand: NSObject, NSMenuItemValidation {
         item.title = model.isValueViewerOpen ? "Hide Value" : "Show Value in Full"
         return model.canInspectValue
     }
+}
+
+/// The Query menu's items, as something a menu can send to.
+///
+/// Its own object rather than a second action on an existing target, for the
+/// reason `RefreshCommand` is one: `validateMenuItem` answers for every item
+/// pointed at it, and one target per menu keeps that answer a sentence.
+@MainActor
+final class QueryCommands: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func runScript(_ sender: Any?) { model.runScript() }
+
+    /// Greyed out away from the Query tab, while a run is in flight, and over a
+    /// buffer with nothing runnable in it — a buffer holding only comments has
+    /// text and no statements, which is why this asks the model rather than
+    /// measuring the string.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canRunScript }
 }
 
 /// The File menu's export items, as something a menu can send to.

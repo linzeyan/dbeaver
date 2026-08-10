@@ -211,6 +211,24 @@ impl ArrowStream {
         Arc::clone(&self.schema)
     }
 
+    /// Rows the server said this statement affected, or `None` until the result
+    /// has been read to the end.
+    ///
+    /// A statement that returns no result set — an `UPDATE`, a `CREATE` — still
+    /// did something, and this count is the only thing it says about itself. It
+    /// rides on the `CommandComplete` that terminates the result, so there is
+    /// nothing to read until `next_batch` has answered `None`; a number reported
+    /// before then would be a guess dressed as an answer.
+    ///
+    /// The verb does not come with it. tokio-postgres parses the trailing count
+    /// out of the command tag and drops the rest, so `UPDATE 3` reaches us as 3
+    /// and `CREATE TABLE` as 0. Recovering the verb by re-reading the SQL we
+    /// sent would be this side inventing a fact the server did not state, which
+    /// is how a `CREATE` ends up labelled by somebody's regex for `INSERT`.
+    pub fn rows_affected(&self) -> Option<u64> {
+        self.rows.rows_affected()
+    }
+
     /// Next batch, or `None` once the result is fully consumed.
     ///
     /// Builders are allocated per batch. Reusing them across batches would save
