@@ -1,0 +1,77 @@
+# CI for the native rewrite.
+#
+# This file exists only on this branch. `devel` carries the Java upstream and
+# its own workflows, and none of the targets below mean anything in that tree —
+# so the branch filters are not tidiness, they are what keeps the two histories
+# from running each other's builds.
+#
+# The steps are Makefile targets rather than open-coded cargo and swift calls.
+# A CI that reimplements the local commands drifts from them, and then a green
+# run stops saying that the documented workflow works.
+name: CI
+
+on:
+  push:
+    branches: [rust]
+  pull_request:
+    branches: [rust]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A superseded push has nothing left to prove, and the macOS runner is the
+# scarce one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    name: Core (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # `make fmt-check` covers Rust and Swift and fails without the Xcode
+      # toolchain, so this job runs the half it can and leaves the whole gate to
+      # the macOS job.
+      - name: Format (Rust)
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: make lint
+
+      - name: Unit tests
+        run: make test
+
+      # The same container and the same seed script a developer runs, unedited.
+      # `make db-seed` takes a minute or so for the million rows the estimate
+      # test checks for, which is the cost of testing against real PostgreSQL
+      # rather than a stub that agrees with us.
+      - name: Seed benchmark database
+        run: make db-seed
+
+      - name: Integration tests
+        run: make test-integration
+
+  app:
+    name: App (macOS)
+    # Pinned rather than `macos-latest`: the package's deployment target is
+    # macOS 15, so the binary this job builds will not launch on an older
+    # runner, and `macos-latest` is whatever GitHub currently points it at.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      # swift-format ships inside the Xcode toolchain, which no Linux runner
+      # has. This step is the only place the Swift sources get checked at all.
+      - name: Format
+        run: make fmt-check
+
+      # Builds the core and links it into the app before running the splitter's
+      # checks, so this also answers whether the front-end still compiles.
+      - name: Swift checks
+        run: make test-swift
