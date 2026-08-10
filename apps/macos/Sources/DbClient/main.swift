@@ -68,6 +68,16 @@ let initialOrder = argument("--order")
 /// default.
 let initialRelation = argument("--relation")
 
+/// `--filter bench` opens with that text already in the navigator's filter
+/// field.
+///
+/// Exists for the reason `--tab` and `--relation` do: the field is reachable
+/// only by typing into it, and a screenshot cannot type. Without it the one
+/// thing that catches a layout defect in a filtered sidebar — a screenshot of a
+/// filtered sidebar — cannot be taken, and neither can the capture that proves
+/// a word matching nothing says so rather than going blank.
+let initialFilter = argument("--filter")
+
 /// `--section triggers` opens the Structure tab on one of its lower sections.
 /// Matched loosely so `foreignkeys`, `foreign-keys` and `Foreign keys` all work
 /// — this is a capture switch, not a parser.
@@ -411,7 +421,8 @@ if benchMode {
             connString: connString, initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
-            initialStructureDetail: initialSection, initialRelation: initialRelation)
+            initialStructureDetail: initialSection, initialRelation: initialRelation,
+            initialFilter: initialFilter)
         // Installed here rather than before the window is built, because the
         // File menu sends to the model and there is no model until now.
         AppMenu.install(into: app, model: model)

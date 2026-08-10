@@ -27,6 +27,10 @@ struct MainView: View {
             DetailPane(model: model, focus: $focus)
         }
         .toolbar { toolbarContent }
+        // The View menu's Filter Objects item, arriving as a bumped counter.
+        // An `NSMenuItem` action runs outside the view tree and cannot assign
+        // to a `@FocusState`; this is the only end of that wire that can.
+        .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
         .navigationTitle(model.selected?.name ?? "DbClient")
         .navigationSubtitle(
             model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? model.connectionLabel)
@@ -74,13 +78,25 @@ struct NavigatorView: View {
                     symbol: "server.rack",
                     title: "No schemas",
                     hint: "Nothing to browse on this connection yet.")
-            } else if model.matchedRelationCount == 0 {
+            } else if model.matchedRelationCount == 0, model.isFiltering {
+                // A filtered tree that matched nothing has to say so. Left
+                // blank it reads as a navigator that failed to load, which is
+                // the one reading that would send someone looking for a bug
+                // instead of for a shorter word.
                 EmptyState(
                     symbol: "magnifyingglass",
                     title: "No matches",
-                    hint: "Nothing named like “\(model.navigatorFilter)”.")
+                    hint: "No relation or schema is named like “\(model.navigatorFilter)”.")
+            } else if model.matchedRelationCount == 0 {
+                // Same shape, different fact: the schemas are there and hold
+                // nothing. Saying "no matches" here would blame a filter that
+                // is not switched on.
+                EmptyState(
+                    symbol: "square.stack.3d.up",
+                    title: "No objects",
+                    hint: "These schemas hold no tables or views.")
             } else {
-                List(selection: $model.selected) {
+                List(selection: $model.navigatorSelection) {
                     ForEach(model.schemas) { schema in
                         let relations = model.visibleRelations(in: schema.name)
                         if !relations.isEmpty {
@@ -151,6 +167,11 @@ struct NavigatorView: View {
         Binding(
             get: { model.isExpanded(schema) },
             set: { isOpen in
+                // Dropped while filtering. The getter answers from the matches
+                // then, not from this set, so a write would silently edit the
+                // arrangement the user gets back when they clear the field
+                // without changing anything on screen now.
+                guard !model.isFiltering else { return }
                 if isOpen { model.expanded.insert(schema) } else { model.expanded.remove(schema) }
             })
     }

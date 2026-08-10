@@ -122,6 +122,14 @@ final class AppModel {
     /// Name filter for the navigator. A schema with hundreds of objects is the
     /// normal case, and scrolling to find one is the slowest thing a user does.
     var navigatorFilter = ""
+    /// Bumped by the View menu's Filter Objects item.
+    ///
+    /// Focus lives in a `@FocusState` inside the window's view tree, which an
+    /// `NSMenuItem` action cannot reach; this is what carries the request across
+    /// that boundary. A counter rather than a flag, because pressing the
+    /// shortcut again after clicking away has to move focus back, and assigning
+    /// a flag the value it already holds gives `onChange` nothing to see.
+    private(set) var filterFocusRequests = 0
 
     // Detail
     var activeTab: DetailTab = .content
@@ -275,8 +283,10 @@ final class AppModel {
         connString: String, initialTab: DetailTab = .content, initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
-        initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil
+        initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
+        initialFilter: String? = nil
     ) {
+        self.navigatorFilter = initialFilter ?? ""
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
@@ -461,13 +471,29 @@ final class AppModel {
 
     // MARK: - Navigator
 
+    /// What the filter field is asking for, folded for comparison, or nil when
+    /// it is asking for nothing. Trimmed because a trailing space is the normal
+    /// residue of typing and never part of an object's name.
+    private var filterNeedle: String? {
+        let needle = navigatorFilter.trimmingCharacters(in: .whitespaces).lowercased()
+        return needle.isEmpty ? nil : needle
+    }
+
+    /// Whether the navigator is showing a subset. Read by the tree in several
+    /// places, each of which has to behave differently while it is true.
+    var isFiltering: Bool { filterNeedle != nil }
+
     /// Relations in `schema` matching the filter. Matching on a substring
     /// rather than a prefix, because table names are usually reached by the
     /// distinctive word in the middle rather than by what they start with.
     func visibleRelations(in schema: String) -> [RelationInfo] {
         let all = relations[schema] ?? []
-        let needle = navigatorFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !needle.isEmpty else { return all }
+        guard let needle = filterNeedle else { return all }
+        // A schema whose own name matches keeps everything under it. Typing
+        // "reporting" is asking to see that schema, and answering with the
+        // subset of its tables that happen to repeat the schema's name in their
+        // own would be a different question entirely.
+        if schema.lowercased().contains(needle) { return all }
         return all.filter { $0.name.lowercased().contains(needle) }
     }
 
@@ -475,10 +501,10 @@ final class AppModel {
     ///
     /// While a filter is active every schema with a match opens, so results are
     /// never hidden inside a collapsed group the user cannot see to expand.
+    /// `expanded` is left untouched throughout, which is what lets clearing the
+    /// field put the tree back exactly as the user last arranged it.
     func isExpanded(_ schema: String) -> Bool {
-        if !navigatorFilter.trimmingCharacters(in: .whitespaces).isEmpty {
-            return !visibleRelations(in: schema).isEmpty
-        }
+        if isFiltering { return !visibleRelations(in: schema).isEmpty }
         return expanded.contains(schema)
     }
 
@@ -489,6 +515,47 @@ final class AppModel {
     var totalRelationCount: Int {
         relations.values.reduce(0) { $0 + $1.count }
     }
+
+    /// Whether the filter is currently hiding the relation the detail panes are
+    /// describing.
+    var filterHidesSelection: Bool {
+        guard isFiltering, let selected else { return false }
+        return !visibleRelations(in: selected.schema).contains(selected)
+    }
+
+    /// What the navigator's `List` binds to, which is not quite `selected`.
+    ///
+    /// A `List` reports the selection among the rows it is showing, and under a
+    /// filter those are a subset — so the row the user is sitting on can leave
+    /// it, and SwiftUI writes nil back. Taking that nil would clear the
+    /// Structure and Content panes and throw away the browsed rows: typing in
+    /// the filter field would then change what the window says about a table,
+    /// not merely which tables are listed. So a nil arriving while the filter
+    /// is hiding the selection is read as the list disowning a row rather than
+    /// as the user deselecting one.
+    ///
+    /// The cost, accepted deliberately: while the selection is filtered out the
+    /// sidebar shows no highlighted row, and the title bar names a relation the
+    /// tree below does not list. The alternative — keeping the selected
+    /// relation in the list so its highlight survives — was rejected because it
+    /// puts a row that does not match into a list whose entire claim is that
+    /// every row in it matches, and a filter that quietly keeps one exception
+    /// is a worse lie than a highlight that is briefly off-screen. Clearing the
+    /// field brings the row and its highlight straight back.
+    var navigatorSelection: RelationInfo? {
+        get { selected }
+        set {
+            if newValue == nil, filterHidesSelection { return }
+            selected = newValue
+        }
+    }
+
+    /// Whether there is anything for the filter field to filter. Drives the
+    /// menu item's enabled state, so the command is not offered before the
+    /// connection has read a tree to narrow.
+    var canFilterObjects: Bool { !schemas.isEmpty }
+
+    func focusNavigatorFilter() { filterFocusRequests += 1 }
 
     // MARK: - Cell inspection
 

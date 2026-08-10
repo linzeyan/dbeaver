@@ -17,6 +17,8 @@ enum AppMenu {
     private static var refreshCommand: RefreshCommand?
     /// Target of the View menu's value-viewer item, held for the same reason.
     private static var valueViewerCommand: ValueViewerCommand?
+    /// Target of the View menu's object-filter item, held for the same reason.
+    private static var navigatorCommand: NavigatorCommand?
     /// Target of the Query menu's items, held for the same reason.
     private static var queryCommands: QueryCommands?
 
@@ -33,13 +35,15 @@ enum AppMenu {
         refreshCommand = refresh
         let valueViewer = ValueViewerCommand(model: model)
         valueViewerCommand = valueViewer
+        let navigator = NavigatorCommand(model: model)
+        navigatorCommand = navigator
         let query = QueryCommands(model: model)
         queryCommands = query
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(fileMenu(target: commands))
         main.addItem(editMenu())
-        main.addItem(viewMenu(target: refresh, valueViewer: valueViewer))
+        main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
         main.addItem(queryMenu(target: query))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
@@ -149,9 +153,17 @@ enum AppMenu {
     /// puts there — a value viewer bound to either would be a trap in a window
     /// whose main pane is a text editor. The item is what makes the shortcut
     /// findable at all; nothing else in the interface can announce a keystroke.
-    private static func viewMenu(target: RefreshCommand, valueViewer: ValueViewerCommand)
-        -> NSMenuItem
-    {
+    ///
+    /// Filter Objects is here on the same grounds — it narrows what this window
+    /// lists without touching the database — and takes ⌥⌘F rather than ⌘F. The
+    /// main pane is a text editor, and a plain ⌘F in an editor means find in the
+    /// text; binding it to the sidebar would claim a key this application will
+    /// want for the obvious thing later, and teach the wrong reflex until then.
+    /// ⌥⌘F is also where Sequel Ace, which this window's layout follows, keeps
+    /// its own table filter.
+    private static func viewMenu(
+        target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand
+    ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
         let refresh = menu.addItem(
@@ -159,6 +171,12 @@ enum AppMenu {
             action: #selector(RefreshCommand.refresh(_:)), keyEquivalent: "r")
         refresh.keyEquivalentModifierMask = [.command, .shift]
         refresh.target = target
+
+        let filter = menu.addItem(
+            withTitle: "Filter Objects",
+            action: #selector(NavigatorCommand.focusFilter(_:)), keyEquivalent: "f")
+        filter.keyEquivalentModifierMask = [.command, .option]
+        filter.target = navigator
 
         menu.addItem(.separator())
         // Titled for the closed state; `validateMenuItem` rewrites it.
@@ -252,6 +270,30 @@ final class ValueViewerCommand: NSObject, NSMenuItemValidation {
         item.title = model.isValueViewerOpen ? "Hide Value" : "Show Value in Full"
         return model.canInspectValue
     }
+}
+
+/// The View menu's object-filter item, as something a menu can send to.
+///
+/// Its own object for the reason `RefreshCommand` gives: `validateMenuItem`
+/// answers for every item pointed at it, and these answer differently.
+@MainActor
+final class NavigatorCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    /// Puts the caret in the sidebar's filter field. Deliberately does not
+    /// clear it: someone reaching for this while a filter is already on is
+    /// nearly always about to edit the word they typed, not to start over — and
+    /// Escape is right there for starting over.
+    @objc func focusFilter(_ sender: Any?) { model.focusNavigatorFilter() }
+
+    /// Greyed out until the tree has something in it. Focusing a field that can
+    /// only ever filter nothing is a command that does nothing.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFilterObjects }
 }
 
 /// The Query menu's items, as something a menu can send to.

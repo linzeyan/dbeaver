@@ -232,7 +232,10 @@ struct SidebarFilterField: View {
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Theme.textTertiary.color)
 
-            TextField("Filter", text: $text)
+            // Named for what it matches. "Filter" alone, over a tree of two
+            // levels, leaves the user to discover by experiment that the schema
+            // row is searched too.
+            TextField("Filter tables and schemas", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.text.color)
@@ -247,7 +250,7 @@ struct SidebarFilterField: View {
                         .foregroundStyle(Theme.textTertiary.color)
                 }
                 .buttonStyle(.plain)
-                .help("Clear filter")
+                .help("Clear filter (⎋)")
                 .accessibilityLabel("Clear filter")
             }
         }
@@ -262,7 +265,14 @@ struct SidebarFilterField: View {
                 .strokeBorder(
                     focus == .navigatorFilter
                         ? Theme.accent.color : Theme.separator.color,
-                    lineWidth: 1))
+                    lineWidth: 1)
+        )
+        // Escape empties the field, which is the reflex every macOS search
+        // field trains. The button is the visible way out and this is the one
+        // the hands already know; a filter is easy to leave switched on by
+        // accident, and both of them end with the whole tree back.
+        .onExitCommand { text = "" }
+        .help("Show only schemas and relations whose name contains this (⌥⌘F)")
     }
 }
 
