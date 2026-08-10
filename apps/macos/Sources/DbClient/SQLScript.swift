@@ -20,6 +20,13 @@ import Foundation
 /// a flag is two scalars and one Character, a letter with a combining accent
 /// likewise — so counting them instead puts every offset after such a character
 /// one place to the left, and the caret on the wrong letter.
+///
+/// The same walk also feeds the editor's colours, through `tokens(in:)`. It is
+/// one scanner on purpose: a highlighter with a lexer of its own would be a
+/// second opinion about where a string ends, and the two would disagree the
+/// first time one of them was fixed. Sharing it means the checks behind
+/// `--verify-splitter` are checking the colours too — a scanner that loses its
+/// place mid-literal splits wrongly and paints wrongly in the same breath.
 enum SQLScript {
     /// What ⌘R will send, and where it came from.
     struct Target: Equatable {
@@ -106,38 +113,65 @@ enum SQLScript {
         var found: [Range<Int>] = []
         var start = 0
         var hasCode = false
-        var i = 0
 
-        func end(at boundary: Int) {
-            if hasCode { found.append(trimming(s, start..<boundary)) }
-            hasCode = false
-        }
-
-        while i < s.count {
-            let c = s[i]
-            if c == ";" {
-                end(at: i)
-                i += 1
-                start = i
-            } else if c == "'" {
+        scan(s) { construct, range in
+            switch construct {
+            case .terminator:
+                if hasCode { found.append(trimming(s, start..<range.lowerBound)) }
+                hasCode = false
+                start = range.upperBound
+            case .comment, .whitespace:
+                break
+            case .string, .quotedIdentifier, .dollarQuoted, .number, .word, .other:
                 hasCode = true
-                i = endOfQuoted(s, from: i, quote: "'", escapes: isEscapeStringPrefix(s, at: i))
-            } else if c == "\"" {
-                hasCode = true
-                i = endOfQuoted(s, from: i, quote: "\"", escapes: false)
-            } else if c == "-", i + 1 < s.count, s[i + 1] == "-" {
-                i = endOfLineComment(s, from: i)
-            } else if c == "/", i + 1 < s.count, s[i + 1] == "*" {
-                i = endOfBlockComment(s, from: i)
-            } else if c == "$", let close = endOfDollarQuoted(s, from: i) {
-                hasCode = true
-                i = close
-            } else {
-                if !c.properties.isWhitespace { hasCode = true }
-                i += 1
             }
         }
-        end(at: s.count)
+        if hasCode { found.append(trimming(s, start..<s.count)) }
+        return found
+    }
+
+    // MARK: - Tokens
+
+    /// A run of the buffer worth giving a colour of its own.
+    struct Token: Equatable {
+        let kind: Kind
+        /// Scalar offsets, like everything else here.
+        let range: Range<Int>
+
+        enum Kind {
+            case keyword
+            case string
+            case quotedIdentifier
+            case number
+            case comment
+            case dollarQuoted
+        }
+    }
+
+    /// Every token the editor colours, in order and non-overlapping.
+    ///
+    /// Ordinary identifiers, operators and whitespace produce nothing. They are
+    /// the editor's default colour, so a token apiece would be most of the array
+    /// carrying no information — and the names of tables and columns are what a
+    /// reader is scanning for, which argues for leaving them at full strength
+    /// rather than tinting them too.
+    static func tokens(in script: String) -> [Token] {
+        let s = Array(script.unicodeScalars)
+        var found: [Token] = []
+        // Roughly one token per five scalars in real SQL; a starting guess, not
+        // a bound.
+        found.reserveCapacity(s.count / 5)
+        scan(s) { construct, range in
+            switch construct {
+            case .string: found.append(Token(kind: .string, range: range))
+            case .quotedIdentifier: found.append(Token(kind: .quotedIdentifier, range: range))
+            case .dollarQuoted: found.append(Token(kind: .dollarQuoted, range: range))
+            case .comment: found.append(Token(kind: .comment, range: range))
+            case .number: found.append(Token(kind: .number, range: range))
+            case .word: if isKeyword(s, range) { found.append(Token(kind: .keyword, range: range)) }
+            case .terminator, .whitespace, .other: break
+            }
+        }
         return found
     }
 
@@ -209,6 +243,135 @@ enum SQLScript {
     }
 
     // MARK: - Lexing
+
+    /// What one construct in the buffer turned out to be.
+    ///
+    /// The categories are the splitter's, not the highlighter's: everything the
+    /// splitter has to tell apart is here, and the highlighter maps what it
+    /// wants onto them. `word` is any run of identifier characters, keyword or
+    /// not — deciding which needs a word list, and the splitter does not care.
+    private enum Construct {
+        case terminator
+        case string
+        case quotedIdentifier
+        case dollarQuoted
+        case comment
+        case number
+        case word
+        case whitespace
+        case other
+    }
+
+    /// One pass over the buffer, naming every construct in order and covering
+    /// every scalar exactly once.
+    ///
+    /// The order of the tests is the grammar's and cannot be shuffled. The
+    /// dollar test comes before the word test because `$` continues an
+    /// identifier as well as opening a body, and `endOfDollarQuoted` is the only
+    /// thing that knows which; the number test comes before the word test
+    /// because both start on a digit and only one of them is reached with a
+    /// digit first.
+    private static func scan(_ s: [Unicode.Scalar], _ emit: (Construct, Range<Int>) -> Void) {
+        var i = 0
+        while i < s.count {
+            let c = s[i]
+            let start = i
+            if c == ";" {
+                i += 1
+                emit(.terminator, start..<i)
+            } else if c == "'" {
+                let escapes = isEscapeStringPrefix(s, at: i)
+                i = endOfQuoted(s, from: i, quote: "'", escapes: escapes)
+                // The `E` of `E'…'` belongs to the literal, so the span reaches
+                // back over it. It was emitted a moment ago as a one-character
+                // word, which costs nothing: no keyword is spelled "e", so the
+                // highlighter drops it and the two spans never both survive.
+                emit(.string, (escapes ? start - 1 : start)..<i)
+            } else if c == "\"" {
+                i = endOfQuoted(s, from: i, quote: "\"", escapes: false)
+                emit(.quotedIdentifier, start..<i)
+            } else if c == "-", i + 1 < s.count, s[i + 1] == "-" {
+                i = endOfLineComment(s, from: i)
+                emit(.comment, start..<i)
+            } else if c == "/", i + 1 < s.count, s[i + 1] == "*" {
+                i = endOfBlockComment(s, from: i)
+                emit(.comment, start..<i)
+            } else if c == "$", let close = endOfDollarQuoted(s, from: i) {
+                i = close
+                emit(.dollarQuoted, start..<i)
+            } else if let close = endOfNumber(s, from: i) {
+                i = close
+                emit(.number, start..<i)
+            } else if isIdentifierScalar(c) {
+                while i < s.count, isIdentifierScalar(s[i]) { i += 1 }
+                emit(.word, start..<i)
+            } else {
+                i += 1
+                emit(c.properties.isWhitespace ? .whitespace : .other, start..<i)
+            }
+        }
+    }
+
+    /// One past the numeric literal starting at `i`, or nil when what is there
+    /// is not one.
+    ///
+    /// Reached only at the start of a token, which is what keeps the `1` of
+    /// `col1` out and the `$1` of a parameter placeholder out with it: both are
+    /// consumed by the word that began before the digit.
+    private static func endOfNumber(_ s: [Unicode.Scalar], from i: Int) -> Int? {
+        if isDigit(s[i]) {
+            // Non-decimal literals and `_` as a group separator arrived in
+            // PostgreSQL 16. `0x` with no digits after it is not a number to the
+            // server either, but it is not anything else either, so painting the
+            // half-typed form is better than leaving it to flicker.
+            if s[i] == "0", i + 1 < s.count, isRadixMark(s[i + 1]) {
+                var j = i + 2
+                while j < s.count, isHexDigit(s[j]) || s[j] == "_" { j += 1 }
+                return j
+            }
+        } else if s[i] != "." || i + 1 >= s.count || !isDigit(s[i + 1]) {
+            // `.5` is a number; `t.x` is not, and neither is a bare `.`.
+            return nil
+        }
+
+        var j = i
+        var seenPoint = false
+        while j < s.count {
+            let c = s[j]
+            if isDigit(c) || c == "_" {
+                j += 1
+            } else if c == ".", !seenPoint {
+                seenPoint = true
+                j += 1
+            } else if c == "e" || c == "E", let after = exponentDigits(s, from: j) {
+                return after
+            } else {
+                break
+            }
+        }
+        return j
+    }
+
+    /// One past the exponent starting at the `e` at `j`, or nil when the `e`
+    /// begins an identifier instead — `1e` is the number 1 followed by a column
+    /// called `e`, and `1e+` is the same plus an operator.
+    private static func exponentDigits(_ s: [Unicode.Scalar], from j: Int) -> Int? {
+        var k = j + 1
+        if k < s.count, s[k] == "+" || s[k] == "-" { k += 1 }
+        guard k < s.count, isDigit(s[k]) else { return nil }
+        while k < s.count, isDigit(s[k]) { k += 1 }
+        return k
+    }
+
+    private static func isDigit(_ c: Unicode.Scalar) -> Bool { c >= "0" && c <= "9" }
+
+    private static func isRadixMark(_ c: Unicode.Scalar) -> Bool {
+        c == "x" || c == "X" || c == "o" || c == "O" || c == "b" || c == "B"
+    }
+
+    private static func isHexDigit(_ c: Unicode.Scalar) -> Bool {
+        isDigit(c) || (c >= "a" && c <= "f") || (c >= "A" && c <= "F")
+    }
 
     /// One past the closing quote of the run opening at `open`, or the end of
     /// the buffer for one that is never closed.
@@ -328,4 +491,132 @@ enum SQLScript {
         while upper > lower, s[upper - 1].properties.isWhitespace { upper -= 1 }
         return lower..<upper
     }
+
+    // MARK: - Keywords
+
+    /// Whether the word at `range` is one the editor paints.
+    ///
+    /// Case-folds and compares without touching the buffer's own storage,
+    /// because this runs once per identifier in the script and the script is
+    /// re-lexed on every edit. The two early exits carry most of that: no
+    /// keyword is longer than `current_timestamp` and none contains a non-ASCII
+    /// character, so a long name or an accented one is rejected before a string
+    /// is built at all.
+    private static func isKeyword(_ s: [Unicode.Scalar], _ range: Range<Int>) -> Bool {
+        guard range.count <= longestKeyword else { return false }
+        var word = ""
+        word.reserveCapacity(range.count)
+        for i in range {
+            let c = s[i]
+            guard c.value < 0x80 else { return false }
+            let folded = c >= "A" && c <= "Z" ? Unicode.Scalar(c.value + 32)! : c
+            word.unicodeScalars.append(folded)
+        }
+        return keywords.contains(word)
+    }
+
+    private static let longestKeyword = keywords.map(\.count).max() ?? 0
+
+    /// The words the editor paints as keywords.
+    ///
+    /// Read out of the server rather than remembered:
+    /// `SELECT word, catcode FROM pg_get_keywords()` on PostgreSQL 17.10, which
+    /// is the same table Appendix C of the manual is generated from. Every
+    /// reserved word is here — the three categories the server will not accept
+    /// as a bare column name in at least one position — so painting one can
+    /// never surprise anybody.
+    ///
+    /// The unreserved bucket is where judgement comes in, and it cannot simply
+    /// be taken whole: it holds 327 words including `name`, `value`, `level` and
+    /// `year`, which are unreserved precisely because they are ordinary column
+    /// names, and a highlighter that paints `SELECT name, value FROM config` as
+    /// three keywords is worse than one that paints nothing. Nor can it be left
+    /// out: `insert`, `update`, `delete`, `set` and `by` are all unreserved, and
+    /// an editor that does not colour `INSERT` is not colouring SQL. So the
+    /// unreserved words taken are the ones that name a statement, name an object
+    /// a statement acts on, or introduce a clause inside one.
+    ///
+    /// The cost of that line is real and accepted: a column genuinely called
+    /// `key` or `type` gets painted. That is a cosmetic surprise on a rare name,
+    /// where the alternative is `PRIMARY KEY` and `CREATE TYPE` going unpainted
+    /// every time they occur.
+    private static let keywords: Set<String> = reserved.union(unreserved).union(typeNames)
+
+    /// `catcode` R, T and C: reserved, reserved-but-usable-as-a-function-name,
+    /// and unreserved-but-not-usable-as-a-function-or-type-name. Verbatim.
+    private static let reserved: Set<String> = [
+        "all", "analyse", "analyze", "and", "any", "array", "as", "asc", "asymmetric",
+        "authorization", "between", "bigint", "binary", "bit", "boolean", "both", "case", "cast",
+        "char", "character", "check", "coalesce", "collate", "collation", "column", "concurrently",
+        "constraint", "create", "cross", "current_catalog", "current_date", "current_role",
+        "current_schema", "current_time", "current_timestamp", "current_user", "dec", "decimal",
+        "default", "deferrable", "desc", "distinct", "do", "else", "end", "except", "exists",
+        "extract", "false", "fetch", "float", "for", "foreign", "freeze", "from", "full", "grant",
+        "greatest", "group", "grouping", "having", "ilike", "in", "initially", "inner", "inout",
+        "int", "integer", "intersect", "interval", "into", "is", "isnull", "join", "json",
+        "json_array", "json_arrayagg", "json_exists", "json_object", "json_objectagg",
+        "json_query", "json_scalar", "json_serialize", "json_table", "json_value", "lateral",
+        "leading", "least", "left", "like", "limit", "localtime", "localtimestamp", "merge_action",
+        "national", "natural", "nchar", "none", "normalize", "not", "notnull", "null", "nullif",
+        "numeric", "offset", "on", "only", "or", "order", "out", "outer", "overlaps", "overlay",
+        "placing", "position", "precision", "primary", "real", "references", "returning", "right",
+        "row", "select", "session_user", "setof", "similar", "smallint", "some", "substring",
+        "symmetric", "system_user", "table", "tablesample", "then", "time", "timestamp", "to",
+        "trailing", "treat", "trim", "true", "union", "unique", "user", "using", "values",
+        "varchar", "variadic", "verbose", "when", "where", "window", "with", "xmlattributes",
+        "xmlconcat", "xmlelement", "xmlexists", "xmlforest", "xmlnamespaces", "xmlparse", "xmlpi",
+        "xmlroot", "xmlserialize", "xmltable"
+    ]
+
+    /// `catcode` U, filtered by the rule above. Grouped by what each group is
+    /// doing in a script, which is also how the rule was applied.
+    private static let unreserved: Set<String> = [
+        // Statements.
+        "abort", "alter", "begin", "call", "checkpoint", "close", "cluster", "comment", "commit",
+        "copy", "deallocate", "declare", "delete", "discard", "drop", "execute", "explain",
+        "import", "insert", "listen", "load", "lock", "move", "notify", "prepare", "reassign",
+        "refresh", "reindex", "release", "reset", "revoke", "rollback", "savepoint", "set", "show",
+        "start", "truncate", "unlisten", "update", "vacuum",
+
+        // What they act on.
+        "aggregate", "database", "domain", "extension", "function", "index", "materialized",
+        "operator", "policy", "procedure", "publication", "role", "routine", "rule", "schema",
+        "sequence", "server", "statistics", "subscription", "tablespace", "trigger", "type",
+        "view", "wrapper",
+
+        // Clauses within them.
+        "add", "by", "cascade", "conflict", "cycle", "each", "enum", "escape", "exclude", "filter",
+        "generated", "identity", "if", "include", "increment", "inherits", "instead", "key",
+        "maxvalue", "minvalue", "no", "nothing", "nulls", "of", "off", "owned", "owner",
+        "partition", "recursive", "rename", "replace", "restart", "restrict", "returns", "sets",
+        "stored", "temp", "temporary", "unlogged", "valid", "varying", "within", "without",
+
+        // Function and procedure definitions.
+        "called", "definer", "immutable", "invoker", "language", "leakproof", "parallel", "return",
+        "security", "sql", "stable", "strict", "volatile",
+
+        // Window frames and grouping sets.
+        "cube", "following", "groups", "over", "preceding", "range", "rollup", "rows", "ties",
+        "unbounded",
+
+        // Transactions.
+        "committed", "deferred", "immediate", "isolation", "nowait", "repeatable", "serializable",
+        "skip", "transaction", "uncommitted",
+
+        "text"
+    ]
+
+    /// Types the grammar does not spell.
+    ///
+    /// `timestamp` and `varchar` are keywords and `date` and `uuid` are not:
+    /// the first two are in the grammar, the rest are ordinary entries in
+    /// `pg_type` that the parser resolves like any other name. That distinction
+    /// is invisible and uninteresting to someone writing a CREATE TABLE, and an
+    /// editor that colours `bigint` and leaves `uuid` grey next to it reads as a
+    /// bug rather than as a fact about the grammar. The `serial` family is in
+    /// neither table — the parser rewrites it into an integer and a sequence —
+    /// and is here for the same reason.
+    private static let typeNames: Set<String> = [
+        "bigserial", "bytea", "date", "inet", "jsonb", "serial", "smallserial", "uuid"
+    ]
 }

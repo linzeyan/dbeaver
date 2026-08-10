@@ -26,6 +26,8 @@ enum SQLScriptChecks {
         checkSelectionWins()
         checkErrorPositions()
         checkUnterminatedInput()
+        checkTokenKinds()
+        checkTokensCoverTheBuffer()
         if failures == 0 {
             fputs("splitter: all checks passed\n", stderr)
         } else {
@@ -227,10 +229,112 @@ enum SQLScriptChecks {
             split("SELECT /* a;b"), ["SELECT /* a;b"], "and an unclosed block comment")
     }
 
+    // MARK: - Tokens
+
+    /// The colours are the same walk as the split, so these cases are as much
+    /// about the scanner as the ones above. What is new here is the word list
+    /// and the number rules, which the splitter never had an opinion about.
+    private static func checkTokenKinds() {
+        expect(
+            tokens("select ID From t"), ["keyword:select", "keyword:From"],
+            "keywords are matched whatever their case, and a table name is not one")
+        expect(
+            tokens("SELECT name, value, level FROM config"),
+            ["keyword:SELECT", "keyword:FROM"],
+            "the unreserved words that are ordinary column names are left alone")
+        expect(
+            tokens("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING"),
+            [
+                "keyword:INSERT", "keyword:INTO", "keyword:VALUES", "number:1", "keyword:ON",
+                "keyword:CONFLICT", "keyword:DO", "keyword:NOTHING"
+            ],
+            "an unreserved command word is still a keyword")
+        expect(
+            tokens("SELECT PRIMARY KEY, uuid, date"),
+            ["keyword:SELECT", "keyword:PRIMARY", "keyword:KEY", "keyword:uuid", "keyword:date"],
+            "a type the grammar does not name is coloured like one that it does")
+
+        expect(
+            tokens("SELECT 'it''s', E'a\\'b', \"odd name\""),
+            [
+                "keyword:SELECT", "string:'it''s'", "string:E'a\\'b'",
+                "quotedIdentifier:\"odd name\""
+            ],
+            "the E of an escape string belongs to the literal it opens")
+        expect(
+            tokens("SELECT emailE'x'"), ["keyword:SELECT", "string:'x'"],
+            "an E that ends an identifier does not, and the identifier is no keyword")
+
+        expect(
+            tokens("SELECT 1, 1.5, .5, 1.5e-3, 1_000, 0xFF, 0b1010"),
+            [
+                "keyword:SELECT", "number:1", "number:1.5", "number:.5", "number:1.5e-3",
+                "number:1_000", "number:0xFF", "number:0b1010"
+            ],
+            "every literal form the server accepts is one number")
+        expect(
+            tokens("SELECT col1, $1, a.b, 1e"), ["keyword:SELECT", "number:1"],
+            "a digit inside a name, a parameter placeholder and a bare e are not numbers")
+
+        expect(
+            tokens("-- one\n/* two /* three */ */ SELECT 1"),
+            ["comment:-- one", "comment:/* two /* three */ */", "keyword:SELECT", "number:1"],
+            "a nested block comment is one comment")
+
+        expect(
+            tokens("SELECT $fn$BEGIN; 'x' END;$fn$ AS body"),
+            ["keyword:SELECT", "dollarQuoted:$fn$BEGIN; 'x' END;$fn$", "keyword:AS"],
+            "a dollar-quoted body is one token, delimiters and all")
+        expect(
+            tokens("SELECT a$b$c"), ["keyword:SELECT"],
+            "$ continues an identifier, so a$b$c is one name and no dollar-quoted body")
+
+        expect(
+            tokens("SELECT 'a;b"), ["keyword:SELECT", "string:'a;b"],
+            "an unclosed literal is coloured to the end of the buffer, as it is split to it")
+
+        // The same trap as the error positions above, from the other side.
+        // Tokens are counted in scalars and painted in UTF-16 units, so a
+        // literal holding a flag would shift every colour after it if either
+        // side counted Characters.
+        let wide = "SELECT '🇹🇼', 1"
+        expect(
+            tokens(wide), ["keyword:SELECT", "string:'🇹🇼'", "number:1"],
+            "a multi-scalar character inside a literal does not move what follows it")
+    }
+
+    /// Structural invariants the highlighter relies on: it binary-searches the
+    /// token list by end offset and intersects each range with the viewport, and
+    /// both are nonsense if the list is out of order, overlapping, or pointing
+    /// outside the buffer.
+    private static func checkTokensCoverTheBuffer() {
+        let script = """
+            -- a note
+            SELECT "c1", 'lit''eral', 12.5, $tag$body ; $$ still$tag$, E'esc\\'d'
+              FROM t /* mid */ WHERE x = $1 AND y IN (1_000, 0xFF);
+            """
+        let all = SQLScript.tokens(in: script)
+        let scalars = script.unicodeScalars.count
+        expect(all.isEmpty, false, "the script has tokens to check")
+        expect(
+            all.allSatisfy { $0.range.lowerBound >= 0 && $0.range.upperBound <= scalars }, true,
+            "every token lies inside the buffer")
+        expect(
+            zip(all, all.dropFirst()).allSatisfy { $0.range.upperBound <= $1.range.lowerBound },
+            true,
+            "tokens arrive in order and never overlap")
+    }
+
     // MARK: - Harness
 
     private static func split(_ script: String) -> [String] {
         SQLScript.statements(in: script).map { SQLScript.text($0, in: script) }
+    }
+
+    /// Tokens rendered as `kind:text`, so one comparison covers both halves and
+    /// a failure prints something readable.
+    private static func tokens(_ script: String) -> [String] {
+        SQLScript.tokens(in: script).map { "\($0.kind):\(SQLScript.text($0.range, in: script))" }
     }
 
     /// A target rendered as `sql|label`, so one comparison covers both halves.
