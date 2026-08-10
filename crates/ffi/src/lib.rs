@@ -77,6 +77,40 @@ pub unsafe extern "C" fn db_free(handle: *mut DbHandle) {
     }
 }
 
+/// Asks the server to stop whatever this handle is currently running. Returns 0
+/// when the request was delivered, -1 when it could not be.
+///
+/// The one call here that may be made while another is in flight on the same
+/// handle, and it has to be: everything else blocks, so a cancel that waited its
+/// turn would arrive after the statement it exists to interrupt. Sound because
+/// the cancel travels on a connection of its own and touches nothing the running
+/// call owns — it reads the handle to learn which backend to name, and that is
+/// shared, immutable state.
+///
+/// Delivery is not interruption. A statement that finished first, or that was
+/// never running, leaves the server nothing to cancel and this still returns 0.
+/// The outcome is observable only where the statement is: `db_query_next`
+/// answering -2.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. It must not be
+/// freed concurrently with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cancel(handle: *mut DbHandle, err: *mut *mut c_char) -> c_int {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.source.cancel()) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
 /// Serializes `value` as JSON into a caller-owned C string.
 ///
 /// Metadata crosses as JSON rather than Arrow: it is a few thousand short rows
@@ -317,7 +351,12 @@ pub unsafe extern "C" fn db_query_schema(
 }
 
 /// Pulls the next batch. Returns 1 when `out` was filled, 0 when the result is
-/// exhausted, -1 on error.
+/// exhausted, -1 on error, -2 when the statement was cancelled.
+///
+/// Cancellation gets a code of its own because it is not a fault and should not
+/// be reported as one. `err` is still set, so a caller that only distinguishes
+/// success from failure keeps working and merely says "canceling statement due
+/// to user request" where it could have said "Cancelled".
 ///
 /// # Safety
 /// `query` must be live; `out` must point to writable `ArrowArray` storage.
@@ -340,8 +379,9 @@ pub unsafe extern "C" fn db_query_next(
         }
         Ok(None) => 0,
         Err(e) => {
+            let cancelled = e.is_cancelled();
             unsafe { set_err(err, e) };
-            -1
+            if cancelled { -2 } else { -1 }
         }
     }
 }

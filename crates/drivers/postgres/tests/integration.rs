@@ -888,3 +888,72 @@ async fn a_located_error_says_where_it_is() {
         .expect("point is unsupported");
     assert_eq!(unsupported.statement_position(), None);
 }
+
+/// The error a statement fails with, from whichever call surfaces it.
+///
+/// Which one that is depends on the server's output buffer, not on the kind of
+/// failure. `query` waits for a BindComplete the server has no reason to flush
+/// on its own, so a statement that fails before anything forces a flush reports
+/// from there, and one that fails afterwards reports from the first batch. Both
+/// are the same failure, and a test that pins itself to one of them is testing
+/// the buffer.
+async fn error_from(src: &PgSource, sql: &str) -> PgError {
+    match src.query(sql, 8192).await {
+        Err(e) => e,
+        Ok(mut stream) => stream
+            .next_batch()
+            .await
+            .expect_err("expected the statement to fail"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_running_statement_stops_when_asked_and_says_that_is_why() {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    let src = Arc::new(connect().await);
+
+    // Scheduled before the statement is sent, not after `query` returns. `query`
+    // does not come back while the statement is running: the server buffers its
+    // output and flushes when the command ends, so the BindComplete it waits for
+    // arrives with the result rather than ahead of it. Cancelling from after
+    // that call is cancelling something that has already finished — which is how
+    // the first version of this test sat through the whole sleep and passed
+    // nothing.
+    let canceller = Arc::clone(&src);
+    let cancel = tokio::spawn(async move {
+        // Long enough for the statement to be running. Cancelling before the
+        // server starts it would find nothing to stop, which is the one outcome
+        // that looks identical to a broken cancel.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        canceller.cancel().await
+    });
+
+    // pg_sleep rather than a large scan: a scan the server finishes early makes
+    // this pass without cancelling anything, and the test would then be green on
+    // a build where cancellation does not work at all.
+    //
+    // In the WHERE clause rather than the select list because pg_sleep returns
+    // void, which has no Arrow type and so fails while the schema is being
+    // built — before anything has run to be cancelled.
+    //
+    // Bounded so a cancel that never arrives fails the run instead of hanging it
+    // for the full sleep.
+    let sql = "SELECT 1 AS n WHERE pg_sleep(30) IS NULL";
+    let err = tokio::time::timeout(Duration::from_secs(10), error_from(&src, sql))
+        .await
+        .expect("the statement was still running 10s after being cancelled");
+
+    assert!(err.is_cancelled(), "expected a cancellation, got: {err}");
+    cancel
+        .await
+        .expect("cancel task panicked")
+        .expect("cancel request failed");
+
+    // Every other failure has to stay distinguishable from this one, or the
+    // front end labels real faults as something the user did on purpose.
+    let ordinary = error_from(&src, "SELECT 1/0").await;
+    assert!(!ordinary.is_cancelled(), "got: {ordinary}");
+}

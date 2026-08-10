@@ -18,7 +18,7 @@ use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use futures_util::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio_postgres::error::ErrorPosition;
+use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, RowStream};
 
@@ -54,6 +54,23 @@ impl PgError {
             ErrorPosition::Original(p) => Some(*p),
             ErrorPosition::Internal { .. } => None,
         }
+    }
+
+    /// Whether the server stopped this statement because somebody asked it to.
+    ///
+    /// A cancelled statement fails like any other, and the difference matters to
+    /// whoever is looking at the screen: "canceling statement due to user
+    /// request" in an error banner reads as a fault, when it is the button they
+    /// just pressed working. The caller having issued the cancel is not enough
+    /// to tell them apart — a statement can fail on its own merits in the same
+    /// moment — so the answer comes from the SQLSTATE the server sent rather
+    /// than from what this side happens to remember doing.
+    pub fn is_cancelled(&self) -> bool {
+        let PgError::Postgres(e) = self else {
+            return false;
+        };
+        e.as_db_error()
+            .is_some_and(|db| *db.code() == SqlState::QUERY_CANCELED)
     }
 }
 
@@ -94,6 +111,23 @@ impl PgSource {
             }
         });
         Ok(Self { client })
+    }
+
+    /// Asks the server to abandon whatever this connection is currently running.
+    ///
+    /// The request travels on a connection of its own, which is why this can be
+    /// called while the socket is busy streaming a result: the protocol has no
+    /// way to interleave one, so a cancel sent in-band would sit in the queue
+    /// behind the statement it is trying to stop.
+    ///
+    /// Best-effort by design. The server may finish before the request lands, or
+    /// the statement may be between commands with nothing to cancel, and neither
+    /// is an error — success here means the request was delivered, not that
+    /// anything was interrupted. What actually happened shows up as the running
+    /// statement failing with `is_cancelled`, or not failing at all.
+    pub async fn cancel(&self) -> Result<(), PgError> {
+        self.client.cancel_token().cancel_query(NoTls).await?;
+        Ok(())
     }
 
     /// Non-system schemas, for the navigator root.
@@ -163,6 +197,13 @@ impl PgSource {
 
     /// Prepare `sql` and begin streaming results as Arrow batches of
     /// `batch_rows` rows.
+    ///
+    /// Resolves once the server acknowledges the bind, which is later than it
+    /// reads: the server buffers its output and flushes at the end of the
+    /// command, so on a slow statement this waits out the whole execution and
+    /// then returns a stream whose first batch has already arrived. Execution
+    /// failures — and a `cancel` that lands mid-statement — therefore still
+    /// surface from `next_batch`, not from here.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, PgError> {
         let stmt = self.client.prepare(sql).await?;
 
