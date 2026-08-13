@@ -13,6 +13,8 @@ enum AppMenu {
     /// Target of the File menu's export items. `NSMenuItem.target` is a weak
     /// reference, so the menu cannot be the thing that keeps this alive.
     private static var exportCommands: ExportCommands?
+    /// Target of the File menu's Connect item, held for the same reason.
+    private static var connectionCommand: ConnectionCommand?
     /// Target of the View menu's Refresh item, held for the same reason.
     private static var refreshCommand: RefreshCommand?
     /// Target of the View menu's value-viewer item, held for the same reason.
@@ -29,6 +31,8 @@ enum AppMenu {
             ?? ProcessInfo.processInfo.processName
         let commands = ExportCommands(model: model)
         exportCommands = commands
+        let connection = ConnectionCommand(model: model)
+        connectionCommand = connection
         let refresh = RefreshCommand(model: model)
         refreshCommand = refresh
         let valueViewer = ValueViewerCommand(model: model)
@@ -37,7 +41,7 @@ enum AppMenu {
         queryCommands = query
         let main = NSMenu()
         main.addItem(appMenu(named: name))
-        main.addItem(fileMenu(target: commands))
+        main.addItem(fileMenu(connection: connection, export: commands))
         main.addItem(editMenu())
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer))
         main.addItem(queryMenu(target: query))
@@ -76,31 +80,46 @@ enum AppMenu {
         return item
     }
 
-    /// Getting a result out of the window.
+    /// Choosing what this window is looking at, and getting a result out of it.
     ///
-    /// ⌘C is the only other way, and it goes to the pasteboard — which means
-    /// anything larger than what the next application will accept as a paste is
-    /// stuck here. ⇧⌘E rather than ⌘S: nothing in this window is a document
-    /// with unsaved changes, and binding Save to something that is not one
-    /// teaches the wrong reflex.
+    /// Connect… leads, because without it the application can only ever reach
+    /// the database it was launched against: changing database would mean
+    /// quitting. ⌘K is what Finder binds Connect to Server to, which is the
+    /// nearest thing on the platform to what this does, and nothing in this
+    /// window has a claim on it.
     ///
-    /// Two items rather than one item with a format popup in the panel's
+    /// The exports: ⌘C is the only other way to get rows out, and it goes to
+    /// the pasteboard — which means anything larger than what the next
+    /// application will accept as a paste is stuck here. ⇧⌘E rather than ⌘S:
+    /// nothing in this window is a document with unsaved changes, and binding
+    /// Save to something that is not one teaches the wrong reflex.
+    ///
+    /// Two export items rather than one with a format popup in the panel's
     /// accessory view: the popup is a control nobody looks for, and the menu is
     /// where a user goes to find out what an application can do.
-    private static func fileMenu(target: ExportCommands) -> NSMenuItem {
+    private static func fileMenu(connection: ConnectionCommand, export: ExportCommands)
+        -> NSMenuItem
+    {
         let item = NSMenuItem()
         let menu = NSMenu(title: "File")
+
+        let connect = menu.addItem(
+            withTitle: "Connect…",
+            action: #selector(ConnectionCommand.presentConnection(_:)), keyEquivalent: "k")
+        connect.keyEquivalentModifierMask = .command
+        connect.target = connection
+        menu.addItem(.separator())
 
         let csv = menu.addItem(
             withTitle: "Export Result as CSV…",
             action: #selector(ExportCommands.exportCSV(_:)), keyEquivalent: "e")
         csv.keyEquivalentModifierMask = [.command, .shift]
-        csv.target = target
+        csv.target = export
 
         let tsv = menu.addItem(
             withTitle: "Export Result as TSV…",
             action: #selector(ExportCommands.exportTSV(_:)), keyEquivalent: "")
-        tsv.target = target
+        tsv.target = export
 
         item.submenu = menu
         return item
@@ -204,6 +223,29 @@ enum AppMenu {
         app.windowsMenu = menu
         return item
     }
+}
+
+/// The File menu's Connect item, as something a menu can send to.
+///
+/// Its own object rather than another action on `ExportCommands`, for the reason
+/// `RefreshCommand` is one: `validateMenuItem` answers for every item that
+/// targets it, and this item is available in states where an export is not.
+@MainActor
+final class ConnectionCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func presentConnection(_ sender: Any?) { model.presentConnection() }
+
+    /// Greyed out only while an attempt is in flight. Unlike every other command
+    /// here it does not need a connection — it is what a window with no
+    /// connection is for — and it stays available over a working session,
+    /// because changing database is the thing it exists to do.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { !model.isConnecting }
 }
 
 /// The View menu's Refresh item, as something a menu can send to.

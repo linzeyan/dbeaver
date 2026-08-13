@@ -38,6 +38,12 @@ PG_CONTAINER := pg-bench
 PG_PORT      := 55432
 PG_IMAGE     := postgres:17
 
+# How every target that launches the app reaches that database. The application
+# has no built-in connection: without --conn it opens the connection form and
+# waits for someone to type into it, which no script can do. Derived from
+# PG_PORT rather than written out again, so moving the port moves this too.
+PG_CONN := host=127.0.0.1 port=$(PG_PORT) user=bench password=bench dbname=bench
+
 TOOLS := tools
 BASELINE := $(TOOLS)/baseline
 
@@ -99,6 +105,7 @@ test-integration: db-check ## Tests requiring the benchmark database
 .PHONY: test-swift
 test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-splitter
+	./$(APP_BIN) --verify-connection
 
 .PHONY: test-all
 test-all: test test-integration test-swift ## Every test
@@ -173,11 +180,11 @@ bench-core: db-check ## Core throughput: PostgreSQL to Arrow
 
 .PHONY: bench-app
 bench-app: release db-check ## Scroll frame times over 1M rows
-	./$(APP_BIN) --bench
+	./$(APP_BIN) --bench --conn "$(PG_CONN)"
 
 .PHONY: bench-verify
 bench-verify: release db-check ## Prove result buffers cross the FFI without copying
-	./$(APP_BIN) --bench --verify
+	./$(APP_BIN) --bench --verify --conn "$(PG_CONN)"
 
 # Screenshots are how rendering and layout defects get caught, so they capture
 # the bundled app: Info.plist decides appearance and the menu's name, and a
@@ -185,7 +192,7 @@ bench-verify: release db-check ## Prove result buffers cross the FFI without cop
 .PHONY: screenshot
 screenshot: package db-check ## Capture the app window: make screenshot OUT=/tmp/grid.png TAB=content
 	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/grid.png)" \
-		./$(APP_BUNDLE_BIN) --tab "$(or $(TAB),content)"
+		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --tab "$(or $(TAB),content)"
 
 ##@ Baseline
 
