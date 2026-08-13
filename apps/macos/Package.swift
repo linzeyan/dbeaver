@@ -31,6 +31,9 @@ let package = Package(
                 .linkedFramework("MetalKit"),
                 .linkedFramework("CoreText"),
                 .linkedFramework("SystemConfiguration"),
+                // The Keychain, which is where connection passwords live. See
+                // Connection.swift for why they are not in UserDefaults.
+                .linkedFramework("Security"),
             ]
         ),
     ]

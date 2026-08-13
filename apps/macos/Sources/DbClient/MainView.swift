@@ -13,6 +13,14 @@ enum FocusArea: Hashable {
     case whereField
     case orderField
     case editor
+    // The connection form's fields. In the same enum as the panes' because the
+    // form is the same window: it replaces the shell rather than floating over
+    // it, so focus is only ever in one of these places at a time.
+    case connectHost
+    case connectPort
+    case connectDatabase
+    case connectUser
+    case connectPassword
 }
 
 struct MainView: View {

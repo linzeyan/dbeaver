@@ -9,9 +9,12 @@ import SwiftUI
 // the data surface rather than the chrome around it, and stay comparable with
 // every earlier measurement.
 //
-// Without it, the full application shell starts.
+// Without it, the full application shell starts — on the connection form, or
+// straight into a session when `--conn` or a remembered connection says which
+// database. There is no built-in one: a default would silently connect to
+// whatever happened to be listening on a port, which is the one thing a
+// database client must never do.
 
-let connString = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench"
 let benchSQL = "SELECT * FROM bench_wide"
 let benchMode = CommandLine.arguments.contains("--bench")
 let verifyMode = CommandLine.arguments.contains("--verify")
@@ -25,10 +28,42 @@ func argument(_ flag: String) -> String? {
     return CommandLine.arguments[i + 1]
 }
 
-// `--verify-splitter` runs the statement splitter's checks and exits with their
-// verdict. It needs no window and no database, so it runs before either exists.
+/// `--conn "host=… port=… user=… password=… dbname=…"` connects to that
+/// database without asking. Every automated path — the benchmarks, the
+/// screenshot captures — comes in this way, and nothing it opens is remembered:
+/// a capture run must not change which database the next launch opens.
+let connArgument = argument("--conn")
+
+/// `--connect-form` opens the connection form even when a connection was
+/// remembered.
+///
+/// Exists for the reason `--tab` does: a screenshot is how a layout defect here
+/// gets caught, and a screenshot can neither press Connect… nor know what a
+/// previous run happened to leave in UserDefaults.
+let forceConnectForm = CommandLine.arguments.contains("--connect-form")
+
+/// `--reconnect "host=… dbname=…"` opens a second database once the first
+/// connection has landed, through the File menu's own Connect… item, printing
+/// what the window holds before and after.
+///
+/// Exists for the reason `--refresh-after` does: Connect… is reachable only
+/// from a menu item, and the form's own Connect button only from a click —
+/// synthetic events need accessibility permission this environment does not
+/// grant. The two reports are the whole claim: opening a second database has to
+/// leave nothing of the first on screen, and launching straight into that
+/// database would show the same window while proving nothing about switching.
+/// Pointed at a connection that fails, it also leaves the form up over a live
+/// session, which is the one state a capture cannot otherwise reach.
+let reconnectTo = argument("--reconnect")
+
+// `--verify-splitter` and `--verify-connection` run the checks for the two
+// pieces of pure logic in the front-end and exit with their verdict. Neither
+// needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-connection") {
+    exit(ConnectionChecks.run() ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -451,6 +486,110 @@ func driveHistory(model: AppModel, open: Bool, pick: Int?) {
     poll()
 }
 
+/// Drives `--reconnect`. Polls, and reports to stderr, for the reasons
+/// `exportWhenReady` does: the model's background pipeline has no completion
+/// hook, and this process ends in `exit`, which loses stdout.
+@MainActor
+func reconnectWhenReady(model: AppModel, to connString: String) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    func report(_ phase: String) {
+        // Padded so the two reports line up in a terminal; the whole point of
+        // printing twice is that the difference is read by eye.
+        let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
+        let objects = model.schemas
+            .flatMap { model.relations[$0.name] ?? [] }
+            .map(\.id).sorted()
+        fputs("\(tag) label    \(model.connectionLabel)\n", stderr)
+        fputs("\(tag) objects  \(objects.joined(separator: ", "))\n", stderr)
+        fputs("\(tag) selected \(model.selected?.id ?? "(none)")\n", stderr)
+        fputs(
+            "\(tag) browse   \(AppModel.pluralized(model.browseResult.rowCount, "row"))\n", stderr)
+        // The editor, the filters and the banner are the state most likely to be
+        // carried across by accident: none of them is rebuilt from the new
+        // catalogue, so nothing else would notice them surviving.
+        fputs("\(tag) editor   \(model.queryText.isEmpty ? "(empty)" : model.queryText)\n", stderr)
+        fputs("\(tag) filters  where=\(model.whereClause) order=\(model.orderClause)\n", stderr)
+        fputs("\(tag) message  \(model.errorMessage ?? "(none)")\n", stderr)
+    }
+
+    /// Waits for a session to be up and done working.
+    ///
+    /// `isBusy` alone is not the signal: the model is briefly idle between the
+    /// connection landing and the first browse being dispatched, and a report
+    /// from inside that gap describes a window nobody ever sees. A database
+    /// with nothing to browse never starts one at all, which is why the
+    /// selection decides which of the two is being waited for — and a browse
+    /// that failed never runs either, so a reported failure counts as settled
+    /// rather than as something still to wait for.
+    func whenSettled(_ next: @escaping @MainActor () -> Void) {
+        func poll() {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("reconnect probe timed out waiting for a session\n", stderr)
+                exit(1)
+            }
+            let browsed =
+                model.selected == nil || model.errorMessage != nil
+                || (model.browseResult.hasRun && !model.browseResult.isLoading)
+            guard !model.isPresentingConnection, !model.isBusy, browsed else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    MainActor.assumeIsolated(poll)
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated(next)
+            }
+        }
+        poll()
+    }
+
+    /// Opens the form the way ⌘K does rather than by setting the flag.
+    ///
+    /// The flag is one assignment and would prove nothing about the command:
+    /// this walks the menu bar for the item, checks validation lets it fire, and
+    /// sends its action to its target, which is every link in the chain except
+    /// AppKit's own key-equivalent dispatch.
+    func presentThroughMenu() {
+        guard
+            let item = NSApp.mainMenu?.items
+                .compactMap(\.submenu)
+                .first(where: { $0.title == "File" })?
+                .items.first(where: { $0.title == "Connect…" })
+        else {
+            fputs("no Connect… item in the File menu\n", stderr)
+            exit(1)
+        }
+        guard let validator = item.target as? NSMenuItemValidation,
+            validator.validateMenuItem(item), let action = item.action
+        else {
+            fputs("the Connect… item is disabled over a live connection\n", stderr)
+            exit(1)
+        }
+        fputs("menu   item     “\(item.title)” · enabled\n", stderr)
+        NSApp.sendAction(action, to: item.target, from: item)
+    }
+
+    whenSettled {
+        report("before")
+        presentThroughMenu()
+        guard model.isPresentingConnection else {
+            fputs("the Connect… item did not open the connection form\n", stderr)
+            exit(1)
+        }
+        // The session is still behind the form, which is what makes Cancel a
+        // way out rather than a button into an empty window.
+        fputs("form   cancel   \(model.canCancelConnection)\n", stderr)
+        model.connect(
+            to: ConnectionSettings(connectionString: connString),
+            password: ConnectionString.parse(connString)["password"] ?? "")
+        whenSettled {
+            report("after")
+            exit(0)
+        }
+    }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
 
@@ -466,6 +605,23 @@ let window = NSWindow(
     defer: false)
 
 if benchMode {
+    // The bench has no window to ask in and no business guessing. A default
+    // connection string would measure whatever was listening on that port and
+    // report the number as if it meant something.
+    guard
+        let connString = connArgument
+            ?? ConnectionStore.remembered().map({
+                $0.settings.connectionString(password: $0.password)
+            })
+    else {
+        fputs(
+            "--bench needs a database and has no window to ask in.\n"
+                + "  Pass --conn \"host=… port=… user=… password=… dbname=…\",\n"
+                + "  or connect once in the application so the connection is remembered.\n",
+            stderr)
+        exit(1)
+    }
+
     window.title = "Phase 0 — 1M rows"
 
     guard let renderer = GridRenderer(device: device, scale: window.backingScaleFactor) else {
@@ -506,6 +662,11 @@ if benchMode {
 
     // Top-level code runs on the main thread but is not statically isolated in
     // Swift 5 mode; assert the isolation the model requires rather than hop.
+    // Until a connection lands the window has no relation to name, and
+    // `navigationTitle` has not run. A titleless window reads as one that failed
+    // to finish launching.
+    window.title = "DbClient"
+
     MainActor.assumeIsolated {
         let history: QueryHistory
         if let historyStore {
@@ -522,7 +683,7 @@ if benchMode {
             history = QueryHistory()
         }
         let model = AppModel(
-            connString: connString, history: history,
+            history: history,
             initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
@@ -531,12 +692,21 @@ if benchMode {
         // Installed here rather than before the window is built, because the
         // File menu sends to the model and there is no model until now.
         AppMenu.install(into: app, model: model)
-        window.contentView = NSHostingView(rootView: MainView(model: model))
+        window.contentView = NSHostingView(rootView: RootView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
-        model.connect()
+
+        // Nothing here opens the form: it is what the window shows until a
+        // connection replaces it, so the last branch is simply not connecting.
+        if let connArgument {
+            model.connect(using: connArgument)
+        } else if !forceConnectForm, let remembered = ConnectionStore.remembered() {
+            model.connect(to: remembered.settings, password: remembered.password)
+        }
+
         if let initialCell { openValueViewer(model: model, on: initialCell) }
+        if let reconnectTo { reconnectWhenReady(model: model, to: reconnectTo) }
         if runScriptMode { runScriptWhenReady(model: model) }
         if showHistory || historyPick != nil {
             driveHistory(model: model, open: showHistory, pick: historyPick)

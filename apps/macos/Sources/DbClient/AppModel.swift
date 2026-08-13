@@ -266,7 +266,9 @@ final class AppModel {
     /// and parking a million-row write in front of the next query would make
     /// clicking a table in the navigator wait on a file.
     private let exportQueue = DispatchQueue(label: "dev.dbclient.export", qos: .userInitiated)
-    private let connString: String
+    /// The string the live connection was opened with. A `var` because the
+    /// window outlives any one database: File ▸ Connect… replaces it.
+    private var connString = ""
 
     /// A statement to open with, from `--sql`. Runs once the connection is up,
     /// in place of browsing the first table.
@@ -293,8 +295,7 @@ final class AppModel {
     private let initialSQLIsScript: Bool
 
     init(
-        connString: String, history: QueryHistory, initialTab: DetailTab = .content,
-        initialSQL: String? = nil,
+        history: QueryHistory, initialTab: DetailTab = .content, initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
@@ -305,7 +306,6 @@ final class AppModel {
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
-        self.connString = connString
         self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
@@ -322,46 +322,186 @@ final class AppModel {
         }
     }
 
-    // MARK: - Lifecycle
+    // MARK: - Connection
 
-    func connect() {
+    /// What the connection form is showing.
+    ///
+    /// Seeded from the last connection that worked, so that reaching a
+    /// neighbouring database on the same server is one field rather than five.
+    var connectionDraft = ConnectionStore.load() ?? .suggested
+
+    /// The form's password field. Nothing persists it from here: a connection
+    /// that opens hands it to the Keychain, and nothing else keeps a copy.
+    var connectionPassword = ""
+
+    /// Whether the window is showing the connection form rather than a session.
+    /// True at launch, because there is no database until one is named.
+    private(set) var isPresentingConnection = true
+
+    /// A connect attempt in flight. Distinct from `isBusy`, which describes the
+    /// session's own queue: this is what routes a failure to the form instead
+    /// of to the pane's banner, and a reconnect fails with the previous
+    /// connection still open behind it.
+    private(set) var isConnecting = false
+
+    /// What the last attempt failed with, shown in the form. The pane's banner
+    /// cannot carry it — while the form is up the pane is not on screen, and on
+    /// a reconnect the pane behind it still describes a connection that works.
+    var connectionError: String?
+
+    /// Whether the form can be dismissed without connecting. Only once there is
+    /// a session behind it to go back to.
+    var canCancelConnection: Bool { db != nil }
+
+    /// Whether Connect has something to try.
+    var canConnect: Bool { connectionDraft.isComplete && !isConnecting }
+
+    /// Whether the launch options have been spent.
+    ///
+    /// They describe the launch, not every session: re-running `--sql` against
+    /// a database the user switched to by hand would execute a statement they
+    /// did not ask for, written for a schema it has never seen.
+    private var appliedLaunchOptions = false
+
+    /// Connects to what the form is showing, and remembers it if it opens.
+    func connectFromForm() {
+        guard canConnect else { return }
+        let settings = connectionDraft
+        let password = connectionPassword
+        open(
+            settings.connectionString(password: password),
+            remembering: (settings, password))
+    }
+
+    /// Connects to a raw libpq string, from `--conn`.
+    ///
+    /// Deliberately not remembered. This is the automation path — the
+    /// benchmarks and the screenshot captures run through it — and writing
+    /// bench credentials over the connection a user last chose would make
+    /// `make screenshot` change what their next launch opens. The form is
+    /// seeded from it so that a string which does not connect can be corrected
+    /// rather than retyped.
+    func connect(using connString: String) {
+        connectionDraft = ConnectionSettings(connectionString: connString)
+        connectionPassword = ConnectionString.parse(connString)["password"] ?? ""
+        open(connString, remembering: nil)
+    }
+
+    /// Connects to a connection this window remembered from last time.
+    func connect(to settings: ConnectionSettings, password: String) {
+        connectionDraft = settings
+        connectionPassword = password
+        connectFromForm()
+    }
+
+    /// Opens the connection form over the session, for File ▸ Connect….
+    ///
+    /// Leaves the live connection alone: it is still the one answering queries
+    /// until another one opens, so a mistyped password costs nothing but the
+    /// retyping. The session is replaced in `adopt`, once there is something to
+    /// replace it with.
+    func presentConnection() {
+        connectionError = nil
+        isPresentingConnection = true
+    }
+
+    /// Puts the session back, for the form's Cancel.
+    func cancelConnection() {
+        guard canCancelConnection else { return }
+        isPresentingConnection = false
+        connectionError = nil
+        // A failed attempt left the dot red over a connection that is still
+        // working. Nothing else would ever put it right.
+        connectionState = .connected
+    }
+
+    private func open(_ connString: String, remembering: (ConnectionSettings, String)?) {
+        isConnecting = true
         isBusy = true
+        connectionError = nil
+        connectionState = .connecting
         status = "Connecting…"
-        run { [connString] in
+        run {
             let db = try Database(connString: connString)
             return (db, try Self.inventory(of: db))
         } then: { [self] result in
-            db = result.0
-            schemas = result.1.schemas
-            relations = result.1.relations
-            connectionLabel = Self.label(for: connString)
-            connectionState = .connected
-            // Open the schema a user most likely wants, and land on a table
-            // rather than an empty pane. Opening to nothing makes every session
-            // start with the same two clicks. `--relation` overrides both, and
-            // may name a schema of its own.
-            let requested = initialRelation.flatMap(findRelation)
-            let opening =
-                requested.map(\.schema)
-                ?? (schemas.first(where: { $0.name == "public" }) ?? schemas.first)?.name
-            if let opening {
-                expanded.insert(opening)
-                selected = requested ?? relations[opening]?.first
+            self.connString = connString
+            adopt(result.0, inventory: result.1)
+            if let remembering {
+                ConnectionStore.save(remembering.0)
+                ConnectionKeychain.save(remembering.1, for: remembering.0)
             }
-            status = Self.pluralized(schemas.count, "schema")
-            isBusy = false
-            // Runs after the selection above, so an explicit `--sql` replaces
-            // the browse rather than racing it. Through the same path ⌘R takes,
-            // so a multi-statement `--sql` runs the one `--caret` names rather
-            // than the whole buffer — unless `--run-script` says otherwise, and
-            // then the menu item is what runs it.
-            if initialSQL != nil, !initialSQLIsScript { runCurrentQuery() }
         }
+    }
+
+    /// Installs a connection that opened, in place of whatever was here.
+    private func adopt(_ connection: Database, inventory: Inventory) {
+        // Now rather than when the form opened: an attempt that fails has to
+        // leave the session it was launched from exactly as it was, and one
+        // that succeeds has to leave nothing of it behind. Skipped on the first
+        // connection, where there is nothing to drop and where dropping it
+        // would take the editor's `--sql` with it.
+        if db != nil { reset() }
+        db = connection
+        isConnecting = false
+        isPresentingConnection = false
+        schemas = inventory.schemas
+        relations = inventory.relations
+        connectionLabel = Self.label(for: connString)
+        connectionState = .connected
+        // Open the schema a user most likely wants, and land on a table
+        // rather than an empty pane. Opening to nothing makes every session
+        // start with the same two clicks. `--relation` overrides both, and
+        // may name a schema of its own.
+        let requested = appliedLaunchOptions ? nil : initialRelation.flatMap(findRelation)
+        let opening =
+            requested.map(\.schema)
+            ?? (schemas.first(where: { $0.name == "public" }) ?? schemas.first)?.name
+        if let opening {
+            expanded.insert(opening)
+            selected = requested ?? relations[opening]?.first
+        }
+        status = Self.pluralized(schemas.count, "schema")
+        isBusy = false
+        // Runs after the selection above, so an explicit `--sql` replaces
+        // the browse rather than racing it. Through the same path ⌘R takes,
+        // so a multi-statement `--sql` runs the one `--caret` names rather
+        // than the whole buffer — unless `--run-script` says otherwise, and
+        // then the menu item is what runs it.
+        if !appliedLaunchOptions, initialSQL != nil, !initialSQLIsScript { runCurrentQuery() }
+        appliedLaunchOptions = true
+    }
+
+    /// Drops everything the previous connection put on screen.
+    ///
+    /// Every property a pane reads is listed here. One left behind is a
+    /// fragment of the previous database shown under the name of this one, and
+    /// nothing else in the window would contradict it.
+    private func reset() {
+        // Releases the previous connection, which closes it.
+        db = nil
+        schemas = []
+        relations = [:]
+        expanded = []
+        selected = nil
+        navigatorFilter = ""
+        columns = []
+        clearRelationDetail()
+        browseResult.discard()
+        scriptSteps = []
+        selectedStep = 0
+        whereClause = ""
+        orderClause = ""
+        queryText = ""
+        suggestedQueryText = ""
+        querySelection = nil
+        isValueViewerOpen = false
+        errorMessage = nil
     }
 
     /// The navigator's whole contents, read in one pass.
     ///
-    /// Shared by `connect` and `refresh` so the two cannot drift into loading
+    /// Shared by `open` and `refresh` so the two cannot drift into loading
     /// different things: a refresh that read less than the connection did would
     /// quietly delete objects from a tree that is supposed to have become more
     /// accurate, not less.
@@ -1457,17 +1597,28 @@ final class AppModel {
         // A Query-pane failure arrives wrapped in the statement that caused it;
         // everything else is its own error.
         let statement = error as? StatementFailure
-        errorMessage = String(describing: statement?.error ?? error)
-        status = "Failed"
+        let message = String(describing: statement?.error ?? error)
         isBusy = false
         isExporting = false
         // The core queue is serial, so at most one of these was running; clearing
         // both saves threading the target through the generic dispatch helper.
         browseResult.abandonLoading()
         queryResult.abandonLoading()
-        // A failed statement says nothing about the connection; only a failure
-        // before one exists does.
-        if db == nil { connectionState = .failed }
+
+        // A connect attempt answers into the form, which is the only surface on
+        // screen while one is in flight. Routed by the flag rather than by
+        // `db == nil`, because a reconnect fails with the previous connection
+        // still open — and that connection is not what went wrong.
+        if isConnecting {
+            isConnecting = false
+            connectionState = .failed
+            connectionError = message
+            if db == nil { status = "Not connected" }
+            return
+        }
+
+        errorMessage = message
+        status = "Failed"
         if let statement { pointAtSyntaxError(statement) }
     }
 
@@ -1505,16 +1656,10 @@ final class AppModel {
 
     private static func label(for connString: String) -> String {
         // "host=… dbname=…" → "dbname@host", which is how these tools name a
-        // session and how users refer to one.
-        var host = "localhost"
-        var dbname = "database"
-        for pair in connString.split(separator: " ") {
-            let kv = pair.split(separator: "=", maxSplits: 1)
-            guard kv.count == 2 else { continue }
-            if kv[0] == "host" { host = String(kv[1]) }
-            if kv[0] == "dbname" { dbname = String(kv[1]) }
-        }
-        return "\(dbname)@\(host)"
+        // session and how users refer to one. Read by the same parser that
+        // writes these strings, so a quoted value is not mistaken for two.
+        let pairs = ConnectionString.parse(connString)
+        return "\(pairs["dbname"] ?? "database")@\(pairs["host"] ?? "localhost")"
     }
 
     /// "1 schema" / "2 schemas". A label that reads "1 objects" is small, but it

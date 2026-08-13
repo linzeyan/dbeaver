@@ -301,9 +301,12 @@ struct CompactField: View {
     let area: FocusArea
     @FocusState.Binding var focus: FocusArea?
     let onSubmit: () -> Void
+    /// Draws the value as dots. The connection form's password field is the one
+    /// place in this window where showing what was typed is the wrong default.
+    var isSecure = false
 
     var body: some View {
-        TextField(placeholder, text: $text)
+        entry
             .textFieldStyle(.plain)
             .font(Theme.Typography.monoSmall)
             .foregroundStyle(Theme.text.color)
@@ -320,5 +323,16 @@ struct CompactField: View {
                     .strokeBorder(
                         focus == area ? Theme.accent.color : Theme.separator.color,
                         lineWidth: 1))
+    }
+
+    /// `SecureField` and `TextField` are different types, so the choice has to
+    /// be made before the shared styling rather than as a modifier on it.
+    @ViewBuilder
+    private var entry: some View {
+        if isSecure {
+            SecureField(placeholder, text: $text)
+        } else {
+            TextField(placeholder, text: $text)
+        }
     }
 }
