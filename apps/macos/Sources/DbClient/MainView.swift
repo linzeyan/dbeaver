@@ -1147,24 +1147,54 @@ private struct ScriptOutcomeList: View {
     private static let maxRows = 6
 
     var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 0) {
-                ForEach(Array(model.scriptSteps.enumerated()), id: \.element.id) { index, step in
-                    Button {
-                        model.selectedStep = index
-                    } label: {
-                        row(step, isSelected: index == model.selectedStep)
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(model.scriptSteps.enumerated()), id: \.element.id) {
+                        index, step in
+                        Button {
+                            model.selectedStep = index
+                        } label: {
+                            row(step, isSelected: index == model.selectedStep)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
+            .frame(
+                height: Self.rowHeight
+                    * CGFloat(min(model.scriptSteps.count, Self.maxRows))
+            )
         }
-        .frame(
-            height: Self.rowHeight
-                * CGFloat(min(model.scriptSteps.count, Self.maxRows))
-        )
         .background(Theme.surface.color)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Statement outcomes")
+    }
+
+    /// Says which list this is.
+    ///
+    /// Without it, opening the history above a script's outcomes stacked two
+    /// unlabelled-looking lists of the same statements with near-identical
+    /// counts down the right — the same three lines twice, reading as one list
+    /// that had somehow repeated itself. The hairline between them is not enough
+    /// to carry that on its own, and the header is what makes the repetition
+    /// obviously deliberate: one is everything this window has run, the other is
+    /// what this run just did.
+    private var header: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Text("This run")
+                .font(Theme.Typography.captionEmphasis)
+                .foregroundStyle(Theme.textSecondary.color)
+            Text(AppModel.pluralized(model.scriptSteps.count, "statement"))
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+            Spacer(minLength: Theme.Space.sm)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 26)
+        .background(Theme.surfaceRaised.color)
     }
 
     private func row(_ step: ScriptStep, isSelected: Bool) -> some View {
