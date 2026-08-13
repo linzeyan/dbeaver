@@ -580,9 +580,13 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
         // The session is still behind the form, which is what makes Cancel a
         // way out rather than a button into an empty window.
         fputs("form   cancel   \(model.canCancelConnection)\n", stderr)
-        model.connect(
-            to: ConnectionSettings(connectionString: connString),
-            password: ConnectionString.parse(connString)["password"] ?? "")
+        // Through the path that does not remember, for the reason `--conn` does
+        // not: a capture run must not change which database the next launch
+        // opens. What this is checking is that the switch clears the window,
+        // not that it writes to UserDefaults — and the first version of it did
+        // write, which is how the probe left a database nobody had chosen as
+        // the one this application would open next.
+        model.connect(using: connString)
         whenSettled {
             report("after")
             exit(0)

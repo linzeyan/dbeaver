@@ -12,11 +12,23 @@ struct RootView: View {
     @Bindable var model: AppModel
 
     var body: some View {
-        if model.isPresentingConnection {
-            ConnectView(model: model)
-        } else {
-            MainView(model: model)
+        Group {
+            if model.isPresentingConnection {
+                ConnectView(model: model)
+            } else {
+                MainView(model: model)
+            }
         }
+        // The swap happens with no animation, which is not a style choice.
+        // SwiftUI cross-fades an `if`/`else` between two view trees by keeping
+        // both alive for the duration, and `MainView` contains an
+        // `NSViewRepresentable` over a Metal layer. The card's layer was
+        // surviving that fade stranded behind the grid, visible as a dark
+        // rectangle wherever the grid had no rows to draw over it — and
+        // invisible on a full table, which is why it took a four-row view to
+        // find. Nothing here is worth animating anyway: the form and the
+        // session share no element for a transition to carry between them.
+        .transaction { $0.animation = nil }
     }
 }
 
