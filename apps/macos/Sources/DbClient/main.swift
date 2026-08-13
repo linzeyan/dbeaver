@@ -113,6 +113,19 @@ let initialRelation = argument("--relation")
 /// a word matching nothing says so rather than going blank.
 let initialFilter = argument("--filter")
 
+/// `--stop-after 0.5` runs `--sql`, waits that many seconds, and stops it
+/// through the Query menu's own Stop item, reporting what the window says
+/// before and after.
+///
+/// Exists because the thing being checked cannot be photographed. A cancellation
+/// is a race with the server: the interesting states are "still running" and
+/// "stopped", they are half a second apart, and the shutter cannot be told to
+/// fire between them. It goes through the menu item rather than calling the
+/// model, so validation, target and action are all part of what is checked —
+/// which matters more here than elsewhere, because a Stop item that is greyed
+/// out at the moment it is needed is indistinguishable from no Stop item at all.
+let stopAfter = argument("--stop-after").flatMap(Double.init)
+
 /// `--section triggers` opens the Structure tab on one of its lower sections.
 /// Matched loosely so `foreignkeys`, `foreign-keys` and `Foreign keys` all work
 /// — this is a capture switch, not a parser.
@@ -486,6 +499,77 @@ func driveHistory(model: AppModel, open: Bool, pick: Int?) {
     poll()
 }
 
+/// Drives `--stop-after`. Reports to stderr for the reasons `exportWhenReady`
+/// does: this process ends in `exit`, which loses stdout.
+@MainActor
+func stopWhenRunning(model: AppModel, after seconds: Double) {
+    func report(_ phase: String) {
+        let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
+        fputs("\(tag) busy     \(model.isBusy)\n", stderr)
+        fputs("\(tag) status   \(model.statusLine)\n", stderr)
+        // The banner is the point of the whole exercise: the server reports a
+        // cancellation as an error, and this is where that would show up as one.
+        fputs("\(tag) banner   \(model.errorMessage ?? "(none)")\n", stderr)
+        fputs(
+            "\(tag) steps    "
+                + model.scriptSteps.map { "\($0.id):\($0.outcome.label)" }
+                .joined(separator: ", ") + "\n", stderr)
+        fputs(
+            "\(tag) history  "
+                + model.history.entries.map(\.outcome.label).joined(separator: ", ") + "\n",
+            stderr)
+    }
+
+    // The cancel is a round trip of its own, and the statement it stops reports
+    // through the same queue as everything else. Polled rather than slept on, so
+    // a cancellation that never arrives fails loudly instead of being reported
+    // as one that did.
+    let deadline = CFAbsoluteTimeGetCurrent() + 30
+    func settle() {
+        guard !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("the statement was still running 30s after Stop\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(settle)
+            }
+            return
+        }
+        report("after")
+        exit(0)
+    }
+
+    func stopThroughMenu() {
+        guard model.isBusy else {
+            fputs("nothing was running \(seconds)s in; nothing to stop\n", stderr)
+            exit(1)
+        }
+        report("before")
+
+        guard
+            let item = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items)
+                .first(where: { $0.action == #selector(StopCommand.stopRunningStatement(_:)) })
+        else {
+            fputs("no Stop item in the menu bar\n", stderr)
+            exit(1)
+        }
+        guard (item.target as? NSMenuItemValidation)?.validateMenuItem(item) == true,
+            let action = item.action
+        else {
+            fputs("the Stop item is disabled while a statement is running\n", stderr)
+            exit(1)
+        }
+        fputs("menu   item     “\(item.title)” · enabled\n", stderr)
+        NSApp.sendAction(action, to: item.target, from: item)
+        settle()
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+        MainActor.assumeIsolated(stopThroughMenu)
+    }
+}
+
 /// Drives `--reconnect`. Polls, and reports to stderr, for the reasons
 /// `exportWhenReady` does: the model's background pipeline has no completion
 /// hook, and this process ends in `exit`, which loses stdout.
@@ -711,6 +795,7 @@ if benchMode {
 
         if let initialCell { openValueViewer(model: model, on: initialCell) }
         if let reconnectTo { reconnectWhenReady(model: model, to: reconnectTo) }
+        if let stopAfter { stopWhenRunning(model: model, after: stopAfter) }
         if runScriptMode { runScriptWhenReady(model: model) }
         if showHistory || historyPick != nil {
             driveHistory(model: model, open: showHistory, pick: historyPick)

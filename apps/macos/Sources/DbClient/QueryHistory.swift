@@ -16,6 +16,10 @@ enum QueryHistoryOutcome: Codable, Equatable {
     /// Returned no result set. The count is what the server said it affected.
     case affected(Int)
     case failed
+    /// Stopped on request. Kept apart from `failed` for the reason the run's own
+    /// list keeps them apart, and because it is the one entry whose statement is
+    /// worth coming back to unedited: nothing was wrong with it.
+    case cancelled
 
     var isFailure: Bool { self == .failed }
 
@@ -28,6 +32,7 @@ enum QueryHistoryOutcome: Codable, Equatable {
         case .affected(let n):
             return n == 0 ? "no rows" : "\(AppModel.pluralized(n, "row")) affected"
         case .failed: return "failed"
+        case .cancelled: return "cancelled"
         }
     }
 
@@ -40,6 +45,7 @@ enum QueryHistoryOutcome: Codable, Equatable {
         case .rows(let n): self = .rows(n)
         case .completed(let affected): self = .affected(affected)
         case .failed: self = .failed
+        case .cancelled: self = .cancelled
         case .notRun: return nil
         }
     }

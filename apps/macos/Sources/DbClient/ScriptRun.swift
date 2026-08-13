@@ -18,6 +18,13 @@ enum StatementOutcome: Equatable {
     case completed(affected: Int)
     /// Failed, and stopped the run here.
     case failed(String)
+    /// Stopped on request, and ended the run here.
+    ///
+    /// Separate from `failed` because it is not one. The server's wording for a
+    /// cancellation is an error message, and a row reading "failed" in red for
+    /// the button the user just pressed sends them looking for a fault in their
+    /// SQL.
+    case cancelled
     /// Never ran, because a statement before it failed.
     case notRun
 
@@ -29,6 +36,7 @@ enum StatementOutcome: Equatable {
         case .completed(let n):
             return n == 0 ? "no rows" : "\(AppModel.pluralized(n, "row")) affected"
         case .failed: return "failed"
+        case .cancelled: return "cancelled"
         case .notRun: return "not run"
         }
     }
@@ -97,9 +105,19 @@ final class ScriptStep: Identifiable {
                 : "This statement returned no rows, and affected "
                     + "\(AppModel.pluralized(n, "row"))."
         case .failed(let message): return message
+        case .cancelled:
+            // Says what happened to the database, because that is the question a
+            // cancel leaves behind. A statement stopped mid-flight is rolled
+            // back by the server; the ones the run had already sent are not, and
+            // nothing here wraps a script in a transaction that would undo them.
+            return "This statement was stopped before it finished, and the server "
+                + "rolled it back. Statements the run had already sent still happened."
         case .notRun:
-            return "This statement did not run — the script stopped at the "
-                + "statement that failed above."
+            // "Stopped above" rather than "failed above": a run also stops when
+            // it is cancelled, and a row that names the wrong reason for its own
+            // silence is the kind of small lie this list exists to avoid.
+            return "This statement did not run — the run stopped at the "
+                + "statement above."
         }
     }
 }

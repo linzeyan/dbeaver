@@ -23,6 +23,8 @@ enum AppMenu {
     private static var navigatorCommand: NavigatorCommand?
     /// Target of the Query menu's items, held for the same reason.
     private static var queryCommands: QueryCommands?
+    /// Target of the Query menu's Stop item, held for the same reason.
+    private static var stopCommand: StopCommand?
     /// Target of the Query menu's history item, held for the same reason.
     private static var historyCommand: QueryHistoryCommand?
 
@@ -45,6 +47,8 @@ enum AppMenu {
         navigatorCommand = navigator
         let query = QueryCommands(model: model)
         queryCommands = query
+        let stop = StopCommand(model: model)
+        stopCommand = stop
         let queryHistory = QueryHistoryCommand(model: model)
         historyCommand = queryHistory
         let main = NSMenu()
@@ -52,7 +56,7 @@ enum AppMenu {
         main.addItem(fileMenu(connection: connection, export: commands))
         main.addItem(editMenu())
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
-        main.addItem(queryMenu(target: query, history: queryHistory))
+        main.addItem(queryMenu(target: query, stop: stop, history: queryHistory))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -231,9 +235,17 @@ enum AppMenu {
     /// binds it. The item opens the panel and does not close it: a list that
     /// closes when a statement is picked, and carries its own dismiss button,
     /// has no question left for a menu to answer.
-    private static func queryMenu(target: QueryCommands, history: QueryHistoryCommand)
-        -> NSMenuItem
-    {
+    ///
+    /// Stop takes ⌘., which has meant "stop what you are doing" on this platform
+    /// since long before any of the alternatives, and it is here as well as on
+    /// the toolbar because the toolbar button only exists while a statement is
+    /// running: a command discoverable only during the seconds you need it is
+    /// not discoverable. It stops metadata reads and browses too, not just the
+    /// Query pane, which is why it sits above the separator with Run Script
+    /// rather than being scoped to one tab.
+    private static func queryMenu(
+        target: QueryCommands, stop: StopCommand, history: QueryHistoryCommand
+    ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Query")
         let script = menu.addItem(
@@ -241,6 +253,12 @@ enum AppMenu {
             action: #selector(QueryCommands.runScript(_:)), keyEquivalent: "r")
         script.keyEquivalentModifierMask = [.command, .option]
         script.target = target
+
+        let stopItem = menu.addItem(
+            withTitle: "Stop Running Statement",
+            action: #selector(StopCommand.stopRunningStatement(_:)), keyEquivalent: ".")
+        stopItem.keyEquivalentModifierMask = .command
+        stopItem.target = stop
 
         menu.addItem(.separator())
         let recent = menu.addItem(
@@ -383,6 +401,26 @@ final class QueryCommands: NSObject, NSMenuItemValidation {
     /// text and no statements, which is why this asks the model rather than
     /// measuring the string.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canRunScript }
+}
+
+/// The Query menu's Stop item, as something a menu can send to.
+///
+/// Its own object because its answer is the negation of `QueryCommands`': Run
+/// Script is offered only when nothing is running, and this only when something
+/// is. Pointed at one target they would light up together, which for the one
+/// command that exists to interrupt the other is not a subtlety.
+@MainActor
+final class StopCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func stopRunningStatement(_ sender: Any?) { model.cancelRunningStatement() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canCancel }
 }
 
 /// The Query menu's history item, as something a menu can send to.

@@ -56,15 +56,30 @@ struct MainView: View {
             .help("\(model.connectionState.label) — \(model.connectionLabel)")
         }
 
+        // One slot, two commands. While something is running, Run is disabled
+        // anyway — the connection is serial — so the space it occupies is the
+        // obvious place for the only command that is useful then. A separate
+        // Stop button beside it would be dimmed for almost the whole life of the
+        // window, and the way out of a statement that will not finish must not
+        // be the control nobody has ever seen enabled.
         ToolbarItem(placement: .primaryAction) {
-            Button {
-                model.runCurrentQuery()
-            } label: {
-                Label("Run", systemImage: "play.fill")
+            if model.canCancel {
+                Button {
+                    model.cancelRunningStatement()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .help("Stop the running statement (⌘.)")
+            } else {
+                Button {
+                    model.runCurrentQuery()
+                } label: {
+                    Label("Run", systemImage: "play.fill")
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(!model.canRun)
+                .help("Run the current query (⌘R)")
             }
-            .keyboardShortcut("r", modifiers: .command)
-            .disabled(model.isBusy || !model.canRun)
-            .help("Run the current query (⌘R)")
         }
     }
 }
@@ -887,21 +902,23 @@ struct QueryPane: View {
                         .accessibilityLabel("Query result grid")
 
                         CellInspector(cell: model.inspectedCell(in: model.queryResult))
+                    } else if model.queryResult.isLoading {
+                        RunningPane()
                     } else {
                         // A statement that returned no rows still has an answer,
                         // and an empty grid with no columns is not it — that
                         // reads as a query that broke rather than as an UPDATE
                         // that worked.
                         StatementNote(step: step)
-                            .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
                     }
+                } else if model.queryResult.isLoading {
+                    RunningPane()
                 } else {
                     EmptyState(
                         symbol: "terminal",
                         title: "No results yet",
                         hint: "Press ⌘R to run the statement above, ⌥⌘R for all of them."
                     )
-                    .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
                 }
             }
             .frame(minHeight: 160)
@@ -1204,6 +1221,10 @@ private struct ScriptOutcomeList: View {
     private func outcomeTone(_ outcome: StatementOutcome) -> Color {
         switch outcome {
         case .failed: return Theme.dangerText.color
+        // Neither red nor dimmed. A cancelled statement is not a fault and did
+        // not fail to happen — it was stopped, and the row should read as a
+        // statement of fact rather than as a warning or as absence.
+        case .cancelled: return Theme.textSecondary.color
         case .notRun: return Theme.textTertiary.color
         case .rows, .completed: return Theme.textSecondary.color
         }
@@ -1237,6 +1258,7 @@ private struct StatementNote: View {
     private var symbol: String {
         switch step.outcome {
         case .failed: return "exclamationmark.triangle"
+        case .cancelled: return "stop.circle"
         case .notRun: return "minus.circle"
         case .rows, .completed: return "checkmark.circle"
         }
@@ -1245,6 +1267,7 @@ private struct StatementNote: View {
     private var tint: Color {
         switch step.outcome {
         case .failed: return Theme.dangerText.color
+        case .cancelled: return Theme.textSecondary.color
         case .notRun: return Theme.textTertiary.color
         case .rows, .completed: return Theme.run.color
         }
@@ -1373,6 +1396,24 @@ struct CellInspector: View {
 }
 
 // MARK: - Loading
+
+/// What the Query pane shows while a statement runs and there is nothing behind
+/// it worth keeping.
+///
+/// Not `LoadingVeil`. That exists to dim stale rows so they stay readable as
+/// context while being replaced, and it puts its own label in the middle of what
+/// it covers — which is fine over a grid and unreadable over anything else
+/// centred. Over the empty state, "Running…" landed exactly on top of "No
+/// results yet" and each made the other illegible. Neither of the two things it
+/// replaces is worth preserving: an empty state and a one-sentence note are
+/// rebuilt the instant the statement lands, unlike a result set.
+struct RunningPane: View {
+    var body: some View {
+        LoadingVeil(isVisible: true)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.background.color)
+    }
+}
 
 /// Dims the grid while a query runs.
 ///

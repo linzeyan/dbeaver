@@ -8,10 +8,18 @@ struct DbError: Error, CustomStringConvertible {
     /// statement, not the editor buffer it was cut from. Nil for every error
     /// that is not about a place in a statement.
     let position: Int?
+    /// Whether the server stopped this statement because somebody asked it to.
+    ///
+    /// Comes from the core's own reading of the SQLSTATE, not from this side
+    /// remembering that it pressed Cancel. A statement can fail on its own
+    /// merits in the same instant the request lands, and a window that reported
+    /// that as "Cancelled" would hide a real fault behind a button.
+    let cancelled: Bool
 
-    init(description: String, position: Int? = nil) {
+    init(description: String, position: Int? = nil, cancelled: Bool = false) {
         self.description = description
         self.position = position
+        self.cancelled = cancelled
     }
 }
 
@@ -32,6 +40,26 @@ final class Database {
     }
 
     deinit { db_free(handle) }
+
+    /// Asks the server to abandon whatever this connection is running.
+    ///
+    /// The one method here that may be called while another is in flight, and
+    /// the one that must not go on the queue the others share: that queue is
+    /// serial and is exactly what is blocked, so a cancel queued behind the
+    /// statement would arrive after it finished. The core sends the request on
+    /// a connection of its own for the same reason.
+    ///
+    /// Silent on failure. A cancel that could not be delivered leaves the
+    /// statement running, which the window already shows by going on saying
+    /// "Running…"; a second message about the request itself would be about
+    /// this application's plumbing rather than about the user's database.
+    func cancel() {
+        var err: UnsafeMutablePointer<CChar>?
+        if db_cancel(handle, &err) != 0 {
+            let message = Database.take(&err) ?? "cancel failed"
+            fputs("cancel request failed: \(message)\n", stderr)
+        }
+    }
 
     // MARK: - Metadata
 
@@ -170,6 +198,10 @@ final class Query {
         case 0:
             out.deallocate()
             return nil
+        case -2:
+            out.deallocate()
+            throw DbError(
+                description: Database.take(&err) ?? "cancelled", cancelled: true)
         default:
             out.deallocate()
             throw DbError(description: Database.take(&err) ?? "next batch failed")

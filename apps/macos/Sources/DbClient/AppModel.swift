@@ -1306,7 +1306,9 @@ final class AppModel {
         if let failure = output.failure, let stopped {
             for i in stopped..<ranges.count {
                 let outcome: StatementOutcome =
-                    i == stopped ? .failed(failure.description) : .notRun
+                    i == stopped
+                    ? (failure.cancelled ? .cancelled : .failed(failure.description))
+                    : .notRun
                 steps.append(
                     ScriptStep(
                         id: i + 1, sql: statements[i], range: ranges[i],
@@ -1352,10 +1354,12 @@ final class AppModel {
         case .rows, .completed:
             let elapsed = String(format: "%.2f", milliseconds / 1000)
             return "\(label) · \(outcome.label) · \(elapsed) s"
-        case .failed, .notRun:
-            // No elapsed time: for one of these there is nothing to time, and
-            // for the other the number would sit beside "failed" looking like a
-            // measurement of the answer rather than of the wait.
+        case .failed, .cancelled, .notRun:
+            // No elapsed time: one of these has nothing to time, and for the
+            // other two the number would sit beside "failed" or "cancelled"
+            // looking like a measurement of the answer rather than of the wait
+            // — and for a cancellation it would be a measurement of how long
+            // the user put up with it, which is not a fact about the database.
             return "\(label) · \(outcome.label)"
         }
     }
@@ -1593,6 +1597,31 @@ final class AppModel {
         }
     }
 
+    /// Whether there is a statement running for Cancel to stop.
+    ///
+    /// `isBusy` covers metadata reads and the browse as well as the Query pane,
+    /// and all of them are the same thing to the server: one connection with one
+    /// statement on it. A metadata read that hangs is exactly as worth stopping
+    /// as a mistyped join.
+    var canCancel: Bool { isBusy && db != nil }
+
+    /// Asks the server to stop what this connection is running.
+    ///
+    /// Not on the core queue, which is the point: that queue is serial and is
+    /// what is blocked, so a cancel dispatched onto it would be delivered after
+    /// the statement it exists to interrupt had already finished. Not on the
+    /// main actor either — the request opens a connection of its own and waits
+    /// for the server, which is a round trip the window must not sit through.
+    ///
+    /// Nothing here changes what the window says. The statement is still running
+    /// until the server says otherwise, and the answer arrives where every other
+    /// answer does: as the running call failing, with `cancelled` set.
+    func cancelRunningStatement() {
+        guard canCancel, let db else { return }
+        status = "Cancelling…"
+        DispatchQueue.global(qos: .userInitiated).async { db.cancel() }
+    }
+
     private func fail(with error: Error) {
         // A Query-pane failure arrives wrapped in the statement that caused it;
         // everything else is its own error.
@@ -1614,6 +1643,17 @@ final class AppModel {
             connectionState = .failed
             connectionError = message
             if db == nil { status = "Not connected" }
+            return
+        }
+
+        // A cancellation is not a fault and does not get the banner. The server
+        // reports it as an error — "canceling statement due to user request" —
+        // and rendering that in red would tell the user their statement was
+        // wrong when what happened is that the button they pressed worked. The
+        // caret stays where it was for the same reason: there is nothing in the
+        // statement to point at.
+        if ((statement?.error ?? error) as? DbError)?.cancelled == true {
+            status = "Cancelled"
             return
         }
 
