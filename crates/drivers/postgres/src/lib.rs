@@ -74,6 +74,26 @@ impl PgError {
     }
 }
 
+/// An error that never reached the server, with the reason it did not.
+///
+/// A failure before the connection exists carries no `DbError`, and what
+/// tokio-postgres displays for one names the stage rather than the cause:
+/// "error connecting to server" is every possible connection failure at once —
+/// wrong port, no route, no server, TLS refused — and a connection dialog
+/// showing it leaves the user to guess which. The reason is in the source
+/// chain, so the chain is what gets rendered.
+fn with_causes(e: &tokio_postgres::Error) -> String {
+    use std::error::Error;
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(next) = cause {
+        out.push_str(": ");
+        out.push_str(&next.to_string());
+        cause = next.source();
+    }
+    out
+}
+
 /// Renders a driver error the way the server stated it.
 ///
 /// `tokio_postgres::Error` displays as the bare string "db error"; everything a
@@ -81,7 +101,7 @@ impl PgError {
 /// error banner that says nothing, which is worse than no banner.
 fn describe(e: &tokio_postgres::Error) -> String {
     let Some(db) = e.as_db_error() else {
-        return e.to_string();
+        return with_causes(e);
     };
     let mut out = db.message().to_string();
     if let Some(detail) = db.detail() {
@@ -312,5 +332,33 @@ impl ArrowStream {
             Arc::clone(&self.schema),
             arrays,
         )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Needs no database — it needs the absence of one, which is why it can run
+    /// in the unit suite. Port 1 is reserved and nothing on a developer machine
+    /// or a CI runner listens there.
+    #[tokio::test]
+    async fn a_connection_that_never_happened_says_why_not() {
+        let err = PgSource::connect("host=127.0.0.1 port=1 user=nobody dbname=nothing")
+            .await
+            .err()
+            .expect("nothing is listening on port 1");
+        let message = err.to_string();
+        // The stage on its own — which is all tokio-postgres displays — fits
+        // every connection failure there is, so a dialog showing it tells the
+        // user nothing they did not already know from the dialog being up.
+        assert!(
+            message.len() > "error connecting to server".len(),
+            "the message stops at the stage and never says the cause: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("refused"),
+            "expected the refusal to survive into the message, got: {message}"
+        );
     }
 }
