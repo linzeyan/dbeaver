@@ -280,10 +280,19 @@ final class ArrowTable {
         case "ttu": return .time64
         default:
             if f.hasPrefix("d:") {
-                // "d:precision,scale"
+                // "d:precision,scale" — or "d:precision,scale,bitWidth", which
+                // is the one that matters. The width is optional and defaults
+                // to 128, so an earlier version read the first two numbers and
+                // ignored the rest: a Decimal256 column matched this case,
+                // reported itself as decimal128, and the reader then took 16
+                // bytes out of every 32. That is not an unreadable column, it
+                // is a column of plausible wrong numbers, which is the worst
+                // thing this file could produce.
                 let parts = f.dropFirst(2).split(separator: ",")
                 let precision = parts.count > 0 ? Int32(parts[0]) ?? 0 : 0
                 let scale = parts.count > 1 ? Int32(parts[1]) ?? 0 : 0
+                let bits = parts.count > 2 ? Int32(parts[2]) ?? 0 : 128
+                guard bits == 128 else { return .unsupported(f) }
                 return .decimal128(precision: precision, scale: scale)
             }
             if f.hasPrefix("tsu:") {
