@@ -563,6 +563,11 @@ pub struct Rows {
     /// Whether anything has been given to the caller yet, which is what decides
     /// whether the invalid-UTF-8 retry is still possible.
     untouched: bool,
+    /// Whether the rows handed over are a count of anything.
+    ///
+    /// False for a statement that had no result set: it did something, and how
+    /// much is a number this driver does not have.
+    counted: bool,
     _registration: Option<Registration>,
 }
 
@@ -586,6 +591,7 @@ impl Rows {
             delivered: 0,
             drained: false,
             untouched: true,
+            counted: true,
             _registration: Some(registration),
         })
     }
@@ -600,6 +606,7 @@ impl Rows {
             delivered: 0,
             drained: true,
             untouched: false,
+            counted: false,
             _registration: None,
         }
     }
@@ -611,14 +618,19 @@ impl Rows {
     /// Rows this statement produced, or `None` until the result has been read to
     /// the end.
     ///
-    /// Counted here rather than taken from the server. ClickHouse reports what a
-    /// statement read and wrote in an `X-ClickHouse-Summary` response header,
-    /// and the crate does not surface it, so the only number this driver can
-    /// state is the one it handed over. For a `SELECT` that is the same number.
-    /// For an `INSERT` it is zero and means nothing, which is why the statement
-    /// that produced it says so in its own comment rather than here.
+    /// Counted here rather than taken from the server, which is exact for a
+    /// statement that returns rows and unavailable for one that does not.
+    /// ClickHouse reports what a statement read and wrote in an
+    /// `X-ClickHouse-Summary` response header and the crate does not surface
+    /// it, so an `INSERT` that wrote a thousand rows has no number to give.
+    ///
+    /// It answers `None` rather than `0`. That is the one ambiguity in this
+    /// method — the trait uses `None` for "not read to the end", and here it
+    /// also has to mean "never knowable" — but the alternative is stating that
+    /// an insert of a million rows affected none, and a wrong number is worse
+    /// than a missing one.
     pub fn rows_affected(&self) -> Option<u64> {
-        (self.drained && self.carry.is_none()).then_some(self.delivered)
+        (self.counted && self.drained && self.carry.is_none()).then_some(self.delivered)
     }
 
     /// The next page, or `None` once the result is fully consumed.

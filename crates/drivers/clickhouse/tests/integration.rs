@@ -68,9 +68,17 @@ async fn seed() {
     }
 }
 
+/// Enough of a statement to recognise it by, for the message when seeding
+/// fails. Counted in characters, because slicing a string by bytes is how a
+/// failure report becomes a second failure.
 fn head(statement: &str) -> String {
-    statement.split_whitespace().collect::<Vec<_>>().join(" ")[..60.min(statement.len())]
-        .to_string()
+    statement
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(60)
+        .collect()
 }
 
 /// Everything one statement produces, in one batch.
@@ -580,6 +588,10 @@ async fn a_statement_with_no_result_set_still_runs() {
     ] {
         let mut rows = source.query(statement, 10).await.expect(statement);
         assert!(rows.next_page().await.unwrap().is_none());
+        // Not `Some(0)`. The insert affected three rows and this driver has no
+        // way to learn the number, so it declines rather than states a false
+        // one — the count rides in a response header the crate does not expose.
+        assert_eq!(rows.rows_affected(), None, "{statement}");
     }
     let batch = read_all(&source, "SELECT sum(a) AS total FROM bench.scratch").await;
     assert_eq!(batch.num_rows(), 1);
