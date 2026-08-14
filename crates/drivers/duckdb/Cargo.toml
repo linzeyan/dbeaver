@@ -1,0 +1,30 @@
+[package]
+name = "driver-duckdb"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# Bundled for the reason driver-sqlite gives: the point of dropping the JVM is
+# that the user installs nothing. Without it libduckdb-sys falls through to
+# pkg-config and links whichever libduckdb the machine happens to have, which
+# for DuckDB also decides which storage format the client can open.
+#
+# The tilde is deliberate. From DuckDB 1.5.0 the crate's minor version encodes
+# the database version, so `~1.10505.0` takes fixes to the binding and refuses
+# to move the database: a `cargo update` that changed the on-disk format would
+# otherwise arrive through a lockfile.
+duckdb = { version = "~1.10505.0", features = ["bundled"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
+# The tests build their fixtures with the library directly, so a fixture does
+# not depend on the code under test being right.
+duckdb = { version = "~1.10505.0", features = ["bundled"] }
