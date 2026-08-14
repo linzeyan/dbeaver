@@ -13,6 +13,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use futures_util::StreamExt;
 use std::ops::{Deref, DerefMut};
@@ -282,6 +283,29 @@ impl PgSource {
         for result in results {
             result?;
         }
+        Ok(())
+    }
+
+    /// Takes one step of transaction control on the session connection.
+    ///
+    /// On the session and not on a pooled connection, which is the whole reason
+    /// this driver keeps one: a transaction belongs to a connection, so a
+    /// `BEGIN` sent down a borrowed one opens a transaction the next statement
+    /// will not be given and nobody can commit.
+    ///
+    /// PostgreSQL spells all six of these the standard way, which is not true of
+    /// every database — the words live here rather than in the caller for that
+    /// reason.
+    pub async fn transaction(&self, step: &TxStep) -> Result<(), PgError> {
+        let statement = match step {
+            TxStep::Begin => "BEGIN".to_string(),
+            TxStep::Commit => "COMMIT".to_string(),
+            TxStep::Rollback => "ROLLBACK".to_string(),
+            TxStep::Savepoint(name) => format!("SAVEPOINT {name}"),
+            TxStep::RollbackTo(name) => format!("ROLLBACK TO SAVEPOINT {name}"),
+            TxStep::Release(name) => format!("RELEASE SAVEPOINT {name}"),
+        };
+        self.session.batch_execute(&statement).await?;
         Ok(())
     }
 

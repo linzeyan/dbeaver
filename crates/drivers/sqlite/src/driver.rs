@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
     DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo,
+    TriggerInfo, TxStep,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, SqliteError, SqliteSource};
@@ -83,6 +83,21 @@ impl Driver for SqliteSource {
     async fn cancel(&self) -> DbResult<()> {
         SqliteSource::cancel(self);
         Ok(())
+    }
+
+    /// Not yet: this driver opens a connection per piece of work and closes it
+    /// after, which is what makes cancelling one safe here — and what leaves
+    /// nothing open between two statements to hold a transaction.
+    fn transactional(&self) -> bool {
+        false
+    }
+
+    /// Refused rather than skipped, so that nobody is told a transaction is open
+    /// when nothing is.
+    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
+        Err(DbError::new(
+            "SQLite: this session opens a connection per statement, so there is no transaction to control",
+        ))
     }
 }
 

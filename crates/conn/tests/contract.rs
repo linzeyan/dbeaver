@@ -18,7 +18,7 @@
 //! about the checks changed, which is the useful result: the contract was about
 //! databases after all, and only the harness had assumed otherwise.
 
-use dbconn::Driver;
+use dbconn::{Driver, TxStep};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -74,8 +74,46 @@ struct Subject {
     /// MongoDB's server rejects a well-formed command by naming the field it
     /// disliked, and there is no offset to have.
     positions: bool,
+    /// Somewhere to write, for the transaction check — `None` where there is no
+    /// transaction to control.
+    ///
+    /// Kept in step with `Driver::transactional` by the check rather than
+    /// derived from it, so that a driver which gains a session connection fails
+    /// here until somebody gives it a fixture, instead of silently testing
+    /// nothing.
+    scratch: Option<Scratch>,
     /// Kept alive for the length of the test, and unused otherwise.
     _fixture: Option<TempDir>,
+}
+
+/// A table the transaction check writes to, created and dropped by the check.
+///
+/// Statements rather than a table name, for the reason the rest of this file
+/// carries statements: building `INSERT INTO {table}` in the check would smuggle
+/// in the claim that every database with transactions speaks SQL. `Scratch::sql`
+/// is where that claim is made, by the subjects that can honour it.
+struct Scratch {
+    create: String,
+    clear: String,
+    /// Adds one row. Run more than once, so nothing in it may be unique.
+    insert: String,
+    /// Reads the rows back; the check counts them and looks at nothing else.
+    read: String,
+    drop: String,
+}
+
+impl Scratch {
+    /// The statements in ordinary SQL, which is what every transactional driver
+    /// here happens to speak.
+    fn sql(table: &str) -> Self {
+        Self {
+            create: format!("CREATE TABLE IF NOT EXISTS {table} (n INT)"),
+            clear: format!("DELETE FROM {table}"),
+            insert: format!("INSERT INTO {table} (n) VALUES (1)"),
+            read: format!("SELECT n FROM {table}"),
+            drop: format!("DROP TABLE {table}"),
+        }
+    }
 }
 
 async fn sqlite() -> Subject {
@@ -104,6 +142,9 @@ async fn sqlite() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
+        // Each statement opens a connection of its own here, so a transaction
+        // could not span two of them.
+        scratch: None,
         _fixture: Some(dir),
     }
 }
@@ -139,6 +180,9 @@ async fn duckdb() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
+        // As SQLite: a connection per piece of work, and no transaction can
+        // reach across two of them.
+        scratch: None,
         _fixture: None,
     }
 }
@@ -158,6 +202,7 @@ async fn postgres() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
+        scratch: Some(Scratch::sql("contract_tx")),
         _fixture: None,
     }
 }
@@ -186,6 +231,9 @@ async fn clickhouse() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
+        // ClickHouse's transactions are experimental, off by default, and cover
+        // one INSERT rather than a session's worth of statements.
+        scratch: None,
         _fixture: None,
     }
 }
@@ -235,6 +283,9 @@ async fn mongodb() -> Subject {
         // text that field was written, and inventing an offset from a field name
         // would put the caret wherever that name first appeared.
         positions: false,
+        // MongoDB's transactions need a replica set and a session this driver
+        // does not hold.
+        scratch: None,
         _fixture: None,
     }
 }
@@ -290,6 +341,9 @@ async fn mysql() -> Subject {
         // fragment would find the first occurrence rather than the one that
         // failed, which is a caret in the wrong place rather than no caret.
         positions: false,
+        // The database has transactions; this driver has no connection to hold
+        // one on, because every statement takes one from a pool.
+        scratch: None,
         _fixture: None,
     }
 }
@@ -373,6 +427,9 @@ async fn mssql() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
+        // As MySQL: pooled connections, so there is nothing for a transaction to
+        // stay open on.
+        scratch: None,
         _fixture: None,
     }
 }
@@ -391,6 +448,7 @@ async fn pg_compatible(
     key: &str,
     positions: bool,
     cursors: bool,
+    scratch: Option<Scratch>,
 ) -> Subject {
     let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
         .await
@@ -421,6 +479,7 @@ async fn pg_compatible(
         missing_is_a_failure: true,
         cursors,
         positions,
+        scratch,
         _fixture: None,
     }
 }
@@ -490,6 +549,9 @@ async fn mysql_compatible(
         missing_is_a_failure: true,
         cursors,
         positions,
+        // The MySQL driver's answer, and it is the driver's rather than the
+        // server's: TiDB and StarRocks both have transactions.
+        scratch: None,
         _fixture: None,
     }
 }
@@ -748,6 +810,138 @@ async fn answers_for_a_relation_that_is_not_there(subject: &Subject) {
     assert_eq!(driver.definition(schema, missing).await.unwrap(), None);
 }
 
+/// A transaction keeps a change to itself until it is committed, forgets it when
+/// it is rolled back, and a savepoint undoes part of one without ending it.
+///
+/// What all three rest on is that the statements and the `BEGIN` reached the same
+/// connection, which is why the transaction is read from while it is still open.
+/// A driver that runs each statement on a borrowed connection passes every other
+/// check in this file and still commits every statement on its own.
+async fn controls_a_transaction(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    let Some(scratch) = subject.scratch.as_ref() else {
+        assert!(
+            !driver.transactional(),
+            "this driver offers transaction control, so the subject needs somewhere to write"
+        );
+        return;
+    };
+    assert!(
+        driver.transactional(),
+        "the subject has a fixture for transactions the driver says it cannot control"
+    );
+
+    // A table left behind by a run that failed part way through is the ordinary
+    // state here, so the fixture is emptied rather than assumed empty.
+    run(driver, &scratch.create).await;
+    run(driver, &scratch.clear).await;
+
+    driver
+        .transaction(&TxStep::Begin)
+        .await
+        .expect("could not begin");
+    run(driver, &scratch.insert).await;
+    assert_eq!(
+        rows(driver, &scratch.read).await,
+        1,
+        "an open transaction should see its own change"
+    );
+    driver
+        .transaction(&TxStep::Rollback)
+        .await
+        .expect("could not roll back");
+    assert_eq!(
+        rows(driver, &scratch.read).await,
+        0,
+        "a rolled-back change should be gone"
+    );
+
+    driver
+        .transaction(&TxStep::Begin)
+        .await
+        .expect("could not begin");
+    run(driver, &scratch.insert).await;
+    driver
+        .transaction(&TxStep::Commit)
+        .await
+        .expect("could not commit");
+    assert_eq!(
+        rows(driver, &scratch.read).await,
+        1,
+        "a committed change should still be there"
+    );
+
+    driver
+        .transaction(&TxStep::Begin)
+        .await
+        .expect("could not begin");
+    run(driver, &scratch.insert).await;
+    driver
+        .transaction(&TxStep::Savepoint("halfway".to_string()))
+        .await
+        .expect("could not set a savepoint");
+    run(driver, &scratch.insert).await;
+    driver
+        .transaction(&TxStep::RollbackTo("halfway".to_string()))
+        .await
+        .expect("could not roll back to the savepoint");
+    assert_eq!(
+        rows(driver, &scratch.read).await,
+        2,
+        "rolling back to a savepoint should undo only what came after it"
+    );
+    driver
+        .transaction(&TxStep::Release("halfway".to_string()))
+        .await
+        .expect("could not release the savepoint");
+    driver
+        .transaction(&TxStep::Rollback)
+        .await
+        .expect("could not roll back");
+    assert_eq!(
+        rows(driver, &scratch.read).await,
+        1,
+        "the transaction around the savepoint was rolled back too"
+    );
+
+    run(driver, &scratch.drop).await;
+}
+
+/// Runs `sql` for its effect, reading it to the end.
+///
+/// To the end because the trait leaves open when a statement is actually
+/// executed — a driver may do the work on the first batch — so a statement sent
+/// and not read is a statement that may not have run.
+async fn run(driver: &dyn Driver, sql: &str) {
+    let mut stream = driver
+        .query(sql, 1)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    while stream
+        .next_batch()
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        .is_some()
+    {}
+}
+
+/// How many rows `sql` returns.
+async fn rows(driver: &dyn Driver, sql: &str) -> usize {
+    let mut stream = driver
+        .query(sql, 100)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    let mut seen = 0;
+    while let Some(batch) = stream
+        .next_batch()
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"))
+    {
+        seen += batch.num_rows();
+    }
+    seen
+}
+
 /// The failure `sql` produces, insisting there is one.
 ///
 /// A helper because the failure can come from either call: `query` resolving at
@@ -773,6 +967,7 @@ async fn every_check(subject: &Subject) {
     reports_where_a_statement_is_wrong(subject).await;
     walks_the_navigator(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
+    controls_a_transaction(subject).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -849,6 +1044,9 @@ async fn cockroachdb_satisfies_the_contract_through_the_postgres_driver() {
         // field exists to avoid, and would break the day the wording changed.
         false,
         true,
+        // Transactions are the part of PostgreSQL that CockroachDB is built
+        // around, savepoints included.
+        Some(Scratch::sql("contract_tx")),
     )
     .await;
     every_check(&subject).await;
@@ -910,6 +1108,10 @@ async fn greptimedb_reads_data_through_the_postgres_driver() {
         "n",
         false,
         false,
+        // The driver says it is transactional because it is the PostgreSQL one;
+        // this server is append-only and has no transactions to control. The
+        // checks below are the ones it does satisfy.
+        None,
     )
     .await;
 

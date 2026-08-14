@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
     DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo,
+    TriggerInfo, TxStep,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MongoError, MongoSource};
@@ -79,6 +79,22 @@ impl Driver for MongoSource {
 
     async fn cancel(&self) -> DbResult<()> {
         Ok(MongoSource::cancel(self).await?)
+    }
+
+    /// Not yet: MongoDB has multi-document transactions, and reaching them
+    /// means threading a `ClientSession` through every operation and running
+    /// against a replica set or a sharded cluster — a standalone `mongod`,
+    /// which is what a laptop runs, refuses them outright.
+    fn transactional(&self) -> bool {
+        false
+    }
+
+    /// Refused rather than skipped, so that nobody is told a transaction is open
+    /// when nothing is.
+    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
+        Err(DbError::new(
+            "MongoDB transactions need a replica set and a session this driver does not hold",
+        ))
     }
 }
 

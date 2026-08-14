@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
     DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo,
+    TriggerInfo, TxStep,
 };
 
 use crate::{ChError, ChSource, Rows, RowsCancel};
@@ -90,6 +90,21 @@ impl Driver for ChSource {
 
     async fn cancel(&self) -> DbResult<()> {
         Ok(ChSource::cancel(self).await?)
+    }
+
+    /// No, and not for want of a session connection. ClickHouse's transactions
+    /// are experimental, are off unless the server was started with them on, and
+    /// cover one INSERT rather than a session's worth of statements. Answering
+    /// yes here would put a Commit button on screen for something that is not
+    /// one.
+    fn transactional(&self) -> bool {
+        false
+    }
+
+    /// Refused rather than skipped, so that nobody is told a transaction is open
+    /// when nothing is.
+    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
+        Err(DbError::new("ClickHouse has no transactions to control"))
     }
 }
 

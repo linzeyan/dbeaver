@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
     DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo,
+    TriggerInfo, TxStep,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, DuckError, DuckSource};
@@ -80,6 +80,21 @@ impl Driver for DuckSource {
     async fn cancel(&self) -> DbResult<()> {
         DuckSource::cancel(self);
         Ok(())
+    }
+
+    /// Not yet: this driver opens a connection per piece of work, as the SQLite
+    /// one does and for the same reason, so there is nothing open between two
+    /// statements to hold a transaction.
+    fn transactional(&self) -> bool {
+        false
+    }
+
+    /// Refused rather than skipped, so that nobody is told a transaction is open
+    /// when nothing is.
+    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
+        Err(DbError::new(
+            "DuckDB: this session opens a connection per statement, so there is no transaction to control",
+        ))
     }
 }
 

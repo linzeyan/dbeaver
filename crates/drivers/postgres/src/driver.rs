@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
     DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo,
+    TriggerInfo, TxStep,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -84,6 +84,16 @@ impl Driver for PgSource {
 
     async fn cancel(&self) -> DbResult<()> {
         Ok(PgSource::cancel(self).await?)
+    }
+
+    /// Statements run on a connection of their own here, which is what a
+    /// transaction needs to span them.
+    fn transactional(&self) -> bool {
+        true
+    }
+
+    async fn transaction(&self, step: &TxStep) -> DbResult<()> {
+        Ok(PgSource::transaction(self, step).await?)
     }
 }
 

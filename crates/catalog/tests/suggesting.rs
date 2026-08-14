@@ -9,7 +9,7 @@
 use dbcatalog::{Kind, Names};
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -104,6 +104,12 @@ impl Driver for Fake {
     }
     async fn cancel(&self) -> DbResult<()> {
         Ok(())
+    }
+    fn transactional(&self) -> bool {
+        false
+    }
+    async fn transaction(&self, _: &TxStep) -> DbResult<()> {
+        unreachable!("completion never opens a transaction")
     }
 }
 

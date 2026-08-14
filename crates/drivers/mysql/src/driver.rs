@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
     DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo,
+    TriggerInfo, TxStep,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -86,6 +86,22 @@ impl Driver for MySqlSource {
 
     async fn cancel(&self) -> DbResult<()> {
         Ok(MySqlSource::cancel(self).await?)
+    }
+
+    /// Not yet: this session takes a connection from its pool for each
+    /// statement, so there is none holding a transaction for the next statement
+    /// to join. Giving it a session connection of its own is what makes this
+    /// true, and it is the same change four other drivers need.
+    fn transactional(&self) -> bool {
+        false
+    }
+
+    /// Refused rather than skipped, so that nobody is told a transaction is open
+    /// when nothing is.
+    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
+        Err(DbError::new(
+            "MySQL: every statement in this session runs on a pooled connection, so there is no transaction to control",
+        ))
     }
 }
 
