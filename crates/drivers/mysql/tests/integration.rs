@@ -1189,3 +1189,47 @@ async fn a_timestamp_is_read_in_the_zone_its_type_claims() {
     // Row five is TIMESTAMP's documented ceiling, 2038-01-19 03:14:07 UTC.
     assert_eq!(stamps.value(4), 2_147_483_647_000_000);
 }
+
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn a_show_statement_arrives_with_the_columns_its_prepare_withheld() {
+    let source = source().await;
+    // MySQL answers the prepare for this statement with no columns at all and
+    // sends the two it really has with the execution. Every other statement is
+    // described at prepare time and a description of nothing means a write, so
+    // a driver that believed this one would report the DDL of a table as an
+    // `INSERT` that changed no rows — and the Structure tab asking for it would
+    // get an empty result rather than a `CREATE TABLE`.
+    let mut stream = source
+        .query("SHOW CREATE TABLE bench.bench_wide", 64)
+        .await
+        .expect("running SHOW CREATE TABLE");
+    let schema = stream.schema();
+    assert_eq!(
+        schema.fields().len(),
+        2,
+        "SHOW CREATE TABLE describes the table and the statement that makes it"
+    );
+    assert_eq!(schema.field(1).name(), "Create Table");
+
+    let batch = stream
+        .next_batch()
+        .await
+        .expect("reading the statement")
+        .expect("a row");
+    let ddl = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("the statement arrives as text");
+    assert!(
+        ddl.value(0).starts_with("CREATE TABLE `bench_wide`"),
+        "{}",
+        ddl.value(0)
+    );
+
+    assert_eq!(stream.next_batch().await.expect("draining"), None);
+    // Counted as what a read produced rather than as what a write changed,
+    // which is the other half of believing the execution over the prepare.
+    assert_eq!(stream.rows_affected(), Some(1));
+}

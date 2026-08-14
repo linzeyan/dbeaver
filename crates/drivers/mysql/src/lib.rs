@@ -592,47 +592,70 @@ async fn pump(
         }
     };
 
-    // Types are known here, before a row exists, because the server answers a
-    // prepare with the column definitions. A statement that returns no result
-    // set — an UPDATE, a CREATE — describes zero columns, which is the honest
-    // schema for it.
-    let specs: Vec<ColumnType> = prepared.columns().iter().map(ColumnType::of).collect();
-    let fields = prepared
-        .columns()
-        .iter()
-        .zip(&specs)
-        .map(|(column, spec)| arrow_map::arrow_field(&column.name_str(), spec))
-        .collect::<Result<Vec<_>, _>>();
-    let schema = match fields {
-        Ok(fields) => Arc::new(Schema::new(fields)),
-        Err(e) => {
-            let _ = schema_out.send(Err(e));
+    // Types are normally known here, before a row exists, because the server
+    // answers a prepare with the column definitions, and a statement that
+    // returns no result set — an UPDATE, a CREATE — describes zero columns,
+    // which is the honest schema for it.
+    //
+    // `SHOW CREATE TABLE` is described the same way and is not that statement:
+    // MySQL 8 answers its prepare with nothing and sends the two columns with
+    // the execution. So a description of nothing is not believed until the
+    // statement has run — which costs those statements the early types, and
+    // costs every other statement nothing. Trusting the prepare instead would
+    // report a `SHOW` as a write that changed no rows, and the DDL a table's
+    // Structure tab is asking for would arrive as an empty result.
+    let (schema, names, mut result) = if prepared.columns().is_empty() {
+        let result = match conn.exec_iter(&prepared, ()).await {
+            Ok(result) => result,
+            // Nothing has been said about the columns yet, so this failure goes
+            // to whoever is waiting for them rather than into a page stream
+            // that nobody is reading, which is where a prepare failure goes.
+            Err(e) => {
+                let _ = schema_out.send(Err(e.into()));
+                return;
+            }
+        };
+        let columns = result.columns().unwrap_or_else(|| Arc::from([]));
+        match columns_as_arrow(&columns) {
+            Ok(described) => {
+                if schema_out.send(Ok(Arc::clone(&described.0))).is_err() {
+                    return;
+                }
+                (described.0, described.1, result)
+            }
+            Err(e) => {
+                let _ = schema_out.send(Err(e));
+                return;
+            }
+        }
+    } else {
+        let (schema, names) = match columns_as_arrow(&prepared.columns()) {
+            Ok(described) => described,
+            Err(e) => {
+                let _ = schema_out.send(Err(e));
+                return;
+            }
+        };
+        if schema_out.send(Ok(Arc::clone(&schema))).is_err() {
             return;
         }
+        let result = match conn.exec_iter(&prepared, ()).await {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = pages.send(Page::Failed(e.into())).await;
+                return;
+            }
+        };
+        (schema, names, result)
     };
-    let names: Vec<String> = schema
-        .fields()
-        .iter()
-        .map(|f| f.name().to_string())
-        .collect();
-    if schema_out.send(Ok(Arc::clone(&schema))).is_err() {
-        return;
-    }
 
     // Whether this statement reads or writes, which decides what its count
-    // means. Taken from the prepared column list rather than from whether a row
-    // stream came back: `QueryResult::stream` answers `Some` for an `INSERT`
-    // too, with a result set of no columns, so using it as the test would report
-    // every write as having changed nothing.
+    // means. Taken from the column list rather than from whether a row stream
+    // came back: `QueryResult::stream` answers `Some` for an `INSERT` too, with
+    // a result set of no columns, so using it as the test would report every
+    // write as having changed nothing.
     let reads = !schema.fields().is_empty();
     let mut produced = 0u64;
-    let mut result = match conn.exec_iter(&prepared, ()).await {
-        Ok(result) => result,
-        Err(e) => {
-            let _ = pages.send(Page::Failed(e.into())).await;
-            return;
-        }
-    };
 
     {
         let rows = match result.stream::<Row>().await {
@@ -715,6 +738,31 @@ async fn pump(
     drop(result);
 
     let _ = pages.send(Page::Done(affected)).await;
+}
+
+/// The Arrow schema a column list describes, and the MySQL type names beside it.
+///
+/// The names come back with the schema because the row loop needs them for its
+/// error messages and an Arrow field no longer carries them: reading them off
+/// `schema.fields()` was the same list until a statement could be described
+/// twice, and a helper that returns half of what it computed invites the caller
+/// to recompute the other half from the wrong one.
+fn columns_as_arrow(
+    columns: &[mysql_async::Column],
+) -> Result<(SchemaRef, Vec<String>), MySqlError> {
+    let specs: Vec<ColumnType> = columns.iter().map(ColumnType::of).collect();
+    let fields = columns
+        .iter()
+        .zip(&specs)
+        .map(|(column, spec)| arrow_map::arrow_field(&column.name_str(), spec))
+        .collect::<Result<Vec<_>, _>>()?;
+    let schema = Arc::new(Schema::new(fields));
+    let names = schema
+        .fields()
+        .iter()
+        .map(|f| f.name().to_string())
+        .collect();
+    Ok((schema, names))
 }
 
 /// The reading half, shared by a result and a cursor because on this database
