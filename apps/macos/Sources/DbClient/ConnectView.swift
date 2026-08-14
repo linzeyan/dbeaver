@@ -69,16 +69,29 @@ struct ConnectView: View {
             }
 
             VStack(spacing: Theme.Space.sm) {
-                HStack(spacing: Theme.Space.sm) {
-                    label("Host")
-                    field($model.connectionDraft.host, .connectHost, "127.0.0.1", named: "Host")
-                    label("Port", width: 32)
-                    field($model.connectionDraft.port, .connectPort, "5432", named: "Port")
+                driverRow
+                // The fields a database actually needs. A file has no host, no
+                // port and nobody to authenticate as, and showing four disabled
+                // boxes beside a path would be describing the form rather than
+                // the database.
+                if model.connectionDraft.driver?.shape == .file {
+                    row("File", $model.connectionDraft.path, .connectDatabase, "/path/to/file.db")
+                } else {
+                    HStack(spacing: Theme.Space.sm) {
+                        label("Host")
+                        field(
+                            $model.connectionDraft.host, .connectHost, "127.0.0.1", named: "Host")
+                        label("Port", width: 32)
+                        field(
+                            $model.connectionDraft.port, .connectPort, portPlaceholder,
+                            named: "Port"
+                        )
                         .frame(width: 56)
+                    }
+                    row("Database", $model.connectionDraft.database, .connectDatabase, "")
+                    row("User", $model.connectionDraft.user, .connectUser, "")
+                    row("Password", $model.connectionPassword, .connectPassword, "", isSecure: true)
                 }
-                row("Database", $model.connectionDraft.database, .connectDatabase, "postgres")
-                row("User", $model.connectionDraft.user, .connectUser, "postgres")
-                row("Password", $model.connectionPassword, .connectPassword, "", isSecure: true)
             }
 
             footer
@@ -104,10 +117,11 @@ struct ConnectView: View {
                 Text("Connect to a database")
                     .font(Theme.Typography.title)
                     .foregroundStyle(Theme.text.color)
-                // Named, because it is the only dialect the core speaks and a
-                // form that does not say so invites a MySQL host and a
-                // bewildering error.
-                Text("PostgreSQL")
+                // The subtitle used to name the one dialect the core spoke.
+                // There are several now, so which one is a choice rather than a
+                // fact, and it belongs in the picker below where it can be
+                // changed.
+                Text("\(DriverCatalog.all.count) databases")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary.color)
             }
@@ -147,6 +161,49 @@ struct ConnectView: View {
                 .tint(Theme.accent.color)
                 .disabled(!model.canConnect)
         }
+    }
+
+    /// The database being connected to.
+    ///
+    /// A menu rather than a segmented control: the list is three entries today
+    /// and fifteen when the driver plan is done, and a segmented control that
+    /// grows to fifteen becomes unreadable at exactly the point it matters.
+    private var driverRow: some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("Database")
+            Picker("", selection: driverBinding) {
+                ForEach(DriverCatalog.all) { driver in
+                    Text(driver.label).tag(driver.scheme)
+                }
+                // A connection string naming a driver this build does not have
+                // keeps its scheme rather than being quietly reassigned, so the
+                // picker has to be able to show it. Listed only when it happens.
+                if model.connectionDraft.driver == nil {
+                    Text("\(model.connectionDraft.scheme) (not in this build)")
+                        .tag(model.connectionDraft.scheme)
+                }
+            }
+            .labelsHidden()
+            .accessibilityLabel("Database kind")
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Changing the picker moves the draft rather than replacing it, so that
+    /// switching database does not empty a form somebody has been typing into.
+    private var driverBinding: Binding<String> {
+        Binding(
+            get: { model.connectionDraft.scheme },
+            set: { scheme in
+                guard let driver = DriverCatalog.named(scheme) else { return }
+                model.connectionDraft = model.connectionDraft.moved(to: driver)
+            })
+    }
+
+    /// The port the chosen database listens on by default, shown greyed until
+    /// the field is filled. Empty for one with no default.
+    private var portPlaceholder: String {
+        model.connectionDraft.driver?.defaultPort.map(String.init) ?? ""
     }
 
     private func row(

@@ -78,6 +78,16 @@ void db_free(DbHandle* handle);
 // only at db_query_next, as -2.
 int db_cancel(DbHandle* handle, char** err);
 
+// Every database this build can open. Takes no handle, because the connection
+// form asks this before there is one: it needs to know which databases to offer
+// and what each of them needs asked for. Each entry has a scheme, a label, a
+// shape ("server" or "file") and a default_port.
+//
+// Exported rather than written out again in Swift, so a driver added to the core
+// appears in the form without anybody remembering to do it twice — and so the
+// form cannot offer one this build does not have.
+char* db_drivers_json(char** err);
+
 // Metadata crosses as JSON, not Arrow: it is small, and Arrow buys nothing for
 // a few thousand short rows. Returned strings are released with db_string_free.
 char* db_schemas_json(DbHandle* handle, char** err);

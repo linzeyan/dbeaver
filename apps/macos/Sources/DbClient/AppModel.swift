@@ -348,7 +348,10 @@ final class AppModel {
     ///
     /// Seeded from the last connection that worked, so that reaching a
     /// neighbouring database on the same server is one field rather than five.
-    var connectionDraft = ConnectionStore.load() ?? .suggested
+    var connectionDraft =
+        ConnectionStore.load()
+        ?? DriverCatalog.first.map(ConnectionSettings.suggested(for:))
+        ?? ConnectionSettings(scheme: "")
 
     /// The form's password field. Nothing persists it from here: a connection
     /// that opens hands it to the Keychain, and nothing else keeps a copy.

@@ -21,6 +21,8 @@ enum ConnectionChecks {
         checkFormRoundTrip()
         checkParsingWhatOthersWrite()
         checkSessionLabels()
+        checkDriverCatalog()
+        checkFileShapedDatabases()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -117,12 +119,79 @@ enum ConnectionChecks {
             "a URL naming no database is named by its host")
     }
 
+    /// The catalog the form is built from, which comes from the core rather than
+    /// from this file.
+    private static func checkDriverCatalog() {
+        expect(
+            DriverCatalog.all.isEmpty, false,
+            "the core reports at least one database it can open")
+        expect(
+            DriverCatalog.named("postgres")?.shape, .server,
+            "a database reached over a socket needs a host and a port")
+        expect(
+            DriverCatalog.named("sqlite")?.shape, .file,
+            "a database that is a file needs a path and nothing else")
+        expect(
+            DriverCatalog.named("sqlite")?.defaultPort, nil,
+            "a file has no port to default to")
+        expect(
+            DriverCatalog.named("oracle") == nil, true,
+            "the form cannot offer a database this build has no driver for")
+    }
+
+    /// A file-shaped database has no host, no port and nobody to authenticate
+    /// as, and the form has to stop insisting on all three.
+    private static func checkFileShapedDatabases() {
+        var file = ConnectionSettings(scheme: "sqlite")
+        expect(file.isComplete, false, "a file driver with no file is not ready")
+        file.path = "/Users/someone/notes.db"
+        expect(
+            file.isComplete, true,
+            "a path is the whole of what a file database needs -- not a user name")
+        expect(
+            file.connectionString(password: ""), "sqlite:///Users/someone/notes.db",
+            "an absolute path gets the three slashes the core splits on")
+
+        let parsed = ConnectionSettings(connectionString: "sqlite:///Users/someone/notes.db")
+        expect(parsed.path, "/Users/someone/notes.db", "and reads back into the path field")
+        expect(parsed.host, "", "without inventing a host it does not have")
+
+        // A relative path parses as the URL's authority, so it has to be put
+        // back in front of the path or the file name reads as a server.
+        let relative = ConnectionSettings(connectionString: "sqlite://notes.db")
+        expect(relative.path, "notes.db", "a relative path is a path, not a host")
+
+        // Switching driver must not empty a form somebody has been typing into.
+        guard let postgres = DriverCatalog.named("postgres"),
+            let mongo = DriverCatalog.named("mongodb")
+        else {
+            failures += 1
+            fputs("connection FAIL: the catalog is missing a driver these checks need\n", stderr)
+            return
+        }
+        let typed = settings("db.example.com", "5432", "shop", "reader")
+        let moved = typed.moved(to: mongo)
+        expect(moved.host, "db.example.com", "switching database keeps the host")
+        expect(moved.database, "shop", "and the database name")
+        expect(moved.port, "27017", "but takes the new driver's default port")
+
+        var custom = typed
+        custom.port = "6543"
+        expect(
+            custom.moved(to: mongo).port, "6543",
+            "a port typed by hand was typed for a reason and stays")
+        expect(
+            ConnectionSettings(scheme: "sqlite", path: "/x.db").moved(to: postgres).host,
+            "127.0.0.1", "moving to a server driver fills in the host it now needs")
+    }
+
     // MARK: - Harness
 
     private static func settings(
         _ host: String, _ port: String, _ database: String, _ user: String
     ) -> ConnectionSettings {
-        ConnectionSettings(host: host, port: port, database: database, user: user)
+        ConnectionSettings(
+            scheme: "postgres", host: host, port: port, database: database, user: user)
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
