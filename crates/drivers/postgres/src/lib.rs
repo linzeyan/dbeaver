@@ -18,6 +18,7 @@ use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use futures_util::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, RowStream};
@@ -118,6 +119,7 @@ fn describe(e: &tokio_postgres::Error) -> String {
 
 pub struct PgSource {
     client: Client,
+    conn_str: String,
 }
 
 impl PgSource {
@@ -130,7 +132,10 @@ impl PgSource {
                 eprintln!("postgres connection closed: {e}");
             }
         });
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            conn_str: conn_str.to_string(),
+        })
     }
 
     /// Asks the server to abandon whatever this connection is currently running.
@@ -257,6 +262,61 @@ impl PgSource {
             exhausted: false,
         })
     }
+
+    /// Open a cursor over `sql` and return a handle to fetch pages.
+    ///
+    /// A cursor occupies its connection while open, so the handle owns a
+    /// connection of its own for the lifetime of the cursor. The connection
+    /// is closed when the cursor is dropped, ensuring that no changes are
+    /// committed.
+    pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, PgError> {
+        // Create a fresh connection for the cursor
+        let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls).await?;
+        // The connection future drives the socket and must outlive us.
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("postgres cursor connection closed: {e}");
+            }
+        });
+
+        // Create a unique cursor name using atomic counter
+        static CURSOR_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let cursor_id = CURSOR_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let cursor_name = format!("cursor_{}", cursor_id);
+
+        // Begin transaction and declare the cursor
+        client.batch_execute("BEGIN").await?;
+
+        let declare_sql = format!("DECLARE {} CURSOR FOR {}", cursor_name, sql);
+        client.batch_execute(&declare_sql).await?;
+
+        // Prepare the schema information by fetching column info from the statement
+        let stmt = client.prepare(sql).await?;
+
+        let types: Vec<ColumnType> = stmt
+            .columns()
+            .iter()
+            .map(|c| ColumnType {
+                pg_type: c.type_().clone(),
+                modifier: c.type_modifier(),
+            })
+            .collect();
+        let fields = stmt
+            .columns()
+            .iter()
+            .zip(&types)
+            .map(|(c, t)| arrow_field(c.name(), t))
+            .collect::<Result<Vec<_>, _>>()?;
+        let schema = Arc::new(Schema::new(fields));
+
+        Ok(Cursor {
+            client,
+            schema,
+            types,
+            batch_rows,
+            cursor_name,
+        })
+    }
 }
 
 pub struct ArrowStream {
@@ -265,6 +325,74 @@ pub struct ArrowStream {
     rows: Pin<Box<RowStream>>,
     batch_rows: usize,
     exhausted: bool,
+}
+
+/// A cursor over a PostgreSQL query result.
+///
+/// A cursor occupies its connection while open, so the handle owns a
+/// connection of its own for the lifetime of the cursor. The connection
+/// is closed when the cursor is dropped, ensuring that no changes are
+/// committed.
+pub struct Cursor {
+    client: Client,
+    schema: SchemaRef,
+    types: Vec<ColumnType>,
+    batch_rows: usize,
+    cursor_name: String,
+}
+
+impl Cursor {
+    /// Fetch the next batch of rows from the cursor.
+    ///
+    /// Returns `Ok(None)` when the cursor has reached the end of the result set.
+    /// Returns an error if the fetch fails.
+    pub async fn fetch(&mut self) -> Result<Option<RecordBatch>, PgError> {
+        // Use FETCH FORWARD to get the next batch of rows
+        let sql = format!(
+            "FETCH FORWARD {} FROM {}",
+            self.batch_rows, self.cursor_name
+        );
+        let rows = self.client.query(&sql, &[]).await?;
+
+        if rows.is_empty() {
+            return Ok(None);
+        }
+
+        let mut builders: Vec<ColBuilder> = self
+            .types
+            .iter()
+            .map(|t| ColBuilder::new(t, self.batch_rows))
+            .collect();
+
+        let mut n = 0usize;
+        for row in rows {
+            for (idx, b) in builders.iter_mut().enumerate() {
+                b.append(&row, idx)?;
+            }
+            n += 1;
+        }
+
+        if n == 0 {
+            return Ok(None);
+        }
+
+        let arrays = builders.iter_mut().map(|b| b.finish()).collect();
+        Ok(Some(RecordBatch::try_new(
+            Arc::clone(&self.schema),
+            arrays,
+        )?))
+    }
+
+    /// Close the cursor explicitly.
+    ///
+    /// This is optional as the cursor will be closed automatically when dropped.
+    pub async fn close(&mut self) -> Result<(), PgError> {
+        let sql = format!("CLOSE {}", self.cursor_name);
+        self.client.batch_execute(&sql).await?;
+        // Rollback the transaction to close it properly
+        self.client.batch_execute("ROLLBACK").await?;
+        Ok(())
+    }
 }
 
 impl ArrowStream {
