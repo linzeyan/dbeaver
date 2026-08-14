@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/conn",
     "crates/drivers/postgres",
     "crates/drivers/sqlite",
     "crates/ffi",

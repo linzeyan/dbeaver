@@ -13,16 +13,15 @@
 //! gets derived from.
 
 mod arrow_map;
+mod driver;
 mod metadata;
-
-pub use metadata::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
-};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
+use dbconn::{
+    ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+};
 use rusqlite::{Connection, InterruptHandle, OpenFlags, Row};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};

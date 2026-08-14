@@ -7,16 +7,14 @@ license.workspace = true
 
 [dependencies]
 arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 # Bundled, because the point of dropping the JVM is that the user installs
 # nothing: linking whichever libsqlite3 the operating system shipped would tie
 # the client's behaviour to the machine it happens to run on.
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 thiserror.workspace = true
-# Metadata crosses the FFI as JSON, as it does for PostgreSQL: a few thousand
-# short rows, where Arrow buys nothing and a JSONDecoder call on the far side
-# buys a lot.
-serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
