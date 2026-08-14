@@ -12,11 +12,12 @@
 //! discover its own drivers at startup.
 
 use dbconn::{DbError, Driver};
+use driver_mongodb::MongoSource;
 use driver_postgres::PgSource;
 use driver_sqlite::SqliteSource;
 
 /// Every scheme this build answers to, for the message a wrong one gets.
-const KNOWN: &str = "postgres, postgresql, sqlite";
+const KNOWN: &str = "postgres, postgresql, mongodb, mongodb+srv, sqlite";
 
 /// Opens whichever database `url` names.
 pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
@@ -43,6 +44,10 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // absolute one and two give a path relative to where the client was
         // started. That is the convention every other tool in this space uses,
         // and inventing a different one would only be a thing to look up.
+        // Passed on whole for the same reason PostgreSQL is: the scheme is part
+        // of what the MongoDB URI parser reads, and `mongodb+srv` in particular
+        // means "look the hosts up in DNS" rather than naming one.
+        "mongodb" | "mongodb+srv" => Ok(Box::new(MongoSource::connect(url).await?)),
         "sqlite" => Ok(Box::new(SqliteSource::connect(rest).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {KNOWN}"

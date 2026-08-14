@@ -38,6 +38,14 @@ PG_CONTAINER := pg-bench
 PG_PORT      := 55432
 PG_IMAGE     := postgres:17
 
+# MongoDB, for the driver's own tests and for its pass through the shared
+# contract. Non-default port for the same reason as PostgreSQL's. It holds no
+# benchmark data — every test seeds and drops the database it uses, so this
+# container needs nothing done to it beyond being up.
+MONGO_CONTAINER := mongo-test
+MONGO_PORT      := 57017
+MONGO_IMAGE     := mongo:7
+
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
 # waits for someone to type into it, which no script can do. Derived from
@@ -97,7 +105,7 @@ test: ## Unit tests (no database required)
 	cargo test --workspace
 
 .PHONY: test-integration
-test-integration: db-check ## Tests requiring the benchmark database
+test-integration: db-check db-check-mongo ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The SQL statement splitter's checks live behind a flag on the app binary
@@ -161,10 +169,36 @@ db-down: ## Stop and remove the benchmark container
 db-seed: db-up ## Create the 1M-row benchmark table
 	$(TOOLS)/seed-bench-db.sh
 
+.PHONY: db-up-mongo
+db-up-mongo: ## Start the MongoDB test container
+	@docker start $(MONGO_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(MONGO_CONTAINER) \
+			-p $(MONGO_PORT):27017 $(MONGO_IMAGE)
+	@echo "waiting for mongodb..."
+	@for i in $$(seq 1 60); do \
+		docker exec $(MONGO_CONTAINER) mongosh --quiet --eval 'db.runCommand({ping:1})' \
+			>/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@docker exec $(MONGO_CONTAINER) mongosh --quiet --eval 'db.runCommand({ping:1}).ok'
+
+.PHONY: db-down-mongo
+db-down-mongo: ## Stop and remove the MongoDB test container
+	-docker rm -f $(MONGO_CONTAINER)
+
 .PHONY: db-check
 db-check: ## Fail unless the benchmark database is reachable
 	@docker exec $(PG_CONTAINER) pg_isready -U bench -d bench >/dev/null 2>&1 \
 		|| { echo "benchmark database not running; run 'make db-seed'"; exit 1; }
+
+# Separate from db-check because the benchmarks want PostgreSQL and nothing
+# else: making every `make bench` depend on a MongoDB container would be asking
+# for a server that no benchmark touches.
+.PHONY: db-check-mongo
+db-check-mongo: ## Fail unless the MongoDB test container is reachable
+	@docker exec $(MONGO_CONTAINER) mongosh --quiet --eval 'db.runCommand({ping:1})' \
+		>/dev/null 2>&1 \
+		|| { echo "mongodb not running; run 'make db-up-mongo'"; exit 1; }
 
 ##@ Benchmarks
 

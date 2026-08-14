@@ -7,8 +7,16 @@
 //! the first one.
 //!
 //! SQLite's pass needs nothing installed and runs under `make test`. PostgreSQL's
-//! is the same checks against the benchmark database, so it is marked `ignore`
-//! and runs under `make test-integration`.
+//! and MongoDB's are the same checks against a server, so they are marked
+//! `ignore` and run under `make test-integration`.
+//!
+//! MongoDB is why `Subject` carries statements rather than building them. The
+//! first version of this file assembled `SELECT {key} FROM {relation}` and was
+//! therefore checking that every driver speaks SQL, which is a claim the trait
+//! never made — `query` takes text the database understands, and MongoDB's is a
+//! command document. The statements moved into the subject and nothing else
+//! about the checks changed, which is the useful result: the contract was about
+//! databases after all, and only the harness had assumed otherwise.
 
 use dbconn::Driver;
 use std::path::PathBuf;
@@ -23,6 +31,35 @@ struct Subject {
     schema: String,
     relation: String,
     key: String,
+    /// Reads `key` from `relation` in ascending order, in this database's own
+    /// language.
+    read: String,
+    /// A statement broken somewhere in the middle rather than truncated, for the
+    /// error-position check. Truncated input is deliberately avoided: SQLite
+    /// reports no offset for it, so a check written that way would be asserting
+    /// PostgreSQL's behaviour under the name of the contract.
+    broken: String,
+    /// A statement naming a relation that is not there.
+    missing: String,
+    /// Whether reading a relation that does not exist is a failure at all.
+    ///
+    /// The two answers are both defensible and the databases give different
+    /// ones. SQL refuses to plan a query over a name it cannot resolve.
+    /// MongoDB returns an empty cursor, because a collection is created by
+    /// writing to it and "not there yet" is an ordinary state rather than a
+    /// mistake. The contract cannot require either without calling one of them
+    /// wrong, so it requires only that the driver be consistent about which it
+    /// does.
+    missing_is_a_failure: bool,
+    /// Whether this database says where in a statement a fault is.
+    ///
+    /// Recorded per subject rather than required of everyone, because the
+    /// databases genuinely differ and the trait says so: a failure carries a
+    /// position or it does not. Asserting `is_some()` for all of them was the
+    /// harness deciding that every database is a SQL parser with an offset —
+    /// MongoDB's server rejects a well-formed command by naming the field it
+    /// disliked, and there is no offset to have.
+    positions: bool,
     /// Kept alive for the length of the test, and unused otherwise.
     _fixture: Option<TempDir>,
 }
@@ -47,6 +84,11 @@ async fn sqlite() -> Subject {
         schema: "main".to_string(),
         relation: "nums".to_string(),
         key: "id".to_string(),
+        read: "SELECT id FROM nums ORDER BY id".to_string(),
+        broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        positions: true,
         _fixture: Some(dir),
     }
 }
@@ -60,6 +102,59 @@ async fn postgres() -> Subject {
         schema: "public".to_string(),
         relation: "bench_wide".to_string(),
         key: "id".to_string(),
+        read: "SELECT id FROM bench_wide ORDER BY id".to_string(),
+        broken: "SELECT id FROM bench_wide WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        positions: true,
+        _fixture: None,
+    }
+}
+
+const MONGO_URI: &str = "mongodb://127.0.0.1:57017";
+
+/// The same fixture as the others, in the one database here that has no schema.
+///
+/// Seeded through the `mongodb` crate rather than through the driver, so the
+/// fixture does not depend on the code under test being right.
+async fn mongodb() -> Subject {
+    let client = mongodb::Client::with_uri_str(MONGO_URI)
+        .await
+        .expect("MongoDB unreachable; run `make db-up-mongo`");
+    let db = client.database("dbclient_contract");
+    db.drop().await.expect("could not clear the fixture");
+    let rows: Vec<bson::Document> = (1..=500)
+        .map(|i| bson::doc! { "_id": i, "label": format!("row-{i}") })
+        .collect();
+    db.collection::<bson::Document>("nums")
+        .insert_many(rows)
+        .await
+        .expect("seeding the fixture");
+
+    let driver = driver_mongodb::MongoSource::connect(&format!("{MONGO_URI}/dbclient_contract"))
+        .await
+        .expect("driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        schema: "dbclient_contract".to_string(),
+        relation: "nums".to_string(),
+        // MongoDB's guaranteed key, which is what `id` is standing in for
+        // everywhere else in this file.
+        key: "_id".to_string(),
+        // Projected down to the key, which is what `SELECT id FROM ...` does for
+        // the others: a find with no projection returns whole documents, and the
+        // check counts columns.
+        read: r#"{"find": "nums", "sort": {"_id": 1}, "projection": {"_id": 1}}"#.to_string(),
+        // Broken in the middle in this database's own language: the sort is a
+        // string where a document belongs, so the statement parses as JSON and
+        // is refused by the server.
+        broken: r#"{"find": "nums", "sort": "sideways"}"#.to_string(),
+        missing: r#"{"find": "no_such_relation_anywhere"}"#.to_string(),
+        missing_is_a_failure: false,
+        // The server names the field it disliked; it does not say where in the
+        // text that field was written, and inventing an offset from a field name
+        // would put the caret wherever that name first appeared.
+        positions: false,
         _fixture: None,
     }
 }
@@ -72,12 +167,10 @@ async fn postgres() -> Subject {
 /// each.
 async fn reads_a_result_in_batches(subject: &Subject) {
     let driver = subject.driver.as_ref();
-    let sql = format!(
-        "SELECT {key} FROM {relation} ORDER BY {key}",
-        key = subject.key,
-        relation = subject.relation
-    );
-    let mut stream = driver.query(&sql, 100).await.expect("query failed");
+    let mut stream = driver
+        .query(&subject.read, 100)
+        .await
+        .expect("query failed");
 
     // Before a single row has been read: a front end lays out a grid first and
     // asks for rows afterwards.
@@ -107,12 +200,10 @@ async fn reads_a_result_in_batches(subject: &Subject) {
 /// before the first page.
 async fn pages_a_cursor(subject: &Subject) {
     let driver = subject.driver.as_ref();
-    let sql = format!(
-        "SELECT {key} FROM {relation} ORDER BY {key}",
-        key = subject.key,
-        relation = subject.relation
-    );
-    let mut cursor = driver.cursor(&sql, 50).await.expect("cursor failed");
+    let mut cursor = driver
+        .cursor(&subject.read, 50)
+        .await
+        .expect("cursor failed");
     assert_eq!(cursor.schema().fields().len(), 1);
 
     let mut seen = 0usize;
@@ -138,14 +229,9 @@ async fn pages_a_cursor(subject: &Subject) {
 /// than an error — and a driver that returned one would make a front end's
 /// Cancel button report a failure for pressing it at the wrong moment.
 async fn cancels_an_idle_cursor_without_complaining(subject: &Subject) {
-    let sql = format!(
-        "SELECT {key} FROM {relation} ORDER BY {key}",
-        key = subject.key,
-        relation = subject.relation
-    );
     let cursor = subject
         .driver
-        .cursor(&sql, 10)
+        .cursor(&subject.read, 10)
         .await
         .expect("cursor failed");
     cursor.canceller().cancel().await.expect("cancel failed");
@@ -160,31 +246,40 @@ async fn cancels_an_idle_cursor_without_complaining(subject: &Subject) {
 async fn reports_where_a_statement_is_wrong(subject: &Subject) {
     let driver = subject.driver.as_ref();
 
-    // A statement that is wrong in the middle rather than truncated. SQLite
-    // reports no offset for input that simply stops — the error is at the end of
-    // what it was given, not at a token — so a check written with a trailing
-    // `WHERE` would be asserting something only PostgreSQL does.
-    let broken = format!(
-        "SELECT {key} FROM {relation} WHERE ORDER BY {key}",
-        key = subject.key,
-        relation = subject.relation
-    );
-    let err = failure(driver, &broken).await;
+    let err = failure(driver, &subject.broken).await;
+    if subject.positions {
+        assert!(
+            err.statement_position().is_some(),
+            "this database reports positions, so a broken statement should have one: {err}"
+        );
+    }
+    lands_inside(&err, &subject.broken);
     assert!(
-        err.statement_position().is_some(),
-        "a syntax error should say where it is: {err}"
+        !err.is_cancelled(),
+        "a broken statement is not a cancellation"
     );
-    lands_inside(&err, &broken);
-    assert!(!err.is_cancelled(), "a syntax error is not a cancellation");
 
     // Whether a missing relation has a position is the database's business, and
     // the two disagree: PostgreSQL points at the name, SQLite reports none. Both
     // are honest, so the contract asks only that whatever comes back could be
     // acted on — an earlier version of this required None and was asserting
     // SQLite's behaviour under the name of the contract.
-    let missing = failure(driver, "SELECT * FROM no_such_relation_anywhere").await;
-    lands_inside(&missing, "SELECT * FROM no_such_relation_anywhere");
-    assert!(!missing.is_cancelled());
+    if subject.missing_is_a_failure {
+        let missing = failure(driver, &subject.missing).await;
+        lands_inside(&missing, &subject.missing);
+        assert!(!missing.is_cancelled());
+    } else {
+        // Not a weaker check, a different one: a database that considers this
+        // ordinary has to actually answer, and answer with nothing.
+        let mut stream = driver
+            .query(&subject.missing, 10)
+            .await
+            .expect("reading a relation that is not there should be allowed here");
+        assert!(
+            stream.next_batch().await.expect("batch error").is_none(),
+            "a relation that is not there has no rows"
+        );
+    }
 }
 
 /// A position a front end could put a caret on: counted from one, and no further
@@ -341,4 +436,10 @@ async fn sqlite_satisfies_the_contract() {
 #[ignore = "requires the benchmark database"]
 async fn postgres_satisfies_the_contract() {
     every_check(&postgres().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a MongoDB server"]
+async fn mongodb_satisfies_the_contract() {
+    every_check(&mongodb().await).await;
 }
