@@ -1,0 +1,30 @@
+[package]
+name = "driver-clickhouse"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+# `rustls-tls-ring` rather than the crate's `rustls-tls`, which selects
+# aws-lc-rs and wants cmake and a C toolchain at build time — the sort of
+# install-time dependency this project exists to avoid. ClickHouse Cloud is
+# HTTPS-only, so some TLS has to be here; ring builds everywhere.
+clickhouse = { version = "0.15.1", default-features = false, features = [
+    "lz4",
+    "rustls-tls-ring",
+    "rustls-tls-webpki-roots",
+] }
+clickhouse-ext-arrow = "0.1.0"
+serde = { version = "1", features = ["derive"] }
+url = "2"
+percent-encoding = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
