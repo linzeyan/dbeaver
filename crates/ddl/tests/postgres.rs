@@ -14,7 +14,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use driver_postgres::PgSource;
 
@@ -236,6 +236,14 @@ impl Driver for Fixture {
 
     async fn cancel(&self) -> DbResult<()> {
         unreachable!("nothing here is long enough to cancel")
+    }
+
+    fn transactional(&self) -> bool {
+        false
+    }
+
+    async fn transaction(&self, _: &TxStep) -> DbResult<()> {
+        unreachable!("reading a table's shape opens no transaction")
     }
 }
 
