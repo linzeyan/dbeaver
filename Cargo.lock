@@ -964,6 +964,7 @@ dependencies = [
  "dbcatalog",
  "dbconn",
  "dbddl",
+ "dbedit",
  "dbsql",
  "driver-clickhouse",
  "driver-duckdb",

@@ -45,12 +45,12 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
-    db_ddl_text, db_definition_json, db_foreign_keys_json, db_free, db_indexes_json,
-    db_names_forget, db_query, db_query_free, db_query_next, db_query_rows_affected,
-    db_query_schema, db_referenced_by_json, db_relations_json, db_schemas_json,
-    db_sql_error_offset, db_sql_scan_json, db_string_free, db_triggers_json, db_tx_autocommit,
-    db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint,
-    db_tx_state_json,
+    db_ddl_text, db_definition_json, db_edit_sql_json, db_foreign_keys_json, db_free,
+    db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
+    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
+    db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free, db_triggers_json,
+    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
+    db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -1635,5 +1635,106 @@ fn the_ddl_of_a_table_is_the_statement_that_would_make_it() {
     unsafe { db_string_free(err) };
     assert!(why.contains("no_such_relation_anywhere"), "got {why}");
 
+    unsafe { db_free(handle) };
+}
+
+// ---------------------------------------------------------------------------
+// Editing a result
+// ---------------------------------------------------------------------------
+
+/// The statements `edits` would take, insisting they were written.
+fn edit_sql(handle: *mut dbffi::DbHandle, edits: &str) -> String {
+    let text = CString::new(edits).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_edit_sql_json(handle, text.as_ptr(), &mut err) };
+    if raw.is_null() {
+        let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(err) };
+        panic!("db_edit_sql_json refused: {why}");
+    }
+    let json = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+    json
+}
+
+#[test]
+fn the_edit_call_says_why_it_could_not_read_its_arguments() {
+    let edits = CString::new("{}").unwrap();
+    let invalid = CString::new(vec![b'{', 0xff, 0xfe]).unwrap();
+    for (handle, text) in [
+        (ptr::null_mut(), edits.as_ptr()),
+        (ptr::null_mut(), ptr::null()),
+        (ptr::null_mut(), invalid.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_edit_sql_json(handle, text, &mut err) };
+        assert!(raw.is_null());
+        assert!(!err.is_null(), "db_edit_sql_json must say why it failed");
+        unsafe { db_string_free(err) };
+    }
+}
+
+/// The statements are written against the real catalog, and they run.
+///
+/// Which is the half `crates/edit` cannot check for itself: it is answered by a
+/// fake there, so "the column is called that" and "this text is valid SQL" are
+/// only ever true here.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_changed_cell_becomes_a_statement_the_server_accepts() {
+    let handle = connected();
+    ran(handle, "DROP TABLE IF EXISTS ffi_edit");
+    ran(
+        handle,
+        "CREATE TABLE ffi_edit (id int PRIMARY KEY, label text, qty numeric(9,2))",
+    );
+    ran(handle, "INSERT INTO ffi_edit VALUES (1, 'first', 1.00)");
+
+    let json = edit_sql(
+        handle,
+        r#"{"schema":"public","relation":"ffi_edit",
+            "updates":[{"key":[{"column":"id","value":"1"}],
+                        "set":[{"column":"label","value":"changed"},
+                               {"column":"qty","value":"2.50"}]}],
+            "inserts":[{"set":[{"column":"id","value":"2"},{"column":"label","value":null}]}],
+            "deletes":[]}"#,
+    );
+    let statements: Vec<String> = serde_json::from_str(&json).expect("statements should decode");
+    assert_eq!(statements.len(), 2, "{json}");
+    assert!(
+        statements[0].starts_with("UPDATE public.ffi_edit SET"),
+        "{json}"
+    );
+
+    for statement in &statements {
+        ran(handle, statement);
+    }
+    // Two rows now, and the changed one changed: read back rather than trusted,
+    // because a statement that ran is not the same claim as a row that says what
+    // the user typed.
+    assert_eq!(ran(handle, "SELECT id FROM ffi_edit"), 2);
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT id FROM ffi_edit WHERE id = 1 AND label = 'changed' AND qty = 2.50"
+        ),
+        1
+    );
+
+    // And a relation with nothing to name a row by is refused with a reason
+    // somebody can act on.
+    let refused = CString::new(
+        r#"{"schema":"public","relation":"no_key",
+            "updates":[{"key":[{"column":"n","value":"1"}],
+                        "set":[{"column":"n","value":"2"}]}]}"#,
+    )
+    .unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(unsafe { db_edit_sql_json(handle, refused.as_ptr(), &mut err) }.is_null());
+    let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(err) };
+    assert!(why.contains("no primary key"), "got {why}");
+
+    ran(handle, "DROP TABLE ffi_edit");
     unsafe { db_free(handle) };
 }

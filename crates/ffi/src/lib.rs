@@ -670,6 +670,71 @@ pub unsafe extern "C" fn db_ddl_text(
     }
 }
 
+/// The statements a grid's pending changes would take, as a JSON array of
+/// strings. Release with `db_string_free`.
+///
+/// Written and not run. What comes back goes to the server through `db_query`
+/// like anything else, which is what puts it inside whatever transaction the
+/// connection is in, under the same Cancel button and with the same error
+/// positions — and what lets a front end show somebody the statements before
+/// they run, which is the reason for editing through generated SQL at all.
+///
+/// `edits` is one relation's worth of changes:
+///
+/// ```json
+/// {"schema": …, "relation": …,
+///  "updates": [{"key": [{"column": …, "value": …}], "set": [{…}]}],
+///  "inserts": [{"set": [{…}]}],
+///  "deletes": [{"key": [{…}]}]}
+/// ```
+///
+/// A `value` of JSON null is SQL's NULL; a value of `""` is an empty string. A
+/// grid has to be able to say both, and one string cannot.
+///
+/// Refuses rather than guesses: a relation with no primary key has no way to
+/// name one of its rows, a key that is not the whole key would name a set of
+/// them, and text that is not a number never reaches a numeric column.
+///
+/// # Safety
+/// `handle` must be live; `edits` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_edit_sql_json(
+    handle: *mut DbHandle,
+    edits: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || edits.is_null() {
+        unsafe { set_err(err, "null handle or edits") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let text = match unsafe { CStr::from_ptr(edits) }.to_str() {
+        Ok(text) => text,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    let requested: dbedit::Edits = match serde_json::from_str(text) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    match runtime().block_on(dbedit::statements(
+        h.driver.as_ref(),
+        h.names.dialect(),
+        &requested,
+    )) {
+        Ok(statements) => json_result(&statements, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transactions
 // ---------------------------------------------------------------------------
