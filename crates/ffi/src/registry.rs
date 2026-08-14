@@ -15,9 +15,79 @@ use dbconn::{DbError, Driver};
 use driver_mongodb::MongoSource;
 use driver_postgres::PgSource;
 use driver_sqlite::SqliteSource;
+use serde::Serialize;
 
-/// Every scheme this build answers to, for the message a wrong one gets.
-const KNOWN: &str = "postgres, postgresql, mongodb, mongodb+srv, sqlite";
+/// What a connection to this kind of database is made of.
+///
+/// The connection form asks for different things depending on the answer, and
+/// this is how it knows without having a list of database names in it. A form
+/// that hardcoded "sqlite means show a file picker" would offer a file picker
+/// for DuckDB the day DuckDB arrived, or not offer one, depending on whether
+/// somebody remembered.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Shape {
+    /// Host, port, database, user, password.
+    Server,
+    /// A path, and nothing else. There is no server to authenticate to.
+    File,
+}
+
+/// One database this build can open.
+#[derive(Debug, Clone, Serialize)]
+pub struct Catalogued {
+    /// The scheme a connection string starts with, and the identity the front
+    /// end stores.
+    pub scheme: &'static str,
+    /// What to show in the picker. The database's own name, capitalised as its
+    /// vendor capitalises it.
+    pub label: &'static str,
+    pub shape: Shape,
+    /// The port to offer before the user has typed one, for a `Server`. `None`
+    /// for a file.
+    pub default_port: Option<u16>,
+}
+
+/// Every database this build can open.
+///
+/// The one place the list lives. `connect` matches against it, the error for an
+/// unknown scheme is built from it, and the front end reads it over the FFI
+/// rather than keeping a second copy that drifts — which is the whole reason it
+/// is a table and not just a `match`.
+///
+/// Alternate spellings of the same driver are deliberately absent. `postgresql`
+/// and `mongodb+srv` are accepted by `connect` because they are what somebody
+/// pastes; they are not offered in a picker, where two entries for one database
+/// is a question the user cannot answer.
+pub const CATALOG: &[Catalogued] = &[
+    Catalogued {
+        scheme: "postgres",
+        label: "PostgreSQL",
+        shape: Shape::Server,
+        default_port: Some(5432),
+    },
+    Catalogued {
+        scheme: "mongodb",
+        label: "MongoDB",
+        shape: Shape::Server,
+        default_port: Some(27017),
+    },
+    Catalogued {
+        scheme: "sqlite",
+        label: "SQLite",
+        shape: Shape::File,
+        default_port: None,
+    },
+];
+
+/// The schemes this build answers to, for the message a wrong one gets.
+fn known() -> String {
+    CATALOG
+        .iter()
+        .map(|d| d.scheme)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Opens whichever database `url` names.
 pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
@@ -50,7 +120,8 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         "mongodb" | "mongodb+srv" => Ok(Box::new(MongoSource::connect(url).await?)),
         "sqlite" => Ok(Box::new(SqliteSource::connect(rest).await?)),
         other => Err(DbError::new(format!(
-            "no driver for {other}://. This build has: {KNOWN}"
+            "no driver for {other}://. This build has: {}",
+            known()
         ))),
     }
 }
@@ -84,6 +155,29 @@ mod tests {
         let message = refusal("oracle://scott@localhost/orcl").await;
         assert!(message.contains("oracle"), "got: {message}");
         assert!(message.contains("sqlite"), "got: {message}");
+    }
+
+    /// Every database offered in the picker can actually be opened.
+    ///
+    /// The failure this guards against is quiet and embarrassing: a scheme added
+    /// to `CATALOG` but not to the `match` shows up in the form, and choosing it
+    /// reports "no driver for duckdb://" — from the same build that just offered
+    /// it. Connecting is expected to fail here, since none of these point at a
+    /// server; what must not happen is failing for that reason.
+    #[tokio::test]
+    async fn every_database_the_picker_offers_can_be_asked_for() {
+        for entry in CATALOG {
+            let url = match entry.shape {
+                Shape::Server => format!("{}://127.0.0.1:1/none", entry.scheme),
+                Shape::File => format!("{}:///nonexistent/none.db", entry.scheme),
+            };
+            let message = refusal(&url).await;
+            assert!(
+                !message.contains("no driver for"),
+                "{} is in the catalog but not in connect(): {message}",
+                entry.scheme
+            );
+        }
     }
 
     #[tokio::test]

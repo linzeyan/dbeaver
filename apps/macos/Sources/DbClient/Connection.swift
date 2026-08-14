@@ -8,52 +8,112 @@ import Security
 /// plist through a later edit; the password travels beside it and lives in the
 /// Keychain. `connectionString(password:)` is the one place the two meet.
 struct ConnectionSettings: Equatable {
+    /// Which database this connects to, as the scheme the core dispatches on.
+    ///
+    /// Held rather than derived, because for a file-shaped database there is
+    /// nothing to derive it from: `/Users/me/notes.db` is a SQLite file and a
+    /// DuckDB file and looks identical either way.
+    var scheme: String
     var host: String
     var port: String
     var database: String
     var user: String
+    /// Where the database lives, for a file-shaped driver. Empty for a server.
+    var path: String
 
-    init(host: String, port: String, database: String, user: String) {
+    init(
+        scheme: String, host: String = "", port: String = "", database: String = "",
+        user: String = "", path: String = ""
+    ) {
+        self.scheme = scheme
         self.host = host
         self.port = port
         self.database = database
         self.user = user
+        self.path = path
     }
 
-    /// What an empty form offers. A loopback host and the standard port are the
-    /// two fields with a defensible default; a guessed database or user name
-    /// would only be a value to delete.
-    static let suggested = ConnectionSettings(
-        host: "127.0.0.1", port: "5432", database: "", user: "")
+    var driver: DriverInfo? { DriverCatalog.named(scheme) }
+
+    /// What an empty form offers.
+    ///
+    /// A loopback host and whichever port the chosen driver names are the two
+    /// fields with a defensible default; a guessed database or user name would
+    /// only be a value to delete.
+    static func suggested(for driver: DriverInfo) -> ConnectionSettings {
+        ConnectionSettings(
+            scheme: driver.scheme,
+            host: driver.shape == .server ? "127.0.0.1" : "",
+            port: driver.defaultPort.map(String.init) ?? "")
+    }
+
+    /// Moves these settings to another database, keeping what still applies.
+    ///
+    /// Switching driver in the picker must not empty the form. The host and
+    /// database someone has typed are still the host and database they want; the
+    /// port is the one field that belongs to the old driver, so it moves to the
+    /// new one's default — but only if it was the old default, since a port
+    /// typed by hand was typed for a reason.
+    func moved(to driver: DriverInfo) -> ConnectionSettings {
+        var next = self
+        next.scheme = driver.scheme
+        let wasDefault = self.driver?.defaultPort.map(String.init) == port
+        if wasDefault || port.isEmpty {
+            next.port = driver.defaultPort.map(String.init) ?? ""
+        }
+        if driver.shape == .server && next.host.isEmpty {
+            next.host = "127.0.0.1"
+        }
+        return next
+    }
 
     /// Whether these name a database worth trying. The Connect button reads it:
     /// a form missing the database produces a server error about a field the
     /// user can see is empty, which is a worse answer than a disabled button.
+    ///
+    /// What counts as filled in depends on the driver. A file needs a path and
+    /// nothing else — there is no server to authenticate to, and requiring a
+    /// user name for SQLite would be asking for something that does not exist.
     var isComplete: Bool {
-        ![host, port, database, user].contains {
-            $0.trimmingCharacters(in: .whitespaces).isEmpty
+        switch driver?.shape {
+        case .file: return !path.trimmingCharacters(in: .whitespaces).isEmpty
+        case .server, nil:
+            return ![host, port, database, user].contains {
+                $0.trimmingCharacters(in: .whitespaces).isEmpty
+            }
         }
     }
 
     /// The connection URL these settings and that password describe.
     ///
     /// A URL rather than the `keyword=value` string libpq takes, because the
-    /// core now has more than one database behind it and the scheme is how it
-    /// knows which: `postgres://` reaches PostgreSQL, `sqlite://` reaches a
-    /// file. A bare `host=… port=…` names no driver, and a client that guessed
+    /// core has more than one database behind it and the scheme is how it knows
+    /// which. A bare `host=… port=…` names no driver, and a client that guessed
     /// between them would be one that connects to the wrong database without
     /// saying so.
     ///
-    /// The four fields are trimmed; the password is not. A hostname pasted with
-    /// a trailing space is the commonest way to spend five minutes on a
-    /// connection error, while whitespace inside a password is a character the
-    /// server is going to check.
+    /// The fields are trimmed; the password is not. A hostname pasted with a
+    /// trailing space is the commonest way to spend five minutes on a connection
+    /// error, while whitespace inside a password is a character the server is
+    /// going to check.
     func connectionString(password: String) -> String {
         func trimmed(_ value: String) -> String {
             value.trimmingCharacters(in: .whitespaces)
         }
         var url = URLComponents()
-        url.scheme = "postgres"
+        url.scheme = scheme
+
+        if driver?.shape == .file {
+            // Three slashes for an absolute path, two for one relative to where
+            // the client was started: an empty authority, then the path. Setting
+            // `host` to "" is what produces the `//` that the core's registry
+            // splits on.
+            url.host = ""
+            let p = trimmed(path)
+            url.path = p.hasPrefix("/") ? p : "/" + p
+            return url.string ?? ""
+        }
+
         url.host = trimmed(host)
         url.port = Int(trimmed(port))
         url.user = trimmed(user).isEmpty ? nil : trimmed(user)
@@ -72,11 +132,32 @@ struct ConnectionSettings: Equatable {
     /// `--conn` comes from a person or a Makefile, and one that does not connect
     /// has to land back in the form for them to correct. Retyping four fields to
     /// fix one character is the difference between a client and a demonstration.
+    ///
+    /// A URL naming a driver this build does not have keeps its scheme rather
+    /// than being silently reassigned to a working one. The form shows it as
+    /// unknown, which is true, instead of offering to connect somewhere the user
+    /// did not ask for.
     init(connectionString text: String) {
         let url = URLComponents(string: text)
+        scheme = url?.scheme ?? DriverCatalog.first?.scheme ?? ""
+        let shape = DriverCatalog.named(scheme)?.shape
+        let rawPath = url?.path ?? ""
+
+        if shape == .file {
+            // A relative path parses as the authority, so it has to be put back
+            // in front of the path or `sqlite://notes.db` reads as a host.
+            path = (url?.host ?? "") + rawPath
+            host = ""
+            port = ""
+            database = ""
+            user = ""
+            return
+        }
+
+        path = ""
         host = url?.host ?? ""
         port = url?.port.map(String.init) ?? ""
-        database = url?.path.hasPrefix("/") == true ? String(url!.path.dropFirst()) : ""
+        database = rawPath.hasPrefix("/") ? String(rawPath.dropFirst()) : ""
         user = url?.user ?? ""
     }
 }
@@ -131,18 +212,26 @@ enum ConnectionStore {
     private static let key = "lastConnection"
 
     static func load() -> ConnectionSettings? {
-        guard let stored = UserDefaults.standard.dictionary(forKey: key) as? [String: String],
-            let host = stored["host"], let port = stored["port"],
-            let database = stored["database"], let user = stored["user"]
+        guard let stored = UserDefaults.standard.dictionary(forKey: key) as? [String: String]
         else { return nil }
-        return ConnectionSettings(host: host, port: port, database: database, user: user)
+        // The scheme is read with a fallback because a settings dictionary
+        // written before there was more than one database has no scheme in it,
+        // and the connection it describes is a PostgreSQL one.
+        let scheme = stored["scheme"] ?? DriverCatalog.first?.scheme ?? ""
+        return ConnectionSettings(
+            scheme: scheme,
+            host: stored["host"] ?? "", port: stored["port"] ?? "",
+            database: stored["database"] ?? "", user: stored["user"] ?? "",
+            path: stored["path"] ?? "")
     }
 
     static func save(_ settings: ConnectionSettings) {
         UserDefaults.standard.set(
             [
+                "scheme": settings.scheme,
                 "host": settings.host, "port": settings.port,
-                "database": settings.database, "user": settings.user
+                "database": settings.database, "user": settings.user,
+                "path": settings.path
             ], forKey: key)
     }
 
@@ -209,8 +298,13 @@ enum ConnectionKeychain {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
+            // The scheme is part of the identity because the same host and port
+            // can front two databases: 127.0.0.1:5432 is PostgreSQL today and
+            // could be a tunnel to something else tomorrow, and the two logins
+            // must not overwrite each other's password.
             kSecAttrAccount as String:
-                "\(settings.user)@\(settings.host):\(settings.port)/\(settings.database)"
+                "\(settings.scheme)://\(settings.user)@\(settings.host):\(settings.port)"
+                + "/\(settings.database)\(settings.path)"
         ]
     }
 }

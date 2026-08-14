@@ -161,6 +161,23 @@ fn json_result<T: serde::Serialize>(value: &T, err: *mut *mut c_char) -> *mut c_
     }
 }
 
+/// Every database this build can open, as a JSON array. Release with
+/// `db_string_free`.
+///
+/// Takes no handle, because it answers a question asked before there is one: the
+/// connection form has to know which databases to offer, and what each of them
+/// needs asked for. Exported rather than duplicated in Swift so that a driver
+/// added to the core appears in the form without anybody remembering to add it
+/// twice — and so the form cannot offer one this build does not have.
+///
+/// # Safety
+/// `err` must be null or point to a writable `*mut c_char`. It is only written
+/// on failure, and what it is set to must be released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_drivers_json(err: *mut *mut c_char) -> *mut c_char {
+    json_result(&registry::CATALOG, err)
+}
+
 /// Non-system schemas as a JSON array. Release with `db_string_free`.
 ///
 /// # Safety
