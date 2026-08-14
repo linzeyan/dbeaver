@@ -31,6 +31,11 @@
 //!    schema before the first fetch, paging a result to the 0 return, stopping a
 //!    fetch that is in flight, freeing an open cursor without closing it, and
 //!    `db_cursor`'s null-sql, invalid-UTF-8 and `err_position` failure paths.
+//!    And the transaction surface — `db_tx_state_json`, `db_tx_autocommit`,
+//!    `db_tx_commit`, `db_tx_rollback`, `db_tx_savepoint`, `db_tx_rollback_to`,
+//!    `db_tx_release` — where the check that matters is what another connection
+//!    can see, since a transaction that held nothing back would pass every
+//!    check made through the connection that opened it.
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
@@ -43,7 +48,8 @@ use dbffi::{
     db_definition_json, db_foreign_keys_json, db_free, db_indexes_json, db_names_forget, db_query,
     db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free,
-    db_triggers_json,
+    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
+    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -1350,5 +1356,226 @@ fn a_refresh_the_user_asked_for_is_answered_from_the_server_again() {
     // trips is checked where it can be seen, in crates/catalog.
     assert_eq!(complete(handle, "SELECT * FROM bench_w", 21), before);
 
+    unsafe { db_free(handle) };
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+/// Opens the benchmark database, insisting it is there.
+fn connected() -> *mut dbffi::DbHandle {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null(), "benchmark database unreachable");
+    handle
+}
+
+/// Runs `sql` to the end and returns what the server said it affected.
+///
+/// The count comes from `db_query_rows_affected` rather than from the batches,
+/// which is what lets these checks count rows without reading an Arrow array:
+/// PostgreSQL reports the row count of a SELECT the same way it reports the
+/// row count of a DELETE.
+fn ran(handle: *mut dbffi::DbHandle, sql: &str) -> i64 {
+    let text = CString::new(sql).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut position: c_int = 0;
+    let query = unsafe { db_query(handle, text.as_ptr(), 100, &mut err, &mut position) };
+    if query.is_null() {
+        let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(err) };
+        panic!("{sql} failed: {why}");
+    }
+    let mut array = FFI_ArrowArray::empty();
+    loop {
+        let mut err: *mut c_char = ptr::null_mut();
+        match unsafe { db_query_next(query, &mut array, &mut err) } {
+            0 => break,
+            1 => continue,
+            code => {
+                let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+                unsafe { db_string_free(err) };
+                panic!("{sql} stopped with {code}: {why}");
+            }
+        }
+    }
+    let affected = unsafe { db_query_rows_affected(query) };
+    unsafe { db_query_free(query) };
+    affected
+}
+
+fn tx_state(handle: *mut dbffi::DbHandle) -> String {
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_tx_state_json(handle, &mut err) };
+    assert!(!raw.is_null());
+    assert!(
+        err.is_null(),
+        "db_tx_state_json must not set err on success"
+    );
+    let json = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+    json
+}
+
+/// Calls `step` and insists it worked, saying why if it did not.
+fn tx_step(what: &str, step: impl Fn(*mut *mut c_char) -> c_int) {
+    let mut err: *mut c_char = ptr::null_mut();
+    if step(&mut err) != 0 {
+        let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(err) };
+        panic!("{what} failed: {why}");
+    }
+    assert!(err.is_null(), "{what} set err on success");
+}
+
+#[test]
+fn the_transaction_calls_say_why_a_null_handle_failed() {
+    let name = CString::new("s").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(unsafe { db_tx_state_json(ptr::null_mut(), &mut err) }.is_null());
+    assert!(!err.is_null());
+    unsafe { db_string_free(err) };
+
+    let calls: [(&str, &dyn Fn(*mut *mut c_char) -> c_int); 6] = [
+        ("db_tx_autocommit", &|err| unsafe {
+            db_tx_autocommit(ptr::null_mut(), 0, err)
+        }),
+        ("db_tx_commit", &|err| unsafe {
+            db_tx_commit(ptr::null_mut(), err)
+        }),
+        ("db_tx_rollback", &|err| unsafe {
+            db_tx_rollback(ptr::null_mut(), err)
+        }),
+        ("db_tx_savepoint", &|err| unsafe {
+            db_tx_savepoint(ptr::null_mut(), name.as_ptr(), err)
+        }),
+        ("db_tx_rollback_to", &|err| unsafe {
+            db_tx_rollback_to(ptr::null_mut(), name.as_ptr(), err)
+        }),
+        ("db_tx_release", &|err| unsafe {
+            db_tx_release(ptr::null_mut(), name.as_ptr(), err)
+        }),
+    ];
+    for (which, call) in calls {
+        let mut err: *mut c_char = ptr::null_mut();
+        assert_eq!(call(&mut err), -1, "{which} should refuse a null handle");
+        assert!(!err.is_null(), "{which} should say why it refused");
+        unsafe { db_string_free(err) };
+    }
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_manual_commit_connection_keeps_its_work_to_itself_until_it_commits() {
+    let handle = connected();
+    let watcher = connected();
+    ran(handle, "DROP TABLE IF EXISTS ffi_tx");
+    ran(handle, "CREATE TABLE ffi_tx (n int)");
+
+    assert!(
+        tx_state(handle).contains(r#""transactional":true"#),
+        "{}",
+        tx_state(handle)
+    );
+    assert!(tx_state(handle).contains(r#""autocommit":true"#));
+
+    tx_step("leaving autocommit", |err| unsafe {
+        db_tx_autocommit(handle, 0, err)
+    });
+    // Nothing is open yet: the mode says what happens to the next statement,
+    // and there has not been one.
+    assert!(tx_state(handle).contains(r#""open":false"#));
+
+    ran(handle, "INSERT INTO ffi_tx (n) VALUES (1)");
+    assert!(tx_state(handle).contains(r#""open":true"#));
+    // The claim, checked from outside: the row is real to this connection and
+    // absent from the other one.
+    assert_eq!(ran(handle, "SELECT n FROM ffi_tx"), 1);
+    assert_eq!(ran(watcher, "SELECT n FROM ffi_tx"), 0);
+
+    // A mode switch while work is uncommitted is refused rather than deciding
+    // what to do with it.
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(unsafe { db_tx_autocommit(handle, 1, &mut err) }, -1);
+    assert!(!err.is_null(), "the refusal has to say why");
+    unsafe { db_string_free(err) };
+
+    tx_step("rollback", |err| unsafe { db_tx_rollback(handle, err) });
+    assert!(tx_state(handle).contains(r#""open":false"#));
+    assert_eq!(ran(handle, "SELECT n FROM ffi_tx"), 0);
+
+    // And committed work is there for everybody.
+    ran(handle, "INSERT INTO ffi_tx (n) VALUES (2)");
+    tx_step("commit", |err| unsafe { db_tx_commit(handle, err) });
+    assert_eq!(ran(watcher, "SELECT n FROM ffi_tx"), 1);
+
+    // Committing nothing is a disagreement about the state, not a no-op.
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(unsafe { db_tx_commit(handle, &mut err) }, -1);
+    unsafe { db_string_free(err) };
+
+    tx_step("returning to autocommit", |err| unsafe {
+        db_tx_autocommit(handle, 1, err)
+    });
+    ran(handle, "DROP TABLE ffi_tx");
+    unsafe { db_free(handle) };
+    unsafe { db_free(watcher) };
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_savepoint_undoes_part_of_a_transaction_and_leaves_the_rest() {
+    let handle = connected();
+    ran(handle, "DROP TABLE IF EXISTS ffi_savepoint");
+    ran(handle, "CREATE TABLE ffi_savepoint (n int)");
+    tx_step("leaving autocommit", |err| unsafe {
+        db_tx_autocommit(handle, 0, err)
+    });
+
+    ran(handle, "INSERT INTO ffi_savepoint (n) VALUES (1)");
+    let halfway = CString::new("halfway").unwrap();
+    tx_step("savepoint", |err| unsafe {
+        db_tx_savepoint(handle, halfway.as_ptr(), err)
+    });
+    assert!(
+        tx_state(handle).contains(r#""savepoints":["halfway"]"#),
+        "{}",
+        tx_state(handle)
+    );
+
+    ran(handle, "INSERT INTO ffi_savepoint (n) VALUES (2)");
+    assert_eq!(ran(handle, "SELECT n FROM ffi_savepoint"), 2);
+    tx_step("rollback to savepoint", |err| unsafe {
+        db_tx_rollback_to(handle, halfway.as_ptr(), err)
+    });
+    assert_eq!(ran(handle, "SELECT n FROM ffi_savepoint"), 1);
+    // The transaction is still open around it, which is the difference between
+    // a savepoint and a rollback.
+    assert!(tx_state(handle).contains(r#""open":true"#));
+
+    tx_step("release", |err| unsafe {
+        db_tx_release(handle, halfway.as_ptr(), err)
+    });
+    assert!(tx_state(handle).contains(r#""savepoints":[]"#));
+
+    // A name that could carry a statement is refused before it reaches the
+    // server, because it would be written into one.
+    let injected = CString::new("s; DROP TABLE ffi_savepoint").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_tx_savepoint(handle, injected.as_ptr(), &mut err) },
+        -1
+    );
+    assert!(!err.is_null());
+    unsafe { db_string_free(err) };
+
+    tx_step("rollback", |err| unsafe { db_tx_rollback(handle, err) });
+    tx_step("returning to autocommit", |err| unsafe {
+        db_tx_autocommit(handle, 1, err)
+    });
+    assert_eq!(ran(handle, "SELECT n FROM ffi_savepoint"), 0);
+    ran(handle, "DROP TABLE ffi_savepoint");
     unsafe { db_free(handle) };
 }

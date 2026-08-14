@@ -11,12 +11,14 @@
 //! measure with, and the simpler surface is easier to trust.
 
 mod registry;
+mod session;
 
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbcatalog::{Kind, Names};
 use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
 use dbsql::{Origin, TokenKind};
+use session::Session;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::sync::{Arc, OnceLock};
@@ -50,6 +52,7 @@ unsafe fn set_err(err: *mut *mut c_char, msg: impl std::fmt::Display) {
 pub struct DbHandle {
     driver: Arc<dyn Driver>,
     names: Names,
+    session: Session,
 }
 
 pub struct DbQuery {
@@ -96,7 +99,11 @@ pub unsafe extern "C" fn db_connect(
         Ok(driver) => {
             let driver: Arc<dyn Driver> = Arc::from(driver);
             let names = Names::new(driver.clone(), dbsql::for_scheme(registry::scheme_of(s)));
-            Box::into_raw(Box::new(DbHandle { driver, names }))
+            Box::into_raw(Box::new(DbHandle {
+                driver,
+                names,
+                session: Session::new(),
+            }))
         }
         Err(e) => {
             unsafe { set_err(err, e) };
@@ -602,6 +609,165 @@ relation_metadata! {
     db_triggers_json => triggers
 }
 
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+/// What this connection's transaction is doing, as JSON: whether control is
+/// possible at all, whether it is in autocommit, whether one is open, and which
+/// savepoints are set. Release with `db_string_free`.
+///
+/// Pulled after the calls that could have changed it rather than pushed. The
+/// front end already redraws at exactly those moments, and a second way of
+/// finding out would be a second thing to keep in step with the first.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_tx_state_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    json_result(&h.session.state(h.driver.as_ref()), err)
+}
+
+/// Turns autocommit on (non-zero) or off (0). Returns 0 on success, -1 on
+/// failure.
+///
+/// Sends nothing by itself: the mode decides what happens to the *next*
+/// statement, and a connection with nothing open has nothing to tell the server
+/// yet. Refused while a transaction is open, and refused on a connection that
+/// cannot hold one.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_tx_autocommit(
+    handle: *mut DbHandle,
+    on: c_int,
+    err: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    match h.session.set_autocommit(h.driver.as_ref(), on != 0) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
+/// Ends the open transaction and keeps what it did. Returns 0 on success, -1 on
+/// failure — including when there was nothing open, which is a front end and a
+/// connection disagreeing about the state rather than a harmless no-op.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_tx_commit(handle: *mut DbHandle, err: *mut *mut c_char) -> c_int {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.session.commit(h.driver.as_ref())) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
+/// Ends the open transaction and undoes it. Returns 0 on success, -1 on failure.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_tx_rollback(handle: *mut DbHandle, err: *mut *mut c_char) -> c_int {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.session.rollback(h.driver.as_ref())) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
+/// Defines one `(handle, name, err) -> int` savepoint entry point.
+///
+/// The three differ only in which step they take, and written out they would be
+/// three copies of the same null check and the same UTF-8 handling.
+macro_rules! savepoint_step {
+    ($(#[$doc:meta])* $name:ident => $method:ident) => {
+        $(#[$doc])*
+        ///
+        /// Returns 0 on success and -1 on failure. A name is a letter followed
+        /// by letters, digits or underscores; anything else is refused, because
+        /// a savepoint name reaches the server as an identifier written into the
+        /// statement and there is no placeholder to bind it to.
+        ///
+        /// # Safety
+        /// `handle` must be live; `name` must be a valid NUL-terminated C string.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            handle: *mut DbHandle,
+            name: *const c_char,
+            err: *mut *mut c_char,
+        ) -> c_int {
+            if handle.is_null() || name.is_null() {
+                unsafe { set_err(err, "null handle or name") };
+                return -1;
+            }
+            let h = unsafe { &*handle };
+            let n = match unsafe { CStr::from_ptr(name) }.to_str() {
+                Ok(n) => n,
+                Err(e) => {
+                    unsafe { set_err(err, e) };
+                    return -1;
+                }
+            };
+            match runtime().block_on(h.session.$method(h.driver.as_ref(), n)) {
+                Ok(()) => 0,
+                Err(e) => {
+                    unsafe { set_err(err, e) };
+                    -1
+                }
+            }
+        }
+    };
+}
+
+savepoint_step! {
+    /// Marks a point in the open transaction to come back to.
+    db_tx_savepoint => savepoint
+}
+
+savepoint_step! {
+    /// Undoes what the transaction did after `name` was marked, leaving the
+    /// transaction open.
+    db_tx_rollback_to => rollback_to
+}
+
+savepoint_step! {
+    /// Forgets `name` and the savepoints inside it, keeping the work they marked.
+    db_tx_release => release
+}
+
 /// Prepares `sql` and returns a stream over its results.
 ///
 /// `err_position` carries the server's error cursor as a number rather than
@@ -637,6 +803,14 @@ pub unsafe extern "C" fn db_query(
             return ptr::null_mut();
         }
     };
+    // Where a transaction opens in manual-commit mode, so that the `BEGIN` and
+    // the statement it belongs to are one call from the front end's point of
+    // view — two would be two chances to get the order wrong, on the one path
+    // where the order is the whole point.
+    if let Err(e) = runtime().block_on(h.session.before_statement(h.driver.as_ref())) {
+        unsafe { set_err(err, e) };
+        return ptr::null_mut();
+    }
     match runtime().block_on(h.driver.query(s, batch_rows)) {
         Ok(stream) => Box::into_raw(Box::new(DbQuery { stream })),
         Err(e) => {
