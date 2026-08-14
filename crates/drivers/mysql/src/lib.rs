@@ -546,8 +546,13 @@ async fn pump(
         return;
     }
 
+    // Whether this statement reads or writes, which decides what its count
+    // means. Taken from the prepared column list rather than from whether a row
+    // stream came back: `QueryResult::stream` answers `Some` for an `INSERT`
+    // too, with a result set of no columns, so using it as the test would report
+    // every write as having changed nothing.
+    let reads = !schema.fields().is_empty();
     let mut produced = 0u64;
-    let mut had_rows = false;
     let mut result = match conn.exec_iter(&prepared, ()).await {
         Ok(result) => result,
         Err(e) => {
@@ -565,7 +570,6 @@ async fn pump(
             }
         };
         if let Some(mut rows) = rows {
-            had_rows = true;
             loop {
                 let mut builders: Vec<ColBuilder> = schema
                     .fields()
@@ -628,15 +632,15 @@ async fn pump(
             }
         }
     }
-    drop(result);
-
     // What the number counts depends on the statement, which is what the trait
     // says: rows produced for one that reads, rows changed for one that writes.
-    let affected = if had_rows {
+    let affected = if reads {
         produced
     } else {
-        conn.affected_rows()
+        result.affected_rows()
     };
+    drop(result);
+
     let _ = pages.send(Page::Done(affected)).await;
     drop(conn);
     drop(live);
