@@ -425,8 +425,79 @@ async fn pg_compatible(
     }
 }
 
+/// A MySQL-compatible database, seeded and connected through the MySQL driver.
+///
+/// The mirror of `pg_compatible`, and there for the same reason: Phase 2 claims
+/// TiDB and StarRocks are reached by the driver already written, and a claim
+/// like that is worth exactly as much as the test that runs against the real
+/// thing.
+///
+/// Seeded over `mysql_async` rather than through `MySqlSource`, so that the
+/// fixture cannot be vouched for by the code it exists to examine. The database
+/// is built here and the table is the caller's, because the table is the one
+/// statement these servers spell differently — StarRocks wants a distribution
+/// clause that MySQL has no word for — while `CREATE DATABASE` is the same
+/// everywhere.
+async fn mysql_compatible(
+    server: &str,
+    seed: Vec<String>,
+    relation: &str,
+    key: &str,
+    positions: bool,
+    cursors: bool,
+) -> Subject {
+    use mysql_async::prelude::Queryable;
+
+    let opts = mysql_async::Opts::from_url(server).expect("the fixture URL should parse");
+    // The same setting the driver connects with, for the same reason: left on,
+    // the client reads `@@socket` during the handshake so it can move a local
+    // connection onto a Unix socket, and StarRocks has no such variable to
+    // report. Turning it off here keeps the seed connection honest about what
+    // it is testing — a fixture that reached the server by a route the driver
+    // does not use would be proving something else.
+    let mut conn = mysql_async::Conn::new(mysql_async::Opts::from(
+        mysql_async::OptsBuilder::from_opts(opts).prefer_socket(false),
+    ))
+    .await
+    .expect("compatible database unreachable; see the Makefile target");
+    let prelude = [
+        "DROP DATABASE IF EXISTS dbclient_contract",
+        "CREATE DATABASE dbclient_contract",
+        "USE dbclient_contract",
+    ]
+    .into_iter()
+    .map(str::to_string);
+    for statement in prelude.chain(seed) {
+        conn.query_drop(&statement)
+            .await
+            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    }
+    conn.disconnect()
+        .await
+        .expect("closing the seed connection");
+
+    let driver = driver_mysql::MySqlSource::connect(&format!("{server}dbclient_contract"))
+        .await
+        .expect("the MySQL driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        schema: "dbclient_contract".to_string(),
+        relation: relation.to_string(),
+        key: key.to_string(),
+        read: format!("SELECT {key} FROM {relation} ORDER BY {key}"),
+        broken: format!("SELECT {key} FROM {relation} WHERE ORDER BY {key}"),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors,
+        positions,
+        _fixture: None,
+    }
+}
+
 const COCKROACH: &str = "postgres://root@127.0.0.1:56257/defaultdb";
 const GREPTIME: &str = "postgres://greptime@127.0.0.1:54003/public";
+const TIDB: &str = "mysql://root@127.0.0.1:54000/";
+const STARROCKS: &str = "mysql://root@127.0.0.1:59030/";
 
 // ---------------------------------------------------------------------------
 // The checks
@@ -860,4 +931,92 @@ async fn greptimedb_reads_data_through_the_postgres_driver() {
         relations.iter().any(|r| r.name == subject.relation),
         "the table should be listed"
     );
+}
+
+/// TiDB, through the MySQL driver and no other code.
+///
+/// Every check passes. Two differences in its catalog are worth stating anyway,
+/// because both are invisible from here and neither is a fault the contract can
+/// see.
+///
+/// TiDB names its system schemas in upper case — `INFORMATION_SCHEMA`,
+/// `PERFORMANCE_SCHEMA`, and a `METRICS_SCHEMA` of its own — so the driver's
+/// list of schemas to hide, which is written the way MySQL spells them, hides
+/// none of them. A navigator against TiDB shows three schemas a navigator
+/// against MySQL does not. Upper-casing the comparison would fix that and would
+/// also newly hide a MySQL database genuinely named `MYSQL` or `Sys`, which on a
+/// case-sensitive filesystem is a database somebody may have made on purpose.
+///
+/// And `information_schema.TABLES` compares `TABLE_SCHEMA` case-sensitively
+/// while `information_schema.COLUMNS` does not, which is TiDB disagreeing with
+/// itself. The driver's probe for `CHECK_CONSTRAINTS` asks the first of those,
+/// so it concludes the table is absent when it is present, and check constraints
+/// go unreported while unique constraints still work. Chasing that would mean
+/// writing the probe around one server's inconsistency rather than around the
+/// question it is asking.
+#[tokio::test]
+#[ignore = "requires a TiDB server"]
+async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
+    let subject = mysql_compatible(
+        TIDB,
+        vec![
+            "CREATE TABLE nums (id INT PRIMARY KEY, label VARCHAR(32))".to_string(),
+            format!(
+                "INSERT INTO nums (id, label) VALUES {}",
+                (1..=500)
+                    .map(|i| format!("({i}, 'row-{i}')"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ],
+        "nums",
+        "id",
+        // No offset, for the same reason MySQL has none: the server sends the
+        // fragment it stopped at rather than a place in the text.
+        false,
+        true,
+    )
+    .await;
+    every_check(&subject).await;
+}
+
+/// StarRocks, through the MySQL driver and no other code.
+///
+/// Every check passes, which is further than its shape suggests it would: it is
+/// a distributed column store, its tables declare how they are spread and how
+/// many copies to keep, and none of that reaches the driver. Its
+/// `information_schema` carries every table the nine metadata calls read except
+/// `CHECK_CONSTRAINTS`, and that one is already asked about rather than assumed,
+/// so unique constraints come back and checks are simply not claimed. The
+/// capability probe was written for MariaDB and old MySQL and it turns out to
+/// have been the right shape for this too, which is the useful result.
+#[tokio::test]
+#[ignore = "requires a StarRocks server"]
+async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
+    let subject = mysql_compatible(
+        STARROCKS,
+        vec![
+            // A distribution and a replica count, which is where StarRocks
+            // stops looking like MySQL: it is a distributed column store, so
+            // every table says how it is spread and how many copies to keep,
+            // and the single backend in the test container can only keep one.
+            "CREATE TABLE nums (id INT, label VARCHAR(32)) \
+             PRIMARY KEY(id) DISTRIBUTED BY HASH(id) \
+             PROPERTIES ('replication_num' = '1')"
+                .to_string(),
+            format!(
+                "INSERT INTO nums (id, label) VALUES {}",
+                (1..=500)
+                    .map(|i| format!("({i}, 'row-{i}')"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ],
+        "nums",
+        "id",
+        false,
+        true,
+    )
+    .await;
+    every_check(&subject).await;
 }

@@ -104,8 +104,15 @@ run-console: release ## Launch the raw binary, keeping stdout in the terminal
 test: ## Unit tests (no database required)
 	cargo test --workspace
 
+# Both compatible-MySQL servers are prerequisites, because the suite behind this
+# target runs their tests whether or not they are listed here — an unlisted
+# server does not make `make test-integration` cheaper, it only makes the failure
+# arrive as a connection refused from inside a test instead of as a line naming
+# the target that fixes it. StarRocks earns its place on the same measurement:
+# under a minute to become ready, and about as much memory as MySQL. Its image is
+# five gigabytes, which is a download to do once rather than a cost per run.
 .PHONY: test-integration
-test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql ## Tests requiring a database server
+test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The SQL statement splitter's checks live behind a flag on the app binary
@@ -214,6 +221,69 @@ db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, Gre
 .PHONY: db-down-compatible
 db-down-compatible: ## Stop and remove the PostgreSQL-compatible containers
 	-docker rm -f $(COCKROACH_CONTAINER) $(GREPTIME_CONTAINER)
+
+# The same argument on the other protocol: TiDB and StarRocks are read by the
+# MySQL driver and no code of their own. Both take `root` with no password,
+# which is their own default rather than a setting chosen here.
+TIDB_CONTAINER      := tidb-test
+TIDB_PORT           := 54000
+STARROCKS_CONTAINER := starrocks-test
+STARROCKS_PORT      := 59030
+
+.PHONY: db-up-tidb
+db-up-tidb: ## Start the TiDB test container
+	@docker start $(TIDB_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(TIDB_CONTAINER) \
+			-p $(TIDB_PORT):4000 pingcap/tidb:latest
+	@echo "waiting for tidb..."
+	@for i in $$(seq 1 60); do \
+		nc -z 127.0.0.1 $(TIDB_PORT) >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+
+.PHONY: db-down-tidb
+db-down-tidb: ## Stop and remove the TiDB test container
+	-docker rm -f $(TIDB_CONTAINER)
+
+.PHONY: db-check-tidb
+db-check-tidb: ## Fail unless the TiDB test container is reachable
+	@nc -z 127.0.0.1 $(TIDB_PORT) >/dev/null 2>&1 \
+		|| { echo "tidb not running; run 'make db-up-tidb'"; exit 1; }
+
+# StarRocks brings up a frontend and a backend inside one container and will not
+# answer until both have registered with each other. Measured here: ready about
+# eight seconds after `docker start`, and about fifty on the first run of a fresh
+# container, when five gigabytes of image are still being read off disk. The
+# budget is ten minutes anyway, because the number that matters is the one on the
+# slowest machine that will ever run this and it is not this one.
+#
+# The poll is a real login rather than `nc` because the MySQL port opens well
+# before the cluster will answer a query: a port check reports ready and the
+# first statement then fails.
+.PHONY: db-up-starrocks
+db-up-starrocks: ## Start the StarRocks test container
+	@docker start $(STARROCKS_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(STARROCKS_CONTAINER) \
+			-p $(STARROCKS_PORT):9030 starrocks/allin1-ubuntu:latest
+	@echo "waiting for starrocks (a minute or so on a cold start)..."
+	@for i in $$(seq 1 300); do \
+		docker exec $(STARROCKS_CONTAINER) \
+			mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null 2>&1 && break; \
+		sleep 2; \
+	done
+	@docker exec $(STARROCKS_CONTAINER) \
+		mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null \
+		&& echo "starrocks ready"
+
+.PHONY: db-down-starrocks
+db-down-starrocks: ## Stop and remove the StarRocks test container
+	-docker rm -f $(STARROCKS_CONTAINER)
+
+.PHONY: db-check-starrocks
+db-check-starrocks: ## Fail unless the StarRocks test container is reachable
+	@docker exec $(STARROCKS_CONTAINER) \
+		mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null 2>&1 \
+		|| { echo "starrocks not running; run 'make db-up-starrocks'"; exit 1; }
 
 # MySQL. No seeding here: the driver's own tests build the fixture themselves,
 # because a fixture kept in a Makefile drifts away from the assertions that read
