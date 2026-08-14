@@ -239,11 +239,32 @@ impl MySqlSource {
         })
     }
 
-    /// A connection to run one metadata call on.
+    /// A connection to run one metadata call on, proven to still be open.
+    ///
+    /// A pooled connection is a cached thing the server may close without
+    /// telling anybody, and MySQL guarantees it eventually does: `wait_timeout`
+    /// ends an idle session after eight hours by default, a restart ends all of
+    /// them at once, and an administrator's `KILL` ends one whenever they like.
+    /// Handed out unchecked, the first call after any of those fails in the
+    /// caller's face for something the caller did not do — and the call after it
+    /// succeeds, which is the shape of a bug nobody can reproduce.
+    ///
+    /// One round trip is what finding out costs. The alternative is to run the
+    /// call and repeat it on a new connection if the old one turned out to be
+    /// gone, which is faster in the ordinary case and asks a worse question:
+    /// whether the statement that just failed is safe to run twice. Asking the
+    /// connection whether it is alive has one answer, and it is about the
+    /// connection rather than about what was being run on it.
     async fn acquire(&self) -> Result<Session, MySqlError> {
-        let pooled = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
-        if let Some(session) = pooled {
-            return Ok(session);
+        loop {
+            let pooled = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            let Some(mut session) = pooled else { break };
+            if session.conn.ping().await.is_ok() {
+                return Ok(session);
+            }
+            // Dropped rather than put back, and the loop tries the next one:
+            // whatever closed this connection — a restart, a `KILL` — has
+            // probably closed the rest of the pool too.
         }
         let (conn, id) = open(&self.opts).await?;
         Ok(Session {
