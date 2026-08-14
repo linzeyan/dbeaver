@@ -186,6 +186,35 @@ db-up-mongo: ## Start the MongoDB test container
 db-down-mongo: ## Stop and remove the MongoDB test container
 	-docker rm -f $(MONGO_CONTAINER)
 
+# The two databases that exist to prove protocol compatibility rather than to
+# be supported: they are read by the PostgreSQL driver and no code of their own,
+# so what these containers test is that the claim is true.
+COCKROACH_CONTAINER := cockroach-test
+COCKROACH_PORT      := 56257
+GREPTIME_CONTAINER  := greptime-test
+GREPTIME_PORT       := 54003
+
+.PHONY: db-up-compatible
+db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, GreptimeDB)
+	@docker start $(COCKROACH_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(COCKROACH_CONTAINER) \
+			-p $(COCKROACH_PORT):26257 cockroachdb/cockroach:v24.1.5 \
+			start-single-node --insecure
+	@docker start $(GREPTIME_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(GREPTIME_CONTAINER) \
+			-p $(GREPTIME_PORT):4003 greptime/greptimedb:latest standalone start \
+			--postgres-addr 0.0.0.0:4003 --rpc-bind-addr 0.0.0.0:4001 --http-addr 0.0.0.0:4000
+	@echo "waiting for the compatible databases..."
+	@for i in $$(seq 1 60); do \
+		nc -z 127.0.0.1 $(COCKROACH_PORT) >/dev/null 2>&1 \
+			&& nc -z 127.0.0.1 $(GREPTIME_PORT) >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+
+.PHONY: db-down-compatible
+db-down-compatible: ## Stop and remove the PostgreSQL-compatible containers
+	-docker rm -f $(COCKROACH_CONTAINER) $(GREPTIME_CONTAINER)
+
 .PHONY: db-check
 db-check: ## Fail unless the benchmark database is reachable
 	@docker exec $(PG_CONTAINER) pg_isready -U bench -d bench >/dev/null 2>&1 \
