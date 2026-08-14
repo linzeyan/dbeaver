@@ -1,0 +1,21 @@
+[package]
+name = "dbconn"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+async-trait.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# A dev-dependency cycle, which cargo permits and which is the point: the trait
+# is only worth testing through the drivers that implement it, and they are the
+# ones that depend on this crate.
+driver-postgres = { path = "../drivers/postgres" }
+driver-sqlite = { path = "../drivers/sqlite" }
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }

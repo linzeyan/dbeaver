@@ -5,16 +5,15 @@
 //! there are two implementations to derive it from.
 
 mod arrow_map;
+mod driver;
 mod metadata;
-
-pub use metadata::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
-};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
+use dbconn::{
+    ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+};
 use futures_util::StreamExt;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;

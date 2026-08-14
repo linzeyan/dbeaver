@@ -485,16 +485,16 @@ async fn relations_report_what_kind_they_are_and_leave_sqlites_own_out() {
     let src = fixture.connect().await;
     let relations = src.relations("main").await.unwrap();
 
-    let listed: Vec<(&str, driver_sqlite::RelationKind)> = relations
+    let listed: Vec<(&str, dbconn::RelationKind)> = relations
         .iter()
         .map(|r| (r.name.as_str(), r.kind))
         .collect();
     assert_eq!(
         listed,
         [
-            ("authors", driver_sqlite::RelationKind::Table),
-            ("books", driver_sqlite::RelationKind::Table),
-            ("in_print", driver_sqlite::RelationKind::View),
+            ("authors", dbconn::RelationKind::Table),
+            ("books", dbconn::RelationKind::Table),
+            ("in_print", dbconn::RelationKind::View),
         ],
         "sqlite_autoindex and friends are SQLite's bookkeeping, not the user's"
     );
@@ -678,7 +678,7 @@ async fn a_unique_constraint_is_reported_and_a_check_constraint_honestly_is_not(
     let constraints = src.constraints("main", "books").await.unwrap();
 
     assert_eq!(constraints.len(), 1, "got: {constraints:?}");
-    assert_eq!(constraints[0].kind, driver_sqlite::ConstraintKind::Unique);
+    assert_eq!(constraints[0].kind, dbconn::ConstraintKind::Unique);
     assert_eq!(constraints[0].definition, "UNIQUE (title)");
 
     // books also has `CHECK (length(title) > 0)`, and it is not here. SQLite

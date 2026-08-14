@@ -11,7 +11,8 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use driver_postgres::{ConstraintKind, PgError, PgSource, RelationKind};
+use dbconn::{ConstraintKind, RelationKind};
+use driver_postgres::{PgError, PgSource};
 use std::sync::Arc;
 
 const CONN: &str = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench";
@@ -664,11 +665,15 @@ async fn relations_report_kind_and_row_estimate() {
     assert_eq!(bench.kind, RelationKind::Table);
     assert_eq!(bench.schema, "public");
     // The planner estimate is approximate by design, but should be the right
-    // order of magnitude after the seed's ANALYZE.
+    // order of magnitude after the seed's ANALYZE. Present at all only because
+    // of that ANALYZE: an unanalyzed relation now reports None rather than the
+    // zero this used to clamp -1 into.
+    let estimate = bench
+        .estimated_rows
+        .expect("the seed analyzes bench_wide, so there is an estimate");
     assert!(
-        bench.estimated_rows > 900_000 && bench.estimated_rows < 1_100_000,
-        "estimate {} is not near 1M",
-        bench.estimated_rows
+        (900_000..1_100_000).contains(&estimate),
+        "estimate {estimate} is not near 1M"
     );
 }
 
@@ -1045,20 +1050,28 @@ async fn triggers_decode_their_bitmask_and_admit_when_disabled() {
     assert_eq!(all.len(), 2, "internal constraint triggers are excluded");
 
     let before = all.iter().find(|t| t.name.contains("before")).unwrap();
-    assert_eq!(before.timing, "BEFORE");
+    assert_eq!(before.timing.as_deref(), Some("BEFORE"));
     assert_eq!(
         before.events,
         vec!["INSERT", "UPDATE"],
         "a multi-event trigger fires on every event in its mask"
     );
-    assert_eq!(before.level, "ROW");
-    assert_eq!(before.function, "bench_child_touch");
+    assert_eq!(before.level.as_deref(), Some("ROW"));
+    assert_eq!(before.function.as_deref(), Some("bench_child_touch"));
     assert!(before.enabled);
+    // Carried beside the descriptors rather than instead of them, because SQLite
+    // can fill only this one and a structure pane should have something to show
+    // whichever database it is looking at.
+    let definition = before.definition.as_deref().expect("the DDL");
+    assert!(
+        definition.contains("BEFORE INSERT OR UPDATE"),
+        "got: {definition}"
+    );
 
     let after = all.iter().find(|t| t.name.contains("after")).unwrap();
-    assert_eq!(after.timing, "AFTER");
+    assert_eq!(after.timing.as_deref(), Some("AFTER"));
     assert_eq!(after.events, vec!["DELETE"]);
-    assert_eq!(after.level, "STATEMENT");
+    assert_eq!(after.level.as_deref(), Some("STATEMENT"));
     assert!(
         !after.enabled,
         "a disabled trigger shown as active promises behaviour that will not happen"

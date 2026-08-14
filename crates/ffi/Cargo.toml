@@ -11,9 +11,14 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 arrow = { workspace = true, features = ["ffi"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+dbconn = { path = "../conn" }
 driver-postgres = { path = "../drivers/postgres" }
+driver-sqlite = { path = "../drivers/sqlite" }
 serde = "1"
 serde_json = "1"
 
 [dev-dependencies]
 arrow = { workspace = true, features = ["ffi"] }
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }

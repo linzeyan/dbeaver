@@ -9,141 +9,37 @@
 //! Arrow buys nothing for a few thousand short rows, and JSON keeps the Swift
 //! side trivial.
 
-use serde::Serialize;
+use dbconn::{
+    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    RelationshipInfo, SchemaInfo, TriggerInfo,
+};
 use tokio_postgres::Client;
 
 use crate::PgError;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SchemaInfo {
-    pub name: String,
-}
-
-/// What kind of relation a navigator entry is. Views and tables look the same
-/// when browsing data but differ in what may be done to them, so the
-/// distinction is carried from the start rather than retrofitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RelationKind {
-    Table,
-    View,
-    MaterializedView,
-    ForeignTable,
-    PartitionedTable,
-    Unknown,
-}
-
-impl RelationKind {
-    fn from_relkind(c: i8) -> Self {
-        match c as u8 as char {
-            'r' => Self::Table,
-            'v' => Self::View,
-            'm' => Self::MaterializedView,
-            'f' => Self::ForeignTable,
-            'p' => Self::PartitionedTable,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RelationInfo {
-    pub schema: String,
-    pub name: String,
-    pub kind: RelationKind,
-    /// Planner estimate. Exact counts require a scan, which is not acceptable
-    /// for a sidebar; the estimate is labelled as such in the UI.
-    pub estimated_rows: i64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ColumnInfo {
-    pub name: String,
-    /// Fully formatted SQL type, e.g. `numeric(18,4)` or `character varying(64)`.
-    pub data_type: String,
-    pub nullable: bool,
-    pub position: i32,
-    pub is_primary_key: bool,
-    pub default_value: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct IndexInfo {
-    pub name: String,
-    /// Key expressions in index order. Expressions rather than plain names,
-    /// because an index on `lower(email)` is not an index on `email` and
-    /// printing it as one would be a lie about what the planner can use.
-    pub columns: Vec<String>,
-    pub is_unique: bool,
-    pub is_primary: bool,
-    /// Access method: btree, hash, gin, gist, brin.
-    pub method: String,
-    /// WHERE clause of a partial index, if any.
-    pub predicate: Option<String>,
-}
-
-/// One foreign key, seen from whichever relation was asked about.
+/// `pg_class.relkind`, as one of the kinds the navigator knows about.
 ///
-/// The same constraint is a table's own key when looked at from the
-/// referencing side and an inbound reference when looked at from the
-/// referenced side, so the fields are named for the vantage point rather than
-/// for one direction. Reusing "referenced_table" for both would name the field
-/// after the wrong end half the time.
-#[derive(Debug, Clone, Serialize)]
-pub struct RelationshipInfo {
-    pub name: String,
-    /// Columns on the relation that was asked about.
-    pub local_columns: Vec<String>,
-    pub other_schema: String,
-    pub other_table: String,
-    pub other_columns: Vec<String>,
-    pub on_update: String,
-    pub on_delete: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ConstraintKind {
-    Check,
-    Unique,
-    Exclude,
-    Other,
-}
-
-impl ConstraintKind {
-    fn from_contype(c: i8) -> Self {
-        match c as u8 as char {
-            'c' => Self::Check,
-            'u' => Self::Unique,
-            'x' => Self::Exclude,
-            _ => Self::Other,
-        }
+/// A free function rather than a method: the enum belongs to `dbconn` now, so
+/// that every driver's navigator entries mean the same thing.
+fn relation_kind(c: i8) -> RelationKind {
+    match c as u8 as char {
+        'r' => RelationKind::Table,
+        'v' => RelationKind::View,
+        'm' => RelationKind::MaterializedView,
+        'f' => RelationKind::ForeignTable,
+        'p' => RelationKind::PartitionedTable,
+        _ => RelationKind::Unknown,
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ConstraintInfo {
-    pub name: String,
-    pub kind: ConstraintKind,
-    /// The server's own rendering, via `pg_get_constraintdef`. Reproducing it
-    /// from catalog columns would mean reimplementing expression formatting,
-    /// and getting it subtly wrong on the cases that matter.
-    pub definition: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct TriggerInfo {
-    pub name: String,
-    /// BEFORE, AFTER, or INSTEAD OF.
-    pub timing: String,
-    /// INSERT / UPDATE / DELETE / TRUNCATE, in that order.
-    pub events: Vec<String>,
-    /// ROW or STATEMENT.
-    pub level: String,
-    pub function: String,
-    /// A disabled trigger listed as though it fires is worse than not listing
-    /// it: it makes the reader expect behaviour that will not happen.
-    pub enabled: bool,
+/// `pg_constraint.contype`, for the constraints that get their own section.
+fn constraint_kind(c: i8) -> ConstraintKind {
+    match c as u8 as char {
+        'c' => ConstraintKind::Check,
+        'u' => ConstraintKind::Unique,
+        'x' => ConstraintKind::Exclude,
+        _ => ConstraintKind::Other,
+    }
 }
 
 /// Decodes `pg_trigger.tgtype`, a documented bitmask.
@@ -234,9 +130,12 @@ pub(crate) async fn relations(client: &Client, schema: &str) -> Result<Vec<Relat
             RelationInfo {
                 schema: schema.to_string(),
                 name: r.get(0),
-                kind: RelationKind::from_relkind(r.get(1)),
-                // reltuples is -1 when the relation has never been analyzed.
-                estimated_rows: estimated.max(0),
+                kind: relation_kind(r.get(1)),
+                // -1 when the relation has never been analyzed. Clamping that to
+                // zero, as this used to, reported a full table as empty — and it
+                // took a second driver with the same hole to notice, because a
+                // benchmark database is analyzed and never showed it.
+                estimated_rows: (estimated >= 0).then_some(estimated),
             }
         })
         .collect())
@@ -475,7 +374,7 @@ pub(crate) async fn constraints(
         .iter()
         .map(|r| ConstraintInfo {
             name: r.get(0),
-            kind: ConstraintKind::from_contype(r.get(1)),
+            kind: constraint_kind(r.get(1)),
             definition: r.get(2),
         })
         .collect())
@@ -491,7 +390,8 @@ pub(crate) async fn triggers(
     // the filter bench_child would report constraint machinery as user code.
     let rows = client
         .query(
-            "SELECT t.tgname, t.tgtype, t.tgenabled, p.proname \
+            "SELECT t.tgname, t.tgtype, t.tgenabled, p.proname, \
+                    pg_catalog.pg_get_triggerdef(t.oid, true) \
              FROM pg_catalog.pg_trigger t \
              JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -509,12 +409,15 @@ pub(crate) async fn triggers(
             let enabled: i8 = r.get(2);
             TriggerInfo {
                 name: r.get(0),
-                timing,
+                // Optional in the shared shape because SQLite records none of
+                // these; PostgreSQL keeps all four in columns and states them.
+                timing: Some(timing),
                 events,
-                level,
-                function: r.get(3),
+                level: Some(level),
+                function: Some(r.get(3)),
                 // 'D' is disabled; 'O', 'R' and 'A' all fire in some session.
                 enabled: enabled as u8 as char != 'D',
+                definition: r.get(4),
             }
         })
         .collect())

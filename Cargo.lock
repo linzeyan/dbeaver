@@ -522,13 +522,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbconn"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "driver-postgres",
+ "driver-sqlite",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "dbffi"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "dbconn",
  "driver-postgres",
+ "driver-sqlite",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -549,10 +567,11 @@ name = "driver-postgres"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-trait",
  "chrono",
+ "dbconn",
  "futures-util",
  "rust_decimal",
- "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -565,8 +584,9 @@ name = "driver-sqlite"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "async-trait",
+ "dbconn",
  "rusqlite",
- "serde",
  "tempfile",
  "thiserror",
  "tokio",

@@ -19,119 +19,27 @@
 //!   Extracting them means parsing SQL, which is `crates/sql`'s job in Phase 3
 //!   and not something to half-do here.
 
+use dbconn::{
+    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    RelationshipInfo, SchemaInfo, TriggerInfo,
+};
 use rusqlite::Connection;
-use serde::Serialize;
 use std::collections::HashMap;
 
 use crate::SqliteError;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SchemaInfo {
-    pub name: String,
-}
-
-/// What kind of relation a navigator entry is.
+/// `pragma_table_list`'s `type`, as one of the kinds the navigator knows about.
 ///
-/// Shorter than PostgreSQL's list, and not a subset of it: SQLite has no
-/// materialized views, foreign tables or partitioned tables, and it does have
-/// virtual tables, which are a relation whose rows come from an extension rather
-/// than from the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RelationKind {
-    Table,
-    View,
-    Virtual,
-    Unknown,
-}
-
-impl RelationKind {
-    fn from_table_list(kind: &str) -> Self {
-        match kind {
-            "table" => Self::Table,
-            "view" => Self::View,
-            "virtual" => Self::Virtual,
-            _ => Self::Unknown,
-        }
+/// SQLite is the reason `Virtual` is in that list: a virtual table's rows come
+/// from an extension rather than from the file, and calling it a table would say
+/// something false about what can be done to it.
+fn relation_kind(kind: &str) -> RelationKind {
+    match kind {
+        "table" => RelationKind::Table,
+        "view" => RelationKind::View,
+        "virtual" => RelationKind::Virtual,
+        _ => RelationKind::Unknown,
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RelationInfo {
-    pub schema: String,
-    pub name: String,
-    pub kind: RelationKind,
-    /// What `ANALYZE` last recorded, and `None` where it has never been run.
-    ///
-    /// Absent rather than zero, which PostgreSQL's driver should learn from: it
-    /// clamps an unanalyzed relation's -1 up to 0, and a sidebar that says a
-    /// table has no rows when it has not been asked is stating something false
-    /// rather than declining to answer.
-    pub estimated_rows: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ColumnInfo {
-    pub name: String,
-    /// The type as declared. `ANY` where a column was declared without one,
-    /// which SQLite permits and which is the word its own STRICT tables use for
-    /// a column that holds any storage class.
-    pub data_type: String,
-    pub nullable: bool,
-    pub position: i32,
-    pub is_primary_key: bool,
-    pub default_value: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct IndexInfo {
-    pub name: String,
-    pub columns: Vec<String>,
-    pub is_unique: bool,
-    pub is_primary: bool,
-    /// Always `btree`. Carried anyway, so the shape does not change per driver
-    /// for a field the sidebar prints either way.
-    pub method: String,
-    pub predicate: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RelationshipInfo {
-    /// Made up from the table and the key's position: SQLite does not record the
-    /// name a foreign key was declared with.
-    pub name: String,
-    pub local_columns: Vec<String>,
-    pub other_schema: String,
-    pub other_table: String,
-    pub other_columns: Vec<String>,
-    pub on_update: String,
-    pub on_delete: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ConstraintKind {
-    Unique,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ConstraintInfo {
-    pub name: String,
-    pub kind: ConstraintKind,
-    pub definition: String,
-}
-
-/// A trigger, as much of one as SQLite records.
-///
-/// Nothing like PostgreSQL's. There the catalog holds the timing, the events and
-/// the function in columns; here there is a name and the statement it was
-/// created from, and picking `BEFORE` or `INSERT` out of that text is guessing at
-/// something the user can read for themselves. Upstream's SQLite plugin reaches
-/// the same conclusion and surfaces a name and the DDL.
-#[derive(Debug, Clone, Serialize)]
-pub struct TriggerInfo {
-    pub name: String,
-    pub definition: Option<String>,
 }
 
 /// Fails unless `schema` names a database this connection has open.
@@ -206,7 +114,7 @@ pub(crate) fn relations(conn: &Connection, schema: &str) -> Result<Vec<RelationI
             Ok(RelationInfo {
                 schema: schema.to_string(),
                 estimated_rows: estimates.get(&name).copied(),
-                kind: RelationKind::from_table_list(&kind),
+                kind: relation_kind(&kind),
                 name,
             })
         })
@@ -568,6 +476,16 @@ pub(crate) fn triggers(
     let rows = stmt.query_map([relation], |row| {
         Ok(TriggerInfo {
             name: row.get(0)?,
+            // None of the descriptors, and that is the honest answer rather than
+            // a gap: SQLite records the statement and nothing else, so picking
+            // `AFTER` or `INSERT` out of that text would be this side guessing at
+            // what the reader can already see below it.
+            timing: None,
+            events: Vec::new(),
+            level: None,
+            function: None,
+            // SQLite has no way to disable a trigger, so one that exists fires.
+            enabled: true,
             definition: row.get(1)?,
         })
     })?;
