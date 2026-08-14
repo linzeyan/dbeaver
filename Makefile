@@ -112,8 +112,52 @@ test: ## Unit tests (no database required)
 # under a minute to become ready, and about as much memory as MySQL. Its image is
 # five gigabytes, which is a download to do once rather than a cost per run.
 .PHONY: test-integration
-test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks ## Tests requiring a database server
+test-integration: db-check db-check-compatible db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks ## Tests requiring a database server
 	cargo test --workspace -- --ignored
+
+# The same suite, split by which server has to be up. CI runs these as separate
+# jobs rather than running the target above: nine servers on one runner is about
+# fourteen gigabytes of images and more memory than StarRocks and SQL Server will
+# share, and a runner that dies of that reports a failure that names nothing.
+#
+# `test-integration` stays the definition of what integration coverage is, and
+# these five are a partition of it — a new crate with `#[ignore]`d tests is
+# picked up by `--workspace` above and has to be added to one of these by hand.
+#
+# The contract suite is one binary holding a subject per database, so each
+# family takes its share by test name. `--exact`, because the compatibility
+# subjects carry the driver's name as well as their own: a plain `mysql` filter
+# would pull TiDB and StarRocks into a job where neither server is running.
+.PHONY: test-postgres
+test-postgres: db-check db-check-compatible ## Integration tests behind PostgreSQL and the servers read through its driver
+	cargo test -p driver-postgres -p dbffi -p dbddl -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact \
+		postgres_satisfies_the_contract \
+		cockroachdb_satisfies_the_contract_through_the_postgres_driver \
+		greptimedb_reads_data_through_the_postgres_driver
+
+.PHONY: test-mysql
+test-mysql: db-check-mysql db-check-tidb db-check-starrocks ## Integration tests behind MySQL and the servers read through its driver
+	cargo test -p driver-mysql -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact \
+		mysql_satisfies_the_contract \
+		tidb_satisfies_the_contract_through_the_mysql_driver \
+		starrocks_satisfies_the_contract_through_the_mysql_driver
+
+.PHONY: test-mssql
+test-mssql: db-check-mssql ## Integration tests behind SQL Server
+	cargo test -p driver-mssql -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact mssql_satisfies_the_contract
+
+.PHONY: test-clickhouse
+test-clickhouse: db-check-clickhouse ## Integration tests behind ClickHouse
+	cargo test -p driver-clickhouse -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact clickhouse_satisfies_the_contract
+
+.PHONY: test-mongodb
+test-mongodb: db-check-mongo ## Integration tests behind MongoDB
+	cargo test -p driver-mongodb -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact mongodb_satisfies_the_contract
 
 # The SQL statement splitter's checks live behind a flag on the app binary
 # rather than in a test target: Package.swift declares one executable target and
@@ -223,6 +267,17 @@ db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, Gre
 .PHONY: db-down-compatible
 db-down-compatible: ## Stop and remove the PostgreSQL-compatible containers
 	-docker rm -f $(COCKROACH_CONTAINER) $(GREPTIME_CONTAINER)
+
+# Missing until now, which made these two the one pair whose absence reached the
+# suite as a connection refused from inside a test rather than as the line that
+# names the target to run — the failure mode the comment on `test-integration`
+# says the checks exist to prevent.
+.PHONY: db-check-compatible
+db-check-compatible: ## Fail unless the PostgreSQL-compatible containers are reachable
+	@nc -z 127.0.0.1 $(COCKROACH_PORT) >/dev/null 2>&1 \
+		|| { echo "cockroachdb not running; run 'make db-up-compatible'"; exit 1; }
+	@nc -z 127.0.0.1 $(GREPTIME_PORT) >/dev/null 2>&1 \
+		|| { echo "greptimedb not running; run 'make db-up-compatible'"; exit 1; }
 
 # The same argument on the other protocol: TiDB and StarRocks are read by the
 # MySQL driver and no code of their own. Both take `root` with no password,

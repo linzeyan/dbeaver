@@ -46,15 +46,49 @@ jobs:
       - name: Unit tests
         run: make test
 
-      # The same container and the same seed script a developer runs, unedited.
-      # `make db-seed` takes a minute or so for the million rows the estimate
-      # test checks for, which is the cost of testing against real PostgreSQL
-      # rather than a stub that agrees with us.
-      - name: Seed benchmark database
-        run: make db-seed
+  # One job per server family rather than one `make test-integration`, which is
+  # what this job used to be. That target now wants nine servers up at once, and
+  # a runner has neither the memory for StarRocks beside SQL Server nor the disk
+  # for every image — so the suite is split the way the Makefile splits it, one
+  # container set per job, and a failure names the database it belongs to.
+  integration:
+    name: Integration (${{ matrix.server.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      # These jobs are a partition of one suite, not attempts at the same thing.
+      # Cancelling the rest because MySQL failed would hide whatever ClickHouse
+      # was about to say.
+      fail-fast: false
+      matrix:
+        server:
+          # The same containers and the same seed script a developer runs,
+          # unedited. `make db-seed` takes a minute or so for the million rows
+          # the estimate test checks for, which is the cost of testing against
+          # real PostgreSQL rather than a stub that agrees with us.
+          - name: PostgreSQL
+            up: db-seed db-up-compatible
+            test: test-postgres
+          - name: MySQL
+            up: db-up-mysql db-up-tidb db-up-starrocks
+            test: test-mysql
+          - name: SQL Server
+            up: db-up-mssql
+            test: test-mssql
+          - name: ClickHouse
+            up: db-up-clickhouse
+            test: test-clickhouse
+          - name: MongoDB
+            up: db-up-mongo
+            test: test-mongodb
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start servers
+        run: make ${{ matrix.server.up }}
 
       - name: Integration tests
-        run: make test-integration
+        run: make ${{ matrix.server.test }}
 
   app:
     name: App (macOS)
