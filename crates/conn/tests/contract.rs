@@ -342,8 +342,70 @@ async fn pg_compatible(
     }
 }
 
+/// A MySQL-compatible database, seeded and connected through the MySQL driver.
+///
+/// The mirror of `pg_compatible`, and there for the same reason: Phase 2 claims
+/// TiDB and StarRocks are reached by the driver already written, and a claim
+/// like that is worth exactly as much as the test that runs against the real
+/// thing.
+///
+/// Seeded over `mysql_async` rather than through `MySqlSource`, so that the
+/// fixture cannot be vouched for by the code it exists to examine. The database
+/// is built here and the table is the caller's, because the table is the one
+/// statement these servers spell differently — StarRocks wants a distribution
+/// clause that MySQL has no word for — while `CREATE DATABASE` is the same
+/// everywhere.
+async fn mysql_compatible(
+    server: &str,
+    seed: Vec<String>,
+    relation: &str,
+    key: &str,
+    positions: bool,
+    cursors: bool,
+) -> Subject {
+    use mysql_async::prelude::Queryable;
+
+    let opts = mysql_async::Opts::from_url(server).expect("the fixture URL should parse");
+    let mut conn = mysql_async::Conn::new(opts)
+        .await
+        .expect("compatible database unreachable; see the Makefile target");
+    let prelude = [
+        "DROP DATABASE IF EXISTS dbclient_contract",
+        "CREATE DATABASE dbclient_contract",
+        "USE dbclient_contract",
+    ]
+    .into_iter()
+    .map(str::to_string);
+    for statement in prelude.chain(seed) {
+        conn.query_drop(&statement)
+            .await
+            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    }
+    conn.disconnect()
+        .await
+        .expect("closing the seed connection");
+
+    let driver = driver_mysql::MySqlSource::connect(&format!("{server}dbclient_contract"))
+        .await
+        .expect("the MySQL driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        schema: "dbclient_contract".to_string(),
+        relation: relation.to_string(),
+        key: key.to_string(),
+        read: format!("SELECT {key} FROM {relation} ORDER BY {key}"),
+        broken: format!("SELECT {key} FROM {relation} WHERE ORDER BY {key}"),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors,
+        positions,
+        _fixture: None,
+    }
+}
+
 const COCKROACH: &str = "postgres://root@127.0.0.1:56257/defaultdb";
 const GREPTIME: &str = "postgres://greptime@127.0.0.1:54003/public";
+const TIDB: &str = "mysql://root@127.0.0.1:54000/";
 
 // ---------------------------------------------------------------------------
 // The checks
@@ -771,4 +833,31 @@ async fn greptimedb_reads_data_through_the_postgres_driver() {
         relations.iter().any(|r| r.name == subject.relation),
         "the table should be listed"
     );
+}
+
+/// TiDB, through the MySQL driver and no other code.
+#[tokio::test]
+#[ignore = "requires a TiDB server"]
+async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
+    let subject = mysql_compatible(
+        TIDB,
+        vec![
+            "CREATE TABLE nums (id INT PRIMARY KEY, label VARCHAR(32))".to_string(),
+            format!(
+                "INSERT INTO nums (id, label) VALUES {}",
+                (1..=500)
+                    .map(|i| format!("({i}, 'row-{i}')"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ],
+        "nums",
+        "id",
+        // No offset, for the same reason MySQL has none: the server sends the
+        // fragment it stopped at rather than a place in the text.
+        false,
+        true,
+    )
+    .await;
+    every_check(&subject).await;
 }
