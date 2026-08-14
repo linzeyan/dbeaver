@@ -219,7 +219,21 @@ impl MySqlSource {
         // offset per value — is arithmetic on every timestamp cell that is
         // wrong the moment anyone issues `SET time_zone`. The cost is visible
         // and belongs on the record: `NOW()` in the query tab answers in UTC.
-        let opts = Opts::from(OptsBuilder::from_opts(opts).init(vec!["SET time_zone = '+00:00'"]));
+        //
+        // The address in the URL is the address that gets connected to, which
+        // is not the default: left alone, the client reads `@@socket` after the
+        // handshake and, if that path is openable from here, drops the TCP
+        // connection and reopens over the Unix socket instead. The server
+        // reports the path it sees, so a forwarded port — a container, an SSH
+        // tunnel — answers with a path belonging to its own filesystem, and
+        // whatever happens to sit at that path on this machine is a different
+        // server. A client whose job is to connect where it was told cannot
+        // treat the port number as a hint.
+        let opts = Opts::from(
+            OptsBuilder::from_opts(opts)
+                .init(vec!["SET time_zone = '+00:00'"])
+                .prefer_socket(false),
+        );
 
         let live: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         // Opened eagerly so a wrong password fails here rather than at the first
