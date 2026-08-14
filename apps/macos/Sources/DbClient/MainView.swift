@@ -56,6 +56,16 @@ struct MainView: View {
             .help("\(model.connectionState.label) — \(model.connectionLabel)")
         }
 
+        // Only where there is a transaction to control. Most of the databases
+        // here run every statement on a connection borrowed from a pool, where
+        // nothing could hold one open, and a Commit button that can never do
+        // anything is worse than no button at all.
+        ToolbarItem(placement: .primaryAction) {
+            if model.canControlTransactions {
+                TransactionControl(model: model)
+            }
+        }
+
         // One slot, two commands. While something is running, Run is disabled
         // anyway — the connection is serial — so the space it occupies is the
         // obvious place for the only command that is useful then. A separate
@@ -81,6 +91,70 @@ struct MainView: View {
                 .help("Run the current query (⌘R)")
             }
         }
+    }
+}
+
+/// The transaction, in the toolbar: which mode the connection is in, whether
+/// anything is uncommitted, and the two commands that end it.
+///
+/// The mode is a menu rather than a switch because it is the rarer choice of the
+/// three controls and the destructive one to get wrong — a switch under the
+/// pointer is a mode changed by a mis-click. Commit and Rollback appear only in
+/// manual-commit mode, where they can mean something, and are dimmed until there
+/// is work in the transaction.
+///
+/// Amber for an open transaction, and nothing at all for a closed one. The
+/// colour is the whole point of the control: what a person needs to notice
+/// without looking is that they have changed a database and not told it to keep
+/// the change.
+private struct TransactionControl: View {
+    let model: AppModel
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs) {
+            Menu {
+                Button("Autocommit") { model.setAutocommit(true) }
+                Button("Manual Commit") { model.setAutocommit(false) }
+            } label: {
+                Label(
+                    model.transaction.autocommit ? "Autocommit" : "Manual",
+                    systemImage: model.hasUncommittedWork
+                        ? "circle.inset.filled" : "arrow.triangle.branch")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .foregroundStyle(
+                (model.hasUncommittedWork ? Theme.warning : Theme.textSecondary).color
+            )
+            .help(help)
+
+            if !model.transaction.autocommit {
+                Button {
+                    model.commit()
+                } label: {
+                    Label("Commit", systemImage: "checkmark")
+                }
+                .disabled(!model.hasUncommittedWork || model.isBusy)
+                .help("Keep the changes in this transaction (⇧⌘C)")
+
+                Button {
+                    model.rollback()
+                } label: {
+                    Label("Rollback", systemImage: "arrow.uturn.backward")
+                }
+                .disabled(!model.hasUncommittedWork || model.isBusy)
+                .help("Undo everything this transaction has done")
+            }
+        }
+    }
+
+    private var help: String {
+        if model.transaction.autocommit {
+            return "Every statement is kept as it runs. Switch to hold them until you commit."
+        }
+        return model.hasUncommittedWork
+            ? "A transaction is open with work in it that the database has not been told to keep."
+            : "Statements will be held until you commit."
     }
 }
 

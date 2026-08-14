@@ -134,6 +134,51 @@ final class Database: @unchecked Sendable {
         db_names_forget(handle)
     }
 
+    // MARK: - Transactions
+
+    /// What this connection's transaction is doing.
+    func transactionState() throws -> TransactionState {
+        try decodeJSON(db_tx_state_json(handle, &errOut), as: TransactionState.self)
+    }
+
+    /// Enters or leaves autocommit.
+    ///
+    /// Throws while a transaction is open rather than deciding what to do with
+    /// the work in it. The window asks, and then commits or rolls back.
+    func setAutocommit(_ on: Bool) throws {
+        try step("autocommit failed") { db_tx_autocommit(handle, on ? 1 : 0, &$0) }
+    }
+
+    func commit() throws {
+        try step("commit failed") { db_tx_commit(handle, &$0) }
+    }
+
+    func rollback() throws {
+        try step("rollback failed") { db_tx_rollback(handle, &$0) }
+    }
+
+    func savepoint(_ name: String) throws {
+        try step("savepoint failed") { db_tx_savepoint(handle, name, &$0) }
+    }
+
+    func rollback(to name: String) throws {
+        try step("rollback to savepoint failed") { db_tx_rollback_to(handle, name, &$0) }
+    }
+
+    func release(_ name: String) throws {
+        try step("releasing the savepoint failed") { db_tx_release(handle, name, &$0) }
+    }
+
+    /// Runs a transaction call that answers with a code rather than a value.
+    private func step(
+        _ fallback: String, _ call: (inout UnsafeMutablePointer<CChar>?) -> Int32
+    ) throws {
+        var err: UnsafeMutablePointer<CChar>?
+        if call(&err) != 0 {
+            throw DbError(description: Database.take(&err) ?? fallback)
+        }
+    }
+
     /// Scratch storage for the C error out-parameter. Calls are serialized by
     /// the caller (all metadata access happens on one background queue), so a
     /// single slot is sufficient and keeps the call sites readable.

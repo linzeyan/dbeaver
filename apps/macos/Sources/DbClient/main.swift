@@ -57,9 +57,10 @@ let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 /// session, which is the one state a capture cannot otherwise reach.
 let reconnectTo = argument("--reconnect")
 
-// `--verify-splitter`, `--verify-connection` and `--verify-completion` run the
-// checks for the pieces of pure logic in the front-end and exit with their
-// verdict. None needs a window or a database, so they run before either exists.
+// `--verify-splitter`, `--verify-connection`, `--verify-completion` and
+// `--verify-transaction` run the checks for the pieces of pure logic in the
+// front-end and exit with their verdict. None needs a window or a database, so
+// they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
@@ -68,6 +69,9 @@ if CommandLine.arguments.contains("--verify-connection") {
 }
 if CommandLine.arguments.contains("--verify-completion") {
     exit(SQLCompletionChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-transaction") {
+    exit(TransactionChecks.run() ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -123,6 +127,85 @@ if CommandLine.arguments.contains("--offers") {
         exit(0)
     } catch {
         fputs("offers: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+/// `--transaction` drives one manual-commit transaction against `--conn` and
+/// prints what the connection says at each step.
+///
+/// Exists because the claim is about what the server was told and not about what
+/// the window looks like. `--verify-transaction` checks that this side reads the
+/// core's answer correctly; the core's own checks prove the transaction against
+/// a server through the C API. This is the piece between them: that the Swift
+/// wrapper's six calls reach those entry points and come back with the state
+/// they changed.
+///
+/// It writes. `tx_probe` is created and dropped in the database `--conn` names,
+/// so point it at a scratch database rather than at anything that matters.
+///
+/// No window and no model, like `--offers`: what is under test is the bridge.
+if CommandLine.arguments.contains("--transaction") {
+    guard let conn = connArgument else {
+        fputs("--transaction needs --conn\n", stderr)
+        exit(2)
+    }
+    func report(_ what: String, _ state: TransactionState, rows: Int? = nil) {
+        let counted = rows.map { ", \($0) row(s)" } ?? ""
+        fputs(
+            "\(what): autocommit=\(state.autocommit) open=\(state.open)"
+                + " savepoints=\(state.savepoints)\(counted)\n", stderr)
+    }
+    do {
+        let db = try Database(connString: conn)
+        /// Runs `sql` to the end and answers with what the server counted, which
+        /// for a SELECT is the rows it returned.
+        func ran(_ sql: String) throws -> Int {
+            let query = try db.query(sql, batchRows: 1000)
+            while try query.nextBatch() != nil {}
+            return query.rowsAffected ?? 0
+        }
+
+        let initial = try db.transactionState()
+        guard initial.transactional else {
+            fputs("this database has no transaction to control\n", stderr)
+            exit(1)
+        }
+        _ = try ran("DROP TABLE IF EXISTS tx_probe")
+        _ = try ran("CREATE TABLE tx_probe (n int)")
+        report("connected", initial)
+
+        try db.setAutocommit(false)
+        report("manual", try db.transactionState())
+
+        _ = try ran("INSERT INTO tx_probe (n) VALUES (1)")
+        report("inserted", try db.transactionState(), rows: try ran("SELECT n FROM tx_probe"))
+
+        try db.savepoint("halfway")
+        _ = try ran("INSERT INTO tx_probe (n) VALUES (2)")
+        try db.rollback(to: "halfway")
+        report(
+            "rolled back to savepoint", try db.transactionState(),
+            rows: try ran("SELECT n FROM tx_probe"))
+
+        try db.rollback()
+        report("rolled back", try db.transactionState(), rows: try ran("SELECT n FROM tx_probe"))
+
+        _ = try ran("INSERT INTO tx_probe (n) VALUES (3)")
+        try db.commit()
+        report("committed", try db.transactionState(), rows: try ran("SELECT n FROM tx_probe"))
+
+        // The count that came back with the line above ran in manual-commit mode
+        // as well, so it opened a transaction of its own — every statement does,
+        // including one that changes nothing — and that one has to be ended
+        // before the mode can change.
+        try db.rollback()
+        try db.setAutocommit(true)
+        _ = try ran("DROP TABLE tx_probe")
+        report("done", try db.transactionState())
+        exit(0)
+    } catch {
+        fputs("transaction: \(error)\n", stderr)
         exit(1)
     }
 }

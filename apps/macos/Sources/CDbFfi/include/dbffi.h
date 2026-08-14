@@ -206,6 +206,56 @@ char* db_constraints_json(DbHandle* handle, const char* schema, const char* rela
 char* db_triggers_json(DbHandle* handle, const char* schema, const char* relation,
                        char** err);
 
+// What this connection's transaction is doing. Released with db_string_free:
+//
+//   {"transactional":…, "autocommit":…, "open":…, "savepoints":[…]}
+//
+// `transactional` is the driver's answer and decides whether the rest is worth
+// showing: a connection that cannot hold a transaction open is not in autocommit
+// mode, it has no mode. Today that is PostgreSQL and the databases reached
+// through its driver; the others run each statement on a connection from a pool,
+// where a BEGIN would open a transaction the next statement never joins.
+//
+// `open` is what this side sent, not what the server was asked. PostgreSQL
+// reports its transaction status in every ReadyForQuery and the client library
+// keeps that to itself, so the core remembers instead — which means a BEGIN
+// typed into the editor and run as an ordinary statement is a transaction the
+// core does not know about, and db_tx_commit will refuse to end it.
+//
+// Pull this after anything that could have changed it. The window redraws at
+// those moments anyway, and a push would be a second thing to keep in step.
+char* db_tx_state_json(DbHandle* handle, char** err);
+
+// Turns autocommit on (non-zero) or off (0). Returns 0 on success, -1 on
+// failure.
+//
+// Sends nothing by itself: the mode decides what happens to the next statement,
+// and there is nothing to tell the server until there is one. Refused while a
+// transaction is open — the work in it is either wanted or not, and only the
+// person who ran it knows which, so the window asks and then commits or rolls
+// back. Refused too on a connection that cannot hold a transaction.
+int db_tx_autocommit(DbHandle* handle, int on, char** err);
+
+// Ends the open transaction, keeping (commit) or undoing (rollback) what it did.
+// Returns 0 on success, -1 on failure — including when nothing was open, which
+// is the window and the connection disagreeing rather than a harmless no-op.
+int db_tx_commit(DbHandle* handle, char** err);
+int db_tx_rollback(DbHandle* handle, char** err);
+
+// Savepoints, within the open transaction. Return 0 on success, -1 on failure.
+//
+// db_tx_savepoint marks a point to come back to; db_tx_rollback_to undoes what
+// happened after it and leaves the transaction open, which is the difference
+// between a savepoint and a rollback; db_tx_release forgets the mark and the
+// ones inside it, keeping the work.
+//
+// A name is a letter followed by letters, digits or underscores, and anything
+// else is refused: the name reaches the server written into the statement as an
+// identifier, where there is no placeholder to bind it to.
+int db_tx_savepoint(DbHandle* handle, const char* name, char** err);
+int db_tx_rollback_to(DbHandle* handle, const char* name, char** err);
+int db_tx_release(DbHandle* handle, const char* name, char** err);
+
 // On a server error that names a place in the statement, `err_position` receives
 // the cursor: 1-based, counted in characters, from the start of `sql`. Zero for
 // every error that has no such place. A number rather than a sentence, because

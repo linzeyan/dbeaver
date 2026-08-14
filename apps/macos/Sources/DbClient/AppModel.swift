@@ -250,6 +250,15 @@ final class AppModel {
     private(set) var exportStatus = ""
     var errorMessage: String?
 
+    /// What the connection's transaction is doing, as of the last thing that
+    /// could have changed it.
+    ///
+    /// Read back from the core after each of those rather than predicted here.
+    /// The core is the side that sent the BEGIN, so a copy kept in the window
+    /// would be a second answer with nothing to keep it honest — and the one
+    /// that is drawn on screen would be the one nobody checked.
+    private(set) var transaction: TransactionState = .none
+
     /// Rows fetched per browse page. A grid shows a window onto the data;
     /// pulling a million rows to display forty is what makes other clients feel
     /// slow. `loadMore()` fetches the next page on request.
@@ -495,6 +504,10 @@ final class AppModel {
         }
         status = Self.pluralized(schemas.count, "schema")
         isBusy = false
+        // Whether this database has a transaction to control is the first thing
+        // the toolbar needs, and it is a property of the connection just made
+        // rather than of anything the user has done yet.
+        refreshTransaction()
         // Runs after the selection above, so an explicit `--sql` replaces
         // the browse rather than racing it. Through the same path ⌘R takes,
         // so a multi-statement `--sql` runs the one `--caret` names rather
@@ -530,6 +543,8 @@ final class AppModel {
         querySelection = nil
         isValueViewerOpen = false
         errorMessage = nil
+        // The mode belonged to the connection being dropped, not to the window.
+        transaction = .none
     }
 
     /// The navigator's whole contents, read in one pass.
@@ -1535,6 +1550,10 @@ final class AppModel {
             ?? steps.lastIndex { $0.outcome.hasGrid }
             ?? max(steps.count - 1, 0)
         isBusy = false
+        // A statement in manual-commit mode opens the transaction it belongs to,
+        // so this is where "uncommitted work" starts being true. A statement
+        // that failed opens one too — the BEGIN went out before it.
+        refreshTransaction()
 
         if let failure = output.failure, let stopped {
             // Through `fail`, so the banner, the status word and the caret are
@@ -1752,6 +1771,71 @@ final class AppModel {
             DispatchQueue.global(qos: .userInitiated).async { cursor.cancel() }
         } else {
             DispatchQueue.global(qos: .userInitiated).async { db.cancel() }
+        }
+    }
+
+    // MARK: - Transactions
+
+    /// Whether this connection can be taken out of autocommit at all.
+    ///
+    /// False for most databases here, and it is the driver's answer rather than
+    /// a preference: a session that runs each statement on a connection from a
+    /// pool has nowhere for a transaction to stay open. Showing the control
+    /// anyway would be offering a mode the connection cannot enter.
+    var canControlTransactions: Bool { db != nil && transaction.transactional }
+
+    /// Whether Commit and Rollback have anything to act on.
+    var hasUncommittedWork: Bool { transaction.open }
+
+    /// Enters or leaves manual-commit mode.
+    ///
+    /// The core refuses this while work is uncommitted rather than deciding what
+    /// to do with it, so the refusal arrives as an ordinary error banner naming
+    /// what to do first. Which is the right place for it: the window cannot
+    /// answer "commit or discard?" on the user's behalf either.
+    func setAutocommit(_ on: Bool) {
+        guard canControlTransactions, !isBusy else { return }
+        change({ try $0.setAutocommit(on) }, saying: on ? "Autocommit" : "Manual commit")
+    }
+
+    func commit() {
+        guard hasUncommittedWork else { return }
+        change({ try $0.commit() }, saying: "Committed")
+    }
+
+    func rollback() {
+        guard hasUncommittedWork else { return }
+        change({ try $0.rollback() }, saying: "Rolled back")
+    }
+
+    /// Takes one transaction step and reads the state back from the core.
+    ///
+    /// The read is part of the same queued job rather than a second one: between
+    /// two jobs the window would be showing a state the connection has already
+    /// left, and it is the state a person is about to press Commit against.
+    private func change(
+        _ step: @escaping @Sendable (Database) throws -> Void, saying said: String
+    ) {
+        guard !isBusy else { return }
+        isBusy = true
+        run { db -> TransactionState in
+            try step(db)
+            return try db.transactionState()
+        } then: { [self] state in
+            transaction = state
+            isBusy = false
+            status = said
+        }
+    }
+
+    /// Reads the transaction state back after something that may have changed
+    /// it — a connection opening, or a statement that opened a transaction
+    /// without being asked to.
+    private func refreshTransaction() {
+        run { db in
+            try db.transactionState()
+        } then: { [self] state in
+            transaction = state
         }
     }
 

@@ -27,6 +27,8 @@ enum AppMenu {
     private static var stopCommand: StopCommand?
     /// Target of the Query menu's history item, held for the same reason.
     private static var historyCommand: QueryHistoryCommand?
+    /// Target of the Query menu's transaction items, held for the same reason.
+    private static var transactionCommands: TransactionCommands?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -51,12 +53,16 @@ enum AppMenu {
         stopCommand = stop
         let queryHistory = QueryHistoryCommand(model: model)
         historyCommand = queryHistory
+        let transactions = TransactionCommands(model: model)
+        transactionCommands = transactions
         let main = NSMenu()
         main.addItem(appMenu(named: name))
         main.addItem(fileMenu(connection: connection, export: commands))
         main.addItem(editMenu())
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
-        main.addItem(queryMenu(target: query, stop: stop, history: queryHistory))
+        main.addItem(
+            queryMenu(
+                target: query, stop: stop, history: queryHistory, transactions: transactions))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -255,8 +261,17 @@ enum AppMenu {
     /// not discoverable. It stops metadata reads and browses too, not just the
     /// Query pane, which is why it sits above the separator with Run Script
     /// rather than being scoped to one tab.
+    ///
+    /// The transaction items are at the bottom because they are about the
+    /// statements that have already been sent rather than about sending one.
+    /// Commit takes ⇧⌘C — ⌘C is Copy and always will be — and Rollback takes no
+    /// key at all: it destroys work, and a shortcut is exactly how it would get
+    /// pressed by somebody reaching for another one. Manual Commit is a
+    /// checkmark rather than two items, because it is one connection setting
+    /// with two values and a pair of items would let the window show both as off.
     private static func queryMenu(
-        target: QueryCommands, stop: StopCommand, history: QueryHistoryCommand
+        target: QueryCommands, stop: StopCommand, history: QueryHistoryCommand,
+        transactions: TransactionCommands
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Query")
@@ -278,6 +293,23 @@ enum AppMenu {
             action: #selector(QueryHistoryCommand.showQueryHistory(_:)), keyEquivalent: "h")
         recent.keyEquivalentModifierMask = [.command, .shift]
         recent.target = history
+
+        menu.addItem(.separator())
+        let manual = menu.addItem(
+            withTitle: "Manual Commit",
+            action: #selector(TransactionCommands.toggleManualCommit(_:)), keyEquivalent: "")
+        manual.target = transactions
+
+        let commit = menu.addItem(
+            withTitle: "Commit",
+            action: #selector(TransactionCommands.commit(_:)), keyEquivalent: "c")
+        commit.keyEquivalentModifierMask = [.command, .shift]
+        commit.target = transactions
+
+        let rollback = menu.addItem(
+            withTitle: "Rollback",
+            action: #selector(TransactionCommands.rollback(_:)), keyEquivalent: "")
+        rollback.target = transactions
 
         item.submenu = menu
         return item
@@ -457,6 +489,45 @@ final class QueryHistoryCommand: NSObject, NSMenuItemValidation {
     /// which is the only way a user finds out the feature exists before they
     /// need it.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canShowHistory }
+}
+
+/// The Query menu's transaction items, as something a menu can send to.
+///
+/// One target for the three because they are one subject and their answers are
+/// written against the same two facts — whether this connection has a
+/// transaction to control, and whether anything is in it. Split across objects,
+/// the pair that must never be enabled together could be.
+@MainActor
+final class TransactionCommands: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func toggleManualCommit(_ sender: Any?) {
+        model.setAutocommit(!model.transaction.autocommit)
+    }
+
+    @objc func commit(_ sender: Any?) { model.commit() }
+
+    @objc func rollback(_ sender: Any?) { model.rollback() }
+
+    /// The mode item carries a checkmark and stays available with nothing
+    /// running; the other two are offered only while there is work to act on.
+    ///
+    /// Leaving the mode item enabled while a transaction is open is deliberate:
+    /// the core refuses that switch, and the refusal names what to do first.
+    /// Greying it out would leave someone looking for a mode they can see is on
+    /// and cannot find the way out of.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleManualCommit(_:)) {
+            item.state = model.transaction.autocommit ? .off : .on
+            return model.canControlTransactions && !model.isBusy
+        }
+        return model.hasUncommittedWork && !model.isBusy
+    }
 }
 
 /// The File menu's export items, as something a menu can send to.

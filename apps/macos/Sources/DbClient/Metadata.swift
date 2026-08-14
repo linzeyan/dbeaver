@@ -196,3 +196,24 @@ struct ColumnInfo: Decodable, Hashable, Identifiable {
         case defaultValue = "default_value"
     }
 }
+
+/// What the connection's transaction is doing.
+///
+/// `transactional` decides whether the rest is worth showing at all: a
+/// connection that cannot hold a transaction open has no mode, rather than being
+/// permanently in autocommit. Today only PostgreSQL and the databases reached
+/// through its driver answer yes — the others run each statement on a connection
+/// from a pool, where a transaction could not span two of them.
+struct TransactionState: Decodable, Hashable {
+    let transactional: Bool
+    let autocommit: Bool
+    /// Whether there is work the server has not been told to keep.
+    let open: Bool
+    /// Innermost last, which is the order they can be rolled back to in.
+    let savepoints: [String]
+
+    /// Before anything is connected, and for a database with no transactions to
+    /// control.
+    static let none = TransactionState(
+        transactional: false, autocommit: true, open: false, savepoints: [])
+}
