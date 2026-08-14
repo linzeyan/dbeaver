@@ -38,11 +38,12 @@ use std::ptr;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
-    db_cancel, db_columns_json, db_connect, db_constraints_json, db_cursor, db_cursor_cancel,
-    db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema, db_definition_json,
-    db_foreign_keys_json, db_free, db_indexes_json, db_query, db_query_free, db_query_next,
-    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free, db_triggers_json,
+    db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
+    db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
+    db_definition_json, db_foreign_keys_json, db_free, db_indexes_json, db_names_forget, db_query,
+    db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_relations_json, db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free,
+    db_triggers_json,
 };
 
 // Test db_connect with null connection string
@@ -1216,5 +1217,138 @@ fn test_cursor_invalid_utf8_sql() {
     );
 
     unsafe { db_string_free(err) };
+    unsafe { db_free(handle) };
+}
+
+// ---------------------------------------------------------------------------
+// Completion, which needs both halves
+//
+// The argument contract and the live surface are kept together here rather than
+// split into the two groups above, because what this entry point promises is one
+// thing: the span it says to replace and the names it offers have to agree, and
+// reading that in two places is how they stop agreeing.
+// ---------------------------------------------------------------------------
+
+/// The JSON one completion produced, with the core's copy released.
+fn complete(handle: *mut dbffi::DbHandle, text: &str, caret: u32) -> String {
+    let text = CString::new(text).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_complete_json(handle, text.as_ptr(), caret, &mut err) };
+    assert!(!raw.is_null(), "db_complete_json must answer");
+    assert!(
+        err.is_null(),
+        "db_complete_json must not set err on success"
+    );
+    let json = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+    json
+}
+
+#[test]
+fn a_completion_says_why_it_could_not_read_its_arguments() {
+    let text = CString::new("SELECT 1").unwrap();
+    let invalid = CString::new(vec![b'v', b'a', b'l', b'i', b'd', 0xff, 0xfe]).unwrap();
+
+    // A null handle is checked before a null text, so both orders are covered
+    // by the first two; the third needs no database because the UTF-8 check
+    // happens before anything is asked of one.
+    for (handle, text) in [
+        (ptr::null_mut(), text.as_ptr()),
+        (ptr::null_mut(), ptr::null()),
+        (ptr::null_mut(), invalid.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_complete_json(handle, text, 0, &mut err) };
+        assert!(raw.is_null());
+        assert!(!err.is_null(), "db_complete_json must say why it failed");
+        unsafe { db_string_free(err) };
+    }
+}
+
+#[test]
+fn forgetting_the_names_of_no_connection_is_not_a_crash() {
+    unsafe { db_names_forget(ptr::null_mut()) };
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_completion_offers_the_columns_of_what_the_statement_selects_from() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    // The relation is named after the caret, which is the case completion exists
+    // for: nothing before it says what is being selected from.
+    let json = complete(handle, "SELECT  FROM bench_wide w", 7);
+    assert!(
+        json.starts_with(r#"{"start":7,"end":7,"#),
+        "nothing is typed yet, so nothing is replaced: {json}"
+    );
+    assert!(
+        json.contains(r#"{"label":"payload","insert":"payload","kind":"column""#),
+        "got {json}"
+    );
+
+    unsafe { db_free(handle) };
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_completion_names_the_characters_accepting_it_replaces() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    // `bench_w` occupies characters 14 to 21, and accepting `bench_wide` has to
+    // replace all seven — a front end that inserted at the caret would produce
+    // `bench_wbench_wide`.
+    let json = complete(handle, "SELECT * FROM bench_w", 21);
+    assert!(json.starts_with(r#"{"start":14,"end":21,"#), "got {json}");
+    assert!(json.contains(r#""label":"bench_wide""#), "got {json}");
+    // And only the names that match what was typed.
+    assert!(!json.contains(r#""label":"no_key""#), "got {json}");
+
+    unsafe { db_free(handle) };
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_qualified_name_is_answered_from_the_schema_it_names() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let json = complete(handle, "SELECT * FROM reporting.", 24);
+    assert!(
+        json.contains(
+            r#"{"label":"daily_totals","insert":"daily_totals","kind":"relation","detail":"table in reporting"}"#
+        ),
+        "got {json}"
+    );
+    // Not the default schema's tables, which is the whole point of having typed
+    // the qualifier.
+    assert!(!json.contains(r#""label":"bench_wide""#), "got {json}");
+
+    unsafe { db_free(handle) };
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_refresh_the_user_asked_for_is_answered_from_the_server_again() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let before = complete(handle, "SELECT * FROM bench_w", 21);
+    unsafe { db_names_forget(handle) };
+    // What is asserted is that forgetting leaves the connection able to answer
+    // at all: the cache is emptied on a live handle, and the count of round
+    // trips is checked where it can be seen, in crates/catalog.
+    assert_eq!(complete(handle, "SELECT * FROM bench_w", 21), before);
+
     unsafe { db_free(handle) };
 }

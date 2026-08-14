@@ -11,6 +11,7 @@ crate-type = ["staticlib", "rlib"]
 [dependencies]
 arrow = { workspace = true, features = ["ffi"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+dbcatalog = { path = "../catalog" }
 dbconn = { path = "../conn" }
 dbsql = { path = "../sql" }
 driver-clickhouse = { path = "../drivers/clickhouse" }

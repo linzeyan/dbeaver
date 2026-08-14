@@ -117,6 +117,16 @@ fn known() -> String {
         .join(", ")
 }
 
+/// The driver `url` names, or `""` for a string that names none.
+///
+/// The scheme decides two things and this is where both of them read it: which
+/// driver opens the connection, and which SQL the editor is written in. A second
+/// copy of the rule elsewhere would be a place for a connection opened as one
+/// database to be highlighted as another.
+pub fn scheme_of(url: &str) -> &str {
+    url.split_once("://").map_or("", |(scheme, _)| scheme)
+}
+
 /// Opens whichever database `url` names.
 pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
     let Some((scheme, rest)) = url.split_once("://").filter(|(s, _)| !s.is_empty()) else {

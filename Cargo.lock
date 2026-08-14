@@ -938,6 +938,7 @@ name = "dbffi"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "dbcatalog",
  "dbconn",
  "dbsql",
  "driver-clickhouse",

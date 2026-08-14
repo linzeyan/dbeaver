@@ -69,6 +69,16 @@ impl Names {
         }
     }
 
+    /// The SQL this connection is written in.
+    ///
+    /// Exposed so that whoever holds a `Names` reads the buffer with the same
+    /// dialect it suggests names for. Two callers picking it separately is a
+    /// connection whose completions and whose highlighting disagree about what
+    /// a double quote means.
+    pub fn dialect(&self) -> &'static Dialect {
+        self.dialect
+    }
+
     /// Drops everything remembered, so the next question asks the server.
     ///
     /// For the refresh a user presses, and for after a statement that changed

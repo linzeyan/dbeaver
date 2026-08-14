@@ -144,6 +144,46 @@ char* db_sql_scan_json(const char* text, const char* scheme, uint32_t selection_
 // Takes no pointers and cannot fail, so it has no `err`.
 int64_t db_sql_error_offset(int position, uint32_t sent_start, uint32_t sent_end);
 
+// What could be typed at `caret`, best first. Released with db_string_free.
+//
+// Takes a handle where db_sql_scan_json does not, because this is the half of
+// completion that needs the catalog: what belongs at the caret — a column of
+// these three relations, a table of this schema, nothing at all inside a string
+// — is read from the text, and the names that answer it belong to one
+// connection.
+//
+// `caret` is counted in characters from zero, like every other offset here, and
+// may sit past the end of `text` — a front end that rounds a selection is
+// answered rather than refused.
+//
+//   {"start":…, "end":…,          // the characters accepting an offer replaces
+//    "offers":[{"label":…, "insert":…, "kind":…, "detail":…}, …]}
+//
+// `label` is the name as the catalog holds it and `insert` is that name written
+// so this database reads it as itself — they differ exactly when the name needs
+// quoting, and a front end that inserts the label instead produces SQL that
+// finds nothing. The span is answered here rather than worked out in the editor
+// because where a name begins is the lexer's rule: "Order Lines" is one name,
+// and walking back over word characters would replace half of it.
+//
+// `kind` is "keyword", "schema", "relation", "column" or "local" — the last
+// being a name this statement invented, a CTE or a derived table, which the
+// catalog has never heard of and which cannot be browsed.
+//
+// The first call on a connection costs the metadata round trips it takes to
+// learn the names; every one after it is answered from memory until
+// db_names_forget. It blocks like everything else here, so it belongs off the
+// main thread — the first one is a network call wearing a keystroke's clothes.
+char* db_complete_json(DbHandle* handle, const char* text, uint32_t caret, char** err);
+
+// Forgets the names this connection has been told, so the next db_complete_json
+// asks the server again. For the refresh the user presses.
+//
+// Nothing expires on a timer, deliberately: a table appearing in the list at a
+// moment nobody chose is worse than one that is a few minutes stale, and the
+// user is the one who knows a migration just ran.
+void db_names_forget(DbHandle* handle);
+
 // Metadata crosses as JSON, not Arrow: it is small, and Arrow buys nothing for
 // a few thousand short rows. Returned strings are released with db_string_free.
 char* db_schemas_json(DbHandle* handle, char** err);

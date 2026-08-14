@@ -14,11 +14,12 @@ mod registry;
 
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
+use dbcatalog::{Kind, Names};
 use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
 use dbsql::{Origin, TokenKind};
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use tokio::runtime::Runtime;
 
 fn runtime() -> &'static Runtime {
@@ -41,8 +42,14 @@ unsafe fn set_err(err: *mut *mut c_char, msg: impl std::fmt::Display) {
 /// The driver is chosen by the scheme of the connection string and never
 /// mentioned again: everything below this line is written against the trait, so
 /// adding a database adds an arm to `registry` and nothing here.
+///
+/// The names live on the handle because that is the only thing whose lifetime
+/// they match. They are what a connection was told when it asked, so they are
+/// wrong for a different connection and gone when this one closes; a cache
+/// anywhere else would need to be told which of those two just happened.
 pub struct DbHandle {
-    driver: Box<dyn Driver>,
+    driver: Arc<dyn Driver>,
+    names: Names,
 }
 
 pub struct DbQuery {
@@ -86,7 +93,11 @@ pub unsafe extern "C" fn db_connect(
         }
     };
     match runtime().block_on(registry::connect(s)) {
-        Ok(driver) => Box::into_raw(Box::new(DbHandle { driver })),
+        Ok(driver) => {
+            let driver: Arc<dyn Driver> = Arc::from(driver);
+            let names = Names::new(driver.clone(), dbsql::for_scheme(registry::scheme_of(s)));
+            Box::into_raw(Box::new(DbHandle { driver, names }))
+        }
         Err(e) => {
             unsafe { set_err(err, e) };
             ptr::null_mut()
@@ -328,6 +339,127 @@ pub extern "C" fn db_sql_error_offset(position: c_int, sent_start: u32, sent_end
         return -1;
     };
     dbsql::error_offset(position, &(sent_start..sent_end)).map_or(-1, i64::from)
+}
+
+/// What could be typed at the caret, best first.
+#[derive(serde::Serialize)]
+struct Offers {
+    /// The characters accepting one of these replaces, which are the ones
+    /// already typed of the name. Empty — `start == end` — where nothing has
+    /// been typed yet.
+    ///
+    /// Answered here rather than left to the front end because deciding where a
+    /// name begins is the lexer's rule: a quoted `"Order Lines"` is one name and
+    /// a front end walking back over word characters would replace half of it.
+    start: u32,
+    end: u32,
+    offers: Vec<Offer>,
+}
+
+/// One thing that could be typed.
+#[derive(serde::Serialize)]
+struct Offer {
+    /// What to show: the name as the catalog holds it.
+    label: String,
+    /// What to put in the buffer, quoted if this database needs it to be.
+    insert: String,
+    /// `keyword`, `schema`, `relation`, `column` or `local`.
+    kind: &'static str,
+    /// The second line: a column's type, a relation's schema and kind.
+    detail: String,
+}
+
+/// The name a suggestion's kind crosses as.
+///
+/// Words rather than numbers, unlike a token kind, because there are five of
+/// them and they are read once per popup instead of once per character — the
+/// payload can afford to say what it means.
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Keyword => "keyword",
+        Kind::Schema => "schema",
+        Kind::Relation => "relation",
+        Kind::Column => "column",
+        Kind::Local => "local",
+    }
+}
+
+/// What could be typed at `caret` in `text`, as JSON. Release with
+/// `db_string_free`.
+///
+/// Takes a handle where `db_sql_scan_json` does not, because this is the half of
+/// completion that needs the catalog: the question — column, relation, or
+/// nothing at all — is answered from the text alone, and the names that answer
+/// it belong to one connection.
+///
+/// `caret` is counted in characters from zero, as everywhere else on this
+/// surface. It may sit past the end of `text`, which is what a front end that
+/// rounds a selection hands over, and is answered rather than refused.
+///
+/// The first question a connection asks costs the metadata round trips it takes
+/// to learn the names; every one after it is answered from memory until
+/// `db_names_forget`. Blocking, like every other call here, so it belongs off
+/// the UI thread — the first one is a network call wearing a keystroke's
+/// clothes.
+///
+/// # Safety
+/// `handle` must be live; `text` must be a valid NUL-terminated C string. `err`
+/// must be null or point to a writable `*mut c_char`, and what it is set to must
+/// be released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_complete_json(
+    handle: *mut DbHandle,
+    text: *const c_char,
+    caret: u32,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || text.is_null() {
+        unsafe { set_err(err, "null handle or text") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let text = match unsafe { CStr::from_ptr(text) }.to_str() {
+        Ok(t) => t,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+
+    let question = dbsql::complete(text, caret, h.names.dialect());
+    let suggestions = runtime().block_on(h.names.suggest(&question));
+    let offers = Offers {
+        start: question.span.start,
+        end: question.span.end,
+        offers: suggestions
+            .into_iter()
+            .map(|s| Offer {
+                label: s.label,
+                insert: s.insert,
+                kind: kind_name(s.kind),
+                detail: s.detail,
+            })
+            .collect(),
+    };
+    json_result(&offers, err)
+}
+
+/// Forgets the names this connection has been told, so the next completion asks
+/// the server again.
+///
+/// For the refresh a user presses. Nothing here expires on a timer: a table
+/// appearing in the list at a moment nobody chose is worse than one that is a
+/// few minutes stale, and the user is the one who knows a migration just ran.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_names_forget(handle: *mut DbHandle) {
+    if handle.is_null() {
+        return;
+    }
+    let h = unsafe { &*handle };
+    runtime().block_on(h.names.forget());
 }
 
 /// Non-system schemas as a JSON array. Release with `db_string_free`.
