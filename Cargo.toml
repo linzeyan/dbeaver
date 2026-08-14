@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/catalog",
     "crates/conn",
+    "crates/ddl",
     "crates/drivers/clickhouse",
     "crates/drivers/duckdb",
     "crates/drivers/mongodb",
