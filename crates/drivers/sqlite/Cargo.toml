@@ -1,0 +1,22 @@
+[package]
+name = "driver-sqlite"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+# Bundled, because the point of dropping the JVM is that the user installs
+# nothing: linking whichever libsqlite3 the operating system shipped would tie
+# the client's behaviour to the machine it happens to run on.
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tempfile = "3"
+# The tests build their fixtures with the library directly, so a fixture does
+# not depend on the code under test being right.
+rusqlite = { version = "0.40", features = ["bundled"] }

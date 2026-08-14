@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/drivers/postgres",
+    "crates/drivers/sqlite",
     "crates/ffi",
 ]
 
