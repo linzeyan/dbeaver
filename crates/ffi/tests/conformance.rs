@@ -27,10 +27,10 @@
 //!    's `err_position` out-parameter carrying a non-zero position for a statement
 //!    with a syntax error, and staying 0 for an error that has no position.
 //!    Also the cursor surface — `db_cursor`, `db_cursor_schema`, `db_cursor_next`,
-//!    `db_cursor_close`, `db_cursor_free` — reporting its schema before the first
-//!    fetch, paging a result to the 0 return, freeing an open cursor without
-//!    closing it, and `db_cursor`'s null-sql, invalid-UTF-8 and `err_position`
-//!    failure paths.
+//!    `db_cursor_cancel`, `db_cursor_close`, `db_cursor_free` — reporting its
+//!    schema before the first fetch, paging a result to the 0 return, stopping a
+//!    fetch that is in flight, freeing an open cursor without closing it, and
+//!    `db_cursor`'s null-sql, invalid-UTF-8 and `err_position` failure paths.
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
@@ -38,11 +38,11 @@ use std::ptr;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
-    db_cancel, db_columns_json, db_connect, db_constraints_json, db_cursor, db_cursor_close,
-    db_cursor_free, db_cursor_next, db_cursor_schema, db_definition_json, db_foreign_keys_json,
-    db_free, db_indexes_json, db_query, db_query_free, db_query_next, db_query_rows_affected,
-    db_query_schema, db_referenced_by_json, db_relations_json, db_schemas_json, db_string_free,
-    db_triggers_json,
+    db_cancel, db_columns_json, db_connect, db_constraints_json, db_cursor, db_cursor_cancel,
+    db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema, db_definition_json,
+    db_foreign_keys_json, db_free, db_indexes_json, db_query, db_query_free, db_query_next,
+    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
+    db_schemas_json, db_string_free, db_triggers_json,
 };
 
 // Test db_connect with null connection string
@@ -547,6 +547,16 @@ fn test_cursor_free_null_cursor() {
     // Should not crash
 }
 
+// Test db_cursor_cancel with null cursor
+#[test]
+fn test_cursor_cancel_null_cursor() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_cursor_cancel(ptr::null_mut(), &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_cursor_cancel must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
 // Test db_cursor_schema with null cursor
 #[test]
 fn test_cursor_schema_null_cursor() {
@@ -782,6 +792,76 @@ fn test_query_syntax_error_with_position() {
     assert!(err_position > 0); // Should have a position for syntax error
 
     unsafe { db_string_free(err) };
+    unsafe { db_free(handle) };
+}
+
+/// A raw pointer is not `Send`, and cancelling means naming the cursor from a
+/// second thread. Sound for exactly the reason `db_cursor_cancel` documents:
+/// that call borrows only the canceller, which the fetch on this thread does
+/// not touch.
+struct CursorHandle(*mut dbffi::DbCursor);
+unsafe impl Send for CursorHandle {}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn test_cursor_cancel_stops_a_fetch_in_flight() {
+    // The defect this exists to catch: `db_cancel` cancels the session
+    // connection, and a cursor runs on one of its own — so a front-end that
+    // routes a browse Cancel to `db_cancel` offers a button that does nothing.
+    // Nothing else in this harness would notice, because every other cancel
+    // test is about the session.
+    let conn_str =
+        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    // pg_sleep rather than a large scan: a scan the server finishes early makes
+    // this pass without cancelling anything, and the test would then be green on
+    // a build where cursor cancellation does not work at all. In the WHERE
+    // clause because pg_sleep returns void, which has no Arrow type and would
+    // fail while the schema was built — before there was anything to cancel.
+    let sql = CString::new("SELECT 1 AS n WHERE pg_sleep(10) IS NULL").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 1, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    // Scheduled before the fetch is issued, not after: `db_cursor_next` does not
+    // return while the page is being produced, so a cancel sent after it would
+    // be cancelling something that had already finished.
+    let sendable = CursorHandle(cursor);
+    let canceller = std::thread::spawn(move || {
+        let c = sendable;
+        // Long enough that the fetch is running. Cancelling before the server
+        // starts finds nothing to stop, which is the one outcome that looks
+        // exactly like a broken cancel.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let mut err: *mut c_char = ptr::null_mut();
+        let rc = unsafe { db_cursor_cancel(c.0, &mut err) };
+        if !err.is_null() {
+            unsafe { db_string_free(err) };
+        }
+        rc
+    });
+
+    let started = std::time::Instant::now();
+    let mut array = FFI_ArrowArray::empty();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_cursor_next(cursor, &mut array, &mut err) };
+
+    assert_eq!(
+        result, -2,
+        "a cancelled fetch is -2, not an ordinary failure"
+    );
+    assert!(!err.is_null(), "db_cursor_next must say why it stopped");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(9),
+        "the fetch ran to completion instead of being cancelled"
+    );
+    assert_eq!(canceller.join().expect("cancel thread panicked"), 0);
+
+    unsafe { db_string_free(err) };
+    unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle) };
 }
 

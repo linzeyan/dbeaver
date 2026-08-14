@@ -12,7 +12,7 @@
 
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use driver_postgres::{ArrowStream, PgSource};
+use driver_postgres::{ArrowStream, CursorCancel, PgSource};
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::sync::OnceLock;
@@ -41,8 +41,14 @@ pub struct DbQuery {
     stream: ArrowStream,
 }
 
+/// The canceller is a field of its own rather than something reached for through
+/// the cursor, because it is used at exactly the moment the cursor is borrowed:
+/// `db_cursor_cancel` runs while a `db_cursor_next` is in flight on another
+/// thread. Each entry point therefore borrows only the field it needs — the two
+/// are disjoint, so neither has to know the other is running.
 pub struct DbCursor {
     cursor: driver_postgres::Cursor,
+    cancel: CursorCancel,
 }
 
 /// # Safety
@@ -468,7 +474,10 @@ pub unsafe extern "C" fn db_cursor(
         }
     };
     match runtime().block_on(h.source.cursor(s, batch_rows)) {
-        Ok(cursor) => Box::into_raw(Box::new(DbCursor { cursor })),
+        Ok(cursor) => {
+            let cancel = cursor.canceller();
+            Box::into_raw(Box::new(DbCursor { cursor, cancel }))
+        }
         Err(e) => {
             if let (false, Some(p)) = (err_position.is_null(), e.statement_position()) {
                 unsafe { *err_position = c_int::try_from(p).unwrap_or(0) };
@@ -494,10 +503,10 @@ pub unsafe extern "C" fn db_cursor_schema(
         unsafe { set_err(err, "null cursor or out") };
         return -1;
     }
-    let c = unsafe { &*cursor };
+    let c = unsafe { &(*cursor).cursor };
     // Exported as a struct array, like the query path, so the schema has to be
     // the struct of the fields rather than the bare field list.
-    let dt = arrow::datatypes::DataType::Struct(c.cursor.schema().fields().clone());
+    let dt = arrow::datatypes::DataType::Struct(c.schema().fields().clone());
     match FFI_ArrowSchema::try_from(&dt) {
         Ok(schema) => {
             unsafe { ptr::write(out, schema) };
@@ -527,8 +536,8 @@ pub unsafe extern "C" fn db_cursor_next(
         unsafe { set_err(err, "null cursor or out") };
         return -1;
     }
-    let c = unsafe { &mut *cursor };
-    match runtime().block_on(c.cursor.fetch()) {
+    let c = unsafe { &mut (*cursor).cursor };
+    match runtime().block_on(c.fetch()) {
         Ok(Some(batch)) => {
             let array = batch_to_ffi(batch);
             unsafe { ptr::write(out, array) };
@@ -539,6 +548,41 @@ pub unsafe extern "C" fn db_cursor_next(
             let cancelled = e.is_cancelled();
             unsafe { set_err(err, e) };
             if cancelled { -2 } else { -1 }
+        }
+    }
+}
+
+/// Asks the server to stop the fetch this cursor is running. Returns 0 when the
+/// request was delivered, -1 when it could not be.
+///
+/// The one call here that may be made while another is in flight on the same
+/// cursor, and it has to be: `db_cursor_next` blocks for as long as the server
+/// takes, so a cancel that waited its turn would arrive after the page it exists
+/// to interrupt. Sound because it borrows only the canceller, which the fetch
+/// does not touch, and travels on a connection of its own.
+///
+/// `db_cancel` cannot do this job. That one cancels the session connection, and
+/// a cursor runs on one of its own — a front-end whose browse pane reads through
+/// a cursor has to route its Cancel here or the button does nothing.
+///
+/// Delivery is not interruption, as with `db_cancel`: the outcome is observable
+/// only where the fetch is, as `db_cursor_next` answering -2.
+///
+/// # Safety
+/// `cursor` must come from `db_cursor` and not have been freed. It must not be
+/// freed concurrently with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cursor_cancel(cursor: *mut DbCursor, err: *mut *mut c_char) -> c_int {
+    if cursor.is_null() {
+        unsafe { set_err(err, "null cursor") };
+        return -1;
+    }
+    let cancel = unsafe { &(*cursor).cancel };
+    match runtime().block_on(cancel.cancel()) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
         }
     }
 }
@@ -555,8 +599,8 @@ pub unsafe extern "C" fn db_cursor_close(cursor: *mut DbCursor, err: *mut *mut c
         unsafe { set_err(err, "null cursor") };
         return -1;
     }
-    let c = unsafe { &mut *cursor };
-    match runtime().block_on(c.cursor.close()) {
+    let c = unsafe { &mut (*cursor).cursor };
+    match runtime().block_on(c.close()) {
         Ok(()) => 0,
         Err(e) => {
             unsafe { set_err(err, e) };

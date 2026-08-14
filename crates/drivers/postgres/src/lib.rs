@@ -25,7 +25,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Client, NoTls, RowStream};
+use tokio_postgres::{CancelToken, Client, NoTls, RowStream};
 
 #[derive(Debug, thiserror::Error)]
 pub enum PgError {
@@ -483,6 +483,25 @@ pub struct Cursor {
     cursor_name: String,
 }
 
+/// Asks the server to stop what a cursor is fetching.
+///
+/// Separate from the cursor so the two can be held at once: cancelling means
+/// reaching the connection while a fetch has it, and the request goes out on a
+/// connection of its own because the protocol cannot interleave one.
+pub struct CursorCancel {
+    token: CancelToken,
+}
+
+impl CursorCancel {
+    /// Delivered is not interrupted. A fetch that had already finished leaves
+    /// nothing to stop and this still succeeds; what actually happened shows up
+    /// as the fetch failing with `is_cancelled`.
+    pub async fn cancel(&self) -> Result<(), PgError> {
+        self.token.cancel_query(NoTls).await?;
+        Ok(())
+    }
+}
+
 impl Cursor {
     /// Fetch the next batch of rows from the cursor.
     ///
@@ -532,6 +551,18 @@ impl Cursor {
     /// row has come back.
     pub fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
+    }
+
+    /// A handle for stopping this cursor's fetch from another thread.
+    ///
+    /// Taken out here rather than reached for at cancel time, because by then
+    /// the cursor itself is borrowed by the `fetch` that is to be stopped —
+    /// which is the whole situation. `PgSource::cancel` cannot do this job: it
+    /// cancels the session connection, and a cursor runs on one of its own.
+    pub fn canceller(&self) -> CursorCancel {
+        CursorCancel {
+            token: self.client.cancel_token(),
+        }
     }
 
     /// Close the cursor explicitly.
