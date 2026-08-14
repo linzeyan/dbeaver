@@ -131,6 +131,35 @@ if CommandLine.arguments.contains("--offers") {
     }
 }
 
+/// `--ddl` prints the statements that would recreate `--relation`, which is what
+/// the Structure tab's DDL section shows.
+///
+/// Exists because that section is a wall of text a screenshot cannot be read
+/// from, and because the claim it makes is that the text matches DBeaver's for
+/// the same object — a claim checked by reading it, against upstream's DDL tab
+/// open beside it. The core's own tests pin the string; this prints what the
+/// window will actually put on screen.
+///
+/// No window and no model, like `--offers`: what is under test is the bridge.
+if CommandLine.arguments.contains("--ddl") {
+    guard let conn = connArgument, let relation = argument("--relation") else {
+        fputs("--ddl needs --conn and --relation\n", stderr)
+        exit(2)
+    }
+    // `schema.name` names a schema; a bare name is looked for in the one that
+    // opens by default, which is the same reading `--relation` has everywhere.
+    let parts = relation.split(separator: ".", maxSplits: 1).map(String.init)
+    let (schema, name) = parts.count == 2 ? (parts[0], parts[1]) : ("public", relation)
+    do {
+        let db = try Database(connString: conn)
+        print(try db.ddl(schema: schema, relation: name))
+        exit(0)
+    } catch {
+        fputs("ddl: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 /// `--transaction` drives one manual-commit transaction against `--conn` and
 /// prints what the connection says at each step.
 ///

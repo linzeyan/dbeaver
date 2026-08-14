@@ -13,6 +13,7 @@ arrow = { workspace = true, features = ["ffi"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 dbcatalog = { path = "../catalog" }
 dbconn = { path = "../conn" }
+dbddl = { path = "../ddl" }
 dbsql = { path = "../sql" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }

@@ -206,6 +206,26 @@ char* db_constraints_json(DbHandle* handle, const char* schema, const char* rela
 char* db_triggers_json(DbHandle* handle, const char* schema, const char* relation,
                        char** err);
 
+// The statements that would recreate one relation, as plain text — released with
+// db_string_free like the JSON above, and unlike it in being the value itself.
+// Wrapping one string in a document would make a caller decode to reach the only
+// field in it.
+//
+// The output is DBeaver's: upstream is the specification for this, so the text
+// is what its DDL tab shows for the same object, differences recorded in the
+// core where they are made.
+//
+// What kind of relation this is gets read here rather than passed in, at the
+// cost of one metadata call. A caller that passed it would be handing back
+// something this side told it, and the day the two disagree the answer is a
+// CREATE TABLE for a view — a statement that runs and makes the wrong object.
+//
+// Fails for a database whose DDL has not been written yet, and for a kind whose
+// statement needs facts the metadata does not carry — a materialized view's
+// WITH DATA, a partitioned table's PARTITION BY. Both say so; neither guesses,
+// because a statement that looks complete and is not is worse than a refusal.
+char* db_ddl_text(DbHandle* handle, const char* schema, const char* relation, char** err);
+
 // What this connection's transaction is doing. Released with db_string_free:
 //
 //   {"transactional":…, "autocommit":…, "open":…, "savepoints":[…]}

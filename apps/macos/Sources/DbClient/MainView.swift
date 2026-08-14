@@ -398,8 +398,8 @@ enum StructureDetail: String, CaseIterable, Identifiable {
     case referencedBy = "Referenced by"
     case constraints = "Constraints"
     case triggers = "Triggers"
-    /// Offered only for a relation that has one; see `AppModel.structureSections`.
-    case definition = "Definition"
+    /// Offered only where the core can write one; see `AppModel.structureSections`.
+    case ddl = "DDL"
 
     var id: String { rawValue }
 }
@@ -464,14 +464,14 @@ struct StructurePane: View {
             }
         case .triggers:
             table(model.triggers, empty: "No triggers") { triggersTable }
-        case .definition:
-            // `section` only names this for a relation that has one, so the
+        case .ddl:
+            // `section` only names this where there is a statement, so the
             // fallback is unreachable — it exists because the switch must be
-            // total, not because a blank Definition section is a state.
-            if let sql = model.definition {
-                definitionText(sql)
+            // total, not because a blank DDL section is a state.
+            if let sql = model.ddl {
+                ddlText(sql)
             } else {
-                emptyLine("No definition")
+                emptyLine("No DDL")
             }
         }
     }
@@ -496,16 +496,16 @@ struct StructurePane: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// The view's defining statement, verbatim.
+    /// The statements that would recreate the relation, verbatim.
     ///
     /// The one section that is prose rather than rows, so it gets a scroll view
     /// instead of a `Table`: the statement runs to tens of lines and the strip
     /// is a few hundred points tall. Scrolls both ways and does not wrap —
     /// re-flowing SQL destroys the indentation that the server put there to make
     /// it readable, and a wrapped line reads as part of the one below it.
-    /// Selectable because the useful thing to do with a definition is paste it
+    /// Selectable because the useful thing to do with a statement is paste it
     /// into the Query tab.
-    private func definitionText(_ sql: String) -> some View {
+    private func ddlText(_ sql: String) -> some View {
         ScrollView([.vertical, .horizontal]) {
             Text(sql)
                 .font(Theme.Typography.mono)
@@ -516,11 +516,11 @@ struct StructurePane: View {
                 .padding(.vertical, Theme.Space.sm)
         }
         // A two-axis scroll view centres content smaller than its viewport, so
-        // a short definition lands in the middle of the pane like a caption.
+        // a short statement lands in the middle of the pane like a caption.
         // The anchor puts it where reading starts.
         .defaultScrollAnchor(.topLeading)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityLabel("View definition")
+        .accessibilityLabel("Relation DDL")
     }
 
     private var columnsTable: some View {

@@ -88,12 +88,23 @@ final class Database: @unchecked Sendable {
             db_indexes_json(handle, schema, relation, &errOut), as: [IndexInfo].self)
     }
 
-    /// The statement a view is defined by, or nil for a relation that has none.
-    /// The one metadata call that answers with a value rather than a list, so
-    /// it decodes a bare JSON string instead of an array of mirrored structs.
-    func definition(schema: String, relation: String) throws -> String? {
-        try decodeJSON(
-            db_definition_json(handle, schema, relation, &errOut), as: String?.self)
+    /// The statements that would recreate one relation.
+    ///
+    /// Plain text, which is what the core sends: this is one value rather than a
+    /// record, and a JSON document around it would be a decode to reach the only
+    /// field in it.
+    ///
+    /// Throws where the statement cannot be written — a database whose DDL the
+    /// core has not learned yet, or a kind whose statement needs facts the
+    /// metadata does not carry. Both are ordinary answers rather than faults, so
+    /// the caller decides what to show for them.
+    func ddl(schema: String, relation: String) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        guard let raw = db_ddl_text(handle, schema, relation, &err) else {
+            throw DbError(description: Database.take(&err) ?? "DDL failed")
+        }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
     }
 
     func foreignKeys(schema: String, relation: String) throws -> [RelationshipInfo] {

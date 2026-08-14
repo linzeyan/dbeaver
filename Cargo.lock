@@ -951,6 +951,7 @@ dependencies = [
  "arrow",
  "dbcatalog",
  "dbconn",
+ "dbddl",
  "dbsql",
  "driver-clickhouse",
  "driver-duckdb",

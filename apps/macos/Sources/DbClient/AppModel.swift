@@ -139,9 +139,10 @@ final class AppModel {
     private(set) var referencedBy: [RelationshipInfo] = []
     private(set) var constraints: [ConstraintInfo] = []
     private(set) var triggers: [TriggerInfo] = []
-    /// The statement a view is defined by. Nil for a table, which is what keeps
-    /// the Definition section off relations that cannot have one.
-    private(set) var definition: String?
+    /// The statements that would recreate the selected relation. Nil where the
+    /// core cannot write them, which is what keeps the DDL section off a
+    /// relation it would have nothing to show for.
+    private(set) var ddl: String?
 
     // Content pane
     let browseResult = ResultSet()
@@ -939,7 +940,7 @@ final class AppModel {
         referencedBy = []
         constraints = []
         triggers = []
-        definition = nil
+        ddl = nil
     }
 
     /// Everything the Structure tab shows below the columns.
@@ -957,30 +958,34 @@ final class AppModel {
                 referencedBy: try db.referencedBy(schema: schema, relation: name),
                 constraints: try db.constraints(schema: schema, relation: name),
                 triggers: try db.triggers(schema: schema, relation: name),
-                definition: try db.definition(schema: schema, relation: name))
+                // Swallowed rather than thrown: a database whose DDL the core
+                // has not learned, or a kind it cannot assemble one for, is a
+                // section with nothing in it — not a failure worth a banner
+                // over a pane the user may not even have open.
+                ddl: try? db.ddl(schema: schema, relation: name))
         } then: { [self] detail in
             indexes = detail.indexes
             foreignKeys = detail.foreignKeys
             referencedBy = detail.referencedBy
             constraints = detail.constraints
             triggers = detail.triggers
-            definition = detail.definition
+            ddl = detail.ddl
         }
     }
 
     /// The sections the strip offers for the selected relation.
     ///
-    /// Definition is the only conditional one. The other five are empty on a
-    /// relation that has none of them, and an empty section still answers a
-    /// question; a Definition section on a table would offer to show something
-    /// a table cannot have.
+    /// DDL is the only conditional one. The other five are empty on a relation
+    /// that has none of them, and an empty section still answers a question; a
+    /// DDL section with nothing under it would offer to show a statement this
+    /// build cannot write.
     var structureSections: [StructureDetail] {
-        StructureDetail.allCases.filter { $0 != .definition || definition != nil }
+        StructureDetail.allCases.filter { $0 != .ddl || ddl != nil }
     }
 
     /// How many rows a section holds, or nil for one that is not a list.
     ///
-    /// A definition is a single value, and "1" beside it would answer a question
+    /// A statement is a single value, and "1" beside it would answer a question
     /// nobody asked — the section being offered at all is what says there is one.
     func structureDetailCount(_ section: StructureDetail) -> Int? {
         switch section {
@@ -989,7 +994,7 @@ final class AppModel {
         case .referencedBy: return referencedBy.count
         case .constraints: return constraints.count
         case .triggers: return triggers.count
-        case .definition: return nil
+        case .ddl: return nil
         }
     }
 
@@ -999,7 +1004,7 @@ final class AppModel {
         let referencedBy: [RelationshipInfo]
         let constraints: [ConstraintInfo]
         let triggers: [TriggerInfo]
-        let definition: String?
+        let ddl: String?
     }
 
     /// Builds the browse query from the filter bar.

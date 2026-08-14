@@ -609,6 +609,67 @@ relation_metadata! {
     db_triggers_json => triggers
 }
 
+/// The statements that would recreate one relation, as plain text. Release with
+/// `db_string_free`.
+///
+/// Text and not JSON, unlike everything else that crosses as a string here: this
+/// is one value rather than a record, and wrapping it would make the caller
+/// decode a document to reach the only field in it.
+///
+/// The kind is read here rather than taken as an argument, at the cost of one
+/// metadata call. A caller that passed it would be passing back something this
+/// side told it, and the day the two disagree the answer is a `CREATE TABLE` for
+/// a view — which is a statement that runs and makes the wrong object.
+///
+/// Fails for a database whose DDL has not been written yet, and for a kind whose
+/// statement cannot be assembled from the metadata this core carries. Both say
+/// so; neither guesses.
+///
+/// # Safety
+/// `handle` must be live; `schema` and `relation` must be valid NUL-terminated C
+/// strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_ddl_text(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() {
+        unsafe { set_err(err, "null handle, schema, or relation") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let (s, r) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+        ) {
+            (Ok(s), Ok(r)) => (s, r),
+            _ => {
+                set_err(err, "schema or relation is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let written = runtime().block_on(async {
+        let listed = h.driver.relations(s).await?;
+        match listed.into_iter().find(|info| info.name == r) {
+            Some(info) => dbddl::definition(h.driver.as_ref(), h.names.dialect(), &info).await,
+            None => Err(dbconn::DbError::new(format!("{s}.{r} is not there"))),
+        }
+    });
+    match written.and_then(|text| {
+        CString::new(text).map_err(|e| dbconn::DbError::new(format!("DDL is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transactions
 // ---------------------------------------------------------------------------

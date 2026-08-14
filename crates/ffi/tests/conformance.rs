@@ -45,11 +45,12 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
-    db_definition_json, db_foreign_keys_json, db_free, db_indexes_json, db_names_forget, db_query,
-    db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
-    db_relations_json, db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free,
-    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
-    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_ddl_text, db_definition_json, db_foreign_keys_json, db_free, db_indexes_json,
+    db_names_forget, db_query, db_query_free, db_query_next, db_query_rows_affected,
+    db_query_schema, db_referenced_by_json, db_relations_json, db_schemas_json,
+    db_sql_error_offset, db_sql_scan_json, db_string_free, db_triggers_json, db_tx_autocommit,
+    db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint,
+    db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -1577,5 +1578,62 @@ fn a_savepoint_undoes_part_of_a_transaction_and_leaves_the_rest() {
     });
     assert_eq!(ran(handle, "SELECT n FROM ffi_savepoint"), 0);
     ran(handle, "DROP TABLE ffi_savepoint");
+    unsafe { db_free(handle) };
+}
+
+// ---------------------------------------------------------------------------
+// DDL
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_ddl_call_says_why_it_could_not_read_its_arguments() {
+    let public = CString::new("public").unwrap();
+    let invalid = CString::new(vec![b'p', b'u', b'b', 0xff, 0xfe]).unwrap();
+    for (handle, schema, relation) in [
+        (ptr::null_mut(), public.as_ptr(), public.as_ptr()),
+        (ptr::null_mut(), ptr::null(), public.as_ptr()),
+        (ptr::null_mut(), public.as_ptr(), ptr::null()),
+        (ptr::null_mut(), invalid.as_ptr(), public.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_ddl_text(handle, schema, relation, &mut err) };
+        assert!(raw.is_null());
+        assert!(!err.is_null(), "db_ddl_text must say why it failed");
+        unsafe { db_string_free(err) };
+    }
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn the_ddl_of_a_table_is_the_statement_that_would_make_it() {
+    let handle = connected();
+    let schema = CString::new("public").unwrap();
+    let table = CString::new("bench_wide").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_ddl_text(handle, schema.as_ptr(), table.as_ptr(), &mut err) };
+    assert!(!raw.is_null());
+    assert!(err.is_null(), "db_ddl_text must not set err on success");
+    let ddl = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+
+    // Text and not JSON: what crosses is the statement itself, quotes and
+    // newlines included, and a caller that had to decode a document first would
+    // be undoing an encoding that bought nothing.
+    assert!(ddl.starts_with("-- Drop table"), "got {ddl}");
+    assert!(
+        ddl.contains("CREATE TABLE public.bench_wide (\n\tid int4"),
+        "got {ddl}"
+    );
+
+    // A relation the schema does not hold is a failure with a name in it, not an
+    // empty statement.
+    let missing = CString::new("no_such_relation_anywhere").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_ddl_text(handle, schema.as_ptr(), missing.as_ptr(), &mut err) };
+    assert!(raw.is_null());
+    let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(err) };
+    assert!(why.contains("no_such_relation_anywhere"), "got {why}");
+
     unsafe { db_free(handle) };
 }
