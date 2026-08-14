@@ -12,6 +12,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, TimeUnit};
 use driver_postgres::{ConstraintKind, PgError, PgSource, RelationKind};
+use std::sync::Arc;
 
 const CONN: &str = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench";
 
@@ -627,6 +628,72 @@ async fn a_views_columns_are_described_like_a_tables() {
     // count() is bigint however the counted column was typed.
     assert_eq!(agg[1].name, "lines");
     assert_eq!(agg[1].data_type, "bigint");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn concurrent_metadata_calls() {
+    let src = connect().await;
+    let src = Arc::new(src);
+
+    // Run two metadata calls concurrently on the same PgSource
+    let a = Arc::clone(&src);
+    let handle1 = tokio::spawn(async move { a.schemas().await });
+
+    let b = Arc::clone(&src);
+    let handle2 = tokio::spawn(async move { b.relations("public").await });
+
+    // Wait for both to complete
+    let result1 = handle1.await.unwrap().expect("first metadata call failed");
+    let result2 = handle2.await.unwrap().expect("second metadata call failed");
+
+    // Both should succeed
+    assert!(!result1.is_empty());
+    assert!(!result2.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn metadata_call_while_streaming() {
+    let src = Arc::new(connect().await);
+
+    // The stream needs a handle of its own: it outlives this scope, and the metadata
+    // call below is the point of the test, so the original has to stay usable.
+    let streaming = Arc::clone(&src);
+    let stream_handle = tokio::spawn(async move {
+        streaming
+            .query("SELECT * FROM bench_wide ORDER BY id", 1000)
+            .await
+    });
+
+    // Give the stream a moment to start
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    // While the stream is running, make a metadata call
+    let metadata_result = src.schemas().await;
+
+    // The metadata call should succeed even though a stream is running
+    assert!(!metadata_result.unwrap().is_empty());
+
+    // Wait for the stream to complete
+    let mut stream = stream_handle.await.unwrap().unwrap();
+    while stream.next_batch().await.unwrap().is_some() {}
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn bad_connection_still_fails_immediately() {
+    // Test that connecting with a bad password still fails at connect time
+    let result =
+        PgSource::connect("host=127.0.0.1 port=55432 user=baduser password=badpass dbname=bench")
+            .await;
+
+    // Should fail immediately with a connection error
+    let Err(err) = result else {
+        panic!("connecting with a bad password should fail");
+    };
+    // Should be a postgres error, not a pool exhausted error
+    assert!(!matches!(err, PgError::PoolExhausted));
 }
 
 #[tokio::test]

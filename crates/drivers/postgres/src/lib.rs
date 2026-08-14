@@ -16,8 +16,12 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use futures_util::StreamExt;
+use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{Client, NoTls, RowStream};
@@ -32,6 +36,8 @@ pub enum PgError {
     NumericOverflow(String),
     #[error("arrow: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+    #[error("connection pool exhausted")]
+    PoolExhausted,
 }
 
 impl PgError {
@@ -116,13 +122,63 @@ fn describe(e: &tokio_postgres::Error) -> String {
     out
 }
 
+/// A connection to one PostgreSQL database, plus spare connections for looking things up.
+///
+/// Statements run on the session connection and nothing else does, because a transaction
+/// spans statements and a cancellation has to name a backend — both are properties of one
+/// connection, and neither survives being handed a different one. Metadata reads belong to
+/// no transaction and answer quickly, so they take a connection from the pool instead, and
+/// expanding a schema stops queueing behind a result that is still streaming.
 pub struct PgSource {
-    client: Client,
+    session: Client,
+    pool: Arc<Mutex<Vec<Client>>>,
+    semaphore: Arc<Semaphore>,
+    conn_str: String,
+}
+
+/// A pooled connection, borrowed for one call and returned when it goes out of scope.
+struct AcquiredConnection {
+    client: Option<Client>,
+    pool: Arc<Mutex<Vec<Client>>>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Deref for AcquiredConnection {
+    type Target = Client;
+
+    fn deref(&self) -> &Self::Target {
+        // client is only ever taken by drop, so it is Some for the whole life
+        // of any reference a caller can hold
+        self.client.as_ref().unwrap()
+    }
+}
+
+impl DerefMut for AcquiredConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // client is only ever taken by drop, so it is Some for the whole life
+        // of any reference a caller can hold
+        self.client.as_mut().unwrap()
+    }
+}
+
+impl Drop for AcquiredConnection {
+    fn drop(&mut self) {
+        // This must be in a spawned task because drop cannot await
+        let pool = Arc::clone(&self.pool);
+        let client = self.client.take().unwrap();
+        tokio::spawn(async move {
+            let mut pool_guard = pool.lock().await;
+            pool_guard.push(client);
+        });
+    }
 }
 
 impl PgSource {
     pub async fn connect(conn_str: &str) -> Result<Self, PgError> {
-        let (client, connection) = tokio_postgres::connect(conn_str, NoTls).await?;
+        // Open one connection eagerly to ensure connection errors are caught early
+        // This maintains the existing behavior where connection failures are reported
+        // immediately rather than at first query time
+        let (session, connection) = tokio_postgres::connect(conn_str, NoTls).await?;
         // The connection future drives the socket and must outlive us. Phase 0
         // has no reconnect story; a dropped connection surfaces as a query error.
         tokio::spawn(async move {
@@ -130,7 +186,58 @@ impl PgSource {
                 eprintln!("postgres connection closed: {e}");
             }
         });
-        Ok(Self { client })
+
+        // Start the pool empty. The session connection is already open, so a bad
+        // password still fails at connect, which is the property that mattered.
+        // The pool can open its first connection when a metadata call first needs one,
+        // which acquire_connection already does.
+        let pool = Arc::new(Mutex::new(Vec::new()));
+        let semaphore = Arc::new(Semaphore::new(4));
+
+        Ok(Self {
+            session,
+            pool,
+            semaphore,
+            conn_str: conn_str.to_string(),
+        })
+    }
+
+    /// Acquire a connection from the pool. This will block if all connections
+    /// are busy until one becomes available.
+    async fn acquire_connection(&self) -> Result<AcquiredConnection, PgError> {
+        // Acquire a permit from the semaphore to limit concurrent access
+        let permit = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .await
+            .map_err(|_| PgError::PoolExhausted)?;
+
+        // Try to get an existing connection from the pool
+        {
+            let mut pool = self.pool.lock().await;
+            if let Some(client) = pool.pop() {
+                return Ok(AcquiredConnection {
+                    client: Some(client),
+                    pool: Arc::clone(&self.pool),
+                    _permit: permit,
+                });
+            }
+        }
+
+        // If no connection available, create a new one
+        let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls).await?;
+        // The connection future drives the socket and must outlive us. Phase 0
+        // has no reconnect story; a dropped connection surfaces as a query error.
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("postgres connection closed: {e}");
+            }
+        });
+
+        Ok(AcquiredConnection {
+            client: Some(client),
+            pool: Arc::clone(&self.pool),
+            _permit: permit,
+        })
     }
 
     /// Asks the server to abandon whatever this connection is currently running.
@@ -145,24 +252,40 @@ impl PgSource {
     /// is an error — success here means the request was delivered, not that
     /// anything was interrupted. What actually happened shows up as the running
     /// statement failing with `is_cancelled`, or not failing at all.
+    ///
+    /// With a dedicated session connection, this cancels the connection that is
+    /// currently running a statement. This is the correct behavior because
+    /// cancellation needs to name one backend, and with a single session
+    /// connection we know exactly which one to cancel.
     pub async fn cancel(&self) -> Result<(), PgError> {
-        self.client.cancel_token().cancel_query(NoTls).await?;
+        // Cancel using the session connection which is the one that would be
+        // running the statement we want to cancel
+        self.session.cancel_token().cancel_query(NoTls).await?;
         Ok(())
     }
 
     /// Non-system schemas, for the navigator root.
     pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, PgError> {
-        metadata::schemas(&self.client).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::schemas(&conn).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// Tables, views, and other relations within a schema.
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, PgError> {
-        metadata::relations(&self.client, schema).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::relations(&conn, schema).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// Column definitions for one relation.
     pub async fn columns(&self, schema: &str, relation: &str) -> Result<Vec<ColumnInfo>, PgError> {
-        metadata::columns(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::columns(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// The statement a view is defined by; `None` for a relation that has none.
@@ -171,12 +294,18 @@ impl PgSource {
         schema: &str,
         relation: &str,
     ) -> Result<Option<String>, PgError> {
-        metadata::definition(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::definition(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// Indexes on one relation, primary key first.
     pub async fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<IndexInfo>, PgError> {
-        metadata::indexes(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::indexes(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// Foreign keys declared by one relation.
@@ -185,7 +314,10 @@ impl PgSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<RelationshipInfo>, PgError> {
-        metadata::foreign_keys(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::foreign_keys(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// Foreign keys other relations declare against this one.
@@ -194,7 +326,10 @@ impl PgSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<RelationshipInfo>, PgError> {
-        metadata::referenced_by(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::referenced_by(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// CHECK, UNIQUE, and EXCLUDE constraints.
@@ -203,7 +338,10 @@ impl PgSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<ConstraintInfo>, PgError> {
-        metadata::constraints(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::constraints(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// User-defined triggers, excluding constraint enforcement machinery.
@@ -212,7 +350,10 @@ impl PgSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<TriggerInfo>, PgError> {
-        metadata::triggers(&self.client, schema, relation).await
+        let conn = self.acquire_connection().await?;
+        let result = metadata::triggers(&conn, schema, relation).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
     }
 
     /// Prepare `sql` and begin streaming results as Arrow batches of
@@ -224,8 +365,12 @@ impl PgSource {
     /// then returns a stream whose first batch has already arrived. Execution
     /// failures — and a `cancel` that lands mid-statement — therefore still
     /// surface from `next_batch`, not from here.
+    ///
+    /// This runs on the session connection to ensure that statements share the
+    /// same connection and transaction context, and that cancellation targets
+    /// a specific backend.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, PgError> {
-        let stmt = self.client.prepare(sql).await?;
+        let stmt = self.session.prepare(sql).await?;
 
         let types: Vec<ColumnType> = stmt
             .columns()
@@ -245,10 +390,11 @@ impl PgSource {
 
         let no_params: [&(dyn ToSql + Sync); 0] = [];
         let rows = self
-            .client
+            .session
             .query_raw(&stmt, no_params.iter().copied())
             .await?;
 
+        // Create ArrowStream with the session connection
         Ok(ArrowStream {
             schema,
             types,
@@ -332,6 +478,14 @@ impl ArrowStream {
             Arc::clone(&self.schema),
             arrays,
         )?))
+    }
+}
+
+impl Drop for ArrowStream {
+    fn drop(&mut self) {
+        // When the stream is dropped, we don't need to return anything to the pool
+        // because we used the session connection directly, not a pooled connection
+        // The session connection is kept alive for the lifetime of the PgSource
     }
 }
 
