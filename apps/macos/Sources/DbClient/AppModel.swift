@@ -1644,7 +1644,7 @@ final class AppModel {
         let count = Self.formatted(rows)
         // Only a browse is ever capped, so the selected relation is the one
         // these rows came from and its estimate is the right denominator.
-        if let estimate = selected?.estimatedRows, estimate > Int64(rows) {
+        if let estimate = selected.flatMap(\.estimatedRows), estimate > Int64(rows) {
             return "\(label) · first \(count) of ~\(Self.formatted(estimate)) rows · \(elapsed) s"
         }
         return "\(label) · first \(count) rows · \(elapsed) s"

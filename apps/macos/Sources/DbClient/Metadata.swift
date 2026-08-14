@@ -46,11 +46,26 @@ struct RelationInfo: Decodable, Hashable, Identifiable {
     let kind: RelationKind
     /// Planner estimate, not an exact count — an exact count needs a scan,
     /// which a navigator cannot afford. Presented as approximate in the UI.
-    let estimatedRows: Int64
+    ///
+    /// Absent where the server has no estimate to give: a view has none, and
+    /// neither has a table nothing has analysed yet. Optional rather than zero,
+    /// because zero is a real answer — an empty table — and a client that
+    /// spelled "unknown" with it would announce every view as empty.
+    let estimatedRows: Int64?
 
     var id: String { "\(schema).\(name)" }
     /// Identifier safe to interpolate into SQL.
     var qualifiedName: String { "\"\(schema)\".\"\(name)\"" }
+
+    /// The size as the navigator writes it, or nil where there is nothing to
+    /// write. Marked approximate wherever it appears, because it is.
+    ///
+    /// On the main actor because the number formatter it shares with the status
+    /// bar is: one place decides what a thousands separator looks like.
+    @MainActor var rowsLabel: String? {
+        guard let estimatedRows, estimatedRows > 0 else { return nil }
+        return "~\(AppModel.formatted(estimatedRows))"
+    }
 
     private enum CodingKeys: String, CodingKey {
         case schema, name, kind

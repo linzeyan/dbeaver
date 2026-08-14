@@ -240,23 +240,23 @@ struct NavigatorRow: View {
 
             Spacer(minLength: Theme.Space.xs)
 
-            if relation.estimatedRows > 0 {
+            if let rows = relation.rowsLabel {
                 // Marked as approximate because it is: pg_class.reltuples is
                 // whatever the last ANALYZE saw, and every write since has
                 // drifted from it. The status bar already writes "~1,000,000"
                 // for the same number, and a bare figure here would leave the
                 // navigator as the one place claiming an exact count.
-                Text("~\(AppModel.formatted(relation.estimatedRows))")
+                Text(rows)
                     .font(Theme.Typography.digits)
                     .foregroundStyle(Theme.textTertiary.color)
             }
         }
         .padding(.vertical, 1)
-        .help("\(relation.kind.label) · ~\(AppModel.formatted(relation.estimatedRows)) rows")
+        .help("\(relation.kind.label)" + (relation.rowsLabel.map { " · \($0) rows" } ?? ""))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(relation.name), \(relation.kind.label), "
-                + "about \(AppModel.formatted(relation.estimatedRows)) rows")
+            "\(relation.name), \(relation.kind.label)"
+                + (relation.estimatedRows.map { ", about \(AppModel.formatted($0)) rows" } ?? ""))
     }
 }
 
