@@ -13,21 +13,27 @@
 //! **The rule.** The schema is the union of top-level field names seen in a
 //! sample, in the order they were first seen, each typed by reconciling the types
 //! its values had. A field absent from a document is null, which is what a
-//! nullable column is for. A field *outside* the schema — one the sample never
-//! saw — goes into a trailing `_extra` column holding the leftover fields as JSON
-//! text.
+//! nullable column is for. Everything else — a field the sample never saw, and a
+//! value whose type its column cannot hold — goes into a trailing `_extra` column
+//! as JSON text.
 //!
 //! **Why `_extra` and not simply dropping it.** Dropping is silent data loss in a
 //! tool whose entire job is showing what is in the database, and it is the kind
 //! that is never noticed: the row is there, the value is not, and nothing says
 //! so. Failing the batch instead would make a ragged collection unreadable.
 //!
-//! **Why it is conditional.** A column that is empty in every row of every query
-//! is clutter, and most collections in practice are uniform because an
-//! application wrote them. So `_extra` is added only when the sample itself found
-//! disagreement — more than one distinct set of field names. That is decidable
-//! from the sample, which is what matters: the schema still has to be fixed
-//! before the first document is delivered.
+//! **Why it is unconditional.** The first version of this added `_extra` only
+//! when the sample found documents that disagreed, on the grounds that a column
+//! empty in every row is clutter and most collections are uniform because an
+//! application wrote them. That reasoning covered the wrong case. A sample can be
+//! perfectly uniform and document 1001 can still hold a string where the first
+//! thousand held integers — and with no `_extra` column there is nowhere for that
+//! value to go, so it becomes a null cell and the guarantee above is quietly
+//! false. Type disagreement is not decidable from a prefix, so the escape hatch
+//! cannot be either. It is always there, and a front end that would rather not
+//! show a column null in every row it has can decline to draw it — which is a
+//! question about one screen, where this is a question about whether the client
+//! loses data.
 //!
 //! **Why top-level only.** Flattening `a.b.c` into columns reads well on the
 //! documents that have it and explodes into hundreds of mostly-null columns on
@@ -195,15 +201,37 @@ fn plain_json(value: &Bson) -> serde_json::Value {
     }
 }
 
+/// Whether `column` will actually store this value in a column of that type.
+///
+/// Mirrors the match arms in `column`, and has to stay in step with them: a
+/// value this says fits but that `column` writes as null is a value lost
+/// silently, which is the one failure this whole file exists to prevent. The
+/// duplication is deliberate — the alternative is building the column and then
+/// asking it what it kept, which means keeping every row's outcome for a whole
+/// batch to answer a question about one cell.
+fn fits(value: &Bson, ty: ColumnType) -> bool {
+    match (ty, value) {
+        // A null was not stored, but nothing was lost either: the cell is empty
+        // and that is exactly what the document said.
+        (_, Bson::Null | Bson::Undefined) => true,
+        (ColumnType::Bool, Bson::Boolean(_)) => true,
+        (ColumnType::Int32, Bson::Int32(_)) => true,
+        (ColumnType::Int64, Bson::Int64(_) | Bson::Int32(_)) => true,
+        (ColumnType::Float64, Bson::Double(_) | Bson::Int32(_)) => true,
+        (ColumnType::DateTime, Bson::DateTime(_)) => true,
+        (ColumnType::Binary, Bson::Binary(_)) => true,
+        // Text takes anything, which is why `unify` falls back to it.
+        (ColumnType::Text, _) => true,
+        _ => false,
+    }
+}
+
 /// The columns a result will have, and where each document's leftovers go.
 #[derive(Debug, Clone)]
 pub struct Shape {
     /// Field names in the order they were first seen, `_extra` excluded.
     names: Vec<String>,
     types: Vec<ColumnType>,
-    /// Whether the trailing `_extra` column is present — see the module note on
-    /// why this is decided from the sample rather than per batch.
-    extra: bool,
     schema: SchemaRef,
 }
 
@@ -221,16 +249,9 @@ impl Shape {
         // otherwise be locked to text, and every later integer in it would
         // unify against text and stay there.
         let mut types: Vec<Option<ColumnType>> = Vec::new();
-        // Compared as sorted name lists rather than as sets, so that two
-        // documents with the same fields in a different order are the same
-        // shape — key order in BSON is preserved on the wire and means nothing
-        // here.
-        let mut layouts: Vec<Vec<&str>> = Vec::new();
 
         for document in sample {
-            let mut layout: Vec<&str> = Vec::new();
             for (key, value) in document {
-                layout.push(key.as_str());
                 match names.iter().position(|n| n == key) {
                     Some(at) => {
                         if let Some(found) = type_of(value) {
@@ -248,13 +269,8 @@ impl Shape {
                     }
                 }
             }
-            layout.sort_unstable();
-            if !layouts.contains(&layout) {
-                layouts.push(layout);
-            }
         }
 
-        let extra = layouts.len() > 1;
         // A field that was null in every document sampled has no type to report.
         // Text is the right answer: every value in the column is null, so the
         // choice costs nothing, and it is the type that can hold whatever turns
@@ -263,10 +279,10 @@ impl Shape {
             .into_iter()
             .map(|t| t.unwrap_or(ColumnType::Text))
             .collect();
-        Shape::build(names, types, extra)
+        Shape::build(names, types)
     }
 
-    fn build(names: Vec<String>, types: Vec<ColumnType>, extra: bool) -> Shape {
+    fn build(names: Vec<String>, types: Vec<ColumnType>) -> Shape {
         let mut fields: Vec<Field> = names
             .iter()
             .zip(&types)
@@ -276,14 +292,16 @@ impl Shape {
             // cannot keep.
             .map(|(name, ty)| Field::new(name, ty.arrow(), true))
             .collect();
-        if extra {
+        // An empty result has no columns at all, and giving it a lone `_extra`
+        // would state that a collection has a field when nothing has
+        // established it has any documents.
+        if !fields.is_empty() {
             fields.push(Field::new(EXTRA, DataType::Utf8, true));
         }
         let schema = Arc::new(Schema::new(fields));
         Shape {
             names,
             types,
-            extra,
             schema,
         }
     }
@@ -292,20 +310,19 @@ impl Shape {
         Arc::clone(&self.schema)
     }
 
-    /// The column names, for the structure pane. `_extra` is included when it is
-    /// present: it is a column the grid will show, so hiding it here would make
-    /// the two disagree.
+    /// The fields that were actually found, for the structure pane.
+    ///
+    /// Without `_extra`, which the result schema does carry. The two differ on
+    /// purpose: the grid shows a column because the result has one, but a
+    /// structure pane lists what the *collection* holds, and no document in it
+    /// has a field called `_extra`. Listing the escape hatch there would state
+    /// that every collection in MongoDB has a field this client invented.
     pub fn columns(&self) -> Vec<(String, ColumnType)> {
-        let mut out: Vec<(String, ColumnType)> = self
-            .names
+        self.names
             .iter()
             .cloned()
             .zip(self.types.iter().copied())
-            .collect();
-        if self.extra {
-            out.push((EXTRA.to_string(), ColumnType::Text));
-        }
-        out
+            .collect()
     }
 
     /// Packs documents into one batch of this shape.
@@ -314,7 +331,7 @@ impl Shape {
         for (at, ty) in self.types.iter().enumerate() {
             columns.push(self.column(&self.names[at], *ty, documents));
         }
-        if self.extra {
+        if !columns.is_empty() {
             columns.push(self.leftovers(documents));
         }
         RecordBatch::try_new(self.schema(), columns).map_err(MongoError::Arrow)
@@ -411,15 +428,24 @@ impl Shape {
         }
     }
 
-    /// The fields of each document that the schema has no column for, as one
-    /// JSON object per row — empty rather than `{}` where there are none, so an
+    /// Everything in each document that its own column could not take, as one
+    /// JSON object per row — null rather than `{}` where there is nothing, so an
     /// ordinary row's cell is blank instead of showing punctuation.
+    ///
+    /// Two things end up here, and the second is the one that is easy to miss.
+    /// A field the schema has no column for is obvious. A field that *has* a
+    /// column, holding a value that column's type cannot represent, is not: the
+    /// builder in `column` writes a null for it, and without this that null is
+    /// the only trace the value ever existed.
     fn leftovers(&self, documents: &[Document]) -> ArrayRef {
         let mut b = StringBuilder::new();
         for document in documents {
             let left: serde_json::Map<String, serde_json::Value> = document
                 .iter()
-                .filter(|(k, _)| !self.names.iter().any(|n| n == *k))
+                .filter(|(k, v)| match self.names.iter().position(|n| n == *k) {
+                    Some(at) => !fits(v, self.types[at]),
+                    None => true,
+                })
                 .map(|(k, v)| (k.clone(), plain_json(v)))
                 .collect();
             if left.is_empty() {
@@ -445,15 +471,26 @@ mod tests {
         Shape::infer(documents)
     }
 
+    /// The result's columns, which is `columns()` plus the escape hatch.
+    fn result_columns(shape: &Shape) -> Vec<String> {
+        shape
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect()
+    }
+
     #[test]
-    fn a_uniform_collection_gets_exactly_its_own_columns() {
+    fn the_escape_hatch_is_the_last_column_and_is_always_there() {
         let docs = vec![
             doc! { "_id": 1i32, "name": "a" },
             doc! { "_id": 2i32, "name": "b" },
         ];
         let shape = shape_of(&docs);
-        let names: Vec<String> = shape.columns().into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, vec!["_id", "name"]);
+        assert_eq!(result_columns(&shape), vec!["_id", "name", EXTRA]);
+        let fields: Vec<String> = shape.columns().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(fields, vec!["_id", "name"], "the hatch is not a field");
     }
 
     #[test]
@@ -478,15 +515,45 @@ mod tests {
         let docs = vec![doc! { "a": 1i32 }, doc! { "a": 2i32, "b": 3i32 }];
         let shape = shape_of(&docs);
         assert!(
-            shape.columns().iter().any(|(n, _)| n == EXTRA),
+            result_columns(&shape).iter().any(|n| n == EXTRA),
             "documents that disagree should get the overflow column"
         );
     }
 
     #[test]
-    fn a_uniform_collection_is_not_given_an_empty_column_to_look_at() {
+    fn a_uniform_collection_pays_for_the_hatch_with_a_blank_column_and_nothing_else() {
+        // The cost of making the escape hatch unconditional, stated as a test so
+        // it is a known price rather than a surprise: a collection where nothing
+        // overflows gets a column that is null in every row.
         let docs = vec![doc! { "a": 1i32 }, doc! { "a": 2i32 }];
-        assert!(!shape_of(&docs).columns().iter().any(|(n, _)| n == EXTRA));
+        let batch = shape_of(&docs).batch(&docs).expect("batch");
+        let extra = batch.column_by_name(EXTRA).expect("always present");
+        assert!((0..batch.num_rows()).all(|r| extra.is_null(r)));
+    }
+
+    #[test]
+    fn a_value_its_own_column_cannot_hold_is_kept_rather_than_nulled() {
+        // The case that made the hatch unconditional. Every sampled document
+        // agrees that `n` is an integer, so the column is Int32 and there is no
+        // disagreement a prefix could have detected -- and then a later document
+        // holds a string. Without somewhere to put it the cell is null and the
+        // value is gone with nothing on screen to say so.
+        let sample = vec![doc! { "n": 1i32 }, doc! { "n": 2i32 }];
+        let shape = shape_of(&sample);
+        assert_eq!(shape.columns()[0].1, ColumnType::Int32);
+
+        let batch = shape.batch(&[doc! { "n": "five" }]).expect("batch");
+        assert!(
+            batch.column(0).is_null(0),
+            "the integer column cannot take it"
+        );
+        let extra = batch
+            .column_by_name(EXTRA)
+            .expect("the overflow column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("text");
+        assert_eq!(extra.value(0), r#"{"n":"five"}"#);
     }
 
     #[test]
@@ -607,9 +674,21 @@ mod tests {
     #[test]
     fn a_document_of_the_same_fields_in_another_order_is_not_a_second_shape() {
         // BSON preserves key order, so two writers of the same struct can
-        // produce different orders. Treating that as disagreement would put an
-        // overflow column on a collection that is perfectly uniform.
+        // produce different orders. That must not be read as the documents
+        // holding different fields.
         let docs = vec![doc! { "a": 1i32, "b": 2i32 }, doc! { "b": 3i32, "a": 4i32 }];
-        assert!(!shape_of(&docs).columns().iter().any(|(n, _)| n == EXTRA));
+        assert_eq!(result_columns(&shape_of(&docs)), vec!["a", "b", EXTRA]);
+    }
+
+    #[test]
+    fn a_null_is_not_treated_as_a_value_that_did_not_fit() {
+        // A null in an integer column is an empty cell because the document said
+        // so, not because anything was refused. Sending it to the overflow would
+        // fill `_extra` with noise on every sparse collection.
+        let sample = vec![doc! { "n": 1i32 }];
+        let batch = shape_of(&sample)
+            .batch(&[doc! { "n": Bson::Null }])
+            .expect("batch");
+        assert!(batch.column_by_name(EXTRA).expect("present").is_null(0));
     }
 }

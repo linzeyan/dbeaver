@@ -130,7 +130,11 @@ fn find(collection: &str) -> String {
 async fn reads_a_collection_in_batches_of_the_size_asked_for() {
     let (src, _db) = fixture("reads_a_collection_in_batches_of_the_size_asked_for").await;
     let mut stream = src.query(&find("nums"), 100).await.expect("query");
-    assert_eq!(stream.schema().fields().len(), 2, "_id and label");
+    assert_eq!(
+        stream.schema().fields().len(),
+        3,
+        "_id, label, and the hatch"
+    );
 
     let mut seen = 0;
     while let Some(batch) = stream.next_batch().await.expect("batch") {
@@ -143,15 +147,23 @@ async fn reads_a_collection_in_batches_of_the_size_asked_for() {
 
 #[tokio::test]
 #[ignore = "requires a MongoDB server"]
-async fn a_uniform_collection_gets_no_overflow_column() {
-    // The cosmetic half of the `_extra` rule, checked against a real server:
-    // documents an application wrote are uniform, and those must not acquire a
-    // column that is empty in every row.
-    let (src, _db) = fixture("a_uniform_collection_gets_no_overflow_column").await;
-    let stream = src.query(&find("nums"), 50).await.expect("query");
+async fn a_uniform_collection_gets_its_own_columns_and_the_escape_hatch() {
+    // The escape hatch is unconditional, so a uniform collection carries one
+    // column that stays empty. That is the price of never losing a value whose
+    // type the sample could not have predicted.
+    let (src, _db) = fixture("a_uniform_collection_gets_its_own_columns").await;
+    let mut stream = src.query(&find("nums"), 50).await.expect("query");
     let schema = stream.schema();
     let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-    assert_eq!(names, vec!["_id", "label"]);
+    assert_eq!(names, vec!["_id", "label", "_extra"]);
+
+    while let Some(batch) = stream.next_batch().await.expect("batch") {
+        let extra = batch.column_by_name("_extra").expect("present");
+        assert!(
+            (0..batch.num_rows()).all(|r| extra.is_null(r)),
+            "nothing in this collection should overflow"
+        );
+    }
 }
 
 #[tokio::test]
@@ -318,6 +330,8 @@ async fn the_navigator_finds_the_database_and_its_collections() {
 async fn a_collections_fields_are_found_by_looking_at_documents() {
     let (src, db) = fixture("a_collections_fields_are_found_by_looking_at_documents").await;
     let columns = src.columns(&db, "nums").await.expect("columns");
+    // Two, not three: the structure pane lists the fields documents actually
+    // have, and `_extra` is a column this client adds to results.
     assert_eq!(columns.len(), 2);
     // One-based and ascending, as every other driver reports.
     for (at, column) in columns.iter().enumerate() {
