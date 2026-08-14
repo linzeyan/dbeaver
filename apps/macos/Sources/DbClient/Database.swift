@@ -138,6 +138,23 @@ final class Database {
         return Query(handle: q)
     }
 
+    /// Opens a server-side cursor over `sql`.
+    ///
+    /// What this buys over `query` is a stable position: the server holds one
+    /// statement's snapshot open and hands out the next rows on request, so a
+    /// second page cannot repeat or skip rows the way a second LIMIT/OFFSET
+    /// statement can. It costs a connection for as long as the cursor lives.
+    func cursor(_ sql: String, batchRows: Int) throws -> Cursor {
+        var err: UnsafeMutablePointer<CChar>?
+        var position: Int32 = 0
+        guard let c = db_cursor(handle, sql, batchRows, &err, &position) else {
+            throw DbError(
+                description: Database.take(&err) ?? "cursor failed",
+                position: position > 0 ? Int(position) : nil)
+        }
+        return Cursor(handle: c)
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }
@@ -145,6 +162,59 @@ final class Database {
         db_string_free(e)
         err = nil
         return s
+    }
+}
+
+/// A server-side cursor, read forward one page at a time.
+///
+/// `@unchecked Sendable` because the pointer is only ever used from the one
+/// serial queue that owns the connection; the main actor does nothing with a
+/// cursor but hold the reference and let it go.
+final class Cursor: @unchecked Sendable {
+    private let handle: OpaquePointer
+
+    fileprivate init(handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    /// Freeing an open cursor is the ordinary way one ends: it closes the
+    /// connection the cursor was declared on, which is what rolls its
+    /// transaction back. `db_cursor_close` exists for front-ends that want to
+    /// close explicitly, but calling it here would mean waiting on the server
+    /// from whatever thread released the last reference — including the main
+    /// one.
+    deinit { db_cursor_free(handle) }
+
+    /// Next page, or nil once the cursor is exhausted. Ownership of the
+    /// returned array transfers to the caller.
+    func nextBatch() throws -> UnsafeMutablePointer<ArrowArray>? {
+        let out = UnsafeMutablePointer<ArrowArray>.allocate(capacity: 1)
+        var err: UnsafeMutablePointer<CChar>?
+        switch db_cursor_next(handle, out, &err) {
+        case 1:
+            return out
+        case 0:
+            out.deallocate()
+            return nil
+        case -2:
+            out.deallocate()
+            throw DbError(
+                description: Database.take(&err) ?? "cancelled", cancelled: true)
+        default:
+            out.deallocate()
+            throw DbError(description: Database.take(&err) ?? "next page failed")
+        }
+    }
+
+    /// Caller owns the returned schema and must release it.
+    func schema() throws -> UnsafeMutablePointer<ArrowSchema> {
+        let out = UnsafeMutablePointer<ArrowSchema>.allocate(capacity: 1)
+        var err: UnsafeMutablePointer<CChar>?
+        if db_cursor_schema(handle, out, &err) != 0 {
+            out.deallocate()
+            throw DbError(description: Database.take(&err) ?? "cursor schema failed")
+        }
+        return out
     }
 }
 

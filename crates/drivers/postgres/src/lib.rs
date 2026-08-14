@@ -525,6 +525,15 @@ impl Cursor {
         )?))
     }
 
+    /// The columns this cursor's rows arrive in.
+    ///
+    /// Known at declare time rather than at first fetch: the statement was
+    /// prepared to build it, so a caller can lay out a grid before a single
+    /// row has come back.
+    pub fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+
     /// Close the cursor explicitly.
     ///
     /// This is optional as the cursor will be closed automatically when dropped.

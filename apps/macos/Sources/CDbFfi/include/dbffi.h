@@ -51,6 +51,7 @@ struct ArrowArray {
 
 typedef struct DbHandle DbHandle;
 typedef struct DbQuery DbQuery;
+typedef struct DbCursor DbCursor;
 
 // All calls block. Do not call from the main thread.
 // Any `err` out-parameter, when set, must be released with db_string_free.
@@ -135,6 +136,35 @@ int64_t db_query_rows_affected(DbQuery* query);
 
 void db_query_free(DbQuery* query);
 void db_string_free(char* s);
+
+// A cursor over `sql`: the server keeps one statement's snapshot open and hands
+// out the next rows on request. What that buys over repeating db_query with a
+// LIMIT and an OFFSET is a stable position — a second page cannot repeat or skip
+// rows because the plan changed between two statements. `err_position` carries
+// the same 1-based cursor db_query documents.
+//
+// A cursor holds a connection of its own for as long as it lives, so a front-end
+// keeping one open across user think-time is keeping a connection too.
+DbCursor* db_cursor(DbHandle* handle, const char* sql, size_t batch_rows, char** err,
+                    int* err_position);
+
+// Fills `out` with the cursor's schema, the same struct type db_query_schema
+// exports. Returns 0 on success, -1 on error. Available before the first fetch:
+// the statement was prepared to declare the cursor, so the columns are known.
+int db_cursor_schema(DbCursor* cursor, struct ArrowSchema* out, char** err);
+
+// Returns 1 and fills `out` with the next page, 0 once the cursor is exhausted,
+// -1 on error, -2 when the statement was cancelled. The caller owns `out` and
+// must invoke its release callback.
+int db_cursor_next(DbCursor* cursor, struct ArrowArray* out, char** err);
+
+// Closes the cursor and rolls back the transaction it was declared in. Optional:
+// db_cursor_free reaches the same end by closing the connection, which is what a
+// front-end that drops a result mid-scroll does. Returns 0 on success, -1 on
+// error.
+int db_cursor_close(DbCursor* cursor, char** err);
+
+void db_cursor_free(DbCursor* cursor);
 
 #ifdef __cplusplus
 }
