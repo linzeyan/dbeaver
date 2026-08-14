@@ -9,14 +9,18 @@
 //! and then disagrees with itself. The macOS build had a Swift one first; this
 //! replaces it, and the rules it earned are kept as the tests in `tests/`.
 
+mod complete;
 mod dialect;
 mod keywords;
 mod lex;
+mod parse;
 mod script;
 
+pub use complete::{Completion, Expect, complete};
 pub use dialect::{
     ALL, CLICKHOUSE, DUCKDB, Dialect, DoubleQuote, MSSQL, MYSQL, POSTGRES, Parameter, SQLITE,
     for_scheme,
 };
 pub use lex::{Token, TokenKind, tokens};
+pub use parse::{Scope, Source, Statement, statement};
 pub use script::{Origin, Span, Target, error_offset, statements, target};
