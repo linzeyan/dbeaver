@@ -151,7 +151,8 @@ impl MySqlError {
     }
 }
 
-/// A connection's server-side id, unregistered when the connection goes away.
+/// A connection's server-side id, listed as one `cancel` should reach for as
+/// long as this lives.
 ///
 /// Registered rather than looked up at cancel time because `KILL` names a
 /// connection and the caller cannot see which one is busy. Unregistered on drop
@@ -171,10 +172,13 @@ impl Drop for Registration {
     }
 }
 
-/// One connection, and the number that names it to `KILL`.
+/// One pooled connection, kept in the session's registry for as long as it is
+/// held.
 struct Session {
     conn: Conn,
-    live: Registration,
+    /// Held rather than read: it is what takes this connection's id back out of
+    /// the registry when the connection is dropped instead of pooled.
+    _live: Registration,
 }
 
 /// A MySQL session: connections opened as they are needed, and the ids to stop
@@ -220,8 +224,12 @@ impl MySqlSource {
         let live: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         // Opened eagerly so a wrong password fails here rather than at the first
         // expanded node.
-        let mut first = open(&opts, &live).await?;
-        let caps = metadata::probe(&mut first.conn).await?;
+        let (mut conn, id) = open(&opts).await?;
+        let caps = metadata::probe(&mut conn).await?;
+        let first = Session {
+            conn,
+            _live: register(&live, id),
+        };
 
         Ok(Self {
             opts,
@@ -234,10 +242,14 @@ impl MySqlSource {
     /// A connection to run one metadata call on.
     async fn acquire(&self) -> Result<Session, MySqlError> {
         let pooled = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
-        match pooled {
-            Some(session) => Ok(session),
-            None => open(&self.opts, &self.live).await,
+        if let Some(session) = pooled {
+            return Ok(session);
         }
+        let (conn, id) = open(&self.opts).await?;
+        Ok(Session {
+            conn,
+            _live: register(&self.live, id),
+        })
     }
 
     /// Puts a connection back, unless the failure it just had left it unusable.
@@ -269,6 +281,11 @@ impl MySqlSource {
     /// price of not having to know. A connection that closed between reading the
     /// registry and sending the statement answers `ER_NO_SUCH_THREAD`, and that
     /// is the same no-op arriving a moment later rather than a failure.
+    ///
+    /// A cursor is the exception, and it is an exception by construction rather
+    /// than by care: its connection is never put in the registry, so a Cancel
+    /// pressed over the editor cannot stop the table browser somebody left open
+    /// beside it. Stopping a cursor is its canceller's job.
     ///
     /// Best-effort, as in every driver here: success means the requests were
     /// delivered. What actually happened surfaces where the statement is, as a
@@ -302,19 +319,21 @@ impl MySqlSource {
     /// fails to parse fails here; one that fails while running fails from
     /// `next_batch`.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, MySqlError> {
-        let reader = self.read(sql, batch_rows).await?;
+        let reader = self.read(sql, batch_rows, Reachable::BySession).await?;
         Ok(ArrowStream { reader })
     }
 
     /// Reads `sql` forward, a page at a time.
     ///
     /// The same mechanism `query` uses. On this database the two differ only in
-    /// what the caller is handed: a cursor is meant to be held, so it carries a
-    /// canceller of its own — `MySqlSource::cancel` cannot do that job, because
-    /// the cursor's connection is its own and the cursor outlives the call that
-    /// made it.
+    /// who can stop them: a cursor is handed out to be held and outlives the
+    /// call that made it, so it carries a canceller of its own and is left out
+    /// of the session's registry. `MySqlSource::cancel` reaching it would mean a
+    /// Cancel pressed over a query stopping an open table browser as well.
     pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, MySqlError> {
-        let reader = self.read(sql, batch_rows).await?;
+        let reader = self
+            .read(sql, batch_rows, Reachable::ByItsOwnCanceller)
+            .await?;
         Ok(Cursor {
             canceller: CursorCancel {
                 opts: self.opts.clone(),
@@ -329,16 +348,25 @@ impl MySqlSource {
     /// A connection of its own rather than one from the idle set: a result holds
     /// its connection for as long as it is being read, and a caller that leaves
     /// a grid open would otherwise be holding a quarter of the pool.
-    async fn read(&self, sql: &str, batch_rows: usize) -> Result<Reader, MySqlError> {
-        let session = open(&self.opts, &self.live).await?;
-        let id = session.live.id;
+    async fn read(
+        &self,
+        sql: &str,
+        batch_rows: usize,
+        reachable: Reachable,
+    ) -> Result<Reader, MySqlError> {
+        let (conn, id) = open(&self.opts).await?;
+        let registration = match reachable {
+            Reachable::BySession => Some(register(&self.live, id)),
+            Reachable::ByItsOwnCanceller => None,
+        };
         let (schema_tx, schema_rx) = oneshot::channel();
         // Capacity one, so a reader that stops reading stops the producer
         // rather than letting it run ahead into memory. The bound on what a
         // result costs is this number times the batch size.
         let (pages_tx, pages_rx) = mpsc::channel(1);
         tokio::spawn(pump(
-            session,
+            conn,
+            registration,
             sql.to_string(),
             batch_rows,
             schema_tx,
@@ -461,27 +489,37 @@ impl MySqlSource {
     }
 }
 
-/// Opens a connection and registers the number that stops it.
+/// Who is allowed to stop what a connection is running.
+enum Reachable {
+    /// Named by `MySqlSource::cancel`, which is what a Cancel button over the
+    /// editor reaches.
+    BySession,
+    /// Named by nothing but the handle it was given to.
+    ByItsOwnCanceller,
+}
+
+/// Opens a connection and reads the number that stops it.
 ///
 /// The id comes from `SELECT CONNECTION_ID()` and not from the handshake, which
 /// `mysql_async` exposes for free as a `u32`. One round trip buys correctness on
 /// a large TiDB cluster, where connection ids widen to 64 bits and a truncated
 /// one names a different session — killing somebody else's statement, or
 /// nothing.
-async fn open(opts: &Opts, live: &Arc<Mutex<Vec<u64>>>) -> Result<Session, MySqlError> {
+async fn open(opts: &Opts) -> Result<(Conn, u64), MySqlError> {
     let mut conn = Conn::new(opts.clone()).await?;
     let id: u64 = conn
         .query_first("SELECT CONNECTION_ID()")
         .await?
         .unwrap_or_else(|| u64::from(conn.id()));
+    Ok((conn, id))
+}
+
+fn register(live: &Arc<Mutex<Vec<u64>>>, id: u64) -> Registration {
     live.lock().unwrap_or_else(|e| e.into_inner()).push(id);
-    Ok(Session {
-        conn,
-        live: Registration {
-            live: Arc::clone(live),
-            id,
-        },
-    })
+    Registration {
+        live: Arc::clone(live),
+        id,
+    }
 }
 
 /// One page on its way from the connection that produced it.
@@ -501,16 +539,16 @@ enum Page {
 /// over channels removes that problem entirely and puts the memory bound in the
 /// channel capacity, where it can be read.
 async fn pump(
-    session: Session,
+    mut conn: Conn,
+    // Held rather than read: dropping it with this task is what takes the
+    // connection back out of the session's registry, whichever way the task
+    // ends. A cursor's connection was never in it and passes `None`.
+    _live: Option<Registration>,
     sql: String,
     batch_rows: usize,
     schema_out: oneshot::Sender<Result<SchemaRef, MySqlError>>,
     pages: mpsc::Sender<Page>,
 ) {
-    // Destructured so the registration outlives the connection and is dropped
-    // with this task, whatever way it ends.
-    let Session { mut conn, live } = session;
-
     let prepared = match conn.prep(&*sql).await {
         Ok(prepared) => prepared,
         Err(e) => {
@@ -642,8 +680,6 @@ async fn pump(
     drop(result);
 
     let _ = pages.send(Page::Done(affected)).await;
-    drop(conn);
-    drop(live);
 }
 
 /// The reading half, shared by a result and a cursor because on this database

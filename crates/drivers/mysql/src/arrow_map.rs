@@ -38,6 +38,23 @@
 //! Anything not listed below fails with `UnsupportedType` naming the column. A
 //! quiet fallback to text would make the throughput numbers meaningless, since
 //! text conversion is the cost this path exists to avoid.
+//!
+//! Seven of the types below are ahead of the Swift grid, which maps a closed set
+//! of Arrow format strings and shows anything else as the format string itself.
+//! `Int8` (`c`), the four unsigned widths (`C`, `S`, `I`, `L`), `Duration` (`tDu`)
+//! and `Null` (`n`) all land there — which covers `TINYINT`, `BOOL`, every
+//! `UNSIGNED` column, `BIT(2..64)` and `TIME`, none of them exotic in a MySQL
+//! schema. They are still mapped honestly here: the reader is a closed `switch`
+//! that grows by a line per format, and narrowing a `BIGINT UNSIGNED` to fit what
+//! it reads today would be corrupting data to make a display work.
+//!
+//! `Decimal256` is the one that needs saying out loud, because it does not
+//! degrade to a placeholder. Its format string is `d:65,30,256`, and the reader
+//! recognises the `d:` prefix, ignores the third field and then reads sixteen
+//! bytes of a thirty-two-byte value — so a `DECIMAL(65,30)` renders as a
+//! confident wrong number rather than as something visibly unsupported. That is
+//! reported rather than worked around here, because the alternative is this
+//! driver misreporting the column's type.
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Decimal256Builder,

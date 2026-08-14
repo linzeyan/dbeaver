@@ -492,6 +492,38 @@ async fn a_cursor_carries_its_own_stop() {
 
 #[tokio::test]
 #[ignore = "requires a MySQL server"]
+async fn cancelling_the_session_leaves_an_open_cursor_alone() {
+    let source = Arc::new(source().await);
+    let mut cursor = source
+        .cursor(SLOW, 100)
+        .await
+        .expect("the cursor should open");
+    let canceller = cursor.canceller();
+    let fetching = tokio::spawn(async move { cursor.fetch().await });
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    // A Cancel pressed over the query editor. The trait says it does not reach a
+    // cursor, and here that is by construction: a cursor's connection is never
+    // put in the session's registry, so there is no id for this to name.
+    source.cancel().await.expect("delivering the cancel");
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert!(
+        !fetching.is_finished(),
+        "the session's cancel stopped a table browser somebody left open"
+    );
+
+    // And the canceller it was handed out with still works, which is what makes
+    // the check above about scope rather than about the cancel being broken.
+    canceller.cancel().await.expect("delivering the cancel");
+    let err = fetching
+        .await
+        .expect("the fetch task")
+        .expect_err("a cancelled fetch fails");
+    assert!(err.is_cancelled(), "{err}");
+}
+
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
 async fn stopping_something_that_is_not_running_is_not_a_failure() {
     let source = source().await;
     // A Cancel button pressed at a quiet moment must not report an error for
