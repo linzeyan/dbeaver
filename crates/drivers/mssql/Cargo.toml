@@ -1,0 +1,34 @@
+[package]
+name = "driver-mssql"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures-util.workspace = true
+thiserror.workspace = true
+# `rustls` rather than the default `native-tls`, which pulls async-native-tls
+# with `runtime-async-std` and so drags a second async runtime into a
+# tokio-only application. The two are mutually exclusive inside tiberius —
+# both define `TlsStream` under a bare `cfg(feature)` — so default-features
+# has to go off for this to compile at all.
+#
+# The cost is on the record: this feature pins tokio-rustls 0.24, i.e. rustls
+# 0.21, which is an end-of-life line. tiberius has had no functional release
+# since 2024 and there is nowhere newer to point it.
+tiberius = { version = "0.12.3", default-features = false, features = [
+    "tds73",
+    "rustls",
+] }
+# tiberius is runtime-agnostic: `Client<S>` wants a futures-io stream, and a
+# tokio `TcpStream` is not one. This is the adapter, and it is the only reason
+# the crate is here.
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
