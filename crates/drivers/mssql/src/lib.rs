@@ -25,8 +25,8 @@
 //! any row, and this workspace builds release with `panic = "abort"` — so an
 //! ordinary `SELECT *` over a table with a `geography` column would take the
 //! whole application down with no message. Every statement is therefore
-//! described by the server first (`describe`), and one naming those types is
-//! refused. See `describe` for what that does and does not cover.
+//! described by the server first, and one naming those types is refused. See
+//! `describe_statement` for what that covers and what it does not.
 //!
 //! **Cancelling ends the session.** TDS has an Attention packet that stops one
 //! statement and leaves the connection usable, and tiberius declares the packet
@@ -725,9 +725,13 @@ const TDS_SQL_VARIANT: i32 = 0x62;
 ///   because refusing every undescribable batch would break far more than it
 ///   protects.
 ///
-/// Closing either hole means patching tiberius to return an error where it
-/// currently panics, which is six lines and outside what one driver crate may
-/// touch.
+/// - If the describe query itself fails — an older server, or a login without
+///   the permission — nothing is known and the statement goes ahead.
+///
+/// Closing all three means patching tiberius to return an error where it
+/// currently panics: four `todo!()` arms and one `unimplemented!()`. That needs
+/// a `[patch.crates-io]` entry in the workspace root, which is a file this crate
+/// may not touch, so it is a recommendation rather than a change.
 async fn describe_statement(client: &mut Tds, sql: &str) -> Described {
     // No `is_hidden` filter: browse information is off, so the server adds no
     // hidden columns, and a `WHERE` here would also drop the rows that carry the
@@ -737,9 +741,11 @@ async fn describe_statement(client: &mut Tds, sql: &str) -> Described {
                  FROM sys.dm_exec_describe_first_result_set(@P1, NULL, 0) AS r \
                  ORDER BY r.column_ordinal";
     let Ok(stream) = client.query(query, &[&sql]).await else {
-        // The describe itself failed — an old server, or a login without the
-        // permission to run it. Not knowing is not the same as knowing there is
-        // nothing wrong, and this is the fail-open half of the trade above.
+        // Not knowing is not the same as knowing there is nothing wrong. This
+        // is the fail-open half of the trade above, and it is taken because a
+        // driver that refused every statement it could not vet would be
+        // unusable against the servers and logins where this call is not
+        // available.
         return Described::Unknown;
     };
     let Ok(rows) = stream.into_first_result().await else {
