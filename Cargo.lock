@@ -937,10 +937,14 @@ dependencies = [
 name = "dbddl"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "async-trait",
  "dbconn",
  "dbsql",
  "driver-postgres",
+ "driver-sqlite",
+ "rusqlite",
+ "tempfile",
  "tokio",
 ]
 

@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+# SQLite keeps the statement each object was created from, so its renderer reads
+# a query result rather than metadata, and a query result is an Arrow batch.
+arrow.workspace = true
 dbconn = { path = "../conn" }
 dbsql = { path = "../sql" }
 async-trait.workspace = true
@@ -15,4 +18,10 @@ async-trait.workspace = true
 # reaches one. Only the tests need it: nothing in the crate knows or cares which
 # driver produced the metadata it is handed.
 driver-postgres = { path = "../drivers/postgres" }
+driver-sqlite = { path = "../drivers/sqlite" }
 tokio = { workspace = true, features = ["full"] }
+# SQLite needs no server, so its fixture is a file in a temporary directory and
+# its live tests run under plain `cargo test`. Built with the library directly,
+# so that a fixture does not depend on the code under test being right.
+rusqlite = { version = "0.40", features = ["bundled"] }
+tempfile = "3"

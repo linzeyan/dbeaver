@@ -29,6 +29,7 @@
 //! honest answer to that is a refusal rather than a guess.
 
 mod postgres;
+mod sqlite;
 
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo};
@@ -80,7 +81,10 @@ pub fn for_dialect(dialect: &'static Dialect) -> Option<&'static dyn Renderer> {
 }
 
 /// Every database whose DDL this build can write, in the order they arrived.
-const RENDERERS: &[(&Dialect, &dyn Renderer)] = &[(&dbsql::POSTGRES, &postgres::POSTGRES)];
+const RENDERERS: &[(&Dialect, &dyn Renderer)] = &[
+    (&dbsql::POSTGRES, &postgres::POSTGRES),
+    (&dbsql::SQLITE, &sqlite::SQLITE),
+];
 
 /// A script under construction, joined the way upstream joins one.
 ///
