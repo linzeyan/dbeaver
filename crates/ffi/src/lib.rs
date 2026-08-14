@@ -41,6 +41,10 @@ pub struct DbQuery {
     stream: ArrowStream,
 }
 
+pub struct DbCursor {
+    cursor: driver_postgres::Cursor,
+}
+
 /// # Safety
 /// `conn_str` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
@@ -427,5 +431,117 @@ pub unsafe extern "C" fn db_query_free(query: *mut DbQuery) {
 pub unsafe extern "C" fn db_string_free(s: *mut c_char) {
     if !s.is_null() {
         drop(unsafe { CString::from_raw(s) });
+    }
+}
+
+/// Opens a cursor over `sql` and returns a handle to fetch pages.
+///
+/// The cursor is declared within a transaction that will be kept open for
+/// the lifetime of the cursor. The transaction is rolled back when the
+/// cursor is dropped, ensuring that no changes are committed.
+///
+/// A cursor occupies its connection while open, so the handle owns the
+/// transaction that declared it. The transaction is rolled back when the
+/// cursor is dropped, ensuring that no changes are committed.
+///
+/// # Safety
+/// `handle` must be live; `sql` must be a valid NUL-terminated C string;
+/// `err_position` must be null or point to writable `int` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cursor(
+    handle: *mut DbHandle,
+    sql: *const c_char,
+    batch_rows: usize,
+    err: *mut *mut c_char,
+    err_position: *mut c_int,
+) -> *mut DbCursor {
+    if !err_position.is_null() {
+        unsafe { *err_position = 0 };
+    }
+    if handle.is_null() || sql.is_null() {
+        unsafe { set_err(err, "null handle or sql") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let s = match unsafe { CStr::from_ptr(sql) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    match runtime().block_on(h.source.cursor(s, batch_rows)) {
+        Ok(cursor) => Box::into_raw(Box::new(DbCursor { cursor })),
+        Err(e) => {
+            if let (false, Some(p)) = (err_position.is_null(), e.statement_position()) {
+                unsafe { *err_position = c_int::try_from(p).unwrap_or(0) };
+            }
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Fetches the next batch of rows from the cursor.
+///
+/// Returns 1 when `out` was filled, 0 when the result is exhausted,
+/// -1 on error, -2 when the statement was cancelled.
+///
+/// # Safety
+/// `cursor` must be live; `out` must point to writable `ArrowArray` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cursor_next(
+    cursor: *mut DbCursor,
+    out: *mut FFI_ArrowArray,
+    err: *mut *mut c_char,
+) -> c_int {
+    if cursor.is_null() || out.is_null() {
+        unsafe { set_err(err, "null cursor or out") };
+        return -1;
+    }
+    let c = unsafe { &mut *cursor };
+    match runtime().block_on(c.cursor.fetch()) {
+        Ok(Some(batch)) => {
+            let array = batch_to_ffi(batch);
+            unsafe { ptr::write(out, array) };
+            1
+        }
+        Ok(None) => 0,
+        Err(e) => {
+            let cancelled = e.is_cancelled();
+            unsafe { set_err(err, e) };
+            if cancelled { -2 } else { -1 }
+        }
+    }
+}
+
+/// Closes the cursor explicitly.
+///
+/// This is optional as the cursor will be closed automatically when dropped.
+///
+/// # Safety
+/// `cursor` must come from `db_cursor` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cursor_close(cursor: *mut DbCursor, err: *mut *mut c_char) -> c_int {
+    if cursor.is_null() {
+        unsafe { set_err(err, "null cursor") };
+        return -1;
+    }
+    let c = unsafe { &mut *cursor };
+    match runtime().block_on(c.cursor.close()) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
+/// # Safety
+/// `cursor` must come from `db_cursor` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cursor_free(cursor: *mut DbCursor) {
+    if !cursor.is_null() {
+        drop(unsafe { Box::from_raw(cursor) });
     }
 }

@@ -432,6 +432,179 @@ async fn a_failed_statement_leaves_the_connection_usable() {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
+async fn cursor_pages_stably() {
+    let src = connect().await;
+
+    // Test cursor pagination with bench_wide table
+    let mut cursor = src
+        .cursor("SELECT * FROM bench_wide ORDER BY id", 1000)
+        .await
+        .expect("cursor failed");
+
+    let mut all_rows = Vec::new();
+    let mut page_count = 0;
+
+    loop {
+        let batch = cursor.fetch().await.expect("fetch failed");
+        if let Some(batch) = batch {
+            page_count += 1;
+            let id_col = col::<Int32Array>(&batch, "id");
+            for i in 0..batch.num_rows() {
+                all_rows.push(id_col.value(i));
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Verify we got all rows in order
+    assert_eq!(all_rows.len(), 1000000, "Should have fetched all 1M rows");
+
+    // Verify stable ordering
+    for i in 1..all_rows.len() {
+        assert!(
+            all_rows[i - 1] < all_rows[i],
+            "Rows should be in ascending order"
+        );
+    }
+
+    // Verify no duplicates or missing rows
+    let expected: Vec<i32> = (1..=1000000i32).collect();
+    assert_eq!(
+        all_rows, expected,
+        "Should have all rows without duplicates or gaps"
+    );
+
+    // Verify we got the expected number of pages
+    assert_eq!(page_count, 1000, "Should have 1000 pages of 1000 rows each");
+
+    // Test explicit close
+    cursor.close().await.expect("close failed");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn cursor_last_page_is_short_and_next_empty() {
+    let src = connect().await;
+
+    // Test with a page size that will result in a partial last page
+    // bench_wide has 1,000,000 rows. With page size 333333:
+    // - Page 1: 333333 rows
+    // - Page 2: 333333 rows
+    // - Page 3: 333333 rows
+    // - Page 4: 1 row (remaining)
+    // - Page 5: empty (should return None)
+    let mut cursor = src
+        .cursor("SELECT id FROM bench_wide ORDER BY id", 333333)
+        .await
+        .expect("cursor failed");
+
+    // Fetch first page
+    let batch1 = cursor
+        .fetch()
+        .await
+        .expect("fetch failed")
+        .expect("first page should exist");
+    assert_eq!(batch1.num_rows(), 333333);
+
+    // Fetch second page
+    let batch2 = cursor
+        .fetch()
+        .await
+        .expect("fetch failed")
+        .expect("second page should exist");
+    assert_eq!(batch2.num_rows(), 333333);
+
+    // Fetch third page (should be partial)
+    let batch3 = cursor
+        .fetch()
+        .await
+        .expect("fetch failed")
+        .expect("third page should exist");
+    assert_eq!(batch3.num_rows(), 333333); // This is actually correct - 1M total, 3*333333 = 999999, so 1 remaining
+
+    // Fetch fourth page (should be the final 1 row)
+    let batch4 = cursor
+        .fetch()
+        .await
+        .expect("fetch failed")
+        .expect("fourth page should exist");
+    assert_eq!(batch4.num_rows(), 1); // The final 1 row
+
+    // Fetch fifth page (should be empty)
+    let batch5 = cursor.fetch().await.expect("fetch failed");
+    assert!(batch5.is_none(), "Fifth page should be empty");
+
+    // Test explicit close
+    cursor.close().await.expect("close failed");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn cursor_works_without_primary_key() {
+    let src = connect().await;
+
+    // Create a temporary table without a primary key for testing
+    run(&src, "DROP TABLE IF EXISTS test_cursor_no_pk CASCADE").await;
+    run(&src, "CREATE TABLE test_cursor_no_pk (id int, name text)").await;
+    run(&src, "INSERT INTO test_cursor_no_pk VALUES (1, 'first'), (2, 'second'), (3, 'third'), (4, 'fourth'), (5, 'fifth')").await;
+
+    // Test cursor on a relation without a primary key
+    // This should work because cursor doesn't require a primary key
+    let mut cursor = src
+        .cursor("SELECT id, name FROM test_cursor_no_pk ORDER BY id", 2)
+        .await
+        .expect("cursor failed");
+
+    let mut all_rows = Vec::new();
+    let mut page_count = 0;
+
+    loop {
+        let batch = cursor.fetch().await.expect("fetch failed");
+        if let Some(batch) = batch {
+            page_count += 1;
+            let id_col = col::<Int32Array>(&batch, "id");
+            for i in 0..batch.num_rows() {
+                all_rows.push(id_col.value(i));
+            }
+        } else {
+            break;
+        }
+    }
+
+    // Verify we got all rows in order
+    assert_eq!(all_rows.len(), 5, "Should have fetched all 5 rows");
+
+    // Verify stable ordering
+    for i in 1..all_rows.len() {
+        assert!(
+            all_rows[i - 1] < all_rows[i],
+            "Rows should be in ascending order"
+        );
+    }
+
+    // Verify no duplicates or missing rows
+    let expected: Vec<i32> = vec![1, 2, 3, 4, 5];
+    assert_eq!(
+        all_rows, expected,
+        "Should have all rows without duplicates or gaps"
+    );
+
+    // Verify we got the expected number of pages
+    assert_eq!(
+        page_count, 3,
+        "Should have 3 pages of 2 rows each (plus 1 partial)"
+    );
+
+    // Test explicit close
+    cursor.close().await.expect("close failed");
+
+    // Clean up
+    run(&src, "DROP TABLE test_cursor_no_pk CASCADE").await;
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
 async fn schemas_exclude_catalog_namespaces() {
     let src = connect().await;
     let schemas = src.schemas().await.expect("schemas failed");
