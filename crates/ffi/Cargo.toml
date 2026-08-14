@@ -15,6 +15,7 @@ dbconn = { path = "../conn" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-mongodb = { path = "../drivers/mongodb" }
+driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }
 serde = "1"

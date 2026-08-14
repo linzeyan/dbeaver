@@ -239,6 +239,61 @@ async fn mongodb() -> Subject {
     }
 }
 
+const MYSQL_ROOT: &str = "mysql://root:test@127.0.0.1:53306/";
+
+/// MySQL, in a database of this file's own rather than the driver's `bench`.
+///
+/// The driver's own suite begins by dropping and rebuilding `bench`, and
+/// `cargo test --workspace -- --ignored` runs the two binaries at the same
+/// time. Sharing the fixture would make this test fail whenever it lost that
+/// race, which is a scheduling accident wearing the costume of a contract
+/// violation.
+async fn mysql() -> Subject {
+    use mysql_async::prelude::Queryable;
+
+    let opts = mysql_async::Opts::from_url(MYSQL_ROOT).expect("the fixture URL should parse");
+    let mut conn = mysql_async::Conn::new(opts)
+        .await
+        .expect("MySQL unreachable; run `make db-up-mysql`");
+    let rows: Vec<String> = (1..=500).map(|i| format!("({i}, 'row-{i}')")).collect();
+    for statement in [
+        "DROP DATABASE IF EXISTS dbclient_contract".to_string(),
+        "CREATE DATABASE dbclient_contract".to_string(),
+        "USE dbclient_contract".to_string(),
+        "CREATE TABLE nums (id INT PRIMARY KEY, label VARCHAR(32))".to_string(),
+        format!("INSERT INTO nums (id, label) VALUES {}", rows.join(", ")),
+    ] {
+        conn.query_drop(&statement)
+            .await
+            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    }
+    conn.disconnect()
+        .await
+        .expect("closing the seed connection");
+
+    let driver = driver_mysql::MySqlSource::connect(&format!("{MYSQL_ROOT}dbclient_contract"))
+        .await
+        .expect("the MySQL driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        // MySQL's schema is its database; there is no level above it.
+        schema: "dbclient_contract".to_string(),
+        relation: "nums".to_string(),
+        key: "id".to_string(),
+        read: "SELECT id FROM nums ORDER BY id".to_string(),
+        broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors: true,
+        // MySQL's parse error names the text it stopped at — "near 'ORDER BY
+        // id'" — and never an offset. Recovering one by searching for that
+        // fragment would find the first occurrence rather than the one that
+        // failed, which is a caret in the wrong place rather than no caret.
+        positions: false,
+        _fixture: None,
+    }
+}
+
 /// A PostgreSQL-compatible database, seeded and connected through the
 /// PostgreSQL driver.
 ///
@@ -584,6 +639,12 @@ async fn duckdb_satisfies_the_contract() {
 #[ignore = "requires the benchmark database"]
 async fn postgres_satisfies_the_contract() {
     every_check(&postgres().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn mysql_satisfies_the_contract() {
+    every_check(&mysql().await).await;
 }
 
 #[tokio::test]
