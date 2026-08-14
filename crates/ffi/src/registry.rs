@@ -12,6 +12,7 @@
 //! discover its own drivers at startup.
 
 use dbconn::{DbError, Driver};
+use driver_clickhouse::ChSource;
 use driver_mongodb::MongoSource;
 use driver_postgres::PgSource;
 use driver_sqlite::SqliteSource;
@@ -73,6 +74,12 @@ pub const CATALOG: &[Catalogued] = &[
         default_port: Some(27017),
     },
     Catalogued {
+        scheme: "clickhouse",
+        label: "ClickHouse",
+        shape: Shape::Server,
+        default_port: Some(8123),
+    },
+    Catalogued {
         scheme: "sqlite",
         label: "SQLite",
         shape: Shape::File,
@@ -118,6 +125,16 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // of what the MongoDB URI parser reads, and `mongodb+srv` in particular
         // means "look the hosts up in DNS" rather than naming one.
         "mongodb" | "mongodb+srv" => Ok(Box::new(MongoSource::connect(url).await?)),
+        // Rewritten to `http://`, which is the transport: the driver reads
+        // `FORMAT ArrowStream` over ClickHouse's HTTP interface, and the scheme
+        // the user writes names the database rather than the protocol carrying
+        // it. `clickhouses://` is the same thing over TLS.
+        "clickhouse" => Ok(Box::new(
+            ChSource::connect(&format!("http://{rest}")).await?,
+        )),
+        "clickhouses" => Ok(Box::new(
+            ChSource::connect(&format!("https://{rest}")).await?,
+        )),
         "sqlite" => Ok(Box::new(SqliteSource::connect(rest).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
