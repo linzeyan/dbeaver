@@ -366,9 +366,17 @@ async fn mysql_compatible(
     use mysql_async::prelude::Queryable;
 
     let opts = mysql_async::Opts::from_url(server).expect("the fixture URL should parse");
-    let mut conn = mysql_async::Conn::new(opts)
-        .await
-        .expect("compatible database unreachable; see the Makefile target");
+    // The same setting the driver connects with, for the same reason: left on,
+    // the client reads `@@socket` during the handshake so it can move a local
+    // connection onto a Unix socket, and StarRocks has no such variable to
+    // report. Turning it off here keeps the seed connection honest about what
+    // it is testing — a fixture that reached the server by a route the driver
+    // does not use would be proving something else.
+    let mut conn = mysql_async::Conn::new(mysql_async::Opts::from(
+        mysql_async::OptsBuilder::from_opts(opts).prefer_socket(false),
+    ))
+    .await
+    .expect("compatible database unreachable; see the Makefile target");
     let prelude = [
         "DROP DATABASE IF EXISTS dbclient_contract",
         "CREATE DATABASE dbclient_contract",
@@ -406,6 +414,7 @@ async fn mysql_compatible(
 const COCKROACH: &str = "postgres://root@127.0.0.1:56257/defaultdb";
 const GREPTIME: &str = "postgres://greptime@127.0.0.1:54003/public";
 const TIDB: &str = "mysql://root@127.0.0.1:54000/";
+const STARROCKS: &str = "mysql://root@127.0.0.1:59030/";
 
 // ---------------------------------------------------------------------------
 // The checks
@@ -855,6 +864,38 @@ async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
         "id",
         // No offset, for the same reason MySQL has none: the server sends the
         // fragment it stopped at rather than a place in the text.
+        false,
+        true,
+    )
+    .await;
+    every_check(&subject).await;
+}
+
+/// StarRocks, through the MySQL driver and no other code.
+#[tokio::test]
+#[ignore = "requires a StarRocks server"]
+async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
+    let subject = mysql_compatible(
+        STARROCKS,
+        vec![
+            // A distribution and a replica count, which is where StarRocks
+            // stops looking like MySQL: it is a distributed column store, so
+            // every table says how it is spread and how many copies to keep,
+            // and the single backend in the test container can only keep one.
+            "CREATE TABLE nums (id INT, label VARCHAR(32)) \
+             PRIMARY KEY(id) DISTRIBUTED BY HASH(id) \
+             PROPERTIES ('replication_num' = '1')"
+                .to_string(),
+            format!(
+                "INSERT INTO nums (id, label) VALUES {}",
+                (1..=500)
+                    .map(|i| format!("({i}, 'row-{i}')"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ],
+        "nums",
+        "id",
         false,
         true,
     )

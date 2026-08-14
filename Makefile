@@ -104,13 +104,15 @@ run-console: release ## Launch the raw binary, keeping stdout in the terminal
 test: ## Unit tests (no database required)
 	cargo test --workspace
 
-# StarRocks is deliberately not a prerequisite. It takes minutes to become
-# ready on a cold start — a frontend and a backend inside one container have to
-# find each other before it will accept a login — and a gate that slow stops
-# being run. Its container is started by hand with `make db-up-starrocks`, and
-# its check is `db-check-starrocks` for whoever wants it.
+# Both compatible-MySQL servers are prerequisites, because the suite behind this
+# target runs their tests whether or not they are listed here — an unlisted
+# server does not make `make test-integration` cheaper, it only makes the failure
+# arrive as a connection refused from inside a test instead of as a line naming
+# the target that fixes it. StarRocks earns its place on the same measurement:
+# under a minute to become ready, and about as much memory as MySQL. Its image is
+# five gigabytes, which is a download to do once rather than a cost per run.
 .PHONY: test-integration
-test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-check-tidb ## Tests requiring a database server
+test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-check-tidb db-check-starrocks ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The SQL statement splitter's checks live behind a flag on the app binary
@@ -248,18 +250,22 @@ db-check-tidb: ## Fail unless the TiDB test container is reachable
 	@nc -z 127.0.0.1 $(TIDB_PORT) >/dev/null 2>&1 \
 		|| { echo "tidb not running; run 'make db-up-tidb'"; exit 1; }
 
-# StarRocks brings up a frontend and a backend inside one container and does not
-# accept a login until both have registered with each other, which takes minutes
-# rather than seconds on a cold start. Hence the long budget, and hence the poll
-# being a real login rather than `nc`: the MySQL port opens well before the
-# cluster will answer a query, so a port check reports ready and the first
-# statement then fails.
+# StarRocks brings up a frontend and a backend inside one container and will not
+# answer until both have registered with each other. Measured here: ready about
+# eight seconds after `docker start`, and about fifty on the first run of a fresh
+# container, when five gigabytes of image are still being read off disk. The
+# budget is ten minutes anyway, because the number that matters is the one on the
+# slowest machine that will ever run this and it is not this one.
+#
+# The poll is a real login rather than `nc` because the MySQL port opens well
+# before the cluster will answer a query: a port check reports ready and the
+# first statement then fails.
 .PHONY: db-up-starrocks
-db-up-starrocks: ## Start the StarRocks test container (slow; several minutes)
+db-up-starrocks: ## Start the StarRocks test container
 	@docker start $(STARROCKS_CONTAINER) 2>/dev/null \
 		|| docker run -d --name $(STARROCKS_CONTAINER) \
 			-p $(STARROCKS_PORT):9030 starrocks/allin1-ubuntu:latest
-	@echo "waiting for starrocks (this takes minutes on a cold start)..."
+	@echo "waiting for starrocks (a minute or so on a cold start)..."
 	@for i in $$(seq 1 300); do \
 		docker exec $(STARROCKS_CONTAINER) \
 			mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null 2>&1 && break; \
