@@ -1,0 +1,22 @@
+[package]
+name = "driver-mongodb"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+mongodb = "3"
+# BSON is re-exported by the driver, but named here because this crate reads and
+# builds documents constantly and depending on a re-export makes the version
+# that matters invisible.
+bson = "2"
+serde_json = "1"
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
