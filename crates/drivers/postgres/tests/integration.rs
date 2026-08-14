@@ -1149,6 +1149,46 @@ async fn error_from(src: &PgSource, sql: &str) -> PgError {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
+async fn cancelling_names_the_pooled_connections_too() {
+    // Metadata reads moved off the session onto pooled connections and cancel went
+    // on naming only the session, so Stop during a navigator load was a button that
+    // did nothing. A pooled connection that is in use is not in the pool to be
+    // found, which is why the source keeps a token for every connection it opened.
+    //
+    // What this proves is the mechanism: that the request reaches every backend
+    // without deadlocking on the registry, that naming an idle one is not an error,
+    // and that the session and the pool both still work afterwards. What it does
+    // not prove is the interruption — that needs a catalog read slow enough to
+    // catch in flight, and this database answers every one of them in a
+    // millisecond. The interruption itself is covered on the session by the test
+    // below, and on a cursor by the ffi harness.
+    let src = connect().await;
+
+    // Four at once cannot share one connection, so the pool ends up holding
+    // several — which is the state the old cancel could not see.
+    let (a, b, c, d) = tokio::join!(src.schemas(), src.schemas(), src.schemas(), src.schemas());
+    for schemas in [a, b, c, d] {
+        assert!(!schemas.expect("metadata read failed").is_empty());
+    }
+
+    src.cancel().await.expect("cancel request failed");
+
+    assert!(
+        !src.schemas()
+            .await
+            .expect("pool unusable after cancel")
+            .is_empty(),
+        "cancelling an idle backend is a no-op, not damage"
+    );
+    let mut stream = src
+        .query("SELECT 1", 8192)
+        .await
+        .expect("session unusable after cancel");
+    assert!(stream.next_batch().await.expect("batch error").is_some());
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
 async fn a_running_statement_stops_when_asked_and_says_that_is_why() {
     use std::sync::Arc;
     use std::time::Duration;

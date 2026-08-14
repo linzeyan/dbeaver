@@ -94,8 +94,13 @@ pub unsafe extern "C" fn db_free(handle: *mut DbHandle) {
 /// handle, and it has to be: everything else blocks, so a cancel that waited its
 /// turn would arrive after the statement it exists to interrupt. Sound because
 /// the cancel travels on a connection of its own and touches nothing the running
-/// call owns — it reads the handle to learn which backend to name, and that is
-/// shared, immutable state.
+/// call owns.
+///
+/// A handle is several connections — statements run on the session, metadata
+/// reads on whichever the pool handed out — and which one is busy is not
+/// something the caller can see, so every one of them is named. A cursor is the
+/// exception: it is handed out to be held, so it carries its own
+/// `db_cursor_cancel`.
 ///
 /// Delivery is not interruption. A statement that finished first, or that was
 /// never running, leaves the server nothing to cancel and this still returns 0.
