@@ -34,6 +34,11 @@ let package = Package(
                 // The Keychain, which is where connection passwords live. See
                 // Connection.swift for why they are not in UserDefaults.
                 .linkedFramework("Security"),
+                // DuckDB is C++ compiled into the staticlib, and a Rust
+                // staticlib does not record that its contents need the C++
+                // runtime. Without this the link fails on `___cxa_throw` and
+                // friends, from a Swift executable that contains no C++ at all.
+                .linkedLibrary("c++"),
             ]
         ),
     ]
