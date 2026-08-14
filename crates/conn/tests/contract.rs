@@ -51,6 +51,20 @@ struct Subject {
     /// wrong, so it requires only that the driver be consistent about which it
     /// does.
     missing_is_a_failure: bool,
+    /// Whether this database can hold a cursor open at all.
+    ///
+    /// False for GreptimeDB, and it is the one place protocol compatibility
+    /// stops short. It serves the PostgreSQL wire protocol, accepts `DECLARE`
+    /// and answers `FETCH` correctly under the simple query protocol — psql
+    /// pages through a table with no trouble. Under the extended protocol,
+    /// which is what any client sending typed parameters uses, its `FETCH`
+    /// replies with a DataRow whose field count does not match the
+    /// RowDescription it just sent, and the connection cannot go on.
+    ///
+    /// Nothing in this driver can fix that, and the workarounds are worse than
+    /// the gap: `LIMIT`/`OFFSET` is what a cursor exists instead of, and the
+    /// simple query protocol returns every value as text.
+    cursors: bool,
     /// Whether this database says where in a statement a fault is.
     ///
     /// Recorded per subject rather than required of everyone, because the
@@ -88,6 +102,7 @@ async fn sqlite() -> Subject {
         broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        cursors: true,
         positions: true,
         _fixture: Some(dir),
     }
@@ -106,6 +121,7 @@ async fn postgres() -> Subject {
         broken: "SELECT id FROM bench_wide WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        cursors: true,
         positions: true,
         _fixture: None,
     }
@@ -150,6 +166,7 @@ async fn mongodb() -> Subject {
         // is refused by the server.
         broken: r#"{"find": "nums", "sort": "sideways"}"#.to_string(),
         missing: r#"{"find": "no_such_relation_anywhere"}"#.to_string(),
+        cursors: true,
         missing_is_a_failure: false,
         // The server names the field it disliked; it does not say where in the
         // text that field was written, and inventing an offset from a field name
@@ -158,6 +175,57 @@ async fn mongodb() -> Subject {
         _fixture: None,
     }
 }
+
+/// A PostgreSQL-compatible database, seeded and connected through the
+/// PostgreSQL driver.
+///
+/// The whole point is that no new driver code exists for these. Phase 2 claims
+/// protocol compatibility is transitive — that CockroachDB and GreptimeDB are
+/// reached by the driver already written — and a claim like that is worth
+/// exactly as much as the test that runs against the real thing.
+async fn pg_compatible(
+    url: &str,
+    seed: Vec<String>,
+    relation: &str,
+    key: &str,
+    positions: bool,
+    cursors: bool,
+) -> Subject {
+    let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
+        .await
+        .expect("compatible database unreachable; see the Makefile target");
+    // The connection is a task, not a value: tokio-postgres drives the socket
+    // separately from the client handle, and dropping it closes the session.
+    let pump = tokio::spawn(connection);
+    for statement in &seed {
+        client
+            .batch_execute(statement)
+            .await
+            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    }
+    drop(client);
+    pump.abort();
+
+    let driver = driver_postgres::PgSource::connect(url)
+        .await
+        .expect("the PostgreSQL driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        schema: "public".to_string(),
+        relation: relation.to_string(),
+        key: key.to_string(),
+        read: format!("SELECT {key} FROM {relation} ORDER BY {key}"),
+        broken: format!("SELECT {key} FROM {relation} WHERE ORDER BY {key}"),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors,
+        positions,
+        _fixture: None,
+    }
+}
+
+const COCKROACH: &str = "postgres://root@127.0.0.1:56257/defaultdb";
+const GREPTIME: &str = "postgres://greptime@127.0.0.1:54003/public";
 
 // ---------------------------------------------------------------------------
 // The checks
@@ -426,8 +494,10 @@ async fn failure(driver: &dyn Driver, sql: &str) -> dbconn::DbError {
 
 async fn every_check(subject: &Subject) {
     reads_a_result_in_batches(subject).await;
-    pages_a_cursor(subject).await;
-    cancels_an_idle_cursor_without_complaining(subject).await;
+    if subject.cursors {
+        pages_a_cursor(subject).await;
+        cancels_an_idle_cursor_without_complaining(subject).await;
+    }
     reports_where_a_statement_is_wrong(subject).await;
     walks_the_navigator(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
@@ -452,4 +522,118 @@ async fn postgres_satisfies_the_contract() {
 #[ignore = "requires a MongoDB server"]
 async fn mongodb_satisfies_the_contract() {
     every_check(&mongodb().await).await;
+}
+
+// ---------------------------------------------------------------------------
+// Databases that are reached by a driver written for a different database
+// ---------------------------------------------------------------------------
+
+/// CockroachDB, through the PostgreSQL driver and no other code.
+#[tokio::test]
+#[ignore = "requires a CockroachDB server"]
+async fn cockroachdb_satisfies_the_contract_through_the_postgres_driver() {
+    let subject = pg_compatible(
+        COCKROACH,
+        vec![
+            "DROP TABLE IF EXISTS nums".to_string(),
+            "CREATE TABLE nums (id INT PRIMARY KEY, label STRING)".to_string(),
+            "INSERT INTO nums (id, label) \
+             SELECT g, 'row-' || g::STRING FROM generate_series(1, 500) AS g"
+                .to_string(),
+        ],
+        "nums",
+        "id",
+        // The one thing that does not come across. CockroachDB speaks the
+        // PostgreSQL wire protocol and this driver reads it with no changes,
+        // but it does not send the error position field: it draws the caret
+        // into the message text instead, under a "source SQL:" heading. So the
+        // message is if anything more informative, and the editor cannot put a
+        // caret anywhere from it.
+        //
+        // Parsing that caret back out of the prose is exactly what the position
+        // field exists to avoid, and would break the day the wording changed.
+        false,
+        true,
+    )
+    .await;
+    every_check(&subject).await;
+}
+
+/// GreptimeDB, through the PostgreSQL driver — and exactly how far that goes.
+///
+/// The data path works completely: it connects, runs statements, streams
+/// batches and reports a syntax error, with no code written for it. The
+/// navigator works down to the list of tables. Past that it stops, and the two
+/// places it stops are worth stating rather than discovering:
+///
+/// **Cursors.** `DECLARE` and `FETCH` are accepted, and psql pages a table
+/// happily. Under the extended query protocol — which is what any client
+/// sending typed parameters uses — `FETCH` answers with a DataRow whose field
+/// count contradicts the RowDescription it just sent, and the connection cannot
+/// continue. There is no fix on this side; `LIMIT`/`OFFSET` is the thing a
+/// cursor exists instead of.
+///
+/// **Column metadata.** `pg_index.indkey` is an int2vector in PostgreSQL and a
+/// string in GreptimeDB, so the `attnum = ANY(indkey)` that finds the primary
+/// key fails to plan. Rewriting that around a compatibility shim would put
+/// PostgreSQL's own primary-key detection at risk to serve a database that does
+/// not really have one, so it is left alone.
+///
+/// Five other differences did get fixed, because each was the driver assuming
+/// PostgreSQL where the protocol did not require it: a null `reltuples`, `::int`
+/// meaning 64 bits, `relkind` arriving as text, `FETCH FORWARD` where `FETCH`
+/// says the same thing, and a missing `pg_get_triggerdef`. All five are also
+/// correct against PostgreSQL, which is the test of whether a portability fix is
+/// a fix or a concession.
+#[tokio::test]
+#[ignore = "requires a GreptimeDB server"]
+async fn greptimedb_reads_data_through_the_postgres_driver() {
+    let subject = pg_compatible(
+        GREPTIME,
+        vec![
+            "DROP TABLE IF EXISTS nums".to_string(),
+            // `n`, not `id`: GreptimeDB reserves `id` as a keyword. And every
+            // table needs a TIME INDEX, which is the shape of the database
+            // rather than a quirk — there is no table without a time column.
+            "CREATE TABLE nums (\
+                 n BIGINT, \
+                 label STRING, \
+                 ts TIMESTAMP TIME INDEX, \
+                 PRIMARY KEY (n))"
+                .to_string(),
+            // Written out rather than generated: `generate_series` is a
+            // PostgreSQL function, not part of the wire protocol under test.
+            format!(
+                "INSERT INTO nums (n, label, ts) VALUES {}",
+                (1..=500)
+                    .map(|i| format!("({i}, 'row-{i}', {})", i * 1000))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ],
+        "nums",
+        "n",
+        false,
+        false,
+    )
+    .await;
+
+    reads_a_result_in_batches(&subject).await;
+    reports_where_a_statement_is_wrong(&subject).await;
+
+    // The navigator, as far as it goes. Named checks rather than
+    // `walks_the_navigator`, so that the day GreptimeDB fills in `indkey` this
+    // test starts passing more of the contract instead of silently continuing
+    // to assert less of it.
+    let driver = subject.driver.as_ref();
+    let schemas = driver.schemas().await.expect("schemas failed");
+    assert!(schemas.iter().any(|s| s.name == subject.schema));
+    let relations = driver
+        .relations(&subject.schema)
+        .await
+        .expect("relations failed");
+    assert!(
+        relations.iter().any(|r| r.name == subject.relation),
+        "the table should be listed"
+    );
 }

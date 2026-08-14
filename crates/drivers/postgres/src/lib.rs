@@ -528,11 +528,13 @@ impl Cursor {
     /// Returns `Ok(None)` when the cursor has reached the end of the result set.
     /// Returns an error if the fetch fails.
     pub async fn fetch(&mut self) -> Result<Option<RecordBatch>, PgError> {
-        // Use FETCH FORWARD to get the next batch of rows
-        let sql = format!(
-            "FETCH FORWARD {} FROM {}",
-            self.batch_rows, self.cursor_name
-        );
+        // `FETCH n`, not `FETCH FORWARD n`. PostgreSQL treats the two as the
+        // same statement — a bare count is forward by definition — but the word
+        // is not free: GreptimeDB serves the PostgreSQL wire protocol and its
+        // parser wants a literal count after FETCH, so `FORWARD` fails there and
+        // paging a table is the whole of what a cursor is for. Dropping a word
+        // that says what the default already says costs this driver nothing.
+        let sql = format!("FETCH {} FROM {}", self.batch_rows, self.cursor_name);
         let rows = self.client.query(&sql, &[]).await?;
 
         if rows.is_empty() {
