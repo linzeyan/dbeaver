@@ -7,7 +7,7 @@
 //! terminators that reach it separate anything.
 
 use crate::dialect::Dialect;
-use crate::lex::{TokenKind, tokens};
+use crate::lex::{Token, TokenKind, tokens};
 
 /// A half-open range of characters, which is what every offset here is counted
 /// in. See `lex` for why characters and not bytes.
@@ -49,15 +49,24 @@ pub struct Target {
 /// occur.
 pub fn statements(text: &str, dialect: &Dialect) -> Vec<Span> {
     let chars: Vec<char> = text.chars().collect();
+    spans(&tokens(text, dialect), &chars)
+}
+
+/// The same, for a caller that has already lexed the buffer.
+///
+/// Split out because completion asks four questions of one keystroke, and a
+/// scan per question is four scans of a script that has not changed between
+/// them.
+pub(crate) fn spans(all: &[Token], chars: &[char]) -> Vec<Span> {
     let mut found = Vec::new();
     let mut start = 0u32;
     let mut has_code = false;
 
-    for token in tokens(text, dialect) {
+    for token in all {
         match token.kind {
             TokenKind::Terminator => {
                 if has_code {
-                    found.push(trimmed(&chars, start..token.start));
+                    found.push(trimmed(chars, start..token.start));
                 }
                 has_code = false;
                 start = token.end;
@@ -67,7 +76,7 @@ pub fn statements(text: &str, dialect: &Dialect) -> Vec<Span> {
         }
     }
     if has_code {
-        found.push(trimmed(&chars, start..chars.len() as u32));
+        found.push(trimmed(chars, start..chars.len() as u32));
     }
     found
 }

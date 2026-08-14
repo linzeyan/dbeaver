@@ -97,14 +97,19 @@ impl Statement {
 
 /// The scope tree of the statement covering `span`.
 pub fn statement(text: &str, span: Span, dialect: &Dialect) -> Statement {
-    let all = tokens(text, dialect);
     let chars: Vec<char> = text.chars().collect();
+    scopes(&tokens(text, dialect), &chars, span)
+}
+
+/// The same, for a caller that has already lexed the buffer.
+pub(crate) fn scopes(all: &[Token], chars: &[char], span: Span) -> Statement {
     let within: Vec<Token> = all
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|t| t.start >= span.start && t.end <= span.end && !t.kind.is_trivia())
         .collect();
     Walk {
-        chars: &chars,
+        chars,
         tokens: &within,
         at: 0,
         end: span.end,

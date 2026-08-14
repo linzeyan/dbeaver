@@ -12,8 +12,8 @@
 
 use crate::dialect::Dialect;
 use crate::lex::{TokenKind, tokens};
-use crate::parse::{Source, statement};
-use crate::script::{Span, statements};
+use crate::parse::{Source, scopes};
+use crate::script::{Span, spans};
 
 /// What kind of name belongs where the caret is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,10 +111,12 @@ pub fn complete(text: &str, caret: u32, dialect: &Dialect) -> Completion {
     };
 
     // Which statement the caret is in, and what it can see from there.
-    let Some(stmt_span) = statements(text, dialect)
-        .into_iter()
+    let all_statements = spans(&all, &chars);
+    let Some(stmt_span) = all_statements
+        .iter()
         .find(|s| s.start <= caret && caret <= s.end)
-        .or_else(|| statements(text, dialect).into_iter().next_back())
+        .or_else(|| all_statements.last())
+        .cloned()
     else {
         return Completion {
             expect: Expect::Statement,
@@ -123,7 +125,7 @@ pub fn complete(text: &str, caret: u32, dialect: &Dialect) -> Completion {
             sources: Vec::new(),
         };
     };
-    let parsed = statement(text, stmt_span.clone(), dialect);
+    let parsed = scopes(&all, &chars, stmt_span.clone());
     // Clamped, because the caret is often one character past the statement:
     // `statements` trims the whitespace a statement ends with, and typing
     // happens at the end.

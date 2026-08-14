@@ -265,3 +265,36 @@ fn each_dialect_reads_its_own_quoting_when_finding_a_relation() {
     assert_eq!(at("SELECT ▮ FROM \"t\"", &MYSQL).sources.len(), 0);
     assert_eq!(visible("SELECT ▮ FROM \"t\"", &POSTGRES), ["t"]);
 }
+
+// ---------------------------------------------------------------------------
+// Scale
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_long_script_is_answered_from_the_statement_the_caret_is_in() {
+    // Two thousand statements ahead of the caret, which is an ordinary size for
+    // a migration file somebody has open. The answer must not depend on how
+    // much is above it, and the work must not either — completion runs on every
+    // keystroke, and a scan per question would be four scans of a script that
+    // has not changed between them.
+    let mut script = String::new();
+    for i in 0..2_000 {
+        script.push_str(&format!(
+            "-- statement {i}\nINSERT INTO archive.rows (id, label) VALUES ({i}, 'row-{i}');\n"
+        ));
+    }
+    let caret = script.chars().count() as u32;
+    script.push_str("SELECT  FROM orders o JOIN customers c ON c.id = o.customer");
+    let caret = caret + "SELECT ".chars().count() as u32;
+
+    let started = std::time::Instant::now();
+    let c = dbsql::complete(&script, caret, &POSTGRES);
+    let took = started.elapsed();
+
+    assert_eq!(c.expect, Expect::Column { qualifier: None });
+    let names: Vec<&str> = c.sources.iter().map(|s| s.handle()).collect();
+    assert_eq!(names, ["o", "c"]);
+    // A bound loose enough that a busy machine cannot fail it, and tight enough
+    // that reintroducing a scan per question would.
+    assert!(took.as_millis() < 500, "completion took {took:?}");
+}
