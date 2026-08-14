@@ -174,7 +174,17 @@ async fn reads_a_result_in_batches(subject: &Subject) {
 
     // Before a single row has been read: a front end lays out a grid first and
     // asks for rows afterwards.
-    assert_eq!(stream.schema().fields().len(), 1);
+    //
+    // That the key column is there, not that it is the only one. An exact count
+    // would be asserting SQL's projection semantics: MongoDB's result carries a
+    // trailing `_extra` column whatever the statement asked for, because a
+    // schemaless database cannot promise a later document will fit the columns
+    // inferred from an earlier one.
+    let schema = stream.schema();
+    assert!(
+        schema.field_with_name(&subject.key).is_ok(),
+        "the schema should name the column that was asked for"
+    );
     // Zero is a real answer, so "not finished" cannot be zero.
     assert_eq!(stream.rows_affected(), None);
 
@@ -204,7 +214,7 @@ async fn pages_a_cursor(subject: &Subject) {
         .cursor(&subject.read, 50)
         .await
         .expect("cursor failed");
-    assert_eq!(cursor.schema().fields().len(), 1);
+    assert!(cursor.schema().field_with_name(&subject.key).is_ok());
 
     let mut seen = 0usize;
     for page in 1..=3 {
