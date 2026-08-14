@@ -33,6 +33,16 @@
 //! reached for through the cursor. Both drivers arrived at the same shape
 //! independently, which is the strongest evidence in here that it is the right
 //! one.
+//!
+//! Six more implementations later — MySQL, SQL Server, DuckDB, ClickHouse and,
+//! deliberately, MongoDB — one thing changed: `query` and `cursor` take a
+//! `statement` and not a `sql`. That is the whole of it. A document database
+//! whose statements are JSON objects, an analytical database with no cursors of
+//! its own, and an embedded one that runs in this thread all fit without the
+//! trait growing a method, an option or an escape hatch. Where the databases
+//! genuinely disagree — whether a failure carries a position, whether reading a
+//! relation that is not there is a failure at all — the trait already said "or
+//! not", so the disagreement had somewhere to live.
 
 mod metadata;
 
@@ -68,7 +78,7 @@ impl DbError {
     }
 
     /// Where in the statement the database says the trouble is: 1-based, counted
-    /// in characters, into the SQL that was sent.
+    /// in characters, into the text that was sent.
     ///
     /// Characters and not bytes, and from one and not zero, because the two
     /// databases already disagreed about both and a front end cannot ask which
@@ -153,8 +163,17 @@ pub trait Driver: Send + Sync {
 
     // ---- Results --------------------------------------------------------
 
-    /// Run `sql` and return a stream over its results, in batches of at most
-    /// `batch_rows` rows.
+    /// Run `statement` and return a stream over its results, in batches of at
+    /// most `batch_rows` rows.
+    ///
+    /// `statement` is text this database understands, and not necessarily SQL.
+    /// The parameter was called `sql` while PostgreSQL and SQLite were the only
+    /// implementations, and MongoDB is what showed the word to be wrong: it
+    /// takes a command document, `{"find": "orders", "filter": {…}}`, which is
+    /// what its own protocol carries. Nothing about the shape of this call had
+    /// to change to accommodate that, which is the useful result — a statement
+    /// really is just text the database understands, and only the name said
+    /// otherwise.
     ///
     /// When this resolves relative to the statement running is deliberately not
     /// specified, because the two implementations already differ and neither is
@@ -163,9 +182,9 @@ pub trait Driver: Send + Sync {
     /// type is settled. What is specified is that an execution failure may
     /// surface from `next_batch` rather than from here, so a caller that stops at
     /// a successful `query` has not established that the statement worked.
-    async fn query(&self, sql: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>>;
+    async fn query(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>>;
 
-    /// Read `sql` forward, a page at a time.
+    /// Read `statement` forward, a page at a time.
     ///
     /// Two properties, which is all this asks for — the mechanism is the
     /// driver's. Reading page *n* must not re-read the pages before it, so page
@@ -173,7 +192,7 @@ pub trait Driver: Send + Sync {
     /// a write landing between two of them must not make a row appear twice or
     /// not at all. Neither is achievable with `LIMIT`/`OFFSET`, which is what
     /// this exists instead of.
-    async fn cursor(&self, sql: &str, batch_rows: usize) -> DbResult<Box<dyn Cursor>>;
+    async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn Cursor>>;
 
     /// Ask the database to abandon whatever this session is running.
     ///

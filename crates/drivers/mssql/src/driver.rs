@@ -70,12 +70,16 @@ impl Driver for MsSqlSource {
         Ok(MsSqlSource::triggers(self, schema, relation).await?)
     }
 
-    async fn query(&self, sql: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>> {
-        Ok(Box::new(MsSqlSource::query(self, sql, batch_rows).await?))
+    async fn query(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>> {
+        Ok(Box::new(
+            MsSqlSource::query(self, statement, batch_rows).await?,
+        ))
     }
 
-    async fn cursor(&self, sql: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {
-        Ok(Box::new(MsSqlSource::cursor(self, sql, batch_rows).await?))
+    async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {
+        Ok(Box::new(
+            MsSqlSource::cursor(self, statement, batch_rows).await?,
+        ))
     }
 
     async fn cancel(&self) -> DbResult<()> {

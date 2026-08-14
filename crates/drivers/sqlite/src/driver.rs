@@ -64,12 +64,16 @@ impl Driver for SqliteSource {
         Ok(SqliteSource::triggers(self, schema, relation).await?)
     }
 
-    async fn query(&self, sql: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>> {
-        Ok(Box::new(SqliteSource::query(self, sql, batch_rows).await?))
+    async fn query(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>> {
+        Ok(Box::new(
+            SqliteSource::query(self, statement, batch_rows).await?,
+        ))
     }
 
-    async fn cursor(&self, sql: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {
-        Ok(Box::new(SqliteSource::cursor(self, sql, batch_rows).await?))
+    async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {
+        Ok(Box::new(
+            SqliteSource::cursor(self, statement, batch_rows).await?,
+        ))
     }
 
     /// Async with nothing to await. Interrupting SQLite sets a flag in this
