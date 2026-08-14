@@ -566,6 +566,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "rusqlite",
+ "serde",
  "tempfile",
  "thiserror",
  "tokio",

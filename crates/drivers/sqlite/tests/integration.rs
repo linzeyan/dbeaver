@@ -430,3 +430,326 @@ async fn a_value_that_does_not_fit_its_column_is_reported_rather_than_rounded() 
         other => panic!("expected a mismatch naming the column, got {other}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Metadata
+// ---------------------------------------------------------------------------
+
+/// A schema with one of everything the sidebar has a section for.
+const CATALOG: &str = "
+    CREATE TABLE authors (
+        id      INTEGER PRIMARY KEY,
+        name    TEXT NOT NULL,
+        email   TEXT,
+        country TEXT DEFAULT 'TW'
+    );
+    CREATE UNIQUE INDEX authors_email ON authors (lower(email)) WHERE email IS NOT NULL;
+
+    CREATE TABLE books (
+        isbn      TEXT NOT NULL,
+        region    TEXT NOT NULL,
+        author_id INTEGER REFERENCES authors,
+        editor_id INTEGER,
+        title     TEXT CHECK (length(title) > 0),
+        UNIQUE (title),
+        FOREIGN KEY (editor_id) REFERENCES authors (id)
+            ON DELETE SET NULL ON UPDATE CASCADE,
+        PRIMARY KEY (isbn, region)
+    );
+
+    CREATE VIEW in_print AS SELECT title FROM books WHERE title IS NOT NULL;
+
+    CREATE TRIGGER books_audit AFTER UPDATE ON books BEGIN SELECT 1; END;
+";
+
+#[tokio::test]
+async fn the_navigator_root_is_the_databases_attached_to_this_connection() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let names: Vec<String> = src
+        .schemas()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    // `temp` is deliberately absent: it holds one connection's temporary tables,
+    // and every call here gets a connection of its own, so it could never have
+    // anything under it.
+    assert_eq!(names, ["main"]);
+}
+
+#[tokio::test]
+async fn relations_report_what_kind_they_are_and_leave_sqlites_own_out() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let relations = src.relations("main").await.unwrap();
+
+    let listed: Vec<(&str, driver_sqlite::RelationKind)> = relations
+        .iter()
+        .map(|r| (r.name.as_str(), r.kind))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("authors", driver_sqlite::RelationKind::Table),
+            ("books", driver_sqlite::RelationKind::Table),
+            ("in_print", driver_sqlite::RelationKind::View),
+        ],
+        "sqlite_autoindex and friends are SQLite's bookkeeping, not the user's"
+    );
+    assert!(relations.iter().all(|r| r.schema == "main"));
+}
+
+#[tokio::test]
+async fn a_row_estimate_is_absent_until_something_has_measured_it() {
+    let fixture = Fixture::new(&format!(
+        "{CATALOG}
+         INSERT INTO authors (id, name) VALUES (1, 'a'), (2, 'b'), (3, 'c');"
+    ));
+    let src = fixture.connect().await;
+
+    let before = src.relations("main").await.unwrap();
+    let authors = before.iter().find(|r| r.name == "authors").unwrap();
+    // Not zero. A sidebar that says a table has no rows when nobody has counted
+    // is stating something false rather than declining to answer.
+    assert_eq!(authors.estimated_rows, None);
+
+    fixture.writer().execute_batch("ANALYZE").unwrap();
+    let after = src.relations("main").await.unwrap();
+    let authors = after.iter().find(|r| r.name == "authors").unwrap();
+    assert_eq!(authors.estimated_rows, Some(3));
+}
+
+#[tokio::test]
+async fn columns_report_their_declaration_key_and_default() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let columns = src.columns("main", "authors").await.unwrap();
+
+    let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["id", "name", "email", "country"]);
+
+    let id = &columns[0];
+    assert_eq!(id.data_type, "INTEGER");
+    assert!(id.is_primary_key);
+    // One-based, as PostgreSQL's attnum is. SQLite counts from zero, and a front
+    // end showing both would call the same column first and zeroth depending on
+    // which database it came from.
+    assert_eq!(id.position, 1);
+
+    assert!(!columns[1].nullable, "name is declared NOT NULL");
+    assert!(columns[2].nullable);
+    assert_eq!(columns[3].default_value.as_deref(), Some("'TW'"));
+}
+
+#[tokio::test]
+async fn a_column_declared_without_a_type_says_so_rather_than_leaving_a_blank() {
+    let fixture = Fixture::new("CREATE TABLE loose (a, b INTEGER);");
+    let src = fixture.connect().await;
+    let columns = src.columns("main", "loose").await.unwrap();
+    // SQLite reports an empty string, which renders as a gap in the structure
+    // pane and reads as a defect in the client rather than as the truth about the
+    // column. `ANY` is the word SQLite's own STRICT tables use for it.
+    assert_eq!(columns[0].data_type, "ANY");
+    assert_eq!(columns[1].data_type, "INTEGER");
+}
+
+#[tokio::test]
+async fn a_view_reports_the_statement_it_was_created_from() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+
+    let definition = src
+        .definition("main", "in_print")
+        .await
+        .unwrap()
+        .expect("a view has a definition");
+    assert!(definition.contains("CREATE VIEW"), "got: {definition}");
+    assert!(definition.contains("WHERE title IS NOT NULL"));
+
+    // Absent rather than empty for a table, which is the distinction the
+    // structure pane hangs a section on.
+    assert_eq!(src.definition("main", "books").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn an_index_reports_the_keys_the_planner_can_actually_use() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let indexes = src.indexes("main", "authors").await.unwrap();
+
+    let email = indexes
+        .iter()
+        .find(|i| i.name == "authors_email")
+        .expect("the declared index is missing");
+    // An index on lower(email) is not an index on email. No pragma will name an
+    // expression key, so this comes out of the statement that declared it.
+    assert_eq!(email.columns, ["lower(email)"]);
+    assert!(email.is_unique);
+    assert!(!email.is_primary);
+    assert_eq!(email.method, "btree");
+    // No pragma reports a partial index's predicate either.
+    assert_eq!(email.predicate.as_deref(), Some("email IS NOT NULL"));
+
+    // `authors.id` is INTEGER PRIMARY KEY, which SQLite implements as the rowid
+    // rather than as an index — so there is nothing here to list, and
+    // ColumnInfo::is_primary_key is where a front end should read the key from.
+    assert!(!indexes.iter().any(|i| i.is_primary));
+}
+
+#[tokio::test]
+async fn an_index_sqlite_made_for_itself_still_reports_its_columns() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let indexes = src.indexes("main", "books").await.unwrap();
+
+    let primary = indexes
+        .iter()
+        .find(|i| i.is_primary)
+        .expect("a composite primary key is an index");
+    assert_eq!(primary.columns, ["isbn", "region"]);
+    // No CREATE INDEX statement exists for it, so the key list has to come from
+    // the pragma rather than from DDL text there is none of.
+    assert!(primary.is_unique);
+}
+
+#[tokio::test]
+async fn a_foreign_key_reports_both_sides_and_what_happens_on_delete() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let keys = src.foreign_keys("main", "books").await.unwrap();
+    assert_eq!(keys.len(), 2);
+
+    let editor = keys
+        .iter()
+        .find(|k| k.local_columns == ["editor_id"])
+        .expect("the editor key is missing");
+    assert_eq!(editor.other_table, "authors");
+    assert_eq!(editor.other_columns, ["id"]);
+    assert_eq!(editor.on_delete, "SET NULL");
+    assert_eq!(editor.on_update, "CASCADE");
+    assert_eq!(editor.other_schema, "main");
+
+    // `author_id INTEGER REFERENCES authors` names no column on the far side,
+    // and SQLite leaves it out rather than filling it in. A key rendered with one
+    // side blank reads as though the database were missing something.
+    let author = keys
+        .iter()
+        .find(|k| k.local_columns == ["author_id"])
+        .expect("the author key is missing");
+    assert_eq!(author.other_columns, ["id"]);
+}
+
+#[tokio::test]
+async fn an_inbound_reference_is_named_for_the_table_that_declared_it() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let inbound = src.referenced_by("main", "authors").await.unwrap();
+    assert_eq!(inbound.len(), 2);
+
+    for key in &inbound {
+        assert_eq!(key.other_table, "books");
+        // Named for the vantage point: looked at from authors, the local columns
+        // are authors', and both keys point at its primary key.
+        assert_eq!(key.local_columns, ["id"]);
+        // The key lives on books even though books is not what was asked about,
+        // and a made-up name that said `authors` would misplace it.
+        assert!(key.name.starts_with("fk_books_"), "got: {}", key.name);
+    }
+
+    let referencing: Vec<&str> = inbound
+        .iter()
+        .map(|k| k.other_columns[0].as_str())
+        .collect();
+    assert!(referencing.contains(&"author_id"));
+    assert!(referencing.contains(&"editor_id"));
+
+    assert!(
+        src.referenced_by("main", "books").await.unwrap().is_empty(),
+        "nothing references books"
+    );
+}
+
+#[tokio::test]
+async fn a_unique_constraint_is_reported_and_a_check_constraint_honestly_is_not() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let constraints = src.constraints("main", "books").await.unwrap();
+
+    assert_eq!(constraints.len(), 1, "got: {constraints:?}");
+    assert_eq!(constraints[0].kind, driver_sqlite::ConstraintKind::Unique);
+    assert_eq!(constraints[0].definition, "UNIQUE (title)");
+
+    // books also has `CHECK (length(title) > 0)`, and it is not here. SQLite
+    // records a CHECK only inside the CREATE TABLE text, and reading it out of
+    // there is parsing SQL — Phase 3's job, not something to half-do here.
+}
+
+#[tokio::test]
+async fn a_trigger_reports_the_statement_it_was_created_from() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let triggers = src.triggers("main", "books").await.unwrap();
+
+    assert_eq!(triggers.len(), 1);
+    assert_eq!(triggers[0].name, "books_audit");
+    // Not the timing and events in separate fields, as PostgreSQL reports them.
+    // SQLite's catalog holds the text and nothing else, and picking `AFTER` out
+    // of it is guessing at what the reader can see for themselves.
+    let definition = triggers[0].definition.as_deref().expect("the DDL");
+    assert!(
+        definition.contains("AFTER UPDATE ON books"),
+        "got: {definition}"
+    );
+
+    assert!(src.triggers("main", "authors").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_schema_that_is_not_open_says_so_in_those_words() {
+    // Every schema-scoped call answers the same way, which is the point. Left to
+    // themselves the pragma-backed ones return an empty list and the
+    // sqlite_schema-backed ones fail with "no such table: nowhere.sqlite_schema"
+    // — an internal detail about a table nobody mentioned.
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+
+    for message in [
+        src.relations("nowhere").await.unwrap_err().to_string(),
+        src.columns("nowhere", "authors")
+            .await
+            .unwrap_err()
+            .to_string(),
+        src.indexes("nowhere", "authors")
+            .await
+            .unwrap_err()
+            .to_string(),
+        src.triggers("nowhere", "authors")
+            .await
+            .unwrap_err()
+            .to_string(),
+        src.definition("nowhere", "in_print")
+            .await
+            .unwrap_err()
+            .to_string(),
+        src.constraints("nowhere", "books")
+            .await
+            .unwrap_err()
+            .to_string(),
+        src.foreign_keys("nowhere", "books")
+            .await
+            .unwrap_err()
+            .to_string(),
+        src.referenced_by("nowhere", "authors")
+            .await
+            .unwrap_err()
+            .to_string(),
+    ] {
+        assert!(message.contains("nowhere"), "got: {message}");
+        assert!(!message.contains("sqlite_schema"), "got: {message}");
+    }
+
+    // And the schema that is open still reads.
+    assert_eq!(src.relations("main").await.unwrap().len(), 3);
+}

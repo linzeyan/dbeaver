@@ -13,6 +13,12 @@
 //! gets derived from.
 
 mod arrow_map;
+mod metadata;
+
+pub use metadata::{
+    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    RelationshipInfo, SchemaInfo, TriggerInfo,
+};
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Field, Schema, SchemaRef};
@@ -29,6 +35,8 @@ pub enum SqliteError {
     Sqlite(#[from] rusqlite::Error),
     #[error("no database file at {0}")]
     NoSuchDatabase(String),
+    #[error("no schema named {0} is open on this connection")]
+    NoSuchSchema(String),
     #[error("column {column:?} holds {found} where the column reads as {expected}")]
     TypeMismatch {
         column: String,
@@ -109,6 +117,17 @@ pub struct SqliteSource {
 struct Registration {
     id: u64,
     cancels: Cancels,
+}
+
+impl Registration {
+    /// Puts `handle` where `cancel` can find it, and takes it back out when the
+    /// returned value is dropped.
+    fn hold(cancels: Cancels, id: u64, handle: Arc<InterruptHandle>) -> Self {
+        if let Ok(mut held) = cancels.lock() {
+            held.push((id, handle));
+        }
+        Self { id, cancels }
+    }
 }
 
 impl Drop for Registration {
@@ -198,13 +217,154 @@ impl SqliteSource {
 
     fn register(&self, handle: Arc<InterruptHandle>) -> Registration {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut cancels) = self.cancels.lock() {
-            cancels.push((id, handle));
-        }
-        Registration {
-            id,
-            cancels: Arc::clone(&self.cancels),
-        }
+        Registration::hold(Arc::clone(&self.cancels), id, handle)
+    }
+
+    /// Runs one piece of catalog work on a connection opened for it.
+    ///
+    /// A connection per call, where PostgreSQL takes one from a pool. Opening a
+    /// file is cheap enough that the pool would be bookkeeping for its own sake,
+    /// and the property the pool was there to protect — a navigator that does not
+    /// queue behind a result being read — comes for free once nothing is shared.
+    ///
+    /// The connection is registered for the length of the call so that `cancel`
+    /// reaches it. Most of these answer in microseconds and will never be
+    /// cancelled; `referenced_by` reads every table's keys, and on a schema with
+    /// thousands of them it is the one that a person waits for.
+    async fn with_connection<T, F>(&self, work: F) -> Result<T, SqliteError>
+    where
+        F: FnOnce(&Connection) -> Result<T, SqliteError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let path = self.path.clone();
+        let cancels = Arc::clone(&self.cancels);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        blocking(move || {
+            let conn = open(&path)?;
+            let _registered =
+                Registration::hold(cancels, id, Arc::new(conn.get_interrupt_handle()));
+            work(&conn)
+        })
+        .await
+    }
+
+    /// Runs schema-scoped catalog work, having first established that the schema
+    /// is there to be read.
+    async fn with_schema<T, F>(&self, schema: &str, work: F) -> Result<T, SqliteError>
+    where
+        F: FnOnce(&Connection) -> Result<T, SqliteError> + Send + 'static,
+        T: Send + 'static,
+    {
+        let schema = schema.to_string();
+        self.with_connection(move |conn| {
+            metadata::require_schema(conn, &schema)?;
+            work(conn)
+        })
+        .await
+    }
+
+    /// The databases attached to this connection, for the navigator root.
+    pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, SqliteError> {
+        self.with_connection(metadata::schemas).await
+    }
+
+    /// Tables, views, and virtual tables within a schema.
+    pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, SqliteError> {
+        let owned = schema.to_string();
+        self.with_schema(schema, move |conn| metadata::relations(conn, &owned))
+            .await
+    }
+
+    /// Column definitions for one relation.
+    pub async fn columns(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<ColumnInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::columns(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// The statement a view is defined by; `None` for a relation that has none.
+    pub async fn definition(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Option<String>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::definition(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// Indexes on one relation.
+    pub async fn indexes(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<IndexInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::indexes(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// Foreign keys declared by one relation.
+    pub async fn foreign_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<RelationshipInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::foreign_keys(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// Foreign keys other relations declare against this one.
+    pub async fn referenced_by(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<RelationshipInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::referenced_by(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// UNIQUE constraints. SQLite records no CHECK constraint outside the DDL
+    /// text, so none is reported — see `metadata`.
+    pub async fn constraints(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<ConstraintInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::constraints(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// Triggers on one relation, with the statement each was created from.
+    pub async fn triggers(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<TriggerInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::triggers(conn, &owned, &relation)
+        })
+        .await
     }
 
     /// Prepare `sql` and begin streaming results as Arrow batches of

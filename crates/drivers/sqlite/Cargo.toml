@@ -13,6 +13,10 @@ tokio = { workspace = true, features = ["sync"] }
 # the client's behaviour to the machine it happens to run on.
 rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
 thiserror.workspace = true
+# Metadata crosses the FFI as JSON, as it does for PostgreSQL: a few thousand
+# short rows, where Arrow buys nothing and a JSONDecoder call on the far side
+# buys a lot.
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full"] }
