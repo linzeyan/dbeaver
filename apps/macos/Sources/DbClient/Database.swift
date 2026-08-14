@@ -28,7 +28,14 @@ struct DbError: Error, CustomStringConvertible {
 /// Every call blocks, so nothing here may run on the main thread. Phase 1
 /// replaces this with an event-queue design; the blocking shape is kept for now
 /// because it is small enough to audit by reading it.
-final class Database {
+///
+/// `@unchecked Sendable` states the arrangement the core already documents
+/// rather than a hope: every call but `cancel()` runs on the one serial queue
+/// that owns this connection, which is what makes the shared `errOut` slot
+/// below safe. `cancel()` is the deliberate exception — it has to be reachable
+/// while the queue is blocked, or it would arrive after the statement it exists
+/// to stop — and it touches only `handle`, which never changes after `init`.
+final class Database: @unchecked Sendable {
     private let handle: OpaquePointer
 
     init(connString: String) throws {
