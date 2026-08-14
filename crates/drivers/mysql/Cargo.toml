@@ -1,0 +1,31 @@
+[package]
+name = "driver-mysql"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+futures-util.workspace = true
+thiserror.workspace = true
+# `default` is not a TLS preset here — it links a system zlib and nothing else —
+# so turning it off is required rather than tidy. `default-rustls-ring` buys
+# rustls, the pure-Rust deflate backend and the derive macros in one name.
+#
+# sqlx was the alternative and was rejected for one concrete reason: MySQL sends
+# ENUM, SET, TEXT and BLOB as the same wire types as CHAR and VARCHAR, and the
+# only thing separating them — and BIGINT from BIGINT UNSIGNED — is the column
+# flag word. sqlx keeps `MySqlTypeInfo`'s fields private and offers only a
+# rendered type name, so every one of those distinctions would have to be
+# recovered by matching a string.
+mysql_async = { version = "0.37", default-features = false, features = [
+    "default-rustls-ring",
+] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

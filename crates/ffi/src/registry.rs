@@ -15,6 +15,7 @@ use dbconn::{DbError, Driver};
 use driver_clickhouse::ChSource;
 use driver_duckdb::DuckSource;
 use driver_mongodb::MongoSource;
+use driver_mysql::MySqlSource;
 use driver_postgres::PgSource;
 use driver_sqlite::SqliteSource;
 use serde::Serialize;
@@ -75,6 +76,12 @@ pub const CATALOG: &[Catalogued] = &[
         default_port: Some(27017),
     },
     Catalogued {
+        scheme: "mysql",
+        label: "MySQL",
+        shape: Shape::Server,
+        default_port: Some(3306),
+    },
+    Catalogued {
         scheme: "clickhouse",
         label: "ClickHouse",
         shape: Shape::Server,
@@ -132,6 +139,10 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // of what the MongoDB URI parser reads, and `mongodb+srv` in particular
         // means "look the hosts up in DNS" rather than naming one.
         "mongodb" | "mongodb+srv" => Ok(Box::new(MongoSource::connect(url).await?)),
+        // Passed on whole for the third time, and for the third distinct
+        // reason: `mysql://` is the URL form `mysql_async` reads, so the scheme
+        // is part of what it parses rather than a prefix to strip off.
+        "mysql" => Ok(Box::new(MySqlSource::connect(url).await?)),
         // Rewritten to `http://`, which is the transport: the driver reads
         // `FORMAT ArrowStream` over ClickHouse's HTTP interface, and the scheme
         // the user writes names the database rather than the protocol carrying

@@ -105,7 +105,7 @@ test: ## Unit tests (no database required)
 	cargo test --workspace
 
 .PHONY: test-integration
-test-integration: db-check db-check-mongo db-check-clickhouse ## Tests requiring a database server
+test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The SQL statement splitter's checks live behind a flag on the app binary
@@ -214,6 +214,35 @@ db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, Gre
 .PHONY: db-down-compatible
 db-down-compatible: ## Stop and remove the PostgreSQL-compatible containers
 	-docker rm -f $(COCKROACH_CONTAINER) $(GREPTIME_CONTAINER)
+
+# MySQL. No seeding here: the driver's own tests build the fixture themselves,
+# because a fixture kept in a Makefile drifts away from the assertions that read
+# it and nobody notices until one of them fails for the wrong reason.
+MYSQL_CONTAINER := mysql-test
+MYSQL_PORT      := 53306
+MYSQL_IMAGE     := mysql:8
+
+.PHONY: db-up-mysql
+db-up-mysql: ## Start the MySQL test container
+	@docker start $(MYSQL_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(MYSQL_CONTAINER) \
+			-e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=test \
+			-p $(MYSQL_PORT):3306 $(MYSQL_IMAGE)
+	@echo "waiting for mysql..."
+	@for i in $$(seq 1 60); do \
+		docker exec $(MYSQL_CONTAINER) mysqladmin ping -uroot -ptest --silent \
+			>/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+
+.PHONY: db-down-mysql
+db-down-mysql: ## Stop and remove the MySQL test container
+	-docker rm -f $(MYSQL_CONTAINER)
+
+.PHONY: db-check-mysql
+db-check-mysql: ## Fail unless the MySQL test container is reachable
+	@docker exec $(MYSQL_CONTAINER) mysqladmin ping -uroot -ptest --silent >/dev/null 2>&1 \
+		|| { echo "mysql not running; run 'make db-up-mysql'"; exit 1; }
 
 # ClickHouse, whose fixture is a seed script rather than a few inserts: the
 # driver's argument is about types, so the table has to contain the types it

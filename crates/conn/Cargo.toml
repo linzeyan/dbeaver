@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-mongodb = { path = "../drivers/mongodb" }
+driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }
 tokio = { workspace = true, features = ["full"] }
@@ -25,3 +26,6 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 tokio-postgres.workspace = true
 mongodb = "3"
 bson = "2"
+mysql_async = { version = "0.37", default-features = false, features = [
+    "default-rustls-ring",
+] }
