@@ -479,6 +479,37 @@ pub unsafe extern "C" fn db_cursor(
     }
 }
 
+/// Exports the cursor's schema into `out` (an `ArrowSchema` the caller owns and
+/// releases through its own `release` callback). Returns 0 on success.
+///
+/// # Safety
+/// `cursor` must be live; `out` must point to writable `ArrowSchema` storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cursor_schema(
+    cursor: *mut DbCursor,
+    out: *mut FFI_ArrowSchema,
+    err: *mut *mut c_char,
+) -> c_int {
+    if cursor.is_null() || out.is_null() {
+        unsafe { set_err(err, "null cursor or out") };
+        return -1;
+    }
+    let c = unsafe { &*cursor };
+    // Exported as a struct array, like the query path, so the schema has to be
+    // the struct of the fields rather than the bare field list.
+    let dt = arrow::datatypes::DataType::Struct(c.cursor.schema().fields().clone());
+    match FFI_ArrowSchema::try_from(&dt) {
+        Ok(schema) => {
+            unsafe { ptr::write(out, schema) };
+            0
+        }
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
 /// Fetches the next batch of rows from the cursor.
 ///
 /// Returns 1 when `out` was filled, 0 when the result is exhausted,

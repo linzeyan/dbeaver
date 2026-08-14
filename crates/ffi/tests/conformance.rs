@@ -26,9 +26,11 @@
 //!    returning -1 before the stream is drained and the real count after; `db_query`
 //!    's `err_position` out-parameter carrying a non-zero position for a statement
 //!    with a syntax error, and staying 0 for an error that has no position.
-//!    Also `db_cursor` + `db_cursor_next` + `db_cursor_close` + `db_cursor_free`
-//!    paging a result to the 0 return, freeing an open cursor without closing it,
-//!    and `db_cursor`'s null-sql, invalid-UTF-8 and `err_position` failure paths.
+//!    Also the cursor surface — `db_cursor`, `db_cursor_schema`, `db_cursor_next`,
+//!    `db_cursor_close`, `db_cursor_free` — reporting its schema before the first
+//!    fetch, paging a result to the 0 return, freeing an open cursor without
+//!    closing it, and `db_cursor`'s null-sql, invalid-UTF-8 and `err_position`
+//!    failure paths.
 
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
@@ -37,8 +39,8 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
     db_cancel, db_columns_json, db_connect, db_constraints_json, db_cursor, db_cursor_close,
-    db_cursor_free, db_cursor_next, db_definition_json, db_foreign_keys_json, db_free,
-    db_indexes_json, db_query, db_query_free, db_query_next, db_query_rows_affected,
+    db_cursor_free, db_cursor_next, db_cursor_schema, db_definition_json, db_foreign_keys_json,
+    db_free, db_indexes_json, db_query, db_query_free, db_query_next, db_query_rows_affected,
     db_query_schema, db_referenced_by_json, db_relations_json, db_schemas_json, db_string_free,
     db_triggers_json,
 };
@@ -545,6 +547,17 @@ fn test_cursor_free_null_cursor() {
     // Should not crash
 }
 
+// Test db_cursor_schema with null cursor
+#[test]
+fn test_cursor_schema_null_cursor() {
+    let mut schema = FFI_ArrowSchema::empty();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_cursor_schema(ptr::null_mut(), &mut schema, &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_cursor_schema must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
 // Live-surface tests against the benchmark database
 #[ignore = "requires the benchmark database"]
 #[test]
@@ -769,6 +782,38 @@ fn test_query_syntax_error_with_position() {
     assert!(err_position > 0); // Should have a position for syntax error
 
     unsafe { db_string_free(err) };
+    unsafe { db_free(handle) };
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn test_cursor_schema() {
+    let conn_str =
+        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+    assert!(err.is_null(), "db_connect should not set err on success");
+
+    let sql_cstring = CString::new("SELECT * FROM bench_wide LIMIT 10").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut err_position: c_int = 0;
+    let cursor = unsafe { db_cursor(handle, sql_cstring.as_ptr(), 5, &mut err, &mut err_position) };
+    assert!(!cursor.is_null());
+    assert!(err.is_null(), "db_cursor should not set err on success");
+
+    // Test schema - should be available before any fetch
+    let mut schema = FFI_ArrowSchema::empty();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_cursor_schema(cursor, &mut schema, &mut err) };
+    assert_eq!(result, 0);
+    assert!(
+        err.is_null(),
+        "db_cursor_schema should not set err on success"
+    );
+
+    // Clean up
+    unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle) };
 }
 
