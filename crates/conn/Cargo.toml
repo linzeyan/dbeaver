@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 # A dev-dependency cycle, which cargo permits and which is the point: the trait
 # is only worth testing through the drivers that implement it, and they are the
 # ones that depend on this crate.
+driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-mongodb = { path = "../drivers/mongodb" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }

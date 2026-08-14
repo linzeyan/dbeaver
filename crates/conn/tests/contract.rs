@@ -127,6 +127,34 @@ async fn postgres() -> Subject {
     }
 }
 
+const CLICKHOUSE_URL: &str = "http://default:test@127.0.0.1:58123/bench";
+
+/// ClickHouse, which is the one here with no cursors of its own to speak of.
+///
+/// Its `cursor` and `query` are the same call, and that is not a shortcut: a
+/// ClickHouse response body already is a snapshot being read forward, so the two
+/// properties the trait asks a cursor for come free. The fixture is seeded by
+/// the driver's own test suite (`make db-up-clickhouse`), under the same table
+/// name the PostgreSQL benchmark uses.
+async fn clickhouse() -> Subject {
+    let driver = driver_clickhouse::ChSource::connect(CLICKHOUSE_URL)
+        .await
+        .expect("ClickHouse unreachable; run `make db-up-clickhouse`");
+    Subject {
+        driver: Box::new(driver),
+        schema: "bench".to_string(),
+        relation: "bench_wide".to_string(),
+        key: "id".to_string(),
+        read: "SELECT id FROM bench_wide ORDER BY id".to_string(),
+        broken: "SELECT id FROM bench_wide WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors: true,
+        positions: true,
+        _fixture: None,
+    }
+}
+
 const MONGO_URI: &str = "mongodb://127.0.0.1:57017";
 
 /// The same fixture as the others, in the one database here that has no schema.
@@ -516,6 +544,12 @@ async fn sqlite_satisfies_the_contract() {
 #[ignore = "requires the benchmark database"]
 async fn postgres_satisfies_the_contract() {
     every_check(&postgres().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a ClickHouse server"]
+async fn clickhouse_satisfies_the_contract() {
+    every_check(&clickhouse().await).await;
 }
 
 #[tokio::test]

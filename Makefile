@@ -105,7 +105,7 @@ test: ## Unit tests (no database required)
 	cargo test --workspace
 
 .PHONY: test-integration
-test-integration: db-check db-check-mongo ## Tests requiring a database server
+test-integration: db-check db-check-mongo db-check-clickhouse ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The SQL statement splitter's checks live behind a flag on the app binary
@@ -214,6 +214,38 @@ db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, Gre
 .PHONY: db-down-compatible
 db-down-compatible: ## Stop and remove the PostgreSQL-compatible containers
 	-docker rm -f $(COCKROACH_CONTAINER) $(GREPTIME_CONTAINER)
+
+# ClickHouse, whose fixture is a seed script rather than a few inserts: the
+# driver's argument is about types, so the table has to contain the types it
+# argues about.
+CLICKHOUSE_CONTAINER := clickhouse-test
+CLICKHOUSE_PORT      := 58123
+CLICKHOUSE_IMAGE     := clickhouse/clickhouse-server:24
+
+.PHONY: db-up-clickhouse
+db-up-clickhouse: ## Start the ClickHouse test container and seed it
+	@docker start $(CLICKHOUSE_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(CLICKHOUSE_CONTAINER) \
+			-p $(CLICKHOUSE_PORT):8123 -p 59000:9000 -e CLICKHOUSE_PASSWORD=test \
+			--ulimit nofile=262144:262144 $(CLICKHOUSE_IMAGE)
+	@echo "waiting for clickhouse..."
+	@for i in $$(seq 1 60); do \
+		curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/?query=SELECT+1" \
+			>/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/" \
+		--data-binary @crates/drivers/clickhouse/tests/seed.sql >/dev/null \
+		&& echo "clickhouse seeded"
+
+.PHONY: db-down-clickhouse
+db-down-clickhouse: ## Stop and remove the ClickHouse test container
+	-docker rm -f $(CLICKHOUSE_CONTAINER)
+
+.PHONY: db-check-clickhouse
+db-check-clickhouse: ## Fail unless the ClickHouse test container is reachable
+	@curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/?query=SELECT+1" >/dev/null 2>&1 \
+		|| { echo "clickhouse not running; run 'make db-up-clickhouse'"; exit 1; }
 
 .PHONY: db-check
 db-check: ## Fail unless the benchmark database is reachable

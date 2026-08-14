@@ -755,6 +755,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "bson",
+ "driver-clickhouse",
  "driver-mongodb",
  "driver-postgres",
  "driver-sqlite",
@@ -772,6 +773,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "dbconn",
+ "driver-clickhouse",
  "driver-mongodb",
  "driver-postgres",
  "driver-sqlite",
