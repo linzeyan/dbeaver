@@ -1,0 +1,16 @@
+[package]
+name = "dbcatalog"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dbconn = { path = "../conn" }
+dbsql = { path = "../sql" }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+arrow.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["full"] }

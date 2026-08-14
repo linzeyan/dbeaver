@@ -65,6 +65,14 @@ pub struct Dialect {
     /// What a placeholder looks like, for the highlighter to leave alone rather
     /// than paint as an identifier.
     pub parameters: &'static [Parameter],
+    /// The delimiters to write around a name that needs them.
+    ///
+    /// Preference, not capability: SQLite takes all three and is given the
+    /// standard one, so that a script written here reads as SQL rather than as
+    /// SQLite. SQL Server is given brackets because `"…"` there depends on
+    /// `QUOTED_IDENTIFIER` being on, and a client that emits a name whose
+    /// meaning depends on a session setting is emitting a guess.
+    pub identifier_quotes: (&'static str, &'static str),
     /// What this dialect calls a keyword beyond [`keywords::COMMON`].
     pub(crate) extra_keywords: &'static [&'static str],
 }
@@ -87,6 +95,36 @@ impl Dialect {
     pub(crate) fn is_keyword(&self, word: &str) -> bool {
         keywords::contains(keywords::COMMON, word) || keywords::contains(self.extra_keywords, word)
     }
+
+    /// `name` written so that this database reads it as the name it is.
+    ///
+    /// Quoted only when it has to be, because quoting everything is correct and
+    /// unreadable — an editor that completes `SELECT "id" FROM "orders"` is
+    /// technically right and nobody wants it. It has to be when the name holds
+    /// something an unquoted identifier cannot, when it starts with a digit, or
+    /// when it is a keyword and would be read as one.
+    ///
+    /// Case is why the second rule is not "is it lower case": PostgreSQL folds
+    /// an unquoted name down and SQL Server does not fold at all, so `Orders`
+    /// unquoted finds `orders` on one and `Orders` on the other. Quoting a name
+    /// that is not already lower case keeps it meaning what the catalog says it
+    /// means on every one of them.
+    pub fn quote(&self, name: &str) -> String {
+        let plain = !name.is_empty()
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+            && name
+                .chars()
+                .all(|c| c == '_' || c.is_ascii_lowercase() || c.is_ascii_digit())
+            && !self.is_keyword(name);
+        if plain {
+            return name.to_string();
+        }
+        let (open, close) = self.identifier_quotes;
+        // A delimiter inside the name is doubled, which is the same rule the
+        // lexer reads one by.
+        let inner = name.replace(close, &format!("{close}{close}"));
+        format!("{open}{inner}{close}")
+    }
 }
 
 /// The row every other row is a difference from.
@@ -106,6 +144,7 @@ const BASE: Dialect = Dialect {
     nested_block_comments: false,
     dollar_quoting: false,
     parameters: &[Parameter::Question],
+    identifier_quotes: ("\"", "\""),
     extra_keywords: &[],
 };
 
@@ -133,6 +172,7 @@ pub const MYSQL: Dialect = Dialect {
     backslash_escapes: true,
     string_prefixes: &['x', 'b', 'n'],
     hash_line_comments: true,
+    identifier_quotes: ("`", "`"),
     extra_keywords: keywords::MYSQL,
     ..BASE
 };
@@ -143,6 +183,7 @@ pub const MSSQL: Dialect = Dialect {
     string_prefixes: &['n'],
     nested_block_comments: true,
     parameters: &[Parameter::AtName],
+    identifier_quotes: ("[", "]"),
     extra_keywords: keywords::MSSQL,
     ..BASE
 };
