@@ -722,6 +722,45 @@ async fn the_types_this_database_is_used_for_arrive_as_themselves() {
     assert_eq!(ext.value(0), stated.value(0));
 }
 
+/// A batch the server will not describe still runs, and its decimals fall back.
+///
+/// Building a temp table and selecting from it is ordinary SQL Server work, and
+/// the server cannot describe such a batch before it runs — it answers with
+/// error 11525 instead. Refusing everything undescribable would break far more
+/// than the guard protects, so it is allowed through. What is lost with the
+/// description is the declared precision of a decimal column, which tiberius
+/// does not carry either, so the column arrives in the normalized layout with
+/// every value rescaled into it.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn a_batch_the_server_will_not_describe_is_still_run() {
+    let driver = source().await;
+    let mut stream = driver
+        .query(
+            "CREATE TABLE #t (a int, b decimal(9,2)); \
+             INSERT INTO #t VALUES (1, 2.50), (2, -3.75); \
+             SELECT a, b FROM #t ORDER BY a;",
+            10,
+        )
+        .await
+        .expect("an undescribable batch is still a batch");
+
+    let schema = stream.schema();
+    assert_eq!(schema.field(0).data_type(), &DataType::Int32);
+    assert_eq!(
+        schema.field(1).data_type(),
+        &DataType::Decimal128(38, 10),
+        "with no description there is no declared scale to use"
+    );
+
+    let batch = stream.next_batch().await.unwrap().expect("two rows");
+    let b = batch.column(1);
+    let b = b.as_any().downcast_ref::<Decimal128Array>().unwrap();
+    // 2.50 and -3.75, rescaled from the wire's scale of 2 into the column's 10.
+    assert_eq!(b.value(0), 25_000_000_000);
+    assert_eq!(b.value(1), -37_500_000_000);
+}
+
 /// A `geography` column is refused rather than read, because reading it is fatal.
 ///
 /// The failure asserted here is the specific one the guard produces. That
