@@ -14,3 +14,6 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 driver-postgres = { path = "../drivers/postgres" }
 serde = "1"
 serde_json = "1"
+
+[dev-dependencies]
+arrow = { workspace = true, features = ["ffi"] }
