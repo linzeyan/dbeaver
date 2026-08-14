@@ -384,6 +384,35 @@ mod tests {
     }
 
     #[test]
+    fn a_column_that_cannot_be_rendered_is_refused_before_the_first_batch() {
+        use arrow::datatypes::{UnionFields, UnionMode};
+        // arrow-rs has no union-to-union cast, so the zone cannot be dropped the
+        // way it is for the other containers, and the formatter refuses a named
+        // one. Better here, where the message can name the column and say to
+        // cast it, than three pages into the result.
+        let union = DataType::Union(
+            UnionFields::try_new(
+                [0],
+                [field(
+                    "when",
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("Asia/Taipei".into())),
+                )],
+            )
+            .unwrap(),
+            UnionMode::Sparse,
+        );
+        let err = Layout::of(&Schema::new(vec![field("v", union)]))
+            .err()
+            .expect("a column the grid could not be given");
+        let message = err.to_string();
+        assert!(
+            message.contains("\"v\""),
+            "it should name the column: {message}"
+        );
+        assert!(message.contains("CAST"), "and say what to write: {message}");
+    }
+
+    #[test]
     fn a_result_with_nothing_nested_in_it_is_not_copied() {
         let schema = Arc::new(Schema::new(vec![field("id", DataType::Int64)]));
         let layout = Layout::of(&schema).unwrap();

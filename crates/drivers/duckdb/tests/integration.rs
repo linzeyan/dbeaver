@@ -348,6 +348,59 @@ async fn a_variant_column_fails_with_something_to_do_about_it() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn a_batch_owns_its_buffers_after_the_database_is_gone() {
+    // The claim "duckdb-rs is zero-copy to Arrow" is repeated widely and is
+    // wrong as stated: `duckdb_data_chunk_to_arrow` converts a data chunk into
+    // Arrow-layout buffers in C++, and the binding destroys the chunk before it
+    // imports the array — a string column could not alias one anyway, since
+    // DuckDB's `string_t` is a sixteen-byte value with an inlined prefix and
+    // Arrow's is an offset into a shared buffer. What *is* zero-copy is
+    // everything after that, and this is the property that matters: the batch
+    // that comes out of the channel is self-contained, so the FFI layer can hand
+    // it to Swift after the result and the connection are both gone.
+    let fixture = Fixture::new(&counted(4_000));
+    let src = fixture.connect().await;
+    let mut stream = src.query("SELECT id, label FROM nums", 500).await.unwrap();
+    let batch = stream.next_batch().await.unwrap().expect("a batch");
+    drop(stream);
+    drop(src);
+    drop(fixture);
+
+    assert_eq!(col::<Int64Array>(&batch, "id").value(0), 0);
+    assert_eq!(col::<StringArray>(&batch, "label").value(499), "row-499");
+}
+
+#[tokio::test]
+async fn a_batch_cut_down_to_size_still_crosses_the_ffi_boundary() {
+    // `batch_rows` is honoured by slicing, and a slice is a view: its columns
+    // keep the buffers of the whole chunk and carry an offset into them. The
+    // Arrow C data interface says how to export that, and this is the check that
+    // what this driver emits survives the trip — the Swift reader indexes each
+    // column by its own offset, so a slice whose offset sat on a wrapper instead
+    // of on the columns would show the first rows of the chunk on every page.
+    let fixture = Fixture::new(&counted(4_000));
+    let src = fixture.connect().await;
+    let mut cursor = src.cursor("SELECT id, label FROM nums", 100).await.unwrap();
+    cursor.fetch().await.unwrap().expect("the first page");
+    let second = cursor.fetch().await.unwrap().expect("the second page");
+    assert_eq!(col::<Int64Array>(&second, "id").value(0), 100);
+
+    let exported = arrow::array::StructArray::from(second).into_data();
+    let array = arrow::ffi::FFI_ArrowArray::new(&exported);
+    let schema = arrow::ffi::FFI_ArrowSchema::try_from(exported.data_type()).unwrap();
+    let imported = arrow::array::StructArray::from(unsafe {
+        arrow::ffi::from_ffi(array, &schema).expect("a well-formed export")
+    });
+    let round_tripped = RecordBatch::from(&imported);
+    assert_eq!(round_tripped.num_rows(), 100);
+    assert_eq!(col::<Int64Array>(&round_tripped, "id").value(0), 100);
+    assert_eq!(
+        col::<StringArray>(&round_tripped, "label").value(99),
+        "row-199"
+    );
+}
+
+#[tokio::test]
 async fn the_columns_are_known_before_the_first_row() {
     // PostgreSQL's contract, restored. DuckDB settles every column's type at
     // execution, so `query` resolves without a row having been read — where
@@ -472,6 +525,32 @@ async fn a_page_agrees_with_the_page_before_it_across_a_write() {
         seen += page.num_rows();
     }
     assert_eq!(seen, 50_000, "the page count is the one the snapshot had");
+}
+
+#[tokio::test]
+async fn a_write_reports_its_count_as_a_row_rather_than_as_a_number() {
+    // The shape that differs from both other drivers, pinned rather than
+    // described. DuckDB answers an INSERT with an ordinary one-row result whose
+    // single `Count` column holds the number of rows written, so the count a
+    // user wants is in the grid — and `rows_affected` is the rows this result
+    // produced, which is one.
+    //
+    // Deliberately not guessed at from the shape: `SELECT count(*) AS "Count"`
+    // produces exactly the same result, and a number that is right for writes
+    // and silently wrong for that would be worse than one that always means the
+    // same thing.
+    let fixture = Fixture::new(&counted(10));
+    let src = fixture.connect().await;
+    let mut written = src
+        .query("INSERT INTO nums SELECT i, 'late' FROM range(3) t(i)", 100)
+        .await
+        .unwrap();
+
+    let batch = written.next_batch().await.unwrap().expect("the count row");
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(col::<Int64Array>(&batch, "Count").value(0), 3);
+    assert!(written.next_batch().await.unwrap().is_none());
+    assert_eq!(written.rows_affected(), Some(1));
 }
 
 #[tokio::test]
