@@ -23,4 +23,4 @@ pub use dialect::{
 };
 pub use lex::{Token, TokenKind, tokens};
 pub use parse::{Scope, Source, Statement, statement};
-pub use script::{Origin, Span, Target, error_offset, statements, target};
+pub use script::{Origin, Scan, Span, Target, error_offset, scan, statements, target};

@@ -81,6 +81,31 @@ pub(crate) fn spans(all: &[Token], chars: &[char]) -> Vec<Span> {
     found
 }
 
+/// Everything an editor asks about a buffer, from one scan of it.
+///
+/// The three questions — what to paint, where the statements are, what a run
+/// would send — are asked about the same text at the same moment, so answering
+/// them separately is three scans of a buffer that did not change between them.
+#[derive(Debug, Clone)]
+pub struct Scan {
+    pub tokens: Vec<Token>,
+    pub statements: Vec<Span>,
+    pub target: Option<Target>,
+}
+
+/// Reads `text` once and answers all three.
+pub fn scan(text: &str, selection: Span, dialect: &Dialect) -> Scan {
+    let chars: Vec<char> = text.chars().collect();
+    let all = tokens(text, dialect);
+    let statements = spans(&all, &chars);
+    let target = pick(&chars, &statements, selection);
+    Scan {
+        tokens: all,
+        statements,
+        target,
+    }
+}
+
 /// The statement a run means, given where the caret or the selection is.
 ///
 /// A selection is taken as written: somebody who highlighted three lines meant
@@ -89,18 +114,24 @@ pub(crate) fn spans(all: &[Token], chars: &[char]) -> Vec<Span> {
 /// in. `None` for a buffer with nothing in it to run.
 pub fn target(text: &str, selection: Span, dialect: &Dialect) -> Option<Target> {
     let chars: Vec<char> = text.chars().collect();
+    let all = tokens(text, dialect);
+    let statements = spans(&all, &chars);
+    pick(&chars, &statements, selection)
+}
+
+/// The same, for a caller that has already split the buffer.
+fn pick(chars: &[char], all: &[Span], selection: Span) -> Option<Target> {
     let end = chars.len() as u32;
 
     if selection.start != selection.end {
         let clamped = selection.start.min(end)..selection.end.min(end);
-        let span = trimmed(&chars, clamped);
+        let span = trimmed(chars, clamped);
         return (span.start != span.end).then_some(Target {
             span,
             origin: Origin::Selection,
         });
     }
 
-    let all = statements(text, dialect);
     if all.is_empty() {
         return None;
     }

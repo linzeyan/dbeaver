@@ -294,18 +294,20 @@ pub unsafe extern "C" fn db_sql_scan_json(
     };
 
     let dialect = dbsql::for_scheme(scheme);
-    let mut tokens = Vec::new();
-    for token in dbsql::tokens(text, dialect) {
-        tokens.extend_from_slice(&[token_code(token.kind), token.start, token.end]);
-    }
     let selection = selection_start.min(selection_end)..selection_start.max(selection_end);
+    let read = dbsql::scan(text, selection, dialect);
     let scan = Scan {
-        tokens,
-        statements: dbsql::statements(text, dialect)
-            .into_iter()
+        tokens: read
+            .tokens
+            .iter()
+            .flat_map(|t| [token_code(t.kind), t.start, t.end])
+            .collect(),
+        statements: read
+            .statements
+            .iter()
             .flat_map(|s| [s.start, s.end])
             .collect(),
-        target: dbsql::target(text, selection, dialect).map(RunTarget::from),
+        target: read.target.map(RunTarget::from),
     };
     json_result(&scan, err)
 }
