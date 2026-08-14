@@ -928,6 +928,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "dbconn",
+ "dbsql",
  "driver-clickhouse",
  "driver-duckdb",
  "driver-mongodb",
