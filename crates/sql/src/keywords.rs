@@ -9,7 +9,8 @@
 //! The lists are read out of the databases rather than remembered, which is the
 //! only way they stay true across a version bump. Each table records the query
 //! that produced it. Two needed a program instead of a query and those are kept
-//! as `crates/drivers/{duckdb,sqlite}/examples/keywords.rs`, so the tables can
+//! as `crates/drivers/duckdb/examples/duckdb-keywords.rs` and its SQLite
+//! counterpart, so the tables can
 //! be regenerated rather than patched by hand.
 //!
 //! Every list is sorted, and that is load-bearing rather than tidy: lookup is a
