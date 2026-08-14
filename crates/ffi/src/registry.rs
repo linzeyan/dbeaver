@@ -13,6 +13,7 @@
 
 use dbconn::{DbError, Driver};
 use driver_clickhouse::ChSource;
+use driver_duckdb::DuckSource;
 use driver_mongodb::MongoSource;
 use driver_postgres::PgSource;
 use driver_sqlite::SqliteSource;
@@ -80,6 +81,12 @@ pub const CATALOG: &[Catalogued] = &[
         default_port: Some(8123),
     },
     Catalogued {
+        scheme: "duckdb",
+        label: "DuckDB",
+        shape: Shape::File,
+        default_port: None,
+    },
+    Catalogued {
         scheme: "sqlite",
         label: "SQLite",
         shape: Shape::File,
@@ -135,6 +142,11 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         "clickhouses" => Ok(Box::new(
             ChSource::connect(&format!("https://{rest}")).await?,
         )),
+        // Same path convention as SQLite, and for the same reason: three
+        // slashes give an absolute path, two give one relative to where the
+        // client was started. `duckdb://:memory:` opens a database that is
+        // never written down.
+        "duckdb" => Ok(Box::new(DuckSource::connect(rest).await?)),
         "sqlite" => Ok(Box::new(SqliteSource::connect(rest).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
