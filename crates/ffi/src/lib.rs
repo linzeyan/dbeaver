@@ -436,13 +436,10 @@ pub unsafe extern "C" fn db_string_free(s: *mut c_char) {
 
 /// Opens a cursor over `sql` and returns a handle to fetch pages.
 ///
-/// The cursor is declared within a transaction that will be kept open for
-/// the lifetime of the cursor. The transaction is rolled back when the
-/// cursor is dropped, ensuring that no changes are committed.
-///
-/// A cursor occupies its connection while open, so the handle owns the
-/// transaction that declared it. The transaction is rolled back when the
-/// cursor is dropped, ensuring that no changes are committed.
+/// A cursor occupies its connection while open, so the handle owns a
+/// connection of its own for the lifetime of the cursor. Freeing the cursor
+/// closes that connection, which is what rolls its transaction back — so a
+/// front-end that drops a result mid-scroll leaves nothing behind.
 ///
 /// # Safety
 /// `handle` must be live; `sql` must be a valid NUL-terminated C string;
