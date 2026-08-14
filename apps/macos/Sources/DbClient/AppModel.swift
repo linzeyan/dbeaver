@@ -393,7 +393,7 @@ final class AppModel {
             remembering: (settings, password))
     }
 
-    /// Connects to a raw libpq string, from `--conn`.
+    /// Connects to a raw connection URL, from `--conn`.
     ///
     /// Deliberately not remembered. This is the automation path — the
     /// benchmarks and the screenshot captures run through it — and writing
@@ -403,7 +403,7 @@ final class AppModel {
     /// rather than retyped.
     func connect(using connString: String) {
         connectionDraft = ConnectionSettings(connectionString: connString)
-        connectionPassword = ConnectionString.parse(connString)["password"] ?? ""
+        connectionPassword = ConnectionURL.password(in: connString) ?? ""
         open(connString, remembering: nil)
     }
 
@@ -1782,11 +1782,10 @@ final class AppModel {
     }
 
     private static func label(for connString: String) -> String {
-        // "host=… dbname=…" → "dbname@host", which is how these tools name a
-        // session and how users refer to one. Read by the same parser that
-        // writes these strings, so a quoted value is not mistaken for two.
-        let pairs = ConnectionString.parse(connString)
-        return "\(pairs["dbname"] ?? "database")@\(pairs["host"] ?? "localhost")"
+        // "postgres://user@host/db" → "db@host", which is how these tools name
+        // a session and how users refer to one. A database that is a file has no
+        // host, and is named by its file instead.
+        ConnectionURL.label(for: connString)
     }
 
     /// "1 schema" / "2 schemas". A label that reads "1 objects" is small, but it

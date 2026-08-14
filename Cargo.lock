@@ -540,9 +540,13 @@ name = "dbffi"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "dbconn",
  "driver-postgres",
+ "driver-sqlite",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 

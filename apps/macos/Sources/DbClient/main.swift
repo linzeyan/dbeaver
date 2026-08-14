@@ -28,8 +28,9 @@ func argument(_ flag: String) -> String? {
     return CommandLine.arguments[i + 1]
 }
 
-/// `--conn "host=… port=… user=… password=… dbname=…"` connects to that
-/// database without asking. Every automated path — the benchmarks, the
+/// `--conn "postgres://user:password@host:port/database"` connects to that
+/// database without asking. The scheme names the driver — `sqlite:///path.db`
+/// reaches a file instead. Every automated path — the benchmarks, the
 /// screenshot captures — comes in this way, and nothing it opens is remembered:
 /// a capture run must not change which database the next launch opens.
 let connArgument = argument("--conn")
@@ -42,7 +43,7 @@ let connArgument = argument("--conn")
 /// previous run happened to leave in UserDefaults.
 let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 
-/// `--reconnect "host=… dbname=…"` opens a second database once the first
+/// `--reconnect "postgres://…/other"` opens a second database once the first
 /// connection has landed, through the File menu's own Connect… item, printing
 /// what the window holds before and after.
 ///
@@ -768,7 +769,7 @@ if benchMode {
     else {
         fputs(
             "--bench needs a database and has no window to ask in.\n"
-                + "  Pass --conn \"host=… port=… user=… password=… dbname=…\",\n"
+                + "  Pass --conn \"postgres://user:password@host:port/database\",\n"
                 + "  or connect once in the application so the connection is remembered.\n",
             stderr)
         exit(1)

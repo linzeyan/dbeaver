@@ -10,9 +10,11 @@
 //! blocking because a background dispatch queue on the Swift side is enough to
 //! measure with, and the simpler surface is easier to trust.
 
+mod registry;
+
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
-use driver_postgres::{ArrowStream, CursorCancel, PgSource};
+use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::sync::OnceLock;
@@ -33,12 +35,17 @@ unsafe fn set_err(err: *mut *mut c_char, msg: impl std::fmt::Display) {
     unsafe { *err = c.into_raw() };
 }
 
+/// One open session, whichever database is behind it.
+///
+/// The driver is chosen by the scheme of the connection string and never
+/// mentioned again: everything below this line is written against the trait, so
+/// adding a database adds an arm to `registry` and nothing here.
 pub struct DbHandle {
-    source: PgSource,
+    driver: Box<dyn Driver>,
 }
 
 pub struct DbQuery {
-    stream: ArrowStream,
+    stream: Box<dyn ResultStream>,
 }
 
 /// The canceller is a field of its own rather than something reached for through
@@ -47,10 +54,18 @@ pub struct DbQuery {
 /// thread. Each entry point therefore borrows only the field it needs — the two
 /// are disjoint, so neither has to know the other is running.
 pub struct DbCursor {
-    cursor: driver_postgres::Cursor,
-    cancel: CursorCancel,
+    cursor: Box<dyn Cursor>,
+    cancel: Box<dyn CursorCancel>,
 }
 
+/// Opens the database `conn_str` names.
+///
+/// The string starts with the driver it wants — `postgres://…`, `sqlite://…` —
+/// and there is no fallback for one that does not. A bare `host=… port=…` is a
+/// PostgreSQL string today and a MySQL string in the same shape tomorrow, and a
+/// client that guesses between them is one that connects to the wrong database
+/// without saying so.
+///
 /// # Safety
 /// `conn_str` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
@@ -69,8 +84,8 @@ pub unsafe extern "C" fn db_connect(
             return ptr::null_mut();
         }
     };
-    match runtime().block_on(PgSource::connect(s)) {
-        Ok(source) => Box::into_raw(Box::new(DbHandle { source })),
+    match runtime().block_on(registry::connect(s)) {
+        Ok(driver) => Box::into_raw(Box::new(DbHandle { driver })),
         Err(e) => {
             unsafe { set_err(err, e) };
             ptr::null_mut()
@@ -96,11 +111,10 @@ pub unsafe extern "C" fn db_free(handle: *mut DbHandle) {
 /// the cancel travels on a connection of its own and touches nothing the running
 /// call owns.
 ///
-/// A handle is several connections — statements run on the session, metadata
-/// reads on whichever the pool handed out — and which one is busy is not
-/// something the caller can see, so every one of them is named. A cursor is the
-/// exception: it is handed out to be held, so it carries its own
-/// `db_cursor_cancel`.
+/// A handle is a session rather than a connection, and may be several of them —
+/// which one is busy is not something the caller can see, and not something the
+/// caller should have to. A cursor is the exception: it is handed out to be
+/// held, so it carries its own `db_cursor_cancel`.
 ///
 /// Delivery is not interruption. A statement that finished first, or that was
 /// never running, leaves the server nothing to cancel and this still returns 0.
@@ -117,7 +131,7 @@ pub unsafe extern "C" fn db_cancel(handle: *mut DbHandle, err: *mut *mut c_char)
         return -1;
     }
     let h = unsafe { &*handle };
-    match runtime().block_on(h.source.cancel()) {
+    match runtime().block_on(h.driver.cancel()) {
         Ok(()) => 0,
         Err(e) => {
             unsafe { set_err(err, e) };
@@ -161,7 +175,7 @@ pub unsafe extern "C" fn db_schemas_json(
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    match runtime().block_on(h.source.schemas()) {
+    match runtime().block_on(h.driver.schemas()) {
         Ok(v) => json_result(&v, err),
         Err(e) => {
             unsafe { set_err(err, e) };
@@ -192,7 +206,7 @@ pub unsafe extern "C" fn db_relations_json(
             return ptr::null_mut();
         }
     };
-    match runtime().block_on(h.source.relations(s)) {
+    match runtime().block_on(h.driver.relations(s)) {
         Ok(v) => json_result(&v, err),
         Err(e) => {
             unsafe { set_err(err, e) };
@@ -238,7 +252,7 @@ macro_rules! relation_metadata {
                     }
                 }
             };
-            match runtime().block_on(h.source.$method(s, r)) {
+            match runtime().block_on(h.driver.$method(s, r)) {
                 Ok(v) => json_result(&v, err),
                 Err(e) => {
                     unsafe { set_err(err, e) };
@@ -322,7 +336,7 @@ pub unsafe extern "C" fn db_query(
             return ptr::null_mut();
         }
     };
-    match runtime().block_on(h.source.query(s, batch_rows)) {
+    match runtime().block_on(h.driver.query(s, batch_rows)) {
         Ok(stream) => Box::into_raw(Box::new(DbQuery { stream })),
         Err(e) => {
             if let (false, Some(p)) = (err_position.is_null(), e.statement_position()) {
@@ -478,7 +492,7 @@ pub unsafe extern "C" fn db_cursor(
             return ptr::null_mut();
         }
     };
-    match runtime().block_on(h.source.cursor(s, batch_rows)) {
+    match runtime().block_on(h.driver.cursor(s, batch_rows)) {
         Ok(cursor) => {
             let cancel = cursor.canceller();
             Box::into_raw(Box::new(DbCursor { cursor, cancel }))

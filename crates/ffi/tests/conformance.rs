@@ -18,7 +18,7 @@
 //!    `#[ignore = "requires the benchmark database"]` so `make test-integration`
 //!    runs them and `make test` does not — the same convention
 //!    `crates/drivers/postgres/tests/integration.rs` already uses. Connection
-//!    string: `host=127.0.0.1 port=55432 user=bench password=bench dbname=bench`.
+//!    string: `postgres://bench:bench@127.0.0.1:55432/bench`.
 //!    Cover: `db_connect` / `db_free`; every metadata entry point returning
 //!    parseable JSON; `db_query` + `db_query_schema` + `db_query_next` draining
 //!    a result to the 0 return, with the exported `ArrowSchema` and `ArrowArray`
@@ -572,8 +572,7 @@ fn test_cursor_schema_null_cursor() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_connect_and_free() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -585,8 +584,7 @@ fn test_connect_and_free() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_schemas_json() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -610,8 +608,7 @@ fn test_schemas_json() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_relations_json() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -636,8 +633,7 @@ fn test_relations_json() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_columns_json() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -670,8 +666,7 @@ fn test_columns_json() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_query_and_drain() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -735,8 +730,7 @@ fn test_query_and_drain() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_query_syntax_error() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -768,8 +762,7 @@ fn test_query_syntax_error() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_query_syntax_error_with_position() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -810,8 +803,7 @@ fn test_cursor_cancel_stops_a_fetch_in_flight() {
     // routes a browse Cancel to `db_cancel` offers a button that does nothing.
     // Nothing else in this harness would notice, because every other cancel
     // test is about the session.
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -868,8 +860,7 @@ fn test_cursor_cancel_stops_a_fetch_in_flight() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_cursor_schema() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -900,8 +891,7 @@ fn test_cursor_schema() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_cursor_pages_result_and_ends() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -963,8 +953,7 @@ fn test_cursor_free_without_close() {
     // what makes that observable: each cursor opens a connection of its own, so a release
     // path that leaked one would run the server out of connections inside this loop, while
     // a correct one never holds more than a single cursor's worth at a time.
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -1001,8 +990,7 @@ fn test_cursor_free_without_close() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_cursor_syntax_error_with_position() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -1035,8 +1023,7 @@ fn test_cursor_syntax_error_with_position() {
 #[test]
 fn test_cursor_next_null_out() {
     // A real cursor, so the null out-parameter is what fails rather than the null cursor.
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -1061,8 +1048,7 @@ fn test_cursor_next_null_out() {
 fn test_cursor_null_sql() {
     // A live handle, so the null sql is what fails — with a null handle this path is
     // unreachable and the test would pass with the sql check deleted.
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());
@@ -1079,8 +1065,7 @@ fn test_cursor_null_sql() {
 #[ignore = "requires the benchmark database"]
 #[test]
 fn test_cursor_invalid_utf8_sql() {
-    let conn_str =
-        CString::new("host=127.0.0.1 port=55432 user=bench password=bench dbname=bench").unwrap();
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
     assert!(!handle.is_null());

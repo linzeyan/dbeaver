@@ -42,7 +42,10 @@ PG_IMAGE     := postgres:17
 # has no built-in connection: without --conn it opens the connection form and
 # waits for someone to type into it, which no script can do. Derived from
 # PG_PORT rather than written out again, so moving the port moves this too.
-PG_CONN := host=127.0.0.1 port=$(PG_PORT) user=bench password=bench dbname=bench
+#
+# A URL rather than a libpq keyword string: the scheme is how the core picks a
+# driver, and there is deliberately no fallback for a string that names none.
+PG_CONN := postgres://bench:bench@127.0.0.1:$(PG_PORT)/bench
 
 TOOLS := tools
 BASELINE := $(TOOLS)/baseline

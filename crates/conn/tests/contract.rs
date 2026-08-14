@@ -14,7 +14,7 @@ use dbconn::Driver;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
-const PG_CONN: &str = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench";
+const PG_CONN: &str = "postgres://bench:bench@127.0.0.1:55432/bench";
 
 /// A driver, plus the least a database has to contain for these checks to mean
 /// anything: somewhere to look, and a table of ascending integers to read.
