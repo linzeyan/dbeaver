@@ -68,6 +68,11 @@ void db_free(DbHandle* handle);
 // protocol cannot interleave one, so an in-band cancel would queue behind the
 // statement it is meant to stop.
 //
+// A handle is several connections: statements run on the session and metadata
+// reads on a pooled one, so all of them are named rather than the caller being
+// asked which is busy. Not cursors — those are handed out to be held, and carry
+// db_cursor_cancel instead.
+//
 // Delivered is not interrupted: a statement that had already finished leaves
 // nothing to cancel and this still returns 0. What actually happened is visible
 // only at db_query_next, as -2.

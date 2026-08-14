@@ -135,6 +135,10 @@ pub struct PgSource {
     pool: Arc<Mutex<Vec<Client>>>,
     semaphore: Arc<Semaphore>,
     conn_str: String,
+    /// One cancel token per connection this session has ever opened, kept
+    /// because `cancel` has to name a backend and the connection running the
+    /// statement may be checked out of the pool and unreachable through it.
+    cancels: Arc<Mutex<Vec<CancelToken>>>,
 }
 
 /// A pooled connection, borrowed for one call and returned when it goes out of scope.
@@ -194,12 +198,14 @@ impl PgSource {
         // which acquire_connection already does.
         let pool = Arc::new(Mutex::new(Vec::new()));
         let semaphore = Arc::new(Semaphore::new(4));
+        let cancels = Arc::new(Mutex::new(vec![session.cancel_token()]));
 
         Ok(Self {
             session,
             pool,
             semaphore,
             conn_str: conn_str.to_string(),
+            cancels,
         })
     }
 
@@ -226,6 +232,9 @@ impl PgSource {
 
         // If no connection available, create a new one
         let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls).await?;
+        // Registered before it is handed out, so a statement can never be running
+        // on a connection `cancel` does not know about.
+        self.cancels.lock().await.push(client.cancel_token());
         // The connection future drives the socket and must outlive us. Phase 0
         // has no reconnect story; a dropped connection surfaces as a query error.
         tokio::spawn(async move {
@@ -241,27 +250,39 @@ impl PgSource {
         })
     }
 
-    /// Asks the server to abandon whatever this connection is currently running.
+    /// Asks the server to abandon whatever this session is currently running.
     ///
     /// The request travels on a connection of its own, which is why this can be
-    /// called while the socket is busy streaming a result: the protocol has no
-    /// way to interleave one, so a cancel sent in-band would sit in the queue
-    /// behind the statement it is trying to stop.
+    /// called while a socket is busy streaming a result: the protocol has no way
+    /// to interleave one, so a cancel sent in-band would sit in the queue behind
+    /// the statement it is trying to stop.
+    ///
+    /// Every connection is named, not just the session, because a session owns
+    /// several and the caller cannot see which one is busy: statements run on the
+    /// session, metadata reads run on whichever connection the pool handed out,
+    /// and a pooled connection in use is not in the pool to be found. Naming an
+    /// idle backend costs a round trip and does nothing, which is the price of
+    /// not having to know. A cursor is the exception — it carries its own
+    /// canceller, because it is handed to the caller and outlives the call that
+    /// made it.
     ///
     /// Best-effort by design. The server may finish before the request lands, or
     /// the statement may be between commands with nothing to cancel, and neither
-    /// is an error — success here means the request was delivered, not that
+    /// is an error — success here means the requests were delivered, not that
     /// anything was interrupted. What actually happened shows up as the running
     /// statement failing with `is_cancelled`, or not failing at all.
-    ///
-    /// With a dedicated session connection, this cancels the connection that is
-    /// currently running a statement. This is the correct behavior because
-    /// cancellation needs to name one backend, and with a single session
-    /// connection we know exactly which one to cancel.
     pub async fn cancel(&self) -> Result<(), PgError> {
-        // Cancel using the session connection which is the one that would be
-        // running the statement we want to cancel
-        self.session.cancel_token().cancel_query(NoTls).await?;
+        // Cloned out from under the lock: a cancel is a round trip, and holding
+        // the registry across all of them would block the connection being opened
+        // by whatever we are trying to cancel.
+        let tokens = self.cancels.lock().await.clone();
+        // Every connection is asked before the first refusal is reported, so one
+        // dropped connection cannot spare the rest.
+        let results =
+            futures_util::future::join_all(tokens.iter().map(|t| t.cancel_query(NoTls))).await;
+        for result in results {
+            result?;
+        }
         Ok(())
     }
 
