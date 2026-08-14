@@ -829,9 +829,16 @@ struct QueryPane: View {
                 // The scheme goes with them: it is how the core knows which
                 // database's rules to read the buffer by, and reading MySQL as
                 // PostgreSQL mis-colours it and splits it in the wrong places.
+                // The offers come through a closure for the same reason the
+                // scheme comes through a string: the editor is handed what it
+                // needs to do its job, not the connection it is being done
+                // against.
                 SQLEditor(
                     text: $model.queryText, selection: $model.querySelection,
-                    scheme: model.scheme
+                    scheme: model.scheme,
+                    offers: { text, caret, then in
+                        model.completions(in: text, caret: caret, then: then)
+                    }
                 )
                 .padding(.horizontal, Theme.Space.md)
                 .padding(.vertical, Theme.Space.sm)

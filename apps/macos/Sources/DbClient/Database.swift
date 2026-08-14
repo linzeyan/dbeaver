@@ -116,6 +116,24 @@ final class Database: @unchecked Sendable {
             db_triggers_json(handle, schema, relation, &errOut), as: [TriggerInfo].self)
     }
 
+    /// What could be typed at `caret` in `text`, best first.
+    ///
+    /// A metadata call like the ones above, and blocking like them, though it is
+    /// asked on a keystroke: the core remembers what it learned, so the first
+    /// question on a connection costs the round trips and the rest are answered
+    /// from memory.
+    func completions(in text: String, caret: Int) throws -> SQLCompletion.Answer {
+        try decodeJSON(
+            db_complete_json(handle, text, UInt32(clamping: caret), &errOut),
+            as: SQLCompletion.Answer.self)
+    }
+
+    /// Forgets the names this connection has been told, so the next completion
+    /// asks the server again. What Refresh means for the editor.
+    func forgetNames() {
+        db_names_forget(handle)
+    }
+
     /// Scratch storage for the C error out-parameter. Calls are serialized by
     /// the caller (all metadata access happens on one background queue), so a
     /// single slot is sufficient and keeps the call sites readable.

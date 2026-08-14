@@ -580,7 +580,12 @@ final class AppModel {
         // keeps several metadata round trips from looking like an idle window.
         if selected != nil { browseResult.beginLoading() }
         run { db in
-            try Self.inventory(of: db)
+            // Refresh means the database changed under us. The names the editor
+            // completes from were learned before that, so they go with the tree
+            // — one button, or the navigator and the editor disagree about which
+            // tables exist.
+            db.forgetNames()
+            return try Self.inventory(of: db)
         } then: { [self] inventory in
             schemas = inventory.schemas
             relations = inventory.relations
@@ -1320,6 +1325,33 @@ final class AppModel {
     /// "which of these five is about to run" is the question a script raises and
     /// a blinking caret does not answer.
     var runTarget: SQLScript.Target? { scan.target }
+
+    /// What could be typed at `caret`, answered on the main actor.
+    ///
+    /// Silent on failure, which every other call here is not: a completion that
+    /// could not be fetched is a list that does not appear, and the user has
+    /// already moved on to the next character. Raising the error banner over it
+    /// would put this application's plumbing on screen in the middle of somebody
+    /// typing a word.
+    ///
+    /// Skipped outright while something is running. The core queue is serial, so
+    /// a request made now would be answered when the statement finishes — long
+    /// after the caret it was about moved — and every keystroke until then would
+    /// add another.
+    func completions(
+        in text: String, caret: Int, then apply: @escaping @MainActor (SQLCompletion.Answer) -> Void
+    ) {
+        guard let db, !isBusy else {
+            apply(.none)
+            return
+        }
+        queue.async {
+            let answer = (try? db.completions(in: text, caret: caret)) ?? .none
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { apply(answer) }
+            }
+        }
+    }
 
     func runCurrentQuery() {
         // ⌘R means "run what I am looking at". In the Query tab that is one

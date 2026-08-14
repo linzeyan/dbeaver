@@ -27,6 +27,18 @@ struct SQLEditor: NSViewRepresentable {
     /// not a fact about a text view.
     let scheme: String
 
+    /// Asks the core what could be typed at `caret`, and calls back on the main
+    /// actor when the answer arrives.
+    ///
+    /// A closure rather than a connection, for the reason `scheme` is a string:
+    /// this view is handed what it needs and nothing else. It is asynchronous
+    /// because the first answer for a connection is a metadata read on the far
+    /// side of a socket — a text view that waited for one would stop taking
+    /// keystrokes while it did.
+    let offers:
+        (_ text: String, _ caret: Int, _ then: @escaping (SQLCompletion.Answer) -> Void)
+            -> Void
+
     /// True while `.focused($focus, equals: .editor)` in `QueryPane` points
     /// here. SwiftUI cannot make an arbitrary `NSView` first responder on its
     /// own, so switching to the Query tab would otherwise leave the editor
@@ -51,8 +63,9 @@ struct SQLEditor: NSViewRepresentable {
         storage.addLayoutManager(layout)
         layout.addTextContainer(container)
 
-        let textView = NSTextView(frame: .zero, textContainer: container)
+        let textView = EditorTextView(frame: .zero, textContainer: container)
         textView.delegate = coordinator
+        textView.editor = coordinator
         textView.isRichText = false
         textView.allowsUndo = true
         textView.isVerticallyResizable = true
@@ -165,6 +178,20 @@ struct SQLEditor: NSViewRepresentable {
         /// `updateNSView`.
         var wasFocused = false
 
+        /// The list of names under the caret, when there is one.
+        private let popup = CompletionPopup()
+
+        /// Which question the popup is showing the answer to. An answer arrives
+        /// after a round trip that a fast typist outruns, and one that lands
+        /// against a buffer that has moved on would offer names for text that is
+        /// no longer there — and, worse, name a range to replace that now covers
+        /// different characters.
+        private var asked = 0
+
+        /// Set while an offer is being inserted, so the edit that inserts it is
+        /// not read as the user typing something new to complete.
+        private var accepting = false
+
         static let baseAttributes: [NSAttributedString.Key: Any] = [
             .font: Theme.Typography.editorFont,
             .foregroundColor: Theme.Editor.text.nsColor
@@ -260,6 +287,7 @@ struct SQLEditor: NSViewRepresentable {
             relex(string)
             parent.text = string
             pushSelection(in: string)
+            if !accepting { askForOffers(in: string) }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -273,7 +301,127 @@ struct SQLEditor: NSViewRepresentable {
             // rejects the conversion, and nothing is pushed — which is right,
             // because `textDidChange` is about to push both halves together.
             guard !applyingBinding else { return }
+            // Any caret move that is not the one the offers were asked about
+            // ends them. An arrow key, a click, an accepted offer: in every case
+            // the list on screen describes a place the caret has left.
+            popup.hide()
             pushSelection(in: cachedString)
+        }
+
+        func textDidEndEditing(_ notification: Notification) {
+            popup.hide()
+        }
+
+        // MARK: - Completion
+
+        /// Intercepts the keys the list answers to, and only while it is up.
+        ///
+        /// Returning true takes the key: ↑ and ↓ move the selection instead of
+        /// the caret, Return and Tab accept, Escape dismisses. Every one of them
+        /// means something else in a text view, which is why none of them is
+        /// taken when there is no list to take it for — an editor where Return
+        /// sometimes does not insert a newline is worse than one with no
+        /// completion at all.
+        func textView(
+            _ textView: NSTextView, doCommandBy command: Selector
+        ) -> Bool {
+            guard popup.isVisible else { return false }
+            switch command {
+            case #selector(NSResponder.moveUp(_:)):
+                popup.move(by: -1)
+            case #selector(NSResponder.moveDown(_:)):
+                popup.move(by: 1)
+            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+                accept()
+            case #selector(NSResponder.cancelOperation(_:)):
+                popup.hide()
+            default:
+                return false
+            }
+            return true
+        }
+
+        /// Asks the core what could be typed, if what was just typed asks for
+        /// it.
+        ///
+        /// `unprompted` is the user asking outright, which skips the rule about
+        /// what was typed: pressing ⌥Esc after `FROM ` means "tell me the
+        /// tables", and that is exactly the position the automatic trigger stays
+        /// out of.
+        /// The buffer as it stands, for the caller that has no copy of its own.
+        fileprivate func askForOffers(unprompted: Bool) {
+            askForOffers(in: cachedString, unprompted: unprompted)
+        }
+
+        private func askForOffers(in string: String, unprompted: Bool = false) {
+            guard let textView else { return }
+            let selection = Self.scalarRange(of: textView.selectedRange(), in: string)
+            // Nothing is completed into a selection: accepting would replace
+            // text the user deliberately highlighted, which is not what a list
+            // of names is offering to do.
+            guard selection.isEmpty else {
+                popup.hide()
+                return
+            }
+            let caret = selection.lowerBound
+            guard unprompted || SQLCompletion.wantsOffers(before: caret, in: string) else {
+                popup.hide()
+                return
+            }
+            asked += 1
+            let generation = asked
+            parent.offers(string, caret) { [weak self] answer in
+                guard let self, generation == asked else { return }
+                present(answer, askedAbout: string, at: caret)
+            }
+        }
+
+        /// Puts an answer on screen, under the caret it was asked about.
+        ///
+        /// The buffer and the caret are checked against the ones the question
+        /// was asked about, and not merely the question against the last one
+        /// sent. A caret that moved without an edit — an arrow key, a click —
+        /// asks nothing new, so the counter alone would let an answer about the
+        /// place the user just left open a list under the place they went to.
+        private func present(_ answer: SQLCompletion.Answer, askedAbout text: String, at caret: Int)
+        {
+            guard let textView, let window = textView.window, !answer.offers.isEmpty,
+                cachedString == text,
+                Self.scalarRange(of: textView.selectedRange(), in: text) == caret..<caret
+            else {
+                popup.hide()
+                return
+            }
+            // Screen coordinates, from the text view's own layout — the caret
+            // may be anywhere in a scrolled buffer, and this is the one thing
+            // that knows where it ended up on the display.
+            var actual = NSRange()
+            let caret = textView.selectedRange()
+            let rect = textView.firstRect(
+                forCharacterRange: NSRange(location: caret.location, length: 0),
+                actualRange: &actual)
+            popup.onAccept = { [weak self] in self?.accept() }
+            popup.show(answer.offers, replacing: answer.replacing, under: rect, in: window)
+        }
+
+        /// Puts the selected offer into the buffer.
+        ///
+        /// Through `insertText(_:replacementRange:)` rather than by editing the
+        /// storage, so that accepting is one undo step, the caret lands after
+        /// what was inserted, and the change reaches the model down the same
+        /// path typing does.
+        private func accept() {
+            guard let textView, let offer = popup.selectedOffer,
+                let range = SQLCompletion.utf16Range(of: popup.replacing, in: cachedString),
+                NSMaxRange(range) <= (textView.textStorage?.length ?? 0)
+            else {
+                popup.hide()
+                return
+            }
+            popup.hide()
+            accepting = true
+            textView.insertText(offer.insert, replacementRange: range)
+            accepting = false
         }
 
         /// Sends the caret back to the model.
@@ -519,5 +667,22 @@ struct SQLEditor: NSViewRepresentable {
             }
             return result
         }
+    }
+}
+
+/// The editor's text view, which completes names itself.
+///
+/// `NSTextView.complete(_:)` is the standard "finish what I am typing" command:
+/// ⌥⎋ is bound to it, the Edit menu's Complete item sends it, and both arrive
+/// here. Overridden rather than allowed through, because the popup AppKit would
+/// otherwise open asks its delegate for the list synchronously — and this list
+/// comes from a database.
+final class EditorTextView: NSTextView {
+    /// The coordinator, which owns the list. Weak because it owns this view's
+    /// scroll view in turn, through SwiftUI.
+    weak var editor: SQLEditor.Coordinator?
+
+    override func complete(_ sender: Any?) {
+        editor?.askForOffers(unprompted: true)
     }
 }

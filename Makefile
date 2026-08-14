@@ -124,6 +124,7 @@ test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-
 test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-splitter
 	./$(APP_BIN) --verify-connection
+	./$(APP_BIN) --verify-completion
 
 .PHONY: test-all
 test-all: test test-integration test-swift ## Every test

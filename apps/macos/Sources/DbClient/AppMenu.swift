@@ -156,6 +156,18 @@ enum AppMenu {
             withTitle: "Select All",
             action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        menu.addItem(.separator())
+        // The editor opens its list of names by itself while a name is being
+        // typed; this is how a user asks for one anywhere else — after `FROM `,
+        // where the automatic trigger deliberately stays quiet. ⌥⎋ because that
+        // is what AppKit has always bound `complete:` to, and the item is what
+        // makes the keystroke findable: nothing else in the interface can
+        // announce it.
+        let complete = menu.addItem(
+            withTitle: "Complete", action: #selector(NSResponder.complete(_:)),
+            keyEquivalent: "\u{1b}")
+        complete.keyEquivalentModifierMask = .option
+
         item.submenu = menu
         return item
     }

@@ -57,14 +57,17 @@ let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 /// session, which is the one state a capture cannot otherwise reach.
 let reconnectTo = argument("--reconnect")
 
-// `--verify-splitter` and `--verify-connection` run the checks for the two
-// pieces of pure logic in the front-end and exit with their verdict. Neither
-// needs a window or a database, so they run before either exists.
+// `--verify-splitter`, `--verify-connection` and `--verify-completion` run the
+// checks for the pieces of pure logic in the front-end and exit with their
+// verdict. None needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-connection") {
     exit(ConnectionChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-completion") {
+    exit(SQLCompletionChecks.run() ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -83,6 +86,47 @@ let initialSQL = argument("--sql")
 /// than in the first.
 let initialCaret = argument("--caret").flatMap(Int.init)
 
+/// `--offers` prints what the editor would put in its list at `--caret` in
+/// `--sql`, and how long each of two identical questions took.
+///
+/// Exists because the claim this feature has to make is about time, and a
+/// screenshot of a popup cannot make it. The two passes are the whole report:
+/// the first pays for the metadata the connection had not been told yet, the
+/// second is answered from what the core remembered, and the difference between
+/// them is the cache doing its job. A single number would not distinguish "fast"
+/// from "asked the server nothing because there was nothing to ask".
+///
+/// No window and no model: this is the FFI, the decode and the ranking, which is
+/// everything between a keystroke and a list.
+if CommandLine.arguments.contains("--offers") {
+    guard let conn = connArgument, let sql = initialSQL else {
+        fputs("--offers needs --conn and --sql\n", stderr)
+        exit(2)
+    }
+    let caret = initialCaret ?? sql.unicodeScalars.count
+    do {
+        let db = try Database(connString: conn)
+        for pass in ["cold", "warm"] {
+            let started = Date()
+            let answer = try db.completions(in: sql, caret: caret)
+            let ms = Date().timeIntervalSince(started) * 1000
+            fputs(
+                String(
+                    format: "%@: %d offers in %.1f ms, replacing %d..<%d\n", pass,
+                    answer.offers.count, ms, answer.start, answer.end), stderr)
+            if pass == "cold" {
+                for offer in answer.offers.prefix(8) {
+                    fputs("  \(offer.kind.rawValue) \(offer.label) — \(offer.detail)\n", stderr)
+                }
+            }
+        }
+        exit(0)
+    } catch {
+        fputs("offers: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 /// `--run-script` runs the whole of `--sql` instead of the statement `--caret`
 /// is in, by sending the Query menu's own item.
 ///
@@ -93,6 +137,16 @@ let initialCaret = argument("--caret").flatMap(Int.init)
 /// this one. The outcomes are printed as they land and the window is left up,
 /// because the thing being verified is what the screen says.
 let runScriptMode = CommandLine.arguments.contains("--run-script")
+
+/// `--complete` opens the list of names under the caret once the connection is
+/// up, through the Edit menu's own Complete item. Use with `--tab query`,
+/// `--sql` and `--caret` to choose where the caret sits.
+///
+/// Pair it with an `--sql` the server accepts. A statement that fails leaves the
+/// editor with the offending token selected — that is what points at a syntax
+/// error — and nothing is completed into a selection, so the list would
+/// correctly refuse to open.
+let completeMode = CommandLine.arguments.contains("--complete")
 
 /// `--where` and `--order` seed the browse filters, for the same reason `--tab`
 /// exists: reproducing a particular view without clicking into it.
@@ -297,6 +351,120 @@ func openValueViewer(model: AppModel, on spec: String) {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// The SQL editor's text view, wherever SwiftUI put it.
+@MainActor
+func firstEditorTextView(_ view: NSView) -> EditorTextView? {
+    if let editor = view as? EditorTextView { return editor }
+    for sub in view.subviews {
+        if let found = firstEditorTextView(sub) { return found }
+    }
+    return nil
+}
+
+/// Drives `--complete`: opens the list of names under the editor's caret, the
+/// way ⌥⎋ does, once the connection is up.
+///
+/// Exists because the list appears in answer to a keystroke and a capture cannot
+/// type one — synthetic events need accessibility permission this environment
+/// does not grant. Without it the one thing that catches a popup drawn in the
+/// wrong place, or behind the window, or empty, is a screenshot of the popup,
+/// and there is no way to take one.
+///
+/// It goes through the menu item rather than reaching into the editor, so that
+/// what is checked includes the item being there, being enabled, and being wired
+/// to something. The window is left up, because the thing being verified is what
+/// is on the screen.
+@MainActor
+func completeWhenReady(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var lastReport = CFAbsoluteTimeGetCurrent()
+
+    func poll() {
+        // The connection has landed once the navigator has something in it,
+        // which is also when the core has a catalogue to complete from. Waiting
+        // for the statement `--sql` ran as well: completion is skipped while the
+        // one connection is busy, so firing during the run would leave nothing
+        // on screen and nothing to say why.
+        guard !model.schemas.isEmpty, !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("completion probe timed out waiting for a connection\n", stderr)
+                exit(1)
+            }
+            // Said out loud rather than waited out in silence: a probe that
+            // prints nothing for three minutes and then fails looks the same
+            // whether the database is slow or the connection was refused, and
+            // the window it would be read from is the one being photographed.
+            if CFAbsoluteTimeGetCurrent() - lastReport > 2 {
+                lastReport = CFAbsoluteTimeGetCurrent()
+                fputs(
+                    "waiting: \(model.schemas.count) schemas, "
+                        + "busy \(model.isBusy), \(model.status)"
+                        + (model.connectionError.map { " — \($0)" } ?? "") + "\n", stderr)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        let items = NSApp.mainMenu?.items.compactMap(\.submenu).flatMap(\.items) ?? []
+        guard let item = items.first(where: { $0.action == #selector(NSResponder.complete(_:)) })
+        else {
+            fputs("no Complete item in the menu bar\n", stderr)
+            exit(1)
+        }
+        // Sent to the focused view rather than through `sendAction(to: nil)`,
+        // which dispatches down the *key* window's responder chain — and a
+        // machine running this unattended, with the display asleep, has no key
+        // window at all. What is being checked is the same either way: the item
+        // carries the standard command, and whatever the editor puts in the
+        // responder chain answers it.
+        let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: \.isVisible)
+        // Focused first, which a user does by clicking into the editor. An
+        // application that is not the active one has no key window and SwiftUI's
+        // focus never lands, so on an unattended machine — where a capture is
+        // taken — the responder chain would otherwise start and end at the
+        // window itself.
+        if let editor = window?.contentView.flatMap(firstEditorTextView) {
+            window?.makeFirstResponder(editor)
+        }
+        guard let responder = window?.firstResponder else {
+            fputs("no first responder to complete in\n", stderr)
+            exit(1)
+        }
+        fputs("menu item      “\(item.title)” → \(type(of: responder))\n", stderr)
+        responder.tryToPerform(item.action!, with: item)
+        report(within: CFAbsoluteTimeGetCurrent() + 5)
+    }
+
+    /// Says where the list landed, once it has.
+    ///
+    /// The answer comes back from the core on a background queue, so the list
+    /// does not exist yet at the moment the command is sent. Reported rather
+    /// than assumed: on a machine where a screenshot cannot be taken this line
+    /// is the only evidence that anything appeared, and its frame is what says
+    /// the list is under the caret rather than off the screen.
+    func report(within deadline: CFAbsoluteTime) {
+        if let panel = NSApp.windows.first(where: {
+            $0.identifier == CompletionPopup.identifier && $0.isVisible
+        }) {
+            let f = panel.frame
+            fputs(
+                String(
+                    format: "list shown    at %.0f,%.0f  %.0f×%.0f\n", f.minX, f.minY, f.width,
+                    f.height), stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("no list appeared\n", stderr)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated { report(within: deadline) }
         }
     }
     poll()
@@ -863,6 +1031,7 @@ if benchMode {
         if let stopAfter { stopWhenRunning(model: model, after: stopAfter) }
         if let loadMorePages { loadMoreWhenReady(model: model, pages: loadMorePages) }
         if runScriptMode { runScriptWhenReady(model: model) }
+        if completeMode { completeWhenReady(model: model) }
         if showHistory || historyPick != nil {
             driveHistory(model: model, open: showHistory, pick: historyPick)
         }
