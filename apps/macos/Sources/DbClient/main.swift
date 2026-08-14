@@ -113,6 +113,15 @@ let initialRelation = argument("--relation")
 /// a word matching nothing says so rather than going blank.
 let initialFilter = argument("--filter")
 
+/// `--load-more 3` browses, then asks for that many further pages, reporting the
+/// row count and the paging state after each.
+///
+/// Exists because paging is a claim about what the *second* page contains, and
+/// a screenshot of a grid cannot say whether a row is one it already showed.
+/// The counts can: a page that repeats rows and one that continues from them
+/// look identical on screen and differ here.
+let loadMorePages = argument("--load-more").flatMap(Int.init)
+
 /// `--stop-after 0.5` runs `--sql`, waits that many seconds, and stops it
 /// through the Query menu's own Stop item, reporting what the window says
 /// before and after.
@@ -361,6 +370,61 @@ func refreshWhenReady(model: AppModel, after seconds: Double) {
                 }
             }
         }
+    }
+}
+
+/// Drives `--load-more`. Polls, and reports to stderr, for the reasons
+/// `exportWhenReady` does.
+@MainActor
+func loadMoreWhenReady(model: AppModel, pages: Int) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    func report(_ tag: String) {
+        fputs(
+            "\(tag.padding(toLength: 7, withPad: " ", startingAt: 0)) "
+                + "rows \(AppModel.formatted(model.browseResult.rowCount))"
+                + " · capped \(model.browseResult.capped)"
+                + " · more \(model.canLoadMore)"
+                + " · obstacle \(model.pagingObstacle?.label ?? "(none)")"
+                + " · generation \(model.browseResult.generation)\n", stderr)
+    }
+
+    func settled(_ next: @escaping @MainActor () -> Void) {
+        func poll() {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("load-more probe timed out waiting for the pane to settle\n", stderr)
+                exit(1)
+            }
+            guard model.browseResult.hasRun, !model.isBusy, !model.browseResult.isLoading
+            else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    MainActor.assumeIsolated(poll)
+                }
+                return
+            }
+            next()
+        }
+        poll()
+    }
+
+    func page(_ remaining: Int) {
+        guard remaining > 0 else { exit(0) }
+        guard model.canLoadMore else {
+            // Not a failure: a relation smaller than one page has nothing more
+            // to give, and saying so beats reporting a page that never happened.
+            fputs("no further page to ask for\n", stderr)
+            exit(0)
+        }
+        model.loadMore()
+        settled {
+            report("page \(pages - remaining + 1)")
+            page(remaining - 1)
+        }
+    }
+
+    settled {
+        report("first")
+        page(pages)
     }
 }
 
@@ -796,6 +860,7 @@ if benchMode {
         if let initialCell { openValueViewer(model: model, on: initialCell) }
         if let reconnectTo { reconnectWhenReady(model: model, to: reconnectTo) }
         if let stopAfter { stopWhenRunning(model: model, after: stopAfter) }
+        if let loadMorePages { loadMoreWhenReady(model: model, pages: loadMorePages) }
         if runScriptMode { runScriptWhenReady(model: model) }
         if showHistory || historyPick != nil {
             driveHistory(model: model, open: showHistory, pick: historyPick)

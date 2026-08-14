@@ -158,6 +158,18 @@ int db_cursor_schema(DbCursor* cursor, struct ArrowSchema* out, char** err);
 // must invoke its release callback.
 int db_cursor_next(DbCursor* cursor, struct ArrowArray* out, char** err);
 
+// Asks the server to stop the fetch this cursor is running. Returns 0 when the
+// request was delivered, -1 when it could not be.
+//
+// The exception to the "all calls block, do not call from the main thread" rule
+// above, and it has to be: db_cursor_next blocks for as long as the server takes
+// to produce a page, so a cancel that waited its turn would arrive after it.
+//
+// db_cancel does NOT reach a cursor. That one cancels the session connection and
+// a cursor runs on one of its own, so a front-end reading through a cursor has to
+// route its Cancel here — otherwise the button is offered and does nothing.
+int db_cursor_cancel(DbCursor* cursor, char** err);
+
 // Closes the cursor and rolls back the transaction it was declared in. Optional:
 // db_cursor_free reaches the same end by closing the connection, which is what a
 // front-end that drops a result mid-scroll does. Returns 0 on success, -1 on

@@ -216,6 +216,22 @@ final class Cursor: @unchecked Sendable {
         }
         return out
     }
+
+    /// Asks the server to abandon the page this cursor is fetching.
+    ///
+    /// `Database.cancel()` does not reach here: it cancels the session
+    /// connection, and a cursor runs on one of its own. Cancelling a browse
+    /// means cancelling the cursor that is reading it.
+    ///
+    /// Called off the queue the fetch is blocking, and silent on failure, for
+    /// the reasons `Database.cancel()` gives.
+    func cancel() {
+        var err: UnsafeMutablePointer<CChar>?
+        if db_cursor_cancel(handle, &err) != 0 {
+            let message = Database.take(&err) ?? "cancel failed"
+            fputs("cursor cancel request failed: \(message)\n", stderr)
+        }
+    }
 }
 
 final class Query {

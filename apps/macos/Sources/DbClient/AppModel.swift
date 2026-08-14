@@ -257,10 +257,23 @@ final class AppModel {
 
     /// Maximum rows one browse result will retain.
     ///
-    /// It stops rather than evicting because evicting rows the grid can still be
-    /// scrolled back to needs a server-side cursor, which does not exist yet.
-    /// Refusing to grow is what this can honestly do until it does.
+    /// A bound on this window's memory rather than on what the cursor could
+    /// still deliver: the grid keeps every row it was given so the user can
+    /// scroll back to it, and a million of those is already past what anyone
+    /// reads. It stops rather than evicting for the same reason — a row that
+    /// scrolled off the top has to still be there when they scroll back up.
     private let browseResultBound = 1_000_000
+
+    /// The cursor the Content tab is reading through, and whether a page of it
+    /// is in the air right now.
+    ///
+    /// Held here rather than on `ResultSet` because a cursor is a database
+    /// connection, not a property of the rows on screen: the query pane's
+    /// results never have one and `current` can hand back a `ResultSet` that
+    /// never did. Letting go of it is what closes that connection, so every
+    /// path that abandons a browse goes through `discardBrowse`.
+    private var browseCursor: Cursor?
+    private var browseFetchInFlight = false
 
     /// Rows a page fetches, for the chrome to name in a control.
     var pageSize: Int { browsePage }
@@ -495,6 +508,7 @@ final class AppModel {
         columns = []
         clearRelationDetail()
         browseResult.discard()
+        discardBrowse()
         scriptSteps = []
         selectedStep = 0
         whereClause = ""
@@ -586,6 +600,7 @@ final class AppModel {
             columns = []
             clearRelationDetail()
             browseResult.discard()
+            discardBrowse()
             settleRefresh()
             return
         }
@@ -959,26 +974,26 @@ final class AppModel {
     ///
     /// Filters become SQL rather than filtering fetched rows, so they apply to
     /// the whole table instead of only the window already in memory.
-    private func browseSQL(for relation: RelationInfo, offset: Int) -> String {
+    private func browseSQL(for relation: RelationInfo) -> String {
         var sql = "SELECT * FROM \(relation.qualifiedName)"
         let predicate = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
         if !predicate.isEmpty { sql += " WHERE \(predicate)" }
         if let order = totalOrder { sql += " ORDER BY \(order)" }
-        sql += " LIMIT \(browsePage)"
-        if offset > 0 { sql += " OFFSET \(offset)" }
+        // No LIMIT and no OFFSET: the cursor is what bounds a page, and it holds
+        // its own position. A statement per page is what made the order below
+        // load-bearing.
         return sql
     }
 
     /// The browse's ORDER BY, made total by the primary key.
     ///
-    /// LIMIT without a total order does not describe a stable window. Postgres
-    /// may return rows in a different order for the same query — a different
-    /// plan, a different set of pages in cache — so the second page can repeat
-    /// rows the first one showed and skip others entirely, with nothing on
-    /// screen to say it happened. Appending the primary key makes the order
-    /// unique, which is what gives OFFSET a meaning. A relation without one has
-    /// no such order, and `canLoadMore` refuses to page it rather than paging
-    /// it wrongly.
+    /// No longer what makes paging correct — the cursor holds one statement's
+    /// position, so a later page cannot repeat or skip rows however the server
+    /// chose to order them. What it still buys is a browse that looks the same
+    /// each time it is run: without it the rows arrive in whatever order the
+    /// plan produced, which is stable within a cursor and arbitrary between
+    /// two. A relation with no primary key gets no such promise, and now pages
+    /// anyway.
     private var totalOrder: String? {
         let user = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
         // The user's own order may already name the key; repeating it is
@@ -991,11 +1006,11 @@ final class AppModel {
         return terms.isEmpty ? nil : terms.joined(separator: ", ")
     }
 
-    /// Whether the browse can fetch a further page. Needs both a page boundary
-    /// to fetch past and an order stable enough for "past" to mean anything.
+    /// Whether the browse can fetch a further page. Needs a page boundary to
+    /// fetch past and a cursor still open at it.
     var canLoadMore: Bool {
         activeTab == .content && browseResult.capped && !browseResult.isLoading
-            && columns.contains(where: \.isPrimaryKey)
+            && browseCursor != nil
             && browseResult.rowCount < browseResultBound
     }
 
@@ -1012,11 +1027,11 @@ final class AppModel {
 
     var pagingObstacle: PagingObstacle? {
         guard browseResult.capped else { return nil }
-        if !columns.contains(where: \.isPrimaryKey) {
+        if browseCursor == nil {
             return PagingObstacle(
-                label: "no primary key",
-                detail: "\(selected?.name ?? "This relation") has no primary key, "
-                    + "so there is no stable order to page in.")
+                label: "stopped part way",
+                detail: "The read of \(selected?.name ?? "this relation") did not finish, "
+                    + "so there is no position left to continue from. Run it again to page on.")
         }
         if browseResult.rowCount >= browseResultBound {
             return PagingObstacle(
@@ -1036,20 +1051,135 @@ final class AppModel {
         return ("\(first) > 100", "\(first) desc")
     }
 
+    /// Reads the relation from the top, through a cursor of its own.
+    ///
+    /// Opening and reading are two trips through the core queue rather than one,
+    /// so the cursor reaches the main actor before its first page is asked for.
+    /// Done in one, Cancel would have nothing to name for the whole of that
+    /// page — which is the page most worth stopping, and the one a slow filter
+    /// makes long. Opening does not execute the statement, so the window where
+    /// there is still nothing to name is a round trip rather than a scan.
     private func runBrowse() {
         guard let selected else { return }
-        runQuery(
-            browseSQL(for: selected, offset: 0), describedAs: selected.name,
-            into: browseResult, cappedAt: browsePage)
+        // The old cursor goes before the new one opens. Two cursors would mean
+        // two connections and two open transactions for one pane showing one
+        // result, and the second would outlive every reference to it.
+        discardBrowse()
+        let sql = browseSQL(for: selected)
+        let label = selected.name
+        let page = browsePage
+        beginBrowseFetch()
+        let started = CFAbsoluteTimeGetCurrent()
+        run { db -> Cursor in
+            try db.cursor(sql, batchRows: page)
+        } then: { [self] cursor in
+            browseCursor = cursor
+            fetchBrowsePage(
+                from: cursor, takingSchema: true, describedAs: label,
+                since: started, appending: false)
+        }
     }
 
     /// Fetches the next page and appends it to the rows already on screen.
+    ///
+    /// The cursor holds the position, so this is a fetch rather than a second
+    /// statement: nothing is re-read, and nothing can shift under it between
+    /// pages the way a second `OFFSET` could.
     func loadMore() {
-        guard canLoadMore, let selected else { return }
-        runQuery(
-            browseSQL(for: selected, offset: browseResult.rowCount),
-            describedAs: selected.name, into: browseResult,
-            cappedAt: browsePage, appending: true)
+        guard canLoadMore, let selected, let cursor = browseCursor else { return }
+        beginBrowseFetch()
+        fetchBrowsePage(
+            from: cursor, takingSchema: false, describedAs: selected.name,
+            since: CFAbsoluteTimeGetCurrent(), appending: true)
+    }
+
+    /// Pulls one page off `cursor` and installs it. Only the page that opened the
+    /// cursor takes its schema; a later page would be re-describing columns the
+    /// rows on screen were already built against.
+    private func fetchBrowsePage(
+        from cursor: Cursor, takingSchema: Bool, describedAs label: String,
+        since started: CFAbsoluteTime, appending: Bool
+    ) {
+        run { () -> BrowsePage in
+            // Taken here rather than a stage earlier so that it is released on
+            // the way out of the same closure that allocated it: a fetch that
+            // fails must not leave an ArrowSchema behind holding Rust's memory.
+            let schema = takingSchema ? try cursor.schema() : nil
+            do {
+                let batch = try cursor.nextBatch()
+                return BrowsePage(
+                    cursor: cursor, schema: schema, batch: batch,
+                    milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
+            } catch {
+                if let schema { releaseSchema(schema) }
+                throw error
+            }
+        } then: { [self] fetched in
+            install(fetched, describedAs: label, appending: appending)
+        }
+    }
+
+    /// Lets go of the browse's cursor, which is what closes its connection and
+    /// rolls back the transaction the cursor was declared in.
+    private func discardBrowse() {
+        browseCursor = nil
+        browseFetchInFlight = false
+    }
+
+    private func beginBrowseFetch() {
+        isBusy = true
+        browseResult.beginLoading()
+        browseFetchInFlight = true
+        status = "Running…"
+        // A new fetch supersedes the previous failure; leaving the banner up
+        // would attribute an old error to the result now on screen.
+        errorMessage = nil
+    }
+
+    /// Installs a fetched page into the browse result.
+    private func install(_ fetched: BrowsePage, describedAs label: String, appending: Bool) {
+        // A page whose browse was abandoned while it was in flight — the user
+        // picked another relation, or disconnected — belongs to nothing on
+        // screen. It has to be dropped rather than installed, and dropping it
+        // means letting go of what it carries: installing it would put a
+        // different relation's rows in the grid and, worse, hand back the cursor
+        // `discardBrowse` had already released, leaving a connection open on a
+        // browse nobody is looking at.
+        guard browseFetchInFlight, fetched.cursor === browseCursor else {
+            if let schema = fetched.schema { releaseSchema(schema) }
+            if let batch = fetched.batch { releaseArray(batch) }
+            return
+        }
+        browseFetchInFlight = false
+        let grid = browseResult.table
+        // A page carries a schema only when it opened the cursor. Re-installing
+        // one on an append would drop the columns the existing batches were
+        // built against.
+        if let schema = fetched.schema {
+            grid.reset()
+            browseResult.selection = nil
+            grid.setSchema(schema)
+            releaseSchema(schema)
+        }
+
+        let before = grid.rowCount
+        if let batch = fetched.batch { grid.append(batch: batch) }
+        // A short page is the end of the result: the server fills a FETCH to the
+        // count asked for until it runs out. Exhausted is not a state the cursor
+        // has to be asked about twice, and asking would cost a round trip per
+        // page to learn what the page already said.
+        let capped = grid.rowCount - before >= browsePage
+        let summary = browseSummary(
+            label: label, rows: grid.rowCount, capped: capped,
+            seconds: fetched.milliseconds / 1000)
+        if appending {
+            browseResult.extend(
+                capped: capped, milliseconds: fetched.milliseconds, summary: summary)
+        } else {
+            browseResult.finish(
+                capped: capped, milliseconds: fetched.milliseconds, summary: summary)
+        }
+        isBusy = false
     }
 
     func applyFilters() {
@@ -1485,80 +1615,6 @@ final class AppModel {
 
     // MARK: - Query execution
 
-    /// Runs `sql` and installs the result.
-    ///
-    /// `cappedAt` is the LIMIT this query carries, when it was imposed by the
-    /// browse rather than written by the user. Landing exactly on it means the
-    /// grid is showing a window, not an answer, and the status bar has to say
-    /// so — a row count that silently means "the first hundred thousand" is the
-    /// same class of lie as a cell that truncates without a marker.
-    ///
-    /// The browse's path. The Query pane runs through `runStatements`, which has
-    /// to keep N results rather than install one.
-    private func runQuery(
-        _ sql: String, describedAs label: String, into result: ResultSet,
-        cappedAt: Int? = nil, appending: Bool = false
-    ) {
-        isBusy = true
-        result.beginLoading()
-        status = "Running…"
-        // A new run supersedes the previous failure; leaving the banner up
-        // would attribute an old error to the result now on screen.
-        errorMessage = nil
-        let batchRows = self.batchRows
-
-        // The grid is mutated on the main actor only; the background stage
-        // returns batches and the main stage installs them.
-        run { db -> QueryResult in
-            let started = CFAbsoluteTimeGetCurrent()
-            let query = try db.query(sql, batchRows: batchRows)
-            let schema = try query.schema()
-            var batches: [UnsafeMutablePointer<ArrowArray>] = []
-            while let batch = try query.nextBatch() {
-                batches.append(batch)
-            }
-            return QueryResult(
-                schema: schema, batches: batches,
-                milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000)
-        } then: { [self] fetched in
-            let grid = result.table
-            if appending {
-                // The page carries the same schema as the rows already here;
-                // re-installing it would drop the columns the existing batches
-                // were built against.
-                if let release = fetched.schema.pointee.release { release(fetched.schema) }
-                fetched.schema.deallocate()
-            } else {
-                grid.reset()
-                result.selection = nil
-                grid.setSchema(fetched.schema)
-                if let release = fetched.schema.pointee.release { release(fetched.schema) }
-                fetched.schema.deallocate()
-            }
-
-            let before = grid.rowCount
-            for batch in fetched.batches {
-                grid.append(batch: batch)
-            }
-            // The cap applies to the page, not the running total: a fourth page
-            // that comes back short is the end of the table, however many rows
-            // are on screen by then.
-            let page = grid.rowCount - before
-            let capped = cappedAt.map { page >= $0 } ?? false
-            let summary = browseSummary(
-                label: label, rows: grid.rowCount, capped: capped,
-                seconds: fetched.milliseconds / 1000)
-            if appending {
-                result.extend(
-                    capped: capped, milliseconds: fetched.milliseconds, summary: summary)
-            } else {
-                result.finish(
-                    capped: capped, milliseconds: fetched.milliseconds, summary: summary)
-            }
-            isBusy = false
-        }
-    }
-
     private func browseSummary(
         label: String, rows: Int, capped: Bool, seconds: Double
     ) -> String {
@@ -1637,7 +1693,15 @@ final class AppModel {
     func cancelRunningStatement() {
         guard canCancel, let db else { return }
         status = "Cancelling…"
-        DispatchQueue.global(qos: .userInitiated).async { db.cancel() }
+        // A browse page is fetched through a cursor, which runs on a connection
+        // of its own — `db.cancel()` names the session's backend and would leave
+        // the fetch running behind a button that said it had stopped it. Which
+        // one is running is knowable here because the core queue is serial.
+        if browseFetchInFlight, let cursor = browseCursor {
+            DispatchQueue.global(qos: .userInitiated).async { cursor.cancel() }
+        } else {
+            DispatchQueue.global(qos: .userInitiated).async { db.cancel() }
+        }
     }
 
     private func fail(with error: Error) {
@@ -1651,6 +1715,11 @@ final class AppModel {
         // both saves threading the target through the generic dispatch helper.
         browseResult.abandonLoading()
         queryResult.abandonLoading()
+        // A fetch that failed — cancelled included — leaves its cursor inside an
+        // aborted transaction, where every later fetch fails too. Letting it go
+        // closes that connection; the rows already on screen stay, and
+        // `pagingObstacle` is what tells the user there is no position left.
+        if browseFetchInFlight { discardBrowse() }
 
         // A connect attempt answers into the form, which is the only surface on
         // screen while one is in flight. Routed by the flag rather than by
@@ -1743,9 +1812,34 @@ final class AppModel {
 /// the value and only the receiver ever reads them — so the conformance sits on
 /// this handoff type rather than on `UnsafeMutablePointer` itself, which would
 /// make the claim for every pointer in the program.
-private struct QueryResult: @unchecked Sendable {
-    let schema: UnsafeMutablePointer<ArrowSchema>
-    let batches: [UnsafeMutablePointer<ArrowArray>]
+/// One fetched browse page on its way back from the core queue.
+///
+/// Carries the cursor because the first page is what opens it: the main actor
+/// cannot hold a cursor it has not been given yet, and the fetch cannot install
+/// itself.
+/// Hands an exported schema back through its own release callback.
+///
+/// Outside the model because it is called from the core queue as well as from
+/// the main actor: the closure that allocates one has to be able to let it go
+/// again when the fetch after it fails.
+private func releaseSchema(_ schema: UnsafeMutablePointer<ArrowSchema>) {
+    if let release = schema.pointee.release { release(schema) }
+    schema.deallocate()
+}
+
+/// The same, for a batch that never reached a grid. One that did is owned by
+/// `ArrowTable`, which releases it when the table is reset.
+private func releaseArray(_ array: UnsafeMutablePointer<ArrowArray>) {
+    if let release = array.pointee.release { release(array) }
+    array.deallocate()
+}
+
+private struct BrowsePage: @unchecked Sendable {
+    let cursor: Cursor
+    /// Only the page that opened the cursor brings one.
+    let schema: UnsafeMutablePointer<ArrowSchema>?
+    /// Absent once the cursor is exhausted.
+    let batch: UnsafeMutablePointer<ArrowArray>?
     let milliseconds: Double
 }
 
