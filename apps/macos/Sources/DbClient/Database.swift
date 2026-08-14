@@ -145,6 +145,16 @@ final class Database: @unchecked Sendable {
         db_names_forget(handle)
     }
 
+    /// The statements a grid's pending changes would take.
+    ///
+    /// Written by the core and run by the caller, which is what puts an edit
+    /// inside whatever transaction this connection is in and under the same
+    /// Cancel button as anything else — and what lets the statements be shown to
+    /// somebody before they run.
+    func editStatements(_ request: EditRequest) throws -> [String] {
+        try decodeJSON(db_edit_sql_json(handle, request.json, &errOut), as: [String].self)
+    }
+
     // MARK: - Transactions
 
     /// What this connection's transaction is doing.

@@ -55,6 +55,13 @@ struct MetalGridView: NSViewRepresentable {
     /// See `GridView.claimsInitialFocus`.
     var claimsInitialFocus = false
     var sort: GridSort?
+    /// Cells holding a change that has not been sent, so the grid can mark them.
+    ///
+    /// Empty for the Query pane, whose rows belong to no one relation and cannot
+    /// be edited. Passed down rather than read from a model, for the reason
+    /// `declaredTypes` is: this view draws whatever it is handed and knows
+    /// nothing about connections.
+    var pending: Set<GridCell> = []
     /// Called with a column index when its header is clicked. Nil means this
     /// grid does not sort — the Query pane shows the result of a statement the
     /// user wrote, and appending an ORDER BY to arbitrary SQL is not something
@@ -110,6 +117,7 @@ struct MetalGridView: NSViewRepresentable {
         context.coordinator.onSortColumn = onSortColumn
         view.sortsOnHeaderClick = onSortColumn != nil
         renderer.sort = sort
+        renderer.pending = pending
 
         if context.coordinator.lastGeneration != generation {
             context.coordinator.lastGeneration = generation

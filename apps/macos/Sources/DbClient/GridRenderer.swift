@@ -97,6 +97,9 @@ final class GridRenderer {
     /// The cell under the cursor keys. Drawn as a row band plus a stronger cell
     /// fill, because a database grid is navigated by row and read by cell.
     var selection: GridSelection?
+    /// Cells changed and not yet sent, marked so the change is visible from
+    /// across the grid rather than only in the field that made it.
+    var pending: Set<GridCell> = []
     /// Whether the grid holds keyboard focus. Drawn as an inset border: the
     /// selection alone does not say which surface the arrow keys will move.
     var isFocused = false
@@ -581,6 +584,22 @@ final class GridRenderer {
                     color: Theme.Grid.selectedRow.simd)
             }
         }
+        // Pending changes, under the cursor cell and over the banding: the mark
+        // has to survive the row being selected, because the row somebody is
+        // editing is the row they are standing on.
+        if !pending.isEmpty {
+            for (i, r) in rows.enumerated() {
+                let y = rowY(i)
+                guard y + rowHeight > headerHeight, y < viewH else { continue }
+                for c in cols where pending.contains(GridCell(row: r, column: c)) {
+                    let cx = columnX(c) - scrollX
+                    let cw = columnWidth(c)
+                    guard cx + cw > 0, cx < viewW else { continue }
+                    fill(x: cx, y: y, w: cw, h: rowHeight, color: Theme.Grid.pendingCell.simd)
+                }
+            }
+        }
+
         // The cursor cell is drawn separately: within a multi-row selection it
         // is the one cell the keyboard and the inspector act on, so it needs to
         // stay distinguishable from the band around it.

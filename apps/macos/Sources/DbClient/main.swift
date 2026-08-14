@@ -160,6 +160,58 @@ if CommandLine.arguments.contains("--ddl") {
     }
 }
 
+/// `--edit` puts one cell's worth of change through the whole write path and
+/// prints the statements it produced.
+///
+/// Exists because the shape of the request is the part that can be wrong without
+/// anything failing to compile: the fields this side encodes have to be the
+/// fields the core decodes, and a name that drifts turns into an edit that is
+/// silently empty. The core's tests pin its half; this pins the crossing.
+///
+/// It writes. `edit_probe` is created and dropped in the database `--conn`
+/// names, so point it at a scratch database rather than at anything that
+/// matters.
+if CommandLine.arguments.contains("--edit") {
+    guard let conn = connArgument else {
+        fputs("--edit needs --conn\n", stderr)
+        exit(2)
+    }
+    do {
+        let db = try Database(connString: conn)
+        func ran(_ sql: String) throws -> Int {
+            let query = try db.query(sql, batchRows: 1000)
+            while try query.nextBatch() != nil {}
+            return query.rowsAffected ?? 0
+        }
+        _ = try ran("DROP TABLE IF EXISTS edit_probe")
+        _ = try ran("CREATE TABLE edit_probe (id int PRIMARY KEY, label text, qty numeric(9,2))")
+        _ = try ran("INSERT INTO edit_probe VALUES (1, 'before', 1.00)")
+
+        let request = EditRequest(
+            schema: "public", relation: "edit_probe",
+            updates: [
+                EditRequest.Update(
+                    key: [EditRequest.Cell(column: "id", value: "1")],
+                    set: [
+                        EditRequest.Cell(column: "label", value: "after"),
+                        EditRequest.Cell(column: "qty", value: "3.25")
+                    ])
+            ])
+        let statements = try db.editStatements(request)
+        for sql in statements { print(sql) }
+        for sql in statements { _ = try ran(sql) }
+        // Read back rather than trusted: a statement that ran is not the same
+        // claim as a row that holds what was typed.
+        let kept = try ran("SELECT id FROM edit_probe WHERE label = 'after' AND qty = 3.25")
+        print("rows matching the edit: \(kept)")
+        _ = try ran("DROP TABLE edit_probe")
+        exit(kept == 1 ? 0 : 1)
+    } catch {
+        fputs("edit: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 /// `--transaction` drives one manual-commit transaction against `--conn` and
 /// prints what the connection says at each step.
 ///

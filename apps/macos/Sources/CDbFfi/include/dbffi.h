@@ -226,6 +226,30 @@ char* db_triggers_json(DbHandle* handle, const char* schema, const char* relatio
 // because a statement that looks complete and is not is worse than a refusal.
 char* db_ddl_text(DbHandle* handle, const char* schema, const char* relation, char** err);
 
+// The statements a grid's pending changes would take, as a JSON array of
+// strings. Written here and run by the caller, through db_query like anything
+// else: that is what puts an edit inside whatever transaction the connection is
+// in, under the same Cancel button and with the same error positions — and what
+// lets a window show somebody the statements before they run.
+//
+// `edits` is one relation's worth of changes:
+//
+//   {"schema": …, "relation": …,
+//    "updates": [{"key": [{"column": …, "value": …}], "set": [{…}]}],
+//    "inserts": [{"set": [{…}]}],
+//    "deletes": [{"key": [{…}]}]}
+//
+// A `value` of JSON null is SQL's NULL and a value of "" is an empty string. A
+// grid has to be able to say both, and one string cannot.
+//
+// Values cross as text and reach the server as literals rather than as bound
+// parameters, which is why a row is named by its primary key and nothing else: a
+// key of that shape survives the round trip through text exactly. A relation
+// without one is refused, as are a partial key and text that is not the number
+// its column says it is. Refusals are the point — the failure they prevent is
+// not an error message, it is an UPDATE that silently changes the wrong row.
+char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
+
 // What this connection's transaction is doing. Released with db_string_free:
 //
 //   {"transactional":…, "autocommit":…, "open":…, "savepoints":[…]}

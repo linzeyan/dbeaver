@@ -841,18 +841,90 @@ struct ContentPane: View {
                     selection: $result.selection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
+                    pending: Set(model.pendingEdits.keys),
                     onSortColumn: { model.toggleSort(column: $0) }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
                 .accessibilityLabel("Result grid")
 
-                CellInspector(cell: model.inspectedCell(in: model.browseResult))
+                CellInspector(cell: model.inspectedCell(in: model.browseResult), editing: model)
             }
 
             Rectangle().fill(Theme.separator.color).frame(height: 1)
             FilterBar(model: model, focus: $focus)
         }
     }
+}
+
+/// Where a cell is changed, and where the changes are sent or thrown away.
+///
+/// A field under the grid rather than typing into the cell itself. Inline
+/// editing in a Metal-drawn grid means a text view floating over a scrolling
+/// surface and staying attached to a moving row, and none of that difficulty is
+/// about the database. This row buys the whole of the feature — see the value,
+/// change it, see that it is pending, send it — and leaves the cell to be typed
+/// into by a later version that has earned the complication.
+///
+/// The two buttons that end it sit here as well, and only appear with something
+/// to act on: a Save that is dimmed for the whole of a session is a control
+/// nobody reads twice.
+private struct CellEditorRow: View {
+    @Bindable var model: AppModel
+    let cell: AppModel.InspectedCell
+    @State private var typed = ""
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            if let obstacle = model.editObstacle {
+                // Said rather than hidden. An absent field reads as a feature
+                // this build does not have, and one of the two reasons is
+                // something the user can do something about.
+                Text(obstacle)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+            } else {
+                FieldLabel(text: cell.column)
+                TextField("", text: $typed)
+                    .textFieldStyle(.plain)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .onSubmit { model.stageEdit(typed) }
+                    .help("Return stages the change; nothing is sent until Save")
+                Button("Set") { model.stageEdit(typed) }
+                    .help("Hold this value for the selected cell")
+                Button("NULL") { model.stageEdit(nil) }
+                    .help("Hold NULL for the selected cell, which is not an empty string")
+            }
+
+            Spacer()
+
+            if model.hasPendingEdits {
+                Text(AppModel.pluralized(model.pendingEdits.count, "change"))
+                    .font(Theme.Typography.micro)
+                    .foregroundStyle(Theme.warning.color)
+                Button("Revert") { model.revertEdits() }
+                    .help("Throw the pending changes away; the rows on screen are unchanged")
+                Button("Save") { model.applyEdits() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(model.isBusy)
+                    .help("Send the changes and read the rows back (⌘S)")
+            }
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.xs)
+        .background(Theme.surface.color)
+        // Seeded from whichever cell is selected, and re-seeded when that moves:
+        // a field still holding the last cell's text is one keystroke away from
+        // writing it into this one.
+        .onChange(of: cell.address + "\u{1}" + cell.column) { typed = seed }
+        .task(id: cell.address + "\u{1}" + cell.column) { typed = seed }
+    }
+
+    /// A NULL seeds an empty field rather than the word: the field's contents
+    /// are what would be written, and "NULL" typed into a text column is four
+    /// characters.
+    private var seed: String { cell.isNull ? "" : cell.value }
 }
 
 /// WHERE and ORDER BY, the two filters a browse pane actually needs. They build
@@ -1407,6 +1479,13 @@ private struct StatementNote: View {
 /// instead.
 struct CellInspector: View {
     let cell: AppModel.InspectedCell?
+    /// The model, where this inspector is over rows that can be written to.
+    ///
+    /// Nil in the Query pane, which is what keeps the editor off a result whose
+    /// rows belong to no one relation — and the reason this is a parameter
+    /// rather than something read from the environment: which of the two panes
+    /// this is drawn in is exactly the question being answered.
+    var editing: AppModel? = nil
 
     var body: some View {
         // Rendered once and handed to both halves. The strip's descriptor and
@@ -1418,6 +1497,10 @@ struct CellInspector: View {
             if let rendered {
                 Rectangle().fill(Theme.separator.color).frame(height: 1)
                 CellValueViewer(rendered: rendered)
+            }
+            if let editing, let cell {
+                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                CellEditorRow(model: editing, cell: cell)
             }
         }
     }

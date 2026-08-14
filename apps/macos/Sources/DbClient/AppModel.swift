@@ -544,6 +544,7 @@ final class AppModel {
         querySelection = nil
         isValueViewerOpen = false
         errorMessage = nil
+        pendingEdits.removeAll()
         // The mode belonged to the connection being dropped, not to the window.
         transaction = .none
     }
@@ -863,6 +864,148 @@ final class AppModel {
             toggleExpanded: { [weak self] in self?.isValueViewerOpen.toggle() })
     }
 
+    // MARK: - Editing the browse result
+
+    /// Cells changed and not yet sent, by where they sit in the browse result.
+    ///
+    /// Held here rather than in the grid because they outlive the view and are
+    /// what Save reads. Cleared whenever the result is re-read, which is the same
+    /// moment the database's own answer replaces what was typed.
+    private(set) var pendingEdits: [GridCell: PendingValue] = [:]
+
+    /// Whether the selected cell can be changed at all.
+    ///
+    /// Editing is the Content tab's alone. A query result is not attributable to
+    /// one relation — a join of five tables has no answer to which of them a cell
+    /// belongs to that is right often enough to write into a database — and a
+    /// view has no rows of its own to name. The primary key is the other half of
+    /// the same question: without one there is no way to say which row a change
+    /// is to, so the core refuses and this does not offer.
+    var canEditCell: Bool {
+        activeTab == .content && selected?.kind == .table && !isBusy
+            && columns.contains(where: \.isPrimaryKey)
+            && selectedCell(in: browseResult) != nil
+    }
+
+    /// Why the selected cell cannot be changed, for a pane that has to say so.
+    ///
+    /// A control that is simply absent reads as a feature this build does not
+    /// have. The two reasons a user can act on — the wrong tab, and a table with
+    /// nothing to identify a row by — are worth a sentence each.
+    var editObstacle: String? {
+        guard activeTab == .content, let selected else { return "Editing is for a browsed table." }
+        guard selected.kind == .table else {
+            return "A \(selected.kind.label.lowercased()) has no rows of its own to change."
+        }
+        guard columns.contains(where: \.isPrimaryKey) else {
+            return "\(selected.name) has no primary key, so there is no way to name one row of it."
+        }
+        return nil
+    }
+
+    var hasPendingEdits: Bool { !pendingEdits.isEmpty }
+
+    /// Whether a cell is holding a change that has not been sent.
+    func isPending(row: Int, column: Int) -> Bool {
+        pendingEdits[GridCell(row: row, column: column)] != nil
+    }
+
+    /// Records a change to the selected cell. `nil` is NULL.
+    ///
+    /// Recorded rather than sent: a person editing a grid makes several changes
+    /// and then decides, and a client that sent each keystroke would be one they
+    /// could not change their mind in.
+    func stageEdit(_ value: String?) {
+        guard canEditCell, let s = selectedCell(in: browseResult) else { return }
+        let cell = GridCell(row: s.row, column: s.column)
+        // Typing a cell back to what it already held is not a change. Keeping it
+        // would put an UPDATE on the wire that says nothing and a dirty mark on
+        // screen that cannot be cleared by undoing the edit.
+        let grid = browseResult.table
+        let before: String? =
+            grid.isNull(row: s.row, column: s.column)
+            ? nil : grid.text(row: s.row, column: s.column)
+        if before == value {
+            pendingEdits.removeValue(forKey: cell)
+        } else {
+            pendingEdits[cell] = PendingValue(text: value)
+        }
+    }
+
+    /// Throws the pending changes away. The rows on screen are already the
+    /// database's, so nothing has to be re-read to undo them.
+    func revertEdits() {
+        pendingEdits.removeAll()
+    }
+
+    /// Sends the pending changes and re-reads the rows they touched.
+    ///
+    /// The re-read is not a formality. A trigger, a default or a check
+    /// constraint can make the stored row differ from what was typed, and a grid
+    /// that went on showing the typed value would be showing something that is
+    /// not in the database.
+    func applyEdits() {
+        guard hasPendingEdits, !isBusy, let selected, let request = editRequest(for: selected)
+        else { return }
+        isBusy = true
+        status = "Saving…"
+        errorMessage = nil
+        let batchRows = self.batchRows
+        run { db -> Int in
+            let statements = try db.editStatements(request)
+            for sql in statements {
+                let query = try db.query(sql, batchRows: batchRows)
+                // Drained, because a statement that violates a constraint fails
+                // when the server executes it rather than when it accepts it.
+                while try query.nextBatch() != nil {}
+            }
+            return statements.count
+        } then: { [self] count in
+            pendingEdits.removeAll()
+            isBusy = false
+            status = Self.pluralized(count, "statement") + " sent"
+            // Whatever the transaction is doing now, a write is what moved it.
+            refreshTransaction()
+            runBrowse()
+        }
+    }
+
+    /// The pending changes as one request, or nil where a row cannot be named.
+    ///
+    /// The key values come out of the grid rather than out of the edit: they are
+    /// what the database said when the row was read, which is what identifies it.
+    /// A key column the result does not carry cannot happen through a browse —
+    /// it is `SELECT *` — and is refused here rather than sent as a shorter key
+    /// that would name more rows than one.
+    private func editRequest(for relation: RelationInfo) -> EditRequest? {
+        let grid = browseResult.table
+        let keyColumns = columns.filter(\.isPrimaryKey)
+        guard !keyColumns.isEmpty else { return nil }
+        var request = EditRequest(schema: relation.schema, relation: relation.name)
+        // Grouped by row, so one row with three changed cells is one UPDATE.
+        let byRow = Dictionary(grouping: pendingEdits.keys, by: \.row)
+        for (row, cells) in byRow.sorted(by: { $0.key < $1.key }) {
+            var key: [EditRequest.Cell] = []
+            for column in keyColumns {
+                guard let at = grid.columns.firstIndex(where: { $0.name == column.name }) else {
+                    return nil
+                }
+                key.append(
+                    EditRequest.Cell(
+                        column: column.name,
+                        value: grid.isNull(row: row, column: at)
+                            ? nil : grid.text(row: row, column: at)))
+            }
+            let set = cells.sorted(by: { $0.column < $1.column }).map { cell in
+                EditRequest.Cell(
+                    column: grid.columns[cell.column].name,
+                    value: pendingEdits[cell]?.text)
+            }
+            request.updates.append(EditRequest.Update(key: key, set: set))
+        }
+        return request
+    }
+
     /// Which rendering a cell gets, from the two type sources this has.
     ///
     /// The Arrow kind is always true of what arrived and is what identifies a
@@ -1098,6 +1241,11 @@ final class AppModel {
     /// there is still nothing to name is a round trip rather than a scan.
     private func runBrowse() {
         guard let selected else { return }
+        // A pending edit points at the nth row of what was fetched, so the fetch
+        // being replaced is the moment it stops meaning anything. Dropped here
+        // rather than warned about: every path into this one is either the user
+        // asking for the rows again or the rows already having been written.
+        pendingEdits.removeAll()
         // The old cursor goes before the new one opens. Two cursors would mean
         // two connections and two open transactions for one pane showing one
         // result, and the second would outlive every reference to it.

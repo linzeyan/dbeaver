@@ -107,6 +107,10 @@ enum Theme {
         static let nullText = Tone(0x7C8A_A0)
         static let selectedRow = Theme.accent.opacity(0.18)
         static let selectedCell = Theme.accent.opacity(0.38)
+        /// A cell holding a change that has not been sent. Amber rather than the
+        /// accent: it means the same thing as the amber in the toolbar, which is
+        /// that the database does not know about this yet.
+        static let pendingCell = Theme.warning.opacity(0.30)
         static let cursor = Theme.accent
         /// The scrollbar sits over the data rather than beside it, so the track
         /// is barely there and the thumb carries the whole signal.
