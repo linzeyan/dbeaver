@@ -1021,7 +1021,8 @@ final class AppModel {
         if browseResult.rowCount >= browseResultBound {
             return PagingObstacle(
                 label: "maximum rows reached",
-                detail: "This result is holding the maximum of \(Self.formatted(browseResultBound)) rows. "
+                detail:
+                    "This result is holding the maximum of \(Self.formatted(browseResultBound)) rows. "
                     + "Use a filter to see more rows.")
         }
         return nil
