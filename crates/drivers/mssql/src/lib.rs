@@ -92,6 +92,17 @@ pub enum MsSqlError {
     Arrow(#[from] arrow::error::ArrowError),
     #[error("connection pool exhausted")]
     PoolExhausted,
+    /// Deliberately without the value that failed: it is most often a password,
+    /// and an error message is the one place it is certain to be both shown on
+    /// screen and written to a log.
+    #[error(
+        "the {field} contains a character SQL Server's connection string cannot \
+         carry ({character:?}); change it, or connect with a Server=…;Password=… string"
+    )]
+    Unquotable {
+        field: &'static str,
+        character: char,
+    },
     /// The task reading a result went away before it said anything, which means
     /// the runtime dropped it rather than the server refusing.
     #[error("the task reading this result stopped before it produced anything")]
@@ -233,6 +244,132 @@ fn with_encryption_default(conn_str: &str) -> String {
     } else {
         format!("{};Encrypt=true", conn_str.trim_end_matches(';'))
     }
+}
+
+/// The ADO connection string a `sqlserver://` URL is asking for.
+///
+/// Two spellings of the same fact, and this driver has to read both. The
+/// connection form builds `scheme://user:password@host:port/database` for every
+/// database the client can open, because a form that wanted a different shape
+/// per driver would be a form per driver. SQL Server's own spelling is ADO's
+/// `Server=tcp:host,port;…`, which is what SSMS and the Azure portal hand out
+/// and therefore what somebody pastes.
+///
+/// Only the URL form is converted. An ADO string is passed through, since it is
+/// already what tiberius reads.
+fn ado_from_url(url: &str) -> Result<String, MsSqlError> {
+    let Some(rest) = url.strip_prefix("sqlserver://") else {
+        return Ok(url.to_string());
+    };
+    // Split from the right on `@` and from the left on `/`: the form
+    // percent-encodes both characters inside a user name or a password, so the
+    // last `@` really does end the credentials and the first `/` really does
+    // begin the database name.
+    let (credentials, rest) = match rest.rsplit_once('@') {
+        Some((credentials, rest)) => (Some(credentials), rest),
+        None => (None, rest),
+    };
+    // Anything a URL cannot say in its own grammar goes in the query string,
+    // spelled the way ADO spells it: `?TrustServerCertificate=true` against a
+    // development server with a self-signed certificate, `?Application Name=…`
+    // to be recognisable in `sys.dm_exec_sessions`. Passing them through under
+    // their own names means this does not become a second, smaller list of the
+    // settings SQL Server has.
+    let (rest, settings) = match rest.split_once('?') {
+        Some((rest, settings)) => (rest, settings),
+        None => (rest, ""),
+    };
+    let (authority, database) = match rest.split_once('/') {
+        Some((authority, database)) => (authority, database),
+        None => (rest, ""),
+    };
+
+    // `Server=tcp:host,port` is ADO's spelling of a TCP target; a bare host
+    // means "look this instance up over UDP", which is a different thing that
+    // fails on any server with the browser service turned off.
+    let mut out = match authority.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => {
+            format!("Server=tcp:{host},{port}")
+        }
+        _ => format!("Server=tcp:{authority}"),
+    };
+    if !database.is_empty() {
+        out.push_str(&format!(";Database={}", quoted("database", database)?));
+    }
+    if let Some(credentials) = credentials {
+        let (user, password) = match credentials.split_once(':') {
+            Some((user, password)) => (user, Some(password)),
+            None => (credentials, None),
+        };
+        out.push_str(&format!(";User Id={}", quoted("user name", user)?));
+        if let Some(password) = password {
+            out.push_str(&format!(";Password={}", quoted("password", password)?));
+        }
+    }
+    for setting in settings.split('&').filter(|s| !s.is_empty()) {
+        let (key, value) = setting.split_once('=').unwrap_or((setting, ""));
+        out.push_str(&format!(
+            ";{}={}",
+            percent_decode(key),
+            quoted("connection setting", value)?
+        ));
+    }
+    Ok(out)
+}
+
+/// One percent-decoded field, wrapped in braces if ADO needs it to be.
+///
+/// `{}` is ADO's quoting, and it has no escape inside itself — the parser reads
+/// to the first closing brace and stops. So a value holding one cannot be
+/// expressed at all, and saying that is better than emitting a string that
+/// parses into a different password than the one that was typed and comes back
+/// as a login failure.
+fn quoted(field: &'static str, value: &str) -> Result<String, MsSqlError> {
+    let value = percent_decode(value);
+    if let Some(character) = value.chars().find(|c| *c == '}') {
+        return Err(MsSqlError::Unquotable { field, character });
+    }
+    if value.contains([';', '=', '{']) {
+        Ok(format!("{{{value}}}"))
+    } else {
+        Ok(value)
+    }
+}
+
+/// `%XX` turned back into the byte it stands for.
+///
+/// Written out rather than taken from a crate because this is the whole of what
+/// is needed: the connection form percent-encodes what it builds, and nothing
+/// else about URL syntax reaches here.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i + 1), bytes.get(i + 2)) {
+            (b'%', Some(high), Some(low)) => {
+                match (
+                    char::from(*high).to_digit(16),
+                    char::from(*low).to_digit(16),
+                ) {
+                    (Some(high), Some(low)) => {
+                        out.push((high * 16 + low) as u8);
+                        i += 3;
+                    }
+                    // Not an escape after all, so it is a literal per cent sign.
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// One connection, and the session id a cancel has to name.
@@ -434,13 +571,16 @@ impl Drop for Pooled {
 }
 
 impl MsSqlSource {
-    /// Opens a session from an ADO.NET-style connection string.
+    /// Opens a session from either spelling of a SQL Server connection string.
     ///
-    /// `Server=tcp:host,port;Database=db;User Id=sa;Password=…`. Encryption is
-    /// turned on when the string does not mention it, which is the opposite of
-    /// what tiberius does when left alone.
+    /// `sqlserver://sa:password@host:1433/database`, which is what the
+    /// connection form builds, or ADO's own
+    /// `Server=tcp:host,port;Database=db;User Id=sa;Password=…`, which is what
+    /// SSMS and the Azure portal hand out. Encryption is turned on when the
+    /// string does not mention it, which is the opposite of what tiberius does
+    /// when left alone.
     pub async fn connect(conn_str: &str) -> Result<Self, MsSqlError> {
-        let conn_str = with_encryption_default(conn_str);
+        let conn_str = with_encryption_default(&ado_from_url(conn_str)?);
         // Opened eagerly so a wrong password is a failure to connect rather than
         // a failure at the first metadata call.
         let mut session = Session::connect(&conn_str).await?;
@@ -1133,6 +1273,74 @@ mod tests {
         assert!(
             err.to_string().to_lowercase().contains("refused"),
             "expected the refusal to survive into the message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_url_becomes_the_ado_string_it_stands_for() {
+        assert_eq!(
+            ado_from_url("sqlserver://sa:Str0ng!Passw0rd@localhost:51433/bench").unwrap(),
+            "Server=tcp:localhost,51433;Database=bench;User Id=sa;Password=Str0ng!Passw0rd"
+        );
+        // No port, no database, no credentials: each part is optional, and a
+        // missing one has to leave no trace rather than an empty setting, which
+        // ADO reads as "the empty string" instead of "not said".
+        assert_eq!(
+            ado_from_url("sqlserver://localhost").unwrap(),
+            "Server=tcp:localhost"
+        );
+        // Integrated security, which is a user with no password rather than no
+        // user at all.
+        assert_eq!(
+            ado_from_url("sqlserver://sa@localhost:1433/db").unwrap(),
+            "Server=tcp:localhost,1433;Database=db;User Id=sa"
+        );
+    }
+
+    #[test]
+    fn a_query_string_becomes_the_settings_it_names() {
+        // The escape hatch for everything a URL has no field for. Against a
+        // development server with a self-signed certificate this is the
+        // difference between connecting and not.
+        assert_eq!(
+            ado_from_url(
+                "sqlserver://sa@host:1433/db?TrustServerCertificate=true&Application%20Name=dbclient"
+            )
+            .unwrap(),
+            "Server=tcp:host,1433;Database=db;User Id=sa\
+             ;TrustServerCertificate=true;Application Name=dbclient"
+        );
+    }
+
+    #[test]
+    fn an_ado_string_is_left_exactly_as_it_was_given() {
+        // The form somebody pastes from SSMS. Rewriting it would mean parsing
+        // it, and it is already what tiberius reads.
+        let given = "Server=tcp:localhost,1433;Database=db;User Id=sa;Password=x";
+        assert_eq!(ado_from_url(given).unwrap(), given);
+    }
+
+    #[test]
+    fn a_password_that_would_break_the_string_is_quoted_instead() {
+        // A semicolon ends a setting and an equals sign ends a key, so a
+        // password holding either has to be braced or it becomes several
+        // settings, none of which is the password.
+        let out = ado_from_url("sqlserver://sa:a%3Bb%3Dc@localhost:1433/db").unwrap();
+        assert!(out.ends_with(";Password={a;b=c}"), "got {out}");
+    }
+
+    #[test]
+    fn a_password_no_ado_string_can_carry_is_refused_before_the_attempt() {
+        // ADO's braces have no escape inside themselves — the parser reads to
+        // the first closing brace and stops — so this cannot be expressed. The
+        // failure has to say so, because the alternative is a login failure for
+        // a password that was typed correctly.
+        let err = ado_from_url("sqlserver://sa:a%7Db@localhost:1433/db")
+            .expect_err("a closing brace cannot be carried");
+        assert!(err.to_string().contains("password"), "got: {err}");
+        assert!(
+            !err.to_string().contains("a}b"),
+            "the password leaked: {err}"
         );
     }
 

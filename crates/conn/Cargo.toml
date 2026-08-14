@@ -17,6 +17,7 @@ serde = { version = "1", features = ["derive"] }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-mongodb = { path = "../drivers/mongodb" }
+driver-mssql = { path = "../drivers/mssql" }
 driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }
@@ -29,3 +30,10 @@ bson = "2"
 mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls-ring",
 ] }
+tiberius = { version = "0.12.3", default-features = false, features = [
+    "tds73",
+    "rustls",
+] }
+# tiberius wants a futures-io stream and a tokio TcpStream is not one; this is
+# the adapter, and seeding a SQL Server fixture is the only thing it is for.
+tokio-util = { version = "0.7", features = ["compat"] }

@@ -105,7 +105,7 @@ test: ## Unit tests (no database required)
 	cargo test --workspace
 
 .PHONY: test-integration
-test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql ## Tests requiring a database server
+test-integration: db-check db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The SQL statement splitter's checks live behind a flag on the app binary
@@ -243,6 +243,37 @@ db-down-mysql: ## Stop and remove the MySQL test container
 db-check-mysql: ## Fail unless the MySQL test container is reachable
 	@docker exec $(MYSQL_CONTAINER) mysqladmin ping -uroot -ptest --silent >/dev/null 2>&1 \
 		|| { echo "mysql not running; run 'make db-up-mysql'"; exit 1; }
+
+# SQL Server. Microsoft publishes no ARM64 build — not for 2019, 2022 or 2025 —
+# so on Apple silicon this runs under Rosetta and needs `--platform`. Azure SQL
+# Edge is the usual ARM64 substitute and is the wrong fixture: it is a reduced
+# engine, and half of what the tests exercise is the full `sys.*` surface and
+# the CLR types it does not have.
+MSSQL_CONTAINER := mssql-test
+MSSQL_PORT      := 51433
+MSSQL_PASSWORD  := Str0ng!Passw0rd
+MSSQL_IMAGE     := mcr.microsoft.com/mssql/server:2022-latest
+
+.PHONY: db-up-mssql
+db-up-mssql: ## Start the SQL Server test container
+	@docker start $(MSSQL_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(MSSQL_CONTAINER) --platform linux/amd64 \
+			-e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=$(MSSQL_PASSWORD)' -e MSSQL_PID=Developer \
+			-p $(MSSQL_PORT):1433 $(MSSQL_IMAGE)
+	@echo "waiting for sql server (emulated; this takes a while)..."
+	@for i in $$(seq 1 180); do \
+		nc -z 127.0.0.1 $(MSSQL_PORT) >/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+
+.PHONY: db-down-mssql
+db-down-mssql: ## Stop and remove the SQL Server test container
+	-docker rm -f $(MSSQL_CONTAINER)
+
+.PHONY: db-check-mssql
+db-check-mssql: ## Fail unless the SQL Server test container is reachable
+	@nc -z 127.0.0.1 $(MSSQL_PORT) >/dev/null 2>&1 \
+		|| { echo "sql server not running; run 'make db-up-mssql'"; exit 1; }
 
 # ClickHouse, whose fixture is a seed script rather than a few inserts: the
 # driver's argument is about types, so the table has to contain the types it

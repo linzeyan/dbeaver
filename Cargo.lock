@@ -907,6 +907,7 @@ dependencies = [
  "driver-clickhouse",
  "driver-duckdb",
  "driver-mongodb",
+ "driver-mssql",
  "driver-mysql",
  "driver-postgres",
  "driver-sqlite",
@@ -915,8 +916,10 @@ dependencies = [
  "rusqlite",
  "serde",
  "tempfile",
+ "tiberius",
  "tokio",
  "tokio-postgres",
+ "tokio-util",
 ]
 
 [[package]]
@@ -928,6 +931,7 @@ dependencies = [
  "driver-clickhouse",
  "driver-duckdb",
  "driver-mongodb",
+ "driver-mssql",
  "driver-mysql",
  "driver-postgres",
  "driver-sqlite",

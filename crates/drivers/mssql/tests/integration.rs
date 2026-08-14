@@ -22,10 +22,11 @@
 //! through this driver, so a fixture that came out wrong cannot be the code under
 //! test agreeing with itself.
 //!
-//! The first six checks are `crates/conn/tests/contract.rs` written out again
-//! against this driver. They are duplicated rather than shared because a driver
-//! is registered in that file centrally, after this branch merges; when that
-//! happens these can go.
+//! The shared contract is not repeated here. `crates/conn/tests/contract.rs`
+//! runs it against this driver like every other, so what is left in this file
+//! is what is particular to SQL Server: the types that would take the process
+//! down, paging a heap that has no key to order by, and cancelling a statement
+//! by ending its session.
 
 use arrow::array::{
     Array, BinaryArray, BooleanArray, Date32Array, Decimal128Array, Int16Array, Int32Array,
@@ -238,14 +239,13 @@ const DDL: &[&str] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// The contract, checked through the trait
+// What is particular to this database
 // ---------------------------------------------------------------------------
 
 const READ: &str = "SELECT id FROM sales.nums ORDER BY id";
 /// Broken in the middle rather than truncated, so the failure is a parse error
 /// with something after it rather than an unexpected end of input.
 const BROKEN: &str = "SELECT id FROM sales.nums WHERE ORDER BY id";
-const MISSING: &str = "SELECT * FROM no_such_relation_anywhere";
 
 /// The failure `sql` produces, insisting there is one.
 ///
@@ -262,86 +262,43 @@ async fn failure(driver: &dyn Driver, sql: &str) -> DbError {
     }
 }
 
+/// Every row once, in order, all the way to the end.
+///
+/// The shared contract reads the first two batches and stops, because that is
+/// what proves batching to a front end. This drains the whole result, which is
+/// the part that would catch a paging bug that only shows up after the first
+/// page — and it is cheap here because the fixture is 500 rows.
 #[tokio::test]
 #[ignore = "requires a SQL Server"]
-async fn reads_a_result_in_batches() {
+async fn every_row_arrives_once_and_in_order() {
     let driver = source().await;
     let mut stream = driver.query(READ, 100).await.expect("query failed");
 
-    // Before a single row has been read: a front end lays out a grid first and
-    // asks for rows afterwards.
-    assert_eq!(stream.schema().fields().len(), 1);
-    // Zero is a real answer, so "not finished" cannot be zero.
-    assert_eq!(stream.rows_affected(), None);
-
-    let first = stream.next_batch().await.unwrap().expect("a first batch");
-    assert_eq!(first.num_rows(), 100);
-    let second = stream.next_batch().await.unwrap().expect("a second batch");
-    assert_eq!(second.num_rows(), 100);
-
-    // In order and once each, all the way to the end.
-    let mut seen: Vec<i32> = ints(&first).chain(ints(&second)).collect();
+    let mut seen: Vec<i32> = Vec::new();
     while let Some(batch) = stream.next_batch().await.unwrap() {
         seen.extend(ints(&batch));
     }
-    assert_eq!(seen.len(), 500);
     assert_eq!(seen, (1..=500).collect::<Vec<i32>>());
+    // Only once the result is finished: before that the count is not known, and
+    // zero is a real answer so "not finished" cannot be zero.
     assert_eq!(stream.rows_affected(), Some(500));
 }
 
+/// Cancelling something that is not running leaves the connection alive.
+///
+/// The property that makes `KILL`-based cancellation safe to offer at all. This
+/// driver cancels by ending the session, so a Cancel aimed at an idle
+/// connection would take the whole thing down — and a front end's Cancel button
+/// is pressed at whatever moment the user presses it.
 #[tokio::test]
 #[ignore = "requires a SQL Server"]
-async fn pages_a_cursor() {
-    let driver = source().await;
-    let mut cursor = driver.cursor(READ, 50).await.expect("cursor failed");
-    assert_eq!(cursor.schema().fields().len(), 1);
-
-    let mut seen = 0usize;
-    for page in 1..=3 {
-        let batch = cursor
-            .fetch()
-            .await
-            .expect("fetch error")
-            .unwrap_or_else(|| panic!("page {page} is missing"));
-        assert_eq!(batch.num_rows(), 50);
-        seen += batch.num_rows();
-    }
-    assert_eq!(seen, 150);
-
-    // Closing is optional but has to work, and has to be safe to call on a
-    // cursor with pages left in it.
-    cursor.close().await.expect("close failed");
-}
-
-#[tokio::test]
-#[ignore = "requires a SQL Server"]
-async fn cancels_an_idle_cursor_without_complaining() {
+async fn an_idle_session_survives_being_cancelled() {
     let driver = source().await;
     let cursor = driver.cursor(READ, 10).await.expect("cursor failed");
     cursor.canceller().cancel().await.expect("cancel failed");
     driver.cancel().await.expect("session cancel failed");
 
-    // And the session is still usable afterwards, which is the property that
-    // makes `KILL`-based cancellation safe to expose: an idle connection is not
-    // a target.
     driver.schemas().await.expect("the session survived");
-}
-
-#[tokio::test]
-#[ignore = "requires a SQL Server"]
-async fn reports_where_a_statement_is_wrong() {
-    let driver = source().await;
-
-    let err = failure(&driver, BROKEN).await;
-    lands_inside(&err, BROKEN);
-    assert!(
-        !err.is_cancelled(),
-        "a broken statement is not a cancellation"
-    );
-
-    let missing = failure(&driver, MISSING).await;
-    lands_inside(&missing, MISSING);
-    assert!(!missing.is_cancelled());
 }
 
 /// A position a front end could put a caret on: counted from one, and no further
@@ -358,94 +315,17 @@ fn lands_inside(err: &DbError, sql: &str) {
     );
 }
 
+/// A schema that is not there lists no relations, rather than failing.
+///
+/// The shared contract asks this of a missing *relation*; a missing schema is
+/// the level above, and a navigator refreshing a tree that is one edit out of
+/// date reaches both.
 #[tokio::test]
 #[ignore = "requires a SQL Server"]
-async fn walks_the_navigator() {
+async fn a_schema_that_is_not_there_lists_no_relations() {
     let driver = source().await;
-    let (schema, relation) = ("sales", "customer");
-
-    let schemas = driver.schemas().await.expect("schemas failed");
-    assert!(schemas.iter().any(|s| s.name == schema));
-
-    let relations = driver.relations(schema).await.expect("relations failed");
-    let found = relations
-        .iter()
-        .find(|r| r.name == relation)
-        .expect("customer should be listed under sales");
-    assert_eq!(found.schema, schema, "a relation knows where it lives");
-
-    let columns = driver.columns(schema, relation).await.expect("columns");
-    assert!(!columns.is_empty());
-    for (offset, column) in columns.iter().enumerate() {
-        assert_eq!(
-            column.position,
-            offset as i32 + 1,
-            "column {} is out of position",
-            column.name
-        );
-        assert!(!column.data_type.is_empty(), "a column states its own type");
-    }
-    assert!(columns.iter().any(|c| c.name == "customer_id"));
-
-    // A table is not a view, and the distinction is what the structure pane
-    // hangs a section on.
-    assert_eq!(driver.definition(schema, relation).await.unwrap(), None);
-
-    driver.indexes(schema, relation).await.expect("indexes");
-    driver
-        .foreign_keys(schema, relation)
-        .await
-        .expect("foreign keys");
-    driver
-        .referenced_by(schema, relation)
-        .await
-        .expect("inbound references");
-    driver
-        .constraints(schema, relation)
-        .await
-        .expect("constraints");
-    driver.triggers(schema, relation).await.expect("triggers");
-}
-
-#[tokio::test]
-#[ignore = "requires a SQL Server"]
-async fn answers_for_a_relation_that_is_not_there() {
-    let driver = source().await;
-    let schema = "sales";
-    let missing = "no_such_relation_anywhere";
-
-    assert!(driver.columns(schema, missing).await.unwrap().is_empty());
-    assert!(driver.indexes(schema, missing).await.unwrap().is_empty());
-    assert!(
-        driver
-            .foreign_keys(schema, missing)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        driver
-            .referenced_by(schema, missing)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        driver
-            .constraints(schema, missing)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(driver.triggers(schema, missing).await.unwrap().is_empty());
-    assert_eq!(driver.definition(schema, missing).await.unwrap(), None);
-    // A schema that is not there is the same kind of answer.
     assert!(driver.relations("no_such_schema").await.unwrap().is_empty());
 }
-
-// ---------------------------------------------------------------------------
-// What is particular to this database
-// ---------------------------------------------------------------------------
 
 /// Fifty thousand rows off a table with no key of any kind, in pages.
 ///

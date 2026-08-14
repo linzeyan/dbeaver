@@ -15,6 +15,7 @@ use dbconn::{DbError, Driver};
 use driver_clickhouse::ChSource;
 use driver_duckdb::DuckSource;
 use driver_mongodb::MongoSource;
+use driver_mssql::MsSqlSource;
 use driver_mysql::MySqlSource;
 use driver_postgres::PgSource;
 use driver_sqlite::SqliteSource;
@@ -74,6 +75,12 @@ pub const CATALOG: &[Catalogued] = &[
         label: "MongoDB",
         shape: Shape::Server,
         default_port: Some(27017),
+    },
+    Catalogued {
+        scheme: "sqlserver",
+        label: "SQL Server",
+        shape: Shape::Server,
+        default_port: Some(1433),
     },
     Catalogued {
         scheme: "mysql",
@@ -139,6 +146,11 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // of what the MongoDB URI parser reads, and `mongodb+srv` in particular
         // means "look the hosts up in DNS" rather than naming one.
         "mongodb" | "mongodb+srv" => Ok(Box::new(MongoSource::connect(url).await?)),
+        // The one scheme whose rest is rewritten into a different grammar
+        // rather than a different scheme: SQL Server's own connection string is
+        // ADO's `Server=tcp:host,port;…`, and the driver reads both because
+        // both are what somebody arrives with.
+        "sqlserver" => Ok(Box::new(MsSqlSource::connect(url).await?)),
         // Passed on whole for the third time, and for the third distinct
         // reason: `mysql://` is the URL form `mysql_async` reads, so the scheme
         // is part of what it parses rather than a prefix to strip off.
