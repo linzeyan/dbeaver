@@ -1,0 +1,18 @@
+[package]
+name = "dbddl"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dbconn = { path = "../conn" }
+dbsql = { path = "../sql" }
+async-trait.workspace = true
+
+[dev-dependencies]
+# The live tests read a real catalog, and the driver is how this workspace
+# reaches one. Only the tests need it: nothing in the crate knows or cares which
+# driver produced the metadata it is handed.
+driver-postgres = { path = "../drivers/postgres" }
+tokio = { workspace = true, features = ["full"] }
