@@ -11,6 +11,7 @@ members = [
     "crates/drivers/mysql",
     "crates/drivers/postgres",
     "crates/drivers/sqlite",
+    "crates/edit",
     "crates/ffi",
     "crates/sql",
 ]
