@@ -826,12 +826,18 @@ struct QueryPane: View {
                 // The selection binding is what makes ⌘R mean "this statement":
                 // without it the pane knows the text and not where in it the
                 // user is standing.
-                SQLEditor(text: $model.queryText, selection: $model.querySelection)
-                    .padding(.horizontal, Theme.Space.md)
-                    .padding(.vertical, Theme.Space.sm)
-                    .background(Theme.background.color)
-                    .focused($focus, equals: .editor)
-                    .accessibilityLabel("SQL editor")
+                // The scheme goes with them: it is how the core knows which
+                // database's rules to read the buffer by, and reading MySQL as
+                // PostgreSQL mis-colours it and splits it in the wrong places.
+                SQLEditor(
+                    text: $model.queryText, selection: $model.querySelection,
+                    scheme: model.scheme
+                )
+                .padding(.horizontal, Theme.Space.md)
+                .padding(.vertical, Theme.Space.sm)
+                .background(Theme.background.color)
+                .focused($focus, equals: .editor)
+                .accessibilityLabel("SQL editor")
 
                 HStack(spacing: Theme.Space.sm) {
                     // Says which statement is about to run, before it runs. A

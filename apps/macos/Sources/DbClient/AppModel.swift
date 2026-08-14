@@ -290,6 +290,15 @@ final class AppModel {
     /// window outlives any one database: File ▸ Connect… replaces it.
     private var connString = ""
 
+    /// Which database the editor is writing SQL for, as the scheme the core
+    /// picks a dialect by.
+    ///
+    /// Read off the live connection rather than the form's draft, because the
+    /// draft is what somebody may be part way through typing into File ▸
+    /// Connect… while the buffer behind it still belongs to the database that is
+    /// open. Empty before there is one, which the core reads as PostgreSQL.
+    var scheme: String { ConnectionURL.scheme(in: connString) }
+
     /// A statement to open with, from `--sql`. Runs once the connection is up,
     /// in place of browsing the first table.
     private let initialSQL: String?
@@ -1269,7 +1278,16 @@ final class AppModel {
     /// A buffer holding only comments has text in it and nothing to run, which
     /// is why this asks the splitter rather than measuring the string.
     var canRun: Bool {
-        activeTab == .query ? !SQLScript.statements(in: queryText).isEmpty : selected != nil
+        activeTab == .query ? !scan.statements.isEmpty : selected != nil
+    }
+
+    /// The core's reading of the editor buffer as it stands.
+    ///
+    /// One property rather than a call at each site, because one scan answers
+    /// every question the window asks about the buffer and `SQLScript` hands
+    /// back the same one to all of them.
+    private var scan: SQLScript.Scan {
+        SQLScript.scan(queryText, scheme: scheme, selection: editorSelection)
     }
 
     /// The caret or selection as scalar offsets into `queryText`.
@@ -1301,9 +1319,7 @@ final class AppModel {
     /// What ⌘R would send right now. The editor's corner reads it out, because
     /// "which of these five is about to run" is the question a script raises and
     /// a blinking caret does not answer.
-    var runTarget: SQLScript.Target? {
-        SQLScript.target(in: queryText, selection: editorSelection)
-    }
+    var runTarget: SQLScript.Target? { scan.target }
 
     func runCurrentQuery() {
         // ⌘R means "run what I am looking at". In the Query tab that is one
@@ -1323,7 +1339,7 @@ final class AppModel {
     /// so a second run would only queue behind the first and land looking like a
     /// command that did nothing.
     var canRunScript: Bool {
-        activeTab == .query && !isBusy && !SQLScript.statements(in: queryText).isEmpty
+        activeTab == .query && !isBusy && !scan.statements.isEmpty
     }
 
     /// Runs every statement in the buffer, in order, stopping at the first that
@@ -1343,7 +1359,7 @@ final class AppModel {
     /// something a script asks for rather than something this imposes.
     func runScript() {
         guard canRunScript else { return }
-        let all = SQLScript.statements(in: queryText)
+        let all = scan.statements
         guard !all.isEmpty else { return }
         // A buffer holding one statement is "query" here as it is under ⌘R, so
         // running a one-liner whole is described exactly as it always was.
@@ -1773,8 +1789,7 @@ final class AppModel {
         let sent = statement.sent
         guard sent.script == queryText,
             let offset = SQLScript.errorOffset(ofPosition: position, in: sent.range),
-            let selection = SQLScript.range(
-                SQLScript.tokenRange(at: offset, in: queryText), in: queryText)
+            let selection = SQLScript.range(scan.tokenRange(at: offset), in: queryText)
         else {
             errorMessage = "\(failure.description) · at position \(position) of the statement"
             return

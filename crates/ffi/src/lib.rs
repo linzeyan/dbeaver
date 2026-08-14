@@ -15,6 +15,7 @@ mod registry;
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
+use dbsql::{Origin, TokenKind};
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::sync::OnceLock;
@@ -176,6 +177,155 @@ fn json_result<T: serde::Serialize>(value: &T, err: *mut *mut c_char) -> *mut c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_drivers_json(err: *mut *mut c_char) -> *mut c_char {
     json_result(&registry::CATALOG, err)
+}
+
+/// Everything an editor asks about one buffer of SQL, in one answer.
+///
+/// The three questions — what to paint, where the statements are, and which one
+/// a run would send — are asked about the same text at the same moment, and the
+/// scan that answers any of them has already answered the other two. Three entry
+/// points would be three scans of the same buffer for every keystroke.
+#[derive(serde::Serialize)]
+struct Scan {
+    /// Kind, start and end for every token, in that order and flattened. An
+    /// array of objects would spend most of the payload repeating three field
+    /// names, and this is the part a keystroke pays for.
+    tokens: Vec<u32>,
+    /// Start and end for every statement, flattened for the same reason.
+    statements: Vec<u32>,
+    /// Absent for a buffer with nothing in it to run.
+    target: Option<RunTarget>,
+}
+
+/// What a run would send, flattened so that the caller decodes one shape rather
+/// than three.
+#[derive(serde::Serialize)]
+struct RunTarget {
+    start: u32,
+    end: u32,
+    /// `whole`, `statement` or `selection`.
+    origin: &'static str,
+    /// Which statement of how many, both counted from 1. Zero for the two
+    /// origins that number nothing, which is unambiguous because there is no
+    /// zeroth statement.
+    index: u32,
+    of: u32,
+}
+
+impl From<dbsql::Target> for RunTarget {
+    fn from(target: dbsql::Target) -> Self {
+        let (origin, index, of) = match target.origin {
+            Origin::Whole => ("whole", 0, 0),
+            Origin::Statement { index, of } => ("statement", index as u32, of as u32),
+            Origin::Selection => ("selection", 0, 0),
+        };
+        RunTarget {
+            start: target.span.start,
+            end: target.span.end,
+            origin,
+            index,
+            of,
+        }
+    }
+}
+
+/// The number a token kind crosses as.
+///
+/// Written out rather than taken from the enum's discriminant, because the order
+/// the variants happen to sit in is a promise to nobody: a reordering that
+/// silently painted every string literal as a comment is the kind of mistake a
+/// person notices and a compiler does not.
+fn token_code(kind: TokenKind) -> u32 {
+    match kind {
+        TokenKind::Terminator => 0,
+        TokenKind::Keyword => 1,
+        TokenKind::Identifier => 2,
+        TokenKind::QuotedIdentifier => 3,
+        TokenKind::String => 4,
+        TokenKind::DollarQuoted => 5,
+        TokenKind::Number => 6,
+        TokenKind::Comment => 7,
+        TokenKind::Parameter => 8,
+        TokenKind::Whitespace => 9,
+        TokenKind::Other => 10,
+    }
+}
+
+/// One reading of an editor buffer, as JSON. Release with `db_string_free`.
+///
+/// Takes no handle, like `db_drivers_json` and for a related reason: reading SQL
+/// needs the dialect and not the connection, and an editor holds text before
+/// anything is open. `scheme` is the connection's — `postgres`, `mysql`,
+/// `sqlite` — and one this build does not know is read as PostgreSQL rather than
+/// refused, because a wrong guess there costs colour and not correctness.
+///
+/// Offsets in and out are counted in characters from zero, which is the unit a
+/// Swift `String.unicodeScalars` index is. `selection_start` and `selection_end`
+/// are equal for a caret; either order is accepted, since a front end that hands
+/// them over backwards means the same span.
+///
+/// # Safety
+/// `text` and `scheme` must be valid NUL-terminated C strings. `err` must be
+/// null or point to a writable `*mut c_char`, and what it is set to must be
+/// released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_scan_json(
+    text: *const c_char,
+    scheme: *const c_char,
+    selection_start: u32,
+    selection_end: u32,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if text.is_null() || scheme.is_null() {
+        unsafe { set_err(err, "null text or scheme") };
+        return ptr::null_mut();
+    }
+    let (text, scheme) = unsafe {
+        match (
+            CStr::from_ptr(text).to_str(),
+            CStr::from_ptr(scheme).to_str(),
+        ) {
+            (Ok(t), Ok(s)) => (t, s),
+            _ => {
+                set_err(err, "text or scheme is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+
+    let dialect = dbsql::for_scheme(scheme);
+    let mut tokens = Vec::new();
+    for token in dbsql::tokens(text, dialect) {
+        tokens.extend_from_slice(&[token_code(token.kind), token.start, token.end]);
+    }
+    let selection = selection_start.min(selection_end)..selection_start.max(selection_end);
+    let scan = Scan {
+        tokens,
+        statements: dbsql::statements(text, dialect)
+            .into_iter()
+            .flat_map(|s| [s.start, s.end])
+            .collect(),
+        target: dbsql::target(text, selection, dialect).map(RunTarget::from),
+    };
+    json_result(&scan, err)
+}
+
+/// Where a server's error position lands in the buffer, or -1 when the number
+/// could not have come from what was sent.
+///
+/// A position is counted from 1, in characters, and from the start of the string
+/// the server was handed — which is one statement, not the buffer it was cut
+/// from. Exported rather than left to each front end because the rule for where
+/// such a number stops being believable is the scanner's, and a second copy of
+/// it is a second chance to be one character out.
+///
+/// Takes no pointers and cannot fail, so it has no `err` and no unsafety.
+#[unsafe(no_mangle)]
+pub extern "C" fn db_sql_error_offset(position: c_int, sent_start: u32, sent_end: u32) -> i64 {
+    let Ok(position) = u32::try_from(position) else {
+        return -1;
+    };
+    dbsql::error_offset(position, &(sent_start..sent_end)).map_or(-1, i64::from)
 }
 
 /// Non-system schemas as a JSON array. Release with `db_string_free`.

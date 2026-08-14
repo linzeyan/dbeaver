@@ -88,6 +88,62 @@ int db_cancel(DbHandle* handle, char** err);
 // form cannot offer one this build does not have.
 char* db_drivers_json(char** err);
 
+// One reading of an editor buffer: what to paint, where the statements are, and
+// which one a run would send. Takes no handle for the reason db_drivers_json
+// does not — reading SQL needs the dialect and not the connection, and an editor
+// holds text before anything is open.
+//
+// `scheme` is the connection's ("postgres", "mysql", "sqlite", …). One this
+// build does not know is read as PostgreSQL rather than refused: a wrong guess
+// costs colour, not correctness, since the statement is sent as typed either
+// way.
+//
+// All offsets, in and out, are counted in characters from zero — the unit a
+// Swift String.unicodeScalars index is, and the unit db_query's err_position is
+// counted in. Bytes would be cheaper and would put every offset after an
+// accented letter in the wrong place. `selection_start` and `selection_end` are
+// equal for a caret, and may be given in either order.
+//
+// The answer is one JSON object, released with db_string_free:
+//
+//   {"tokens":    [kind, start, end, …],
+//    "statements":[start, end, …],
+//    "target":    {"start":…, "end":…, "origin":"whole"|"statement"|"selection",
+//                  "index":…, "of":…}   // null when there is nothing to run
+//   }
+//
+// Flat arrays rather than arrays of objects because this crosses on every
+// keystroke, and an object per token would spend most of the payload repeating
+// three field names. The tokens cover the buffer exactly once, in order, so a
+// caller can find the one at an offset without scanning the text itself.
+//
+// `kind` is one of, and these numbers are the contract:
+//
+//   0 terminator   3 quoted identifier  6 number     9  whitespace
+//   1 keyword      4 string             7 comment    10 other
+//   2 identifier   5 dollar-quoted      8 parameter
+//
+// `index` and `of` count from 1 and are zero for the origins that number
+// nothing, which is unambiguous because there is no zeroth statement.
+//
+// One call rather than three, because the three questions are asked about the
+// same text at the same moment and one scan answers all of them.
+char* db_sql_scan_json(const char* text, const char* scheme, uint32_t selection_start,
+                       uint32_t selection_end, char** err);
+
+// Where a server error position lands in the buffer, or -1 when the number could
+// not have come from what was sent.
+//
+// The position is db_query's `err_position`: 1-based, in characters, counted
+// from the start of the SQL that was sent — which is one statement, not the
+// buffer it was cut from. Applying it to the buffer instead points confidently
+// at a character in the wrong statement, and looks right every time the one that
+// failed happened to be the first. One past the last character is a real answer,
+// being what an unexpected end of input points at; anything beyond it is not.
+//
+// Takes no pointers and cannot fail, so it has no `err`.
+int64_t db_sql_error_offset(int position, uint32_t sent_start, uint32_t sent_end);
+
 // Metadata crosses as JSON, not Arrow: it is small, and Arrow buys nothing for
 // a few thousand short rows. Returned strings are released with db_string_free.
 char* db_schemas_json(DbHandle* handle, char** err);

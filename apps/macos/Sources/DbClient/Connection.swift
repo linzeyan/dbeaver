@@ -176,6 +176,17 @@ enum ConnectionURL {
         URLComponents(string: text)?.password
     }
 
+    /// Which database a URL names, as the scheme the core dispatches on.
+    ///
+    /// Wanted because the scheme picks a SQL dialect as well as a driver: the
+    /// editor reads `"a"` as a quoted identifier against PostgreSQL and as a
+    /// string against MySQL, and it can only ask the right question if it knows
+    /// which database is on the other end. Empty for a string that is not a URL,
+    /// which the core reads as PostgreSQL.
+    static func scheme(in text: String) -> String {
+        URLComponents(string: text)?.scheme ?? ""
+    }
+
     /// How a session is named in a tab: `database@host`, or the file name for a
     /// database that is a file.
     ///

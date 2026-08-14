@@ -12,6 +12,7 @@ crate-type = ["staticlib", "rlib"]
 arrow = { workspace = true, features = ["ffi"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 dbconn = { path = "../conn" }
+dbsql = { path = "../sql" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-mongodb = { path = "../drivers/mongodb" }

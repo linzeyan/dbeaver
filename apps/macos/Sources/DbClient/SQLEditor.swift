@@ -21,6 +21,12 @@ struct SQLEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var selection: TextSelection?
 
+    /// The connection's scheme, which is how the core picks the dialect this
+    /// buffer is read in. Passed in rather than looked up here because the view
+    /// is handed the two bindings it needs and nothing else, and a database is
+    /// not a fact about a text view.
+    let scheme: String
+
     /// True while `.focused($focus, equals: .editor)` in `QueryPane` points
     /// here. SwiftUI cannot make an arbitrary `NSView` first responder on its
     /// own, so switching to the Query tab would otherwise leave the editor
@@ -353,9 +359,10 @@ struct SQLEditor: NSViewRepresentable {
 
         // MARK: - Colour
 
-        /// Re-lexes the buffer and repaints what is on screen.
+        /// Asks the core to read the buffer again and repaints what is on
+        /// screen.
         ///
-        /// The buffer is lexed whole on every edit, and that is a decision
+        /// The buffer is scanned whole on every edit, and that is a decision
         /// rather than the path of least resistance. Nothing cheaper is
         /// correct: typing one `/*` at the top of a script turns every line
         /// below it into a comment, and a `'` does the same with a literal, so
@@ -364,21 +371,40 @@ struct SQLEditor: NSViewRepresentable {
         /// per-line state cache to make that possible is a real design, and it
         /// buys nothing at the sizes this editor sees.
         ///
-        /// Which is the part worth measuring, so it was, from inside the app
-        /// with a probe driving `insertText`: a keystroke costs 0.70 ms over 100
-        /// lines, 1.5 ms over 500 and 4.9 ms over 2,000 — the last being a
-        /// 140 KB script, and still under a third of a frame. It reaches 16 ms
-        /// at 8,000 lines, half a megabyte of SQL, which is where this approach
-        /// would have to be reconsidered and is not a buffer anybody types.
+        /// The caret is handed over with the text because one scan answers the
+        /// colours and the run target together. The model reads the target
+        /// during the SwiftUI update this keystroke is about to trigger, and
+        /// asking here with the caret it is about to be given means that read
+        /// finds the answer already made — one crossing per keystroke rather
+        /// than two.
         ///
-        /// What is genuinely expensive at any size is handing TextKit an
-        /// attribute range per token, each invalidating layout where it lands.
-        /// So the tokens are cached and only the ones on screen are applied,
-        /// which holds the repaint at 0.3 ms whatever the buffer is doing and
-        /// keeps the lexer out of scrolling altogether.
+        /// What is expensive at any size is handing TextKit an attribute range
+        /// per token, each invalidating layout where it lands. So the tokens are
+        /// cached and only the ones on screen are applied, which holds the
+        /// repaint flat whatever the buffer is doing and keeps the scanner out
+        /// of scrolling altogether.
         private func relex(_ string: String) {
-            painted = Self.utf16Ranges(SQLScript.tokens(in: string), in: string)
+            guard let textView else { return }
+            let scan = SQLScript.scan(
+                string, scheme: parent.scheme,
+                selection: Self.scalarRange(of: textView.selectedRange(), in: string))
+            painted = Self.utf16Ranges(scan.tokens, in: string)
             highlight()
+        }
+
+        /// An AppKit selection as the scalar offsets the core counts in.
+        ///
+        /// `NSRange` has always meant UTF-16 units and the core counts Unicode
+        /// scalars; the two agree on every character in the Basic Multilingual
+        /// Plane and disagree on every emoji. Nothing selected for a range the
+        /// buffer cannot hold, which is what a selection left over from the text
+        /// this one replaced looks like.
+        private static func scalarRange(of range: NSRange, in text: String) -> Range<Int> {
+            guard let indices = Range(range, in: text) else { return 0..<0 }
+            let scalars = text.unicodeScalars
+            let lower = scalars.distance(from: scalars.startIndex, to: indices.lowerBound)
+            let length = scalars.distance(from: indices.lowerBound, to: indices.upperBound)
+            return lower..<(lower + length)
         }
 
         /// Paints the visible range from the cache.
@@ -460,7 +486,7 @@ struct SQLEditor: NSViewRepresentable {
 
         /// Token offsets, converted from Unicode scalars to UTF-16 units.
         ///
-        /// `SQLScript` counts scalars because that is what PostgreSQL reports an
+        /// The core counts scalars because that is what a server reports an
         /// error position in; AppKit counts UTF-16 units because that is what
         /// `NSRange` has always meant. The two agree on every character in the
         /// Basic Multilingual Plane and disagree on every emoji, so a literal

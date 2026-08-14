@@ -42,7 +42,7 @@ use dbffi::{
     db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema, db_definition_json,
     db_foreign_keys_json, db_free, db_indexes_json, db_query, db_query_free, db_query_next,
     db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_schemas_json, db_string_free, db_triggers_json,
+    db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free, db_triggers_json,
 };
 
 // Test db_connect with null connection string
@@ -498,6 +498,131 @@ fn test_query_free_null_query() {
 fn test_string_free_null_string() {
     unsafe { db_string_free(ptr::null_mut()) };
     // Should not crash
+}
+
+// ---------------------------------------------------------------------------
+// Reading SQL, which needs no database
+//
+// The wire shape is asserted whole rather than parsed, because it is what a
+// front end mirrors field by field: a renamed key or a renumbered token kind is
+// a silently mispainted editor, and comparing the string is the only assertion
+// that fails on either. These names read as sentences, which is the convention
+// of the newer tests in this workspace; the ones above predate it.
+// ---------------------------------------------------------------------------
+
+/// The JSON one scan produced, with the core's copy released.
+fn scan(text: &str, scheme: &str, selection: (u32, u32)) -> String {
+    let text = CString::new(text).unwrap();
+    let scheme = CString::new(scheme).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe {
+        db_sql_scan_json(
+            text.as_ptr(),
+            scheme.as_ptr(),
+            selection.0,
+            selection.1,
+            &mut err,
+        )
+    };
+    assert!(!raw.is_null(), "db_sql_scan_json must answer");
+    assert!(
+        err.is_null(),
+        "db_sql_scan_json must not set err on success"
+    );
+    let json = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+    json
+}
+
+#[test]
+fn a_scan_answers_all_three_questions_in_one_object() {
+    // SELECT is a keyword, the space between is whitespace, 1 is a number, the
+    // semicolon separates and the comment after it is not a statement of its
+    // own. The one statement in the buffer reports itself as the whole thing.
+    assert_eq!(
+        scan("SELECT 1; -- x", "postgres", (0, 0)),
+        r#"{"tokens":[1,0,6,9,6,7,6,7,8,0,8,9,9,9,10,7,10,14],"statements":[0,8],"#.to_owned()
+            + r#""target":{"start":0,"end":8,"origin":"whole","index":0,"of":0}}"#
+    );
+}
+
+#[test]
+fn a_caret_names_the_statement_it_sits_in_and_a_selection_names_itself() {
+    let script = "SELECT 1; SELECT 2";
+    assert!(
+        scan(script, "postgres", (12, 12))
+            .contains(r#""target":{"start":10,"end":18,"origin":"statement","index":2,"of":2}"#),
+        "the caret in the second statement must name it"
+    );
+    assert!(
+        scan(script, "postgres", (0, 8))
+            .contains(r#""target":{"start":0,"end":8,"origin":"selection","index":0,"of":0}"#),
+        "a selection is taken as written"
+    );
+    // Backwards is the same span, because a C caller can hand them over either
+    // way round and means the same thing.
+    assert!(scan(script, "postgres", (8, 0)).contains(r#""origin":"selection""#));
+}
+
+#[test]
+fn a_buffer_with_nothing_to_run_has_no_target() {
+    assert_eq!(
+        scan("-- nothing here", "postgres", (0, 0)),
+        r#"{"tokens":[7,0,15],"statements":[],"target":null}"#
+    );
+}
+
+#[test]
+fn the_scheme_picks_the_dialect_and_an_unknown_one_is_read_as_postgresql() {
+    // A double quote opens an identifier in PostgreSQL and a string in MySQL,
+    // which is kind 3 against kind 4 and the plainest proof that the scheme
+    // reached the table rather than being ignored.
+    assert!(scan(r#""a""#, "postgres", (0, 0)).starts_with(r#"{"tokens":[3,0,3]"#));
+    assert!(scan(r#""a""#, "mysql", (0, 0)).starts_with(r#"{"tokens":[4,0,3]"#));
+    assert!(scan(r#""a""#, "nosuchdb", (0, 0)).starts_with(r#"{"tokens":[3,0,3]"#));
+}
+
+#[test]
+fn offsets_are_counted_in_characters_and_not_in_bytes() {
+    // The difference is invisible until somebody types an accented letter, and
+    // then every caret after it is one place out.
+    assert_eq!(
+        scan("'é' x", "postgres", (0, 0)),
+        r#"{"tokens":[4,0,3,9,3,4,2,4,5],"statements":[0,5],"#.to_owned()
+            + r#""target":{"start":0,"end":5,"origin":"whole","index":0,"of":0}}"#
+    );
+}
+
+#[test]
+fn a_scan_says_why_it_could_not_read_its_arguments() {
+    let text = CString::new("SELECT 1").unwrap();
+    let scheme = CString::new("postgres").unwrap();
+    let invalid = CString::new(vec![b'v', b'a', b'l', b'i', b'd', 0xff, 0xfe]).unwrap();
+
+    for (text, scheme) in [
+        (ptr::null(), scheme.as_ptr()),
+        (text.as_ptr(), ptr::null()),
+        (invalid.as_ptr(), scheme.as_ptr()),
+        (text.as_ptr(), invalid.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_sql_scan_json(text, scheme, 0, 0, &mut err) };
+        assert!(raw.is_null());
+        assert!(!err.is_null(), "db_sql_scan_json must say why it failed");
+        unsafe { db_string_free(err) };
+    }
+}
+
+#[test]
+fn an_error_position_lands_where_the_statement_started() {
+    // 1-based, from the start of what was sent rather than of the buffer.
+    assert_eq!(db_sql_error_offset(1, 10, 20), 10);
+    assert_eq!(db_sql_error_offset(11, 10, 20), 20);
+    // One past the last character is what an unexpected end of input points at;
+    // beyond that the number cannot have come from this statement.
+    assert_eq!(db_sql_error_offset(12, 10, 20), -1);
+    assert_eq!(db_sql_error_offset(0, 10, 20), -1);
+    assert_eq!(db_sql_error_offset(-1, 10, 20), -1);
 }
 
 // Test db_cursor with null handle

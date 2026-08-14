@@ -2,6 +2,18 @@ import Foundation
 
 /// Executable checks for `SQLScript`, run by `--verify-splitter`.
 ///
+/// What the scanner promises about SQL — where a literal ends, which words are
+/// keywords, what separates two statements — is settled in
+/// `crates/sql/tests/scanning.rs` and is not restated here. Two copies of a rule
+/// are two rules the moment one of them is corrected.
+///
+/// What is left is this side's own, and it is all about the seam. The core
+/// counts characters and AppKit counts UTF-16 units and a `String.Index` is
+/// neither; the token kinds cross as numbers that no compiler on either side
+/// checks; and the whole answer arrives through a C string that has to be
+/// decoded and released. Every check below fails for something that could go
+/// wrong between the two languages rather than inside either.
+///
 /// There is no Swift test target and adding one is disruptive: `Package.swift`
 /// declares a single executable target that links the Rust staticlib, so a test
 /// target would have to reproduce that link. A flag on the binary is how this
@@ -17,17 +29,13 @@ enum SQLScriptChecks {
 
     static func run() -> Bool {
         failures = 0
-        checkPlainSplitting()
-        checkStringsAndIdentifiers()
-        checkComments()
-        checkDollarQuoting()
-        checkSeedScript()
-        checkCaretPicksAStatement()
-        checkSelectionWins()
-        checkErrorPositions()
-        checkUnterminatedInput()
-        checkTokenKinds()
+        checkSpansArriveAsSpans()
+        checkTokenKindsSurviveTheCrossing()
         checkTokensCoverTheBuffer()
+        checkTargetsArriveWithTheirOrigin()
+        checkErrorPositionsCrossBack()
+        checkTheSchemeReachesTheDialect()
+        checkOffsetsAreCountedInScalars()
         if failures == 0 {
             fputs("splitter: all checks passed\n", stderr)
         } else {
@@ -38,303 +46,177 @@ enum SQLScriptChecks {
 
     // MARK: - Cases
 
-    private static func checkPlainSplitting() {
-        expect(split(""), [], "an empty buffer holds no statements")
-        expect(split("   \n\t "), [], "blank space holds no statements")
-        expect(split("SELECT 1"), ["SELECT 1"], "a statement needs no terminator")
-        expect(split("SELECT 1;"), ["SELECT 1"], "the terminator is not part of it")
-        expect(split("SELECT 1;;;"), ["SELECT 1"], "empty statements are not statements")
+    /// The statement spans are offsets into the buffer, and cutting the buffer
+    /// with them has to give back the statements.
+    ///
+    /// The rule being exercised is the core's and is tested there; what is
+    /// tested here is that a pair of numbers survives JSON, a C string and
+    /// `String.Index` arithmetic and still names the same characters. An
+    /// off-by-one anywhere on that path sends the server a statement missing its
+    /// first letter.
+    private static func checkSpansArriveAsSpans() {
+        expect(split(""), [], "an empty buffer scans to nothing")
         expect(
             split("SELECT 1;\n\nSELECT 2;\n"), ["SELECT 1", "SELECT 2"],
-            "blank lines between statements are trimmed off both")
+            "the spans cut the buffer into the statements they name")
         expect(
-            split("SELECT 1;SELECT 2"), ["SELECT 1", "SELECT 2"],
-            "a terminator needs no whitespace around it")
+            split("SELECT $fn$a;b$fn$; SELECT 2"), ["SELECT $fn$a;b$fn$", "SELECT 2"],
+            "a span reaches over a body holding its own semicolons")
     }
 
-    private static func checkStringsAndIdentifiers() {
+    /// Each of the six kinds the editor paints arrives as itself.
+    ///
+    /// The kinds cross as the numbers `dbffi.h` documents, and nothing on either
+    /// side of that boundary is checked by a compiler: renumbering them would
+    /// paint every string literal as a comment and produce no diagnostic at all.
+    /// One script holding all six is what turns that into a failure here.
+    private static func checkTokenKindsSurviveTheCrossing() {
         expect(
-            split("SELECT 'a;b';"), ["SELECT 'a;b'"],
-            "a semicolon in a literal is a character, not a boundary")
-        expect(
-            split("SELECT 'it''s; fine';"), ["SELECT 'it''s; fine'"],
-            "a doubled quote does not end the literal")
-        expect(
-            split("SELECT \"a;b\" FROM t;"), ["SELECT \"a;b\" FROM t"],
-            "a semicolon in a quoted identifier is part of the name")
-        expect(
-            split("SELECT \"say \"\"hi\"\"; ok\";"), ["SELECT \"say \"\"hi\"\"; ok\""],
-            "a doubled quote does not end the identifier either")
-        // standard_conforming_strings is on, so this is a literal ending in a
-        // backslash followed by a second literal — not one escaped quote.
-        expect(
-            split("SELECT 'a\\', 'b;c';"), ["SELECT 'a\\', 'b;c'"],
-            "a backslash is an ordinary character in a plain literal")
-        expect(
-            split("SELECT E'a\\'; b';"), ["SELECT E'a\\'; b'"],
-            "a backslash does escape inside E'…'")
-        expect(
-            split("SELECT emailE'a\\'; SELECT 2"), ["SELECT emailE'a\\'", "SELECT 2"],
-            "the E ending an identifier does not make the next literal an escape string")
-    }
-
-    private static func checkComments() {
-        expect(
-            split("SELECT 1; -- and ; then\nSELECT 2;"), ["SELECT 1", "-- and ; then\nSELECT 2"],
-            "a semicolon in a line comment is not a boundary")
-        expect(
-            split("SELECT 1 /* ; still one */ + 1;"), ["SELECT 1 /* ; still one */ + 1"],
-            "nor one in a block comment")
-        expect(
-            split("SELECT /* outer /* inner ; */ still ; */ 1;"),
-            ["SELECT /* outer /* inner ; */ still ; */ 1"],
-            "block comments nest, so the first */ does not close the outer one")
-        expect(
-            split("SELECT 1;\n-- trailing note\n"), ["SELECT 1"],
-            "a chunk holding only a comment is not a statement")
-        expect(
-            split("-- fetch the rows\nSELECT 1;"), ["-- fetch the rows\nSELECT 1"],
-            "a leading comment stays with the statement it describes")
-    }
-
-    private static func checkDollarQuoting() {
-        expect(
-            split("SELECT $$a;b$$;"), ["SELECT $$a;b$$"],
-            "an untagged dollar-quoted body hides its semicolons")
-        expect(
-            split("SELECT $tag$a;$$b$tag$;"), ["SELECT $tag$a;$$b$tag$"],
-            "only the matching tag closes the body")
-        expect(
-            split("SELECT $1; SELECT $2"), ["SELECT $1", "SELECT $2"],
-            "$1 is a parameter placeholder, not the start of a body")
-        expect(
-            split("SELECT a$b$c; SELECT 2"), ["SELECT a$b$c", "SELECT 2"],
-            "$ continues an identifier, so a$b$c is one name")
-    }
-
-    /// The function body from `tools/seed-bench-db.sh`, which is where this
-    /// whole file comes from: two semicolons inside `$fn$ … $fn$`, and a third
-    /// that really does end the statement.
-    private static func checkSeedScript() {
-        let script = """
-            CREATE OR REPLACE FUNCTION bench_child_touch() RETURNS trigger AS $fn$
-            BEGIN
-              RETURN NEW;
-            END;
-            $fn$ LANGUAGE plpgsql;
-
-            CREATE TRIGGER bench_child_before_write
-              BEFORE INSERT OR UPDATE ON bench_child
-              FOR EACH ROW EXECUTE FUNCTION bench_child_touch();
-            """
-        let parts = split(script)
-        expect(parts.count, 2, "the seed's function and trigger are two statements")
-        expect(
-            parts.first?.hasSuffix("$fn$ LANGUAGE plpgsql"), true,
-            "the function body's own semicolons do not end it")
-        expect(
-            parts.last?.hasPrefix("CREATE TRIGGER"), true,
-            "the trigger is what follows it")
-    }
-
-    private static func checkCaretPicksAStatement() {
-        let script = "SELECT 1;\nSELECT 22;\nSELECT 333;"
-        // Offsets: statement 1 at 0..<8, 2 at 10..<19, 3 at 21..<31.
-        expect(target(script, caret: 0), "SELECT 1|statement 1 of 3", "caret at the very start")
-        expect(target(script, caret: 8), "SELECT 1|statement 1 of 3", "caret at the end of one")
-        expect(
-            target(script, caret: 9), "SELECT 1|statement 1 of 3",
-            "caret past the terminator is still on that line")
-        expect(target(script, caret: 14), "SELECT 22|statement 2 of 3", "caret inside the second")
-        expect(target(script, caret: 31), "SELECT 333|statement 3 of 3", "caret at the buffer end")
-
-        expect(
-            target("SELECT 1", caret: 0), "SELECT 1|query",
-            "one statement is still described as the query it always was")
-        expect(
-            target("  \n SELECT 1;", caret: 1), "SELECT 1|query",
-            "a caret in the leading blank space means the first statement")
-        expect(SQLScript.target(in: "-- nothing to run", selection: 0..<0), nil, "no statement")
-
-        // A comment above a statement is part of it, so the caret sitting on the
-        // comment runs the statement it introduces rather than the one above.
-        let annotated = "SELECT 1;\n-- second\nSELECT 2;"
-        expect(
-            target(annotated, caret: 12), "-- second\nSELECT 2|statement 2 of 2",
-            "caret on a comment")
-    }
-
-    private static func checkSelectionWins() {
-        let script = "SELECT 1;\nSELECT 22;"
-        expect(
-            target(script, from: 10, to: 19), "SELECT 22|selection",
-            "a selection is what runs, whatever the caret rule would have said")
-        expect(
-            target(script, from: 9, to: 20), "SELECT 22;|selection",
-            "a selection is taken as written, trimmed only of blank space")
-        expect(
-            SQLScript.target(in: script, selection: 9..<10), nil,
-            "a selection holding nothing but blank space is not something to run")
-    }
-
-    private static func checkErrorPositions() {
-        // The trap this exists for: the server counts from 1 within the
-        // statement it was sent, and the second statement of a buffer does not
-        // start at the buffer's first character.
-        let second = 10..<19
-        expect(SQLScript.errorOffset(ofPosition: 1, in: second), 10, "position 1 is the first char")
-        expect(SQLScript.errorOffset(ofPosition: 8, in: second), 17, "position 8 is eight in")
-        expect(
-            SQLScript.errorOffset(ofPosition: 10, in: second), 19,
-            "one past the last character is where an unexpected end of input points")
-        expect(SQLScript.errorOffset(ofPosition: 11, in: second), nil, "beyond that is not")
-        expect(SQLScript.errorOffset(ofPosition: 0, in: second), nil, "the server never says 0")
-
-        let script = "SELECT 1;\nSELECT nope;"
-        expect(
-            SQLScript.lineColumn(of: 17, in: script).line, 2, "line counted from 1")
-        expect(
-            SQLScript.lineColumn(of: 17, in: script).column, 8, "column counted from 1")
-        expect(
-            SQLScript.text(SQLScript.tokenRange(at: 17, in: script), in: script), "nope",
-            "the selection covers the word the server is pointing at")
-        expect(
-            SQLScript.text(SQLScript.tokenRange(at: 7, in: script), in: script), "1",
-            "a number is a word too")
-        expect(
-            SQLScript.text(SQLScript.tokenRange(at: 6, in: script), in: script), " ",
-            "punctuation gets a single character, not an invisible empty selection")
-
-        // A flag is two code points and one Character. PostgreSQL counts code
-        // points, so counting Characters here would put every offset after the
-        // literal one place to the left — and the caret on the wrong letter.
-        let wide = "SELECT '🇹🇼';\nSELECT nope"
-        expect(
-            SQLScript.text(SQLScript.tokenRange(at: 20, in: wide), in: wide), "nope",
-            "offsets past a multi-scalar character still land on the right word")
-        expect(SQLScript.lineColumn(of: 20, in: wide).line, 2, "line after the literal")
-        expect(SQLScript.lineColumn(of: 20, in: wide).column, 8, "column after the literal")
-    }
-
-    private static func checkUnterminatedInput() {
-        // Half-typed input is the normal state of an editor. Each of these
-        // swallows the rest of the buffer on purpose: the alternative is
-        // treating a semicolon inside a half-written literal as a boundary and
-        // running the fragment before it.
-        expect(
-            split("SELECT 'a;b"), ["SELECT 'a;b"], "an unclosed literal runs to the end")
-        expect(
-            split("SELECT $$a;b"), ["SELECT $$a;b"], "so does an unclosed dollar body")
-        expect(
-            split("SELECT /* a;b"), ["SELECT /* a;b"], "and an unclosed block comment")
-    }
-
-    // MARK: - Tokens
-
-    /// The colours are the same walk as the split, so these cases are as much
-    /// about the scanner as the ones above. What is new here is the word list
-    /// and the number rules, which the splitter never had an opinion about.
-    private static func checkTokenKinds() {
-        expect(
-            tokens("select ID From t"), ["keyword:select", "keyword:From"],
-            "keywords are matched whatever their case, and a table name is not one")
-        expect(
-            tokens("SELECT name, value, level FROM config"),
-            ["keyword:SELECT", "keyword:FROM"],
-            "the unreserved words that are ordinary column names are left alone")
-        expect(
-            tokens("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING"),
+            tokens("SELECT 'lit', \"name\", $tag$body$tag$, 12.5 -- note"),
             [
-                "keyword:INSERT", "keyword:INTO", "keyword:VALUES", "number:1", "keyword:ON",
-                "keyword:CONFLICT", "keyword:DO", "keyword:NOTHING"
+                "keyword:SELECT", "string:'lit'", "quotedIdentifier:\"name\"",
+                "dollarQuoted:$tag$body$tag$", "number:12.5", "comment:-- note"
             ],
-            "an unreserved command word is still a keyword")
+            "every kind the editor colours arrives as the kind it is")
         expect(
-            tokens("SELECT PRIMARY KEY, uuid, date"),
-            ["keyword:SELECT", "keyword:PRIMARY", "keyword:KEY", "keyword:uuid", "keyword:date"],
-            "a type the grammar does not name is coloured like one that it does")
-
-        expect(
-            tokens("SELECT 'it''s', E'a\\'b', \"odd name\""),
-            [
-                "keyword:SELECT", "string:'it''s'", "string:E'a\\'b'",
-                "quotedIdentifier:\"odd name\""
-            ],
-            "the E of an escape string belongs to the literal it opens")
-        expect(
-            tokens("SELECT emailE'x'"), ["keyword:SELECT", "string:'x'"],
-            "an E that ends an identifier does not, and the identifier is no keyword")
-
-        expect(
-            tokens("SELECT 1, 1.5, .5, 1.5e-3, 1_000, 0xFF, 0b1010"),
-            [
-                "keyword:SELECT", "number:1", "number:1.5", "number:.5", "number:1.5e-3",
-                "number:1_000", "number:0xFF", "number:0b1010"
-            ],
-            "every literal form the server accepts is one number")
-        expect(
-            tokens("SELECT col1, $1, a.b, 1e"), ["keyword:SELECT", "number:1"],
-            "a digit inside a name, a parameter placeholder and a bare e are not numbers")
-
-        expect(
-            tokens("-- one\n/* two /* three */ */ SELECT 1"),
-            ["comment:-- one", "comment:/* two /* three */ */", "keyword:SELECT", "number:1"],
-            "a nested block comment is one comment")
-
-        expect(
-            tokens("SELECT $fn$BEGIN; 'x' END;$fn$ AS body"),
-            ["keyword:SELECT", "dollarQuoted:$fn$BEGIN; 'x' END;$fn$", "keyword:AS"],
-            "a dollar-quoted body is one token, delimiters and all")
-        expect(
-            tokens("SELECT a$b$c"), ["keyword:SELECT"],
-            "$ continues an identifier, so a$b$c is one name and no dollar-quoted body")
-
-        expect(
-            tokens("SELECT 'a;b"), ["keyword:SELECT", "string:'a;b"],
-            "an unclosed literal is coloured to the end of the buffer, as it is split to it")
-
-        // The same trap as the error positions above, from the other side.
-        // Tokens are counted in scalars and painted in UTF-16 units, so a
-        // literal holding a flag would shift every colour after it if either
-        // side counted Characters.
-        let wide = "SELECT '🇹🇼', 1"
-        expect(
-            tokens(wide), ["keyword:SELECT", "string:'🇹🇼'", "number:1"],
-            "a multi-scalar character inside a literal does not move what follows it")
+            tokens("SELECT id FROM t"), ["keyword:SELECT", "keyword:FROM"],
+            "the kinds the editor leaves alone arrive as nothing to paint")
     }
 
-    /// Structural invariants the highlighter relies on: it binary-searches the
-    /// token list by end offset and intersects each range with the viewport, and
-    /// both are nonsense if the list is out of order, overlapping, or pointing
-    /// outside the buffer.
+    /// Structural invariants the highlighter relies on.
+    ///
+    /// It binary-searches the painted list by end offset and intersects each
+    /// range with the viewport, and `tokenRange` binary-searches the full list
+    /// expecting it to leave no character uncovered. Both are nonsense if what
+    /// arrived is out of order, overlapping, or pointing outside the buffer —
+    /// which is what a payload decoded one field out of step looks like.
     private static func checkTokensCoverTheBuffer() {
         let script = """
             -- a note
             SELECT "c1", 'lit''eral', 12.5, $tag$body ; $$ still$tag$, E'esc\\'d'
               FROM t /* mid */ WHERE x = $1 AND y IN (1_000, 0xFF);
             """
-        let all = SQLScript.tokens(in: script)
+        let scan = scanned(script)
         let scalars = script.unicodeScalars.count
-        expect(all.isEmpty, false, "the script has tokens to check")
+        expect(scan.tokens.isEmpty, false, "the script has tokens to check")
         expect(
-            all.allSatisfy { $0.range.lowerBound >= 0 && $0.range.upperBound <= scalars }, true,
-            "every token lies inside the buffer")
+            scan.tokens.allSatisfy { $0.range.lowerBound >= 0 && $0.range.upperBound <= scalars },
+            true, "every painted token lies inside the buffer")
         expect(
-            zip(all, all.dropFirst()).allSatisfy { $0.range.upperBound <= $1.range.lowerBound },
-            true,
-            "tokens arrive in order and never overlap")
+            zip(scan.tokens, scan.tokens.dropFirst()).allSatisfy {
+                $0.range.upperBound <= $1.range.lowerBound
+            }, true, "painted tokens arrive in order and never overlap")
+        expect(
+            scan.spans.first?.lowerBound, 0, "the spans start at the first character")
+        expect(scan.spans.last?.upperBound, scalars, "and reach the last")
+        expect(
+            zip(scan.spans, scan.spans.dropFirst()).allSatisfy {
+                $0.upperBound == $1.lowerBound
+            }, true, "with no gap between them, which is what tokenRange walks")
+    }
+
+    /// A target arrives with the origin it was given, and says so on screen.
+    ///
+    /// The origin crosses as a name and two numbers and comes back as an enum
+    /// with an associated value; the sentence the status bar reads is built from
+    /// it here. A buffer of five statements running under a label saying "query"
+    /// is the defect this prevents.
+    private static func checkTargetsArriveWithTheirOrigin() {
+        let script = "SELECT 1;\nSELECT 22;\nSELECT 333;"
+        expect(target(script, caret: 14), "SELECT 22|statement 2 of 3", "one statement of several")
+        expect(
+            target("SELECT 1", caret: 0), "SELECT 1|query",
+            "one statement is still described as the query it always was")
+        expect(
+            target(script, from: 10, to: 19), "SELECT 22|selection",
+            "a selection is described as one")
+        expect(target("-- nothing to run", caret: 0), nil, "nothing to run has no target")
+    }
+
+    /// A server's error position comes back as a buffer offset, or as nothing.
+    ///
+    /// The arithmetic is the core's; what is checked here is that -1 for "that
+    /// number cannot have come from this statement" becomes nil rather than an
+    /// offset the editor would then try to select.
+    private static func checkErrorPositionsCrossBack() {
+        let second = 10..<19
+        expect(SQLScript.errorOffset(ofPosition: 1, in: second), 10, "position 1 is the first char")
+        expect(
+            SQLScript.errorOffset(ofPosition: 10, in: second), 19,
+            "one past the last character is where an unexpected end of input points")
+        expect(SQLScript.errorOffset(ofPosition: 11, in: second), nil, "beyond that is not")
+        expect(SQLScript.errorOffset(ofPosition: 0, in: second), nil, "the server never says 0")
+    }
+
+    /// The connection's scheme reaches the dialect table.
+    ///
+    /// Which database is on the other end changes what the same characters mean,
+    /// and the editor is the only thing that knows it. A scheme dropped anywhere
+    /// between the window and the core would leave every connection reading its
+    /// buffer as PostgreSQL — correct-looking against PostgreSQL, and wrong
+    /// everywhere else.
+    private static func checkTheSchemeReachesTheDialect() {
+        expect(
+            tokens("SELECT \"a\"", scheme: "postgres"),
+            ["keyword:SELECT", "quotedIdentifier:\"a\""],
+            "a double quote opens an identifier in PostgreSQL")
+        expect(
+            tokens("SELECT \"a\"", scheme: "mysql"), ["keyword:SELECT", "string:\"a\""],
+            "and a string in MySQL, which is the same characters read differently")
+        expect(
+            split("SELECT 1 # note; SELECT 2", scheme: "mysql"), ["SELECT 1 # note; SELECT 2"],
+            "a hash comment hides a semicolon where the database has hash comments")
+    }
+
+    /// Offsets are Unicode scalars on both sides of every conversion.
+    ///
+    /// A flag is two scalars and one `Character`, and AppKit counts UTF-16 units
+    /// besides. Counting `Character`s anywhere on the path would put every
+    /// offset after such a literal one place to the left — the caret on the
+    /// wrong letter, and every colour after it shifted with it. This is the
+    /// check that is entirely Swift's own: the core cannot get it wrong and
+    /// cannot see it go wrong.
+    private static func checkOffsetsAreCountedInScalars() {
+        let wide = "SELECT '🇹🇼';\nSELECT nope"
+        expect(
+            tokens(wide), ["keyword:SELECT", "string:'🇹🇼'", "keyword:SELECT"],
+            "a multi-scalar character inside a literal does not move what follows it")
+        expect(
+            SQLScript.text(scanned(wide).tokenRange(at: 20), in: wide), "nope",
+            "an offset past it still lands on the right word")
+        expect(SQLScript.lineColumn(of: 20, in: wide).line, 2, "line counted from 1")
+        expect(SQLScript.lineColumn(of: 20, in: wide).column, 8, "column counted from 1")
+
+        let plain = "SELECT 1;\nSELECT nope;"
+        expect(
+            SQLScript.text(scanned(plain).tokenRange(at: 7), in: plain), "1",
+            "a number is a word too")
+        expect(
+            SQLScript.text(scanned(plain).tokenRange(at: 6), in: plain), " ",
+            "punctuation gets a character, not an invisible empty selection")
+        expect(
+            SQLScript.text(scanned(plain).tokenRange(at: 99), in: plain), "",
+            "an offset the buffer cannot hold selects nothing")
     }
 
     // MARK: - Harness
 
-    private static func split(_ script: String) -> [String] {
-        SQLScript.statements(in: script).map { SQLScript.text($0, in: script) }
+    /// PostgreSQL unless a case is about a difference between databases, which
+    /// is what the editor's own default amounts to.
+    private static func scanned(_ script: String, scheme: String = "postgres") -> SQLScript.Scan {
+        SQLScript.scan(script, scheme: scheme, selection: 0..<0)
+    }
+
+    private static func split(_ script: String, scheme: String = "postgres") -> [String] {
+        scanned(script, scheme: scheme).statements.map { SQLScript.text($0, in: script) }
     }
 
     /// Tokens rendered as `kind:text`, so one comparison covers both halves and
     /// a failure prints something readable.
-    private static func tokens(_ script: String) -> [String] {
-        SQLScript.tokens(in: script).map { "\($0.kind):\(SQLScript.text($0.range, in: script))" }
+    private static func tokens(_ script: String, scheme: String = "postgres") -> [String] {
+        scanned(script, scheme: scheme).tokens.map {
+            "\($0.kind):\(SQLScript.text($0.range, in: script))"
+        }
     }
 
     /// A target rendered as `sql|label`, so one comparison covers both halves.
@@ -343,7 +225,9 @@ enum SQLScriptChecks {
     }
 
     private static func target(_ script: String, from: Int, to: Int) -> String? {
-        guard let t = SQLScript.target(in: script, selection: from..<to) else { return nil }
+        guard
+            let t = SQLScript.scan(script, scheme: "postgres", selection: from..<to).target
+        else { return nil }
         return "\(SQLScript.text(t.range, in: script))|\(t.label)"
     }
 
