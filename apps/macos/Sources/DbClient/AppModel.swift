@@ -255,6 +255,13 @@ final class AppModel {
     /// slow. `loadMore()` fetches the next page on request.
     private let browsePage = 100_000
 
+    /// Maximum rows one browse result will retain.
+    ///
+    /// It stops rather than evicting because evicting rows the grid can still be
+    /// scrolled back to needs a server-side cursor, which does not exist yet.
+    /// Refusing to grow is what this can honestly do until it does.
+    private let browseResultBound = 1_000_000
+
     /// Rows a page fetches, for the chrome to name in a control.
     var pageSize: Int { browsePage }
     private let batchRows = 8192
@@ -989,6 +996,7 @@ final class AppModel {
     var canLoadMore: Bool {
         activeTab == .content && browseResult.capped && !browseResult.isLoading
             && columns.contains(where: \.isPrimaryKey)
+            && browseResult.rowCount < browseResultBound
     }
 
     /// Why the truncation marker is not offering a next page, when it is not.
@@ -1003,11 +1011,20 @@ final class AppModel {
     }
 
     var pagingObstacle: PagingObstacle? {
-        guard browseResult.capped, !columns.contains(where: \.isPrimaryKey) else { return nil }
-        return PagingObstacle(
-            label: "no primary key",
-            detail: "\(selected?.name ?? "This relation") has no primary key, "
-                + "so there is no stable order to page in.")
+        guard browseResult.capped else { return nil }
+        if !columns.contains(where: \.isPrimaryKey) {
+            return PagingObstacle(
+                label: "no primary key",
+                detail: "\(selected?.name ?? "This relation") has no primary key, "
+                    + "so there is no stable order to page in.")
+        }
+        if browseResult.rowCount >= browseResultBound {
+            return PagingObstacle(
+                label: "maximum rows reached",
+                detail: "This result is holding the maximum of \(Self.formatted(browseResultBound)) rows. "
+                    + "Use a filter to see more rows.")
+        }
+        return nil
     }
 
     /// Example filters, written against the selected relation. A fixed `id > 100`
