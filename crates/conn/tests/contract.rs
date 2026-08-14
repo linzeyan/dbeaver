@@ -108,6 +108,41 @@ async fn sqlite() -> Subject {
     }
 }
 
+/// DuckDB, which like SQLite needs nothing installed and so runs under plain
+/// `cargo test`.
+///
+/// Its schema is `memory.main` rather than `main`: DuckDB has a catalog level
+/// above the schema and the trait has one string, so the driver flattens the two
+/// into a qualified name. `ATTACH` is ordinary usage there and produces two
+/// schemas both called `main`, so the level cannot simply be dropped.
+async fn duckdb() -> Subject {
+    let driver = driver_duckdb::DuckSource::connect(":memory:")
+        .await
+        .expect("an in-memory database should always open");
+    driver
+        .query(
+            "CREATE TABLE nums AS \
+             SELECT i AS id, 'row-' || i AS label FROM range(1, 501) t(i)",
+            1,
+        )
+        .await
+        .expect("fixture setup failed");
+
+    Subject {
+        driver: Box::new(driver),
+        schema: "memory.main".to_string(),
+        relation: "nums".to_string(),
+        key: "id".to_string(),
+        read: "SELECT id FROM nums ORDER BY id".to_string(),
+        broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors: true,
+        positions: true,
+        _fixture: None,
+    }
+}
+
 async fn postgres() -> Subject {
     let driver = driver_postgres::PgSource::connect(PG_CONN)
         .await
@@ -538,6 +573,11 @@ async fn every_check(subject: &Subject) {
 #[tokio::test]
 async fn sqlite_satisfies_the_contract() {
     every_check(&sqlite().await).await;
+}
+
+#[tokio::test]
+async fn duckdb_satisfies_the_contract() {
+    every_check(&duckdb().await).await;
 }
 
 #[tokio::test]
