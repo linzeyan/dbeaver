@@ -845,6 +845,26 @@ async fn greptimedb_reads_data_through_the_postgres_driver() {
 }
 
 /// TiDB, through the MySQL driver and no other code.
+///
+/// Every check passes. Two differences in its catalog are worth stating anyway,
+/// because both are invisible from here and neither is a fault the contract can
+/// see.
+///
+/// TiDB names its system schemas in upper case — `INFORMATION_SCHEMA`,
+/// `PERFORMANCE_SCHEMA`, and a `METRICS_SCHEMA` of its own — so the driver's
+/// list of schemas to hide, which is written the way MySQL spells them, hides
+/// none of them. A navigator against TiDB shows three schemas a navigator
+/// against MySQL does not. Upper-casing the comparison would fix that and would
+/// also newly hide a MySQL database genuinely named `MYSQL` or `Sys`, which on a
+/// case-sensitive filesystem is a database somebody may have made on purpose.
+///
+/// And `information_schema.TABLES` compares `TABLE_SCHEMA` case-sensitively
+/// while `information_schema.COLUMNS` does not, which is TiDB disagreeing with
+/// itself. The driver's probe for `CHECK_CONSTRAINTS` asks the first of those,
+/// so it concludes the table is absent when it is present, and check constraints
+/// go unreported while unique constraints still work. Chasing that would mean
+/// writing the probe around one server's inconsistency rather than around the
+/// question it is asking.
 #[tokio::test]
 #[ignore = "requires a TiDB server"]
 async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
@@ -872,6 +892,15 @@ async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
 }
 
 /// StarRocks, through the MySQL driver and no other code.
+///
+/// Every check passes, which is further than its shape suggests it would: it is
+/// a distributed column store, its tables declare how they are spread and how
+/// many copies to keep, and none of that reaches the driver. Its
+/// `information_schema` carries every table the nine metadata calls read except
+/// `CHECK_CONSTRAINTS`, and that one is already asked about rather than assumed,
+/// so unique constraints come back and checks are simply not claimed. The
+/// capability probe was written for MariaDB and old MySQL and it turns out to
+/// have been the right shape for this too, which is the useful result.
 #[tokio::test]
 #[ignore = "requires a StarRocks server"]
 async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
