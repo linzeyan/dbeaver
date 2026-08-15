@@ -47,7 +47,7 @@ jobs:
         run: make test
 
   # One job per server family rather than one `make test-integration`, which is
-  # what this job used to be. That target now wants nine servers up at once, and
+  # what this job used to be. That target now wants ten servers up at once, and
   # a runner has neither the memory for StarRocks beside SQL Server nor the disk
   # for every image — so the suite is split the way the Makefile splits it, one
   # container set per job, and a failure names the database it belongs to.
@@ -80,6 +80,9 @@ jobs:
           - name: MongoDB
             up: db-up-mongo
             test: test-mongodb
+          - name: Redis
+            up: db-up-redis
+            test: test-redis
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
