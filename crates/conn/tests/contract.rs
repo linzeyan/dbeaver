@@ -317,6 +317,110 @@ async fn mongodb() -> Subject {
     }
 }
 
+/// Database 9, because a Redis server has sixteen numbered databases and no way
+/// to make a seventeenth. The driver's own suite uses another one, for the reason
+/// `mysql()` gives: `cargo test --workspace -- --ignored` runs both binaries at
+/// once, and a shared fixture would turn a scheduling accident into a contract
+/// violation.
+const REDIS_URL: &str = "redis://127.0.0.1:56379/9";
+
+/// Redis, whose relations are its six value types rather than its keys.
+///
+/// The subject that stretches this file furthest, and every field below is
+/// answered from what Redis actually does rather than from what the other
+/// subjects needed.
+///
+/// Seeded through the `redis` crate rather than through the driver, so the
+/// fixture does not depend on the code under test being right.
+async fn redis() -> Subject {
+    let client = redis::Client::open(REDIS_URL).expect("the fixture URL should parse");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("Redis unreachable; run `make db-up-redis`");
+    redis::cmd("FLUSHDB")
+        .exec_async(&mut conn)
+        .await
+        .expect("could not clear the fixture");
+    // Five hundred string keys and nothing else, which is what makes two of the
+    // fields below mean anything: `string` has rows to page through, and
+    // `stream` has none at all.
+    let mut seed = redis::pipe();
+    for i in 1..=500 {
+        seed.cmd("SET").arg(format!("nums:{i}")).arg(i).ignore();
+    }
+    seed.exec_async(&mut conn)
+        .await
+        .expect("seeding the fixture");
+
+    let driver = driver_redis::RedisSource::connect(REDIS_URL)
+        .await
+        .expect("the Redis driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        // Redis's databases are numbered and cannot be named; `db9` is what the
+        // navigator shows and `SELECT 9` is what a statement sends.
+        schema: "db9".to_string(),
+        // A type, not a key. A relation per key would put half a million entries
+        // in the navigator, so the rows of `string` are the keys that hold
+        // strings — see the driver's crate doc.
+        relation: "string".to_string(),
+        // Every listing of keys carries the key it lists, and it is the primary
+        // key in every sense that matters: unique, and the only way to address
+        // the row.
+        key: "key".to_string(),
+        // Two lines, because Redis has no way to name a database inside a
+        // command: the database is a property of the connection, so a statement
+        // that reads db9 has to select it first.
+        read: "SELECT 9\nSCAN 0 TYPE string".to_string(),
+        // Broken in the middle in this database's own language: line one is
+        // fine, line two is not a command. Two lines on purpose — the driver
+        // reports the offset of the line that failed and declines to report one
+        // for a single-line statement, where "line 1" locates nothing.
+        broken: "SELECT 9\nWIBBLE nums".to_string(),
+        // The nearest thing Redis has to a relation that is not there: a type
+        // with no keys of it. The fixture seeds only strings, so this scans the
+        // whole database and finds nothing.
+        missing: "SELECT 9\nSCAN 0 TYPE stream".to_string(),
+        // False, and it is not a near miss. The six relations always exist —
+        // they are the fixed vocabulary of the database, not something anybody
+        // created — so there is no name a browse could fail on. Reading a type
+        // with no keys walks the keyspace and returns nothing, which is the same
+        // answer as reading an empty table.
+        missing_is_a_failure: false,
+        // False, and this is the one place Redis cannot meet the trait. `SCAN`
+        // is its own cursor and it gives the first half of what `Driver::cursor`
+        // asks for exactly — page *n* costs what page one costs — but not the
+        // second: a key present throughout is returned at least once, and *may
+        // be returned twice* if the hash table is resized under the iteration,
+        // which adding or removing enough keys causes.
+        //
+        // The driver could hide the repeats by remembering every key it has
+        // returned. It does not, and `RedisSource::cursor` argues why at length:
+        // the memory is unbounded in the size of the browse, which is what
+        // paging exists to avoid, and it would still not make a key created
+        // mid-iteration appear. So the cursor is real, the Content tab uses it,
+        // and the driver's own suite pages through it — but the guarantee is not
+        // claimed here, because claiming it quietly would be worse than not
+        // having it.
+        cursors: false,
+        // True, and not from anything Redis sends. A rejected command names what
+        // it disliked and never where in the text it was; what the driver knows
+        // instead is its own grammar — one command per line — so it reports the
+        // offset of the line whose command failed. That points at the right
+        // command and no closer, which is the same bargain the SQL Server driver
+        // strikes with a line number.
+        positions: true,
+        // No fixture, because there is no transaction to control. `MULTI` queues
+        // commands and `EXEC` runs the queue; a command sent between them answers
+        // QUEUED rather than a value, so nothing can be read back before deciding
+        // whether to keep it. That is a batch, and the check below asserts the
+        // driver says so rather than offering buttons that would mislead.
+        scratch: None,
+        _fixture: None,
+    }
+}
+
 const MYSQL_ROOT: &str = "mysql://root:test@127.0.0.1:53306/";
 
 /// MySQL, in a database of this file's own rather than the driver's `bench`.
@@ -1140,6 +1244,12 @@ async fn clickhouse_satisfies_the_contract() {
 #[ignore = "requires a MongoDB server"]
 async fn mongodb_satisfies_the_contract() {
     every_check(&mongodb().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Redis server"]
+async fn redis_satisfies_the_contract() {
+    every_check(&redis().await).await;
 }
 
 // ---------------------------------------------------------------------------

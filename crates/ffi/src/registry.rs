@@ -18,6 +18,7 @@ use driver_mongodb::MongoSource;
 use driver_mssql::MsSqlSource;
 use driver_mysql::MySqlSource;
 use driver_postgres::PgSource;
+use driver_redis::RedisSource;
 use driver_sqlite::SqliteSource;
 use serde::Serialize;
 
@@ -106,6 +107,12 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::File,
         default_port: None,
     },
+    Catalogued {
+        scheme: "redis",
+        label: "Redis",
+        shape: Shape::Server,
+        default_port: Some(6379),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -181,6 +188,10 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // never written down.
         "duckdb" => Ok(Box::new(DuckSource::connect(rest).await?)),
         "sqlite" => Ok(Box::new(SqliteSource::connect(rest).await?)),
+        // Passed on whole, because the scheme is part of what redis-rs's URL
+        // parser reads — and because the path after the host is the database
+        // number rather than a name, so `redis://host:6379/3` opens on db3.
+        "redis" => Ok(Box::new(RedisSource::connect(url).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
             known()
