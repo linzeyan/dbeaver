@@ -79,14 +79,28 @@ help: ## Show available targets
 
 ##@ Build
 
+# SwiftPM does not treat the Rust staticlib as an input of its own: it relinks
+# when a Swift source changes, and not when the library does. So a core that
+# changed under an unchanged front-end links into nothing — the binary stays as
+# it was, and every check run against it reports on the core before the change.
+#
+# Not theoretical. The window could not open a Redis connection for as long as no
+# Swift file had changed since the driver was added: `make release` rebuilt the
+# library, SwiftPM linked nothing, and the binary went on carrying a registry
+# that had never heard of the scheme. Deleting the product when the library is
+# newer than it is what makes these two targets mean what they say.
+RELINK = [ ! -e $(1) ] || [ $(1) -nt $(2) ] || rm -f $(1)
+
 .PHONY: build
 build: ## Debug build of core and app
 	cargo build
+	@$(call RELINK,$(APP_DEBUG),target/debug/libdbffi.a)
 	RUST_PROFILE=debug swift build --package-path $(APP_DIR) -c debug
 
 .PHONY: release
 release: ## Release build of core and app
 	cargo build --release
+	@$(call RELINK,$(APP_BIN),target/release/libdbffi.a)
 	swift build --package-path $(APP_DIR) -c release
 	@echo "binary: $(APP_BIN)  (run 'make package' for the launchable .app)"
 
