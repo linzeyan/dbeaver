@@ -269,10 +269,10 @@ final class Database: @unchecked Sendable {
         return try JSONDecoder().decode(type, from: data)
     }
 
-    func query(_ sql: String, batchRows: Int) throws -> Query {
+    func query(_ statement: String, batchRows: Int) throws -> Query {
         var err: UnsafeMutablePointer<CChar>?
         var position: Int32 = 0
-        guard let q = db_query(handle, sql, batchRows, &err, &position) else {
+        guard let q = db_query(handle, statement, batchRows, &err, &position) else {
             throw DbError(
                 description: Database.take(&err) ?? "query failed",
                 // The server counts from one, so zero is "nowhere in particular"
@@ -282,16 +282,16 @@ final class Database: @unchecked Sendable {
         return Query(handle: q)
     }
 
-    /// Opens a server-side cursor over `sql`.
+    /// Opens a server-side cursor over `statement`.
     ///
     /// What this buys over `query` is a stable position: the server holds one
     /// statement's snapshot open and hands out the next rows on request, so a
     /// second page cannot repeat or skip rows the way a second LIMIT/OFFSET
     /// statement can. It costs a connection for as long as the cursor lives.
-    func cursor(_ sql: String, batchRows: Int) throws -> Cursor {
+    func cursor(_ statement: String, batchRows: Int) throws -> Cursor {
         var err: UnsafeMutablePointer<CChar>?
         var position: Int32 = 0
-        guard let c = db_cursor(handle, sql, batchRows, &err, &position) else {
+        guard let c = db_cursor(handle, statement, batchRows, &err, &position) else {
             throw DbError(
                 description: Database.take(&err) ?? "cursor failed",
                 position: position > 0 ? Int(position) : nil)

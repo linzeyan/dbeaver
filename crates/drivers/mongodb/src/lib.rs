@@ -7,12 +7,10 @@
 //!
 //! **The statement is not SQL, and the trait never said it was.** `query` takes
 //! a `&str` and MongoDB's is an MQL command document written as JSON —
-//! `{"find": "orders", "filter": {"status": "open"}}`. The parameter is *named*
-//! `sql`, which is now the wrong word, but nothing about the trait's shape had
+//! `{"find": "orders", "filter": {"status": "open"}}`. The parameter is now
+//! named `statement`, which is correct, and nothing about the trait's shape had
 //! to change: a statement is text the database understands, and this database
-//! understands JSON. The name is recorded as a wart rather than fixed here,
-//! because renaming it touches every driver and that is a decision for after all
-//! six report.
+//! understands JSON.
 //!
 //! **The columns are not known before the rows.** Every other database describes
 //! its result first. MongoDB cannot, because a collection has no schema and two
@@ -257,8 +255,12 @@ impl MongoSource {
     }
 
     /// Runs a statement and reads enough of it to know what its columns are.
-    pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, MongoError> {
-        let reader = self.start(sql, batch_rows).await?;
+    pub async fn query(
+        &self,
+        statement: &str,
+        batch_rows: usize,
+    ) -> Result<ArrowStream, MongoError> {
+        let reader = self.start(statement, batch_rows).await?;
         Ok(ArrowStream { reader })
     }
 
@@ -270,8 +272,8 @@ impl MongoSource {
     /// page one costs and a concurrent write cannot make a document appear
     /// twice. This is the one database in the set that needed no arranging to
     /// satisfy it.
-    pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, MongoError> {
-        let reader = self.start(sql, batch_rows).await?;
+    pub async fn cursor(&self, statement: &str, batch_rows: usize) -> Result<Cursor, MongoError> {
+        let reader = self.start(statement, batch_rows).await?;
         let cancel = CursorCancel {
             client: self.client.clone(),
             mark: reader.mark.clone(),
@@ -280,8 +282,8 @@ impl MongoSource {
     }
 
     /// Runs the statement, buffers the sample, and settles the schema.
-    async fn start(&self, sql: &str, batch_rows: usize) -> Result<Reader, MongoError> {
-        let mut command = parse_statement(sql)?;
+    async fn start(&self, statement: &str, batch_rows: usize) -> Result<Reader, MongoError> {
+        let mut command = parse_statement(statement)?;
         let mark = self.mark();
         // `$db` is where MongoDB's own protocol carries the database, so a
         // statement that names one is using the field the wire format uses
