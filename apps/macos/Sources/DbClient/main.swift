@@ -58,10 +58,10 @@ let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
-// `--verify-transaction`, `--verify-editing`, `--verify-metadata` and
-// `--verify-preferences` run the checks for the pieces of pure logic in the
-// front-end and exit with their verdict. None needs a window or a database, so
-// they run before either exists.
+// `--verify-transaction`, `--verify-editing`, `--verify-metadata`,
+// `--verify-schema-metadata` and `--verify-preferences` run the checks for the
+// pieces of pure logic in the front-end and exit with their verdict. None needs
+// a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
@@ -79,6 +79,9 @@ if CommandLine.arguments.contains("--verify-editing") {
 }
 if CommandLine.arguments.contains("--verify-metadata") {
     exit(MetadataChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-schema-metadata") {
+    exit(SchemaMetadataChecks.run() ? 0 : 1)
 }
 // The only one of these that has to state its isolation. `Preferences` is
 // main-actor isolated because the window reads it, and top-level code runs on

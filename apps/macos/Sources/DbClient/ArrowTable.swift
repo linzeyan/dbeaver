@@ -10,6 +10,14 @@ final class ArrowTable {
     struct Column {
         let name: String
         let kind: Kind
+        /// Whether the server declared this column NOT NULL.
+        ///
+        /// Not the same question as whether the field is nullable, which it
+        /// always is: a driver may substitute NULL for a value Arrow has no
+        /// shape for, and MySQL's `'0000-00-00'` is exactly that. So the
+        /// declaration arrives beside the validity buffer instead of in it, and
+        /// this is what tells a substituted NULL from one the data contains.
+        let declaredNotNull: Bool
         /// Cached per-batch accessors, indexed by batch.
         fileprivate var batches: [ColumnBatch] = []
     }
@@ -98,8 +106,55 @@ final class ArrowTable {
             let child = schema.pointee.children![i]!
             let name = child.pointee.name.map { String(cString: $0) } ?? "col\(i)"
             return Column(
-                name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)))
+                name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)),
+                declaredNotNull: Self.declaresNotNull(child.pointee.metadata))
         }
+    }
+
+    /// The key the core writes a NOT NULL declaration under.
+    ///
+    /// Spelled here as well as in `dbconn::DECLARED_NOT_NULL` because the C data
+    /// interface carries no shared header for it — the string is the contract.
+    static let declaredNotNullKey = "dbclient.declared_not_null"
+
+    /// Whether a field's metadata carries that declaration.
+    ///
+    /// The C data interface counts its lengths rather than terminating them, so
+    /// the buffer may hold NUL bytes and reading it as a C string would stop at
+    /// the first one: an int32 pair count, then per pair an int32 key length,
+    /// the key, an int32 value length, the value. None of it is promised to be
+    /// aligned, hence the unaligned loads.
+    ///
+    /// A count or length below zero answers false instead of trapping — this is
+    /// memory another language handed over, and a grid that crashes on it would
+    /// be a worse failure than a column drawn as though it were nullable. A
+    /// buffer that lies about a length in the other direction cannot be caught
+    /// here, because the format carries no total size to check it against.
+    static func declaresNotNull(_ metadata: UnsafePointer<CChar>?) -> Bool {
+        guard let metadata else { return false }
+        var cursor = UnsafeRawPointer(metadata)
+        let pairs = cursor.loadUnaligned(as: Int32.self)
+        guard pairs > 0 else { return false }
+        cursor += MemoryLayout<Int32>.size
+        for _ in 0..<pairs {
+            guard let key = takeString(&cursor), let value = takeString(&cursor) else {
+                return false
+            }
+            // Decided at the first match: a second entry under the same key is
+            // not something the writer can produce.
+            if key == declaredNotNullKey { return value == "1" }
+        }
+        return false
+    }
+
+    /// One length-prefixed string, advancing the cursor past it.
+    private static func takeString(_ cursor: inout UnsafeRawPointer) -> String? {
+        let length = cursor.loadUnaligned(as: Int32.self)
+        guard length >= 0 else { return nil }
+        cursor += MemoryLayout<Int32>.size
+        let bytes = UnsafeRawBufferPointer(start: cursor, count: Int(length))
+        cursor += Int(length)
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     func append(batch: UnsafeMutablePointer<ArrowArray>) {
