@@ -10,8 +10,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
-    DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
+    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
     TriggerInfo, TxStep,
 };
 
@@ -69,6 +69,18 @@ impl Driver for DuckSource {
         Ok(Box::new(
             DuckSource::query(self, statement, batch_rows).await?,
         ))
+    }
+
+    /// `SELECT * FROM …`, in PostgreSQL's spelling, which DuckDB follows.
+    ///
+    /// The schema is written as it was reported and not quoted, because what
+    /// this driver reports is `database.schema` — the extra level DuckDB has and
+    /// the trait does not, carried as the qualified name DuckDB itself accepts.
+    /// Quoting the pair as one identifier would ask for a schema whose name has
+    /// a dot in it.
+    fn browse(&self, what: &Browse<'_>) -> String {
+        let name = format!("{}.{}", what.schema, dbsql::DUCKDB.quote(what.relation));
+        what.sql_named(&dbsql::DUCKDB, &name)
     }
 
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {

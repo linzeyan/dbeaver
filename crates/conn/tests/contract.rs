@@ -18,7 +18,7 @@
 //! about the checks changed, which is the useful result: the contract was about
 //! databases after all, and only the harness had assumed otherwise.
 
-use dbconn::{Driver, TxStep};
+use dbconn::{Browse, Driver, TxStep};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -1023,6 +1023,7 @@ async fn failure(driver: &dyn Driver, sql: &str) -> dbconn::DbError {
 
 async fn every_check(subject: &Subject) {
     reads_a_result_in_batches(subject).await;
+    browses_a_relation(subject).await;
     if subject.cursors {
         pages_a_cursor(subject).await;
         cancels_an_idle_cursor_without_complaining(subject).await;
@@ -1031,6 +1032,70 @@ async fn every_check(subject: &Subject) {
     walks_the_navigator(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// The statement a navigator writes for a table is one this database runs.
+///
+/// The check that did not exist, and the defect it would have caught was in the
+/// front end rather than in any driver: a window that had only met PostgreSQL
+/// assembled `SELECT * FROM "schema"."relation"` for every database it could
+/// open. MySQL reads those quotes as a string and answers with a syntax error;
+/// MongoDB has no SELECT at all. Both are now the driver's answer, and this runs
+/// it rather than comparing it to an expected spelling — an expected string
+/// would be this file deciding what MySQL's quoting is.
+async fn browses_a_relation(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    let keys = [subject.key.clone()];
+    let statement = driver.browse(&Browse {
+        schema: &subject.schema,
+        relation: &subject.relation,
+        filter: None,
+        order: None,
+        keys: &keys,
+        limit: None,
+    });
+    let mut stream = driver
+        .query(&statement, 10)
+        .await
+        .unwrap_or_else(|e| panic!("the browse statement did not run: {statement}: {e}"));
+    let first = stream
+        .next_batch()
+        .await
+        .unwrap_or_else(|e| panic!("the browse statement failed while running: {statement}: {e}"))
+        .expect("a browse of a table with rows should produce a batch");
+    assert!(
+        first.schema().field_with_name(&subject.key).is_ok(),
+        "a browse reads every column, so it carries the key: {statement}"
+    );
+    // Let go before asking for anything else. A result holds the session
+    // connection on every driver that can keep a transaction open, so a second
+    // statement started while this one is alive waits for it — forever, since
+    // nothing here would ever read the rest of it.
+    drop(stream);
+
+    // The row ceiling, which is the one part of the statement a caller adds
+    // rather than the driver: a front end seeding an editor wants a statement
+    // that cannot fetch a million rows by accident.
+    let bounded = driver.browse(&Browse {
+        schema: &subject.schema,
+        relation: &subject.relation,
+        filter: None,
+        order: None,
+        keys: &keys,
+        limit: Some(3),
+    });
+    let mut stream = driver
+        .query(&bounded, 10)
+        .await
+        .unwrap_or_else(|e| panic!("the bounded browse did not run: {bounded}: {e}"));
+    let mut rows = 0;
+    while let Some(batch) = stream.next_batch().await.expect("bounded browse failed") {
+        rows += batch.num_rows();
+    }
+    assert_eq!(
+        rows, 3,
+        "a browse limited to three rows should read three: {bounded}"
+    );
 }
 
 // ---------------------------------------------------------------------------

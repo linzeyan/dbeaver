@@ -54,8 +54,6 @@ struct RelationInfo: Decodable, Hashable, Identifiable {
     let estimatedRows: Int64?
 
     var id: String { "\(schema).\(name)" }
-    /// Identifier safe to interpolate into SQL.
-    var qualifiedName: String { "\"\(schema)\".\"\(name)\"" }
 
     /// The size as the navigator writes it, or nil where there is nothing to
     /// write. Marked approximate wherever it appears, because it is.

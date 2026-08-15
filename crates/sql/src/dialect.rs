@@ -73,8 +73,24 @@ pub struct Dialect {
     /// `QUOTED_IDENTIFIER` being on, and a client that emits a name whose
     /// meaning depends on a session setting is emitting a guess.
     pub identifier_quotes: (&'static str, &'static str),
+    /// How a statement asks for at most so many rows.
+    pub row_limit: RowLimit,
     /// What this dialect calls a keyword beyond [`keywords::COMMON`].
     pub(crate) extra_keywords: &'static [&'static str],
+}
+
+/// Where a row ceiling goes in a statement.
+///
+/// A dialect fact rather than a suffix every caller appends, because SQL Server
+/// puts it in front of the columns and everything else puts it at the end. A
+/// client that appended `LIMIT 1000` to a T-SQL statement would be handing the
+/// user something that does not run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowLimit {
+    /// `… LIMIT 1000`, at the end.
+    Limit,
+    /// `SELECT TOP (1000) …`, before the columns.
+    Top,
 }
 
 /// One spelling of a parameter placeholder.
@@ -145,6 +161,7 @@ const BASE: Dialect = Dialect {
     dollar_quoting: false,
     parameters: &[Parameter::Question],
     identifier_quotes: ("\"", "\""),
+    row_limit: RowLimit::Limit,
     extra_keywords: &[],
 };
 
@@ -184,6 +201,7 @@ pub const MSSQL: Dialect = Dialect {
     nested_block_comments: true,
     parameters: &[Parameter::AtName],
     identifier_quotes: ("[", "]"),
+    row_limit: RowLimit::Top,
     extra_keywords: keywords::MSSQL,
     ..BASE
 };

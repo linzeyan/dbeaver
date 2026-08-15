@@ -226,6 +226,23 @@ char* db_triggers_json(DbHandle* handle, const char* schema, const char* relatio
 // because a statement that looks complete and is not is worse than a refusal.
 char* db_ddl_text(DbHandle* handle, const char* schema, const char* relation, char** err);
 
+// The statement that reads one relation's rows, as plain text — released with
+// db_string_free, and written rather than run, like db_edit_sql_json.
+//
+//   {"schema": …, "relation": …, "filter": …, "order": …, "keys": […], "limit": …}
+//
+// `filter` and `order` are the filter bar's two fields as the user typed them,
+// in whatever language this database reads. `keys` are the columns the catalog
+// calls a key, added to the ordering so that a browse looks the same twice.
+// `limit` is for a caller seeding an editor; the Content tab leaves it out,
+// because its bound is the cursor.
+//
+// Here rather than in the window, which is where it was until a window that had
+// only ever met PostgreSQL wrote SELECT * FROM "bench"."orders" for every
+// database it could open: MySQL reads those quotes as a string, SQL Server's
+// depend on a session setting, and MongoDB has no SELECT at all.
+char* db_browse_statement(DbHandle* handle, const char* what, char** err);
+
 // The statements a grid's pending changes would take, as a JSON array of
 // strings. Written here and run by the caller, through db_query like anything
 // else: that is what puts an edit inside whatever transaction the connection is

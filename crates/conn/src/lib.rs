@@ -184,6 +184,24 @@ pub trait Driver: Send + Sync {
     /// a successful `query` has not established that the statement worked.
     async fn query(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn ResultStream>>;
 
+    /// The statement that reads a relation's rows, as this database spells it.
+    ///
+    /// Text and not rows, because a browse is a statement like any other: it goes
+    /// back through `query` or `cursor`, inside whatever transaction the session
+    /// is in, under the same Cancel button — and it can be shown to the person
+    /// who is about to run it.
+    ///
+    /// Here rather than in the front end, which is where it was until a front end
+    /// that had only ever met PostgreSQL wrote `SELECT * FROM "bench"."orders"`
+    /// for every database it could open. MySQL rejects that as a syntax error
+    /// unless `ANSI_QUOTES` is set, and MongoDB rejects it because it is not a
+    /// command document. Quoting is dialect-specific and a statement is not
+    /// always SQL, so both answers belong to the driver.
+    ///
+    /// No I/O: everything this needs is in `what`, so a caller can build the
+    /// statement and decide not to run it.
+    fn browse(&self, what: &Browse<'_>) -> String;
+
     /// Read `statement` forward, a page at a time.
     ///
     /// Two properties, which is all this asks for — the mechanism is the
@@ -238,6 +256,92 @@ pub trait Driver: Send + Sync {
     /// client that quietly did nothing would leave somebody believing there is a
     /// point they can come back to.
     async fn transaction(&self, step: &TxStep) -> DbResult<()>;
+}
+
+/// What a browse is asking for.
+///
+/// A struct rather than five parameters, because three of them are optional and
+/// a call site with three `None`s in a row is a place to put one in the wrong
+/// order. The text fields are the user's own — typed into the filter bar in
+/// whatever language this database reads — and reach the statement unaltered.
+pub struct Browse<'a> {
+    pub schema: &'a str,
+    pub relation: &'a str,
+    /// The filter as it was typed: a `WHERE` clause without the word, a MongoDB
+    /// filter document, a key pattern.
+    pub filter: Option<&'a str>,
+    /// The ordering as it was typed, without the words `ORDER BY`.
+    pub order: Option<&'a str>,
+    /// Columns to order by after `order`, and the reason a browse looks the same
+    /// twice: without a total order the rows arrive in whatever order the plan
+    /// produced, which is stable within one result and arbitrary between two.
+    /// The caller supplies them because it is the caller that knows which
+    /// columns the catalog called a key — and which of them the user has already
+    /// named.
+    pub keys: &'a [String],
+    /// A row ceiling, for a caller that wants a statement to put in an editor
+    /// rather than one to page through. The Content tab passes `None`: its
+    /// bound is the cursor.
+    pub limit: Option<u32>,
+}
+
+impl Browse<'_> {
+    /// This browse as SQL, in `dialect`'s spelling.
+    ///
+    /// Here rather than six times over, because the six drivers that speak SQL
+    /// write the same statement and differ only in how a name is quoted and
+    /// where a row ceiling goes — both of which `dbsql` already answers. The
+    /// trait does not require SQL of anybody; this is for the implementations
+    /// that want it, and MongoDB's `browse` never calls it.
+    pub fn sql(&self, dialect: &dbsql::Dialect) -> String {
+        let mut name = String::new();
+        // A database with no schema layer answers with an empty one rather than
+        // with a name, and `.orders` is not a relation anywhere.
+        if !self.schema.is_empty() {
+            name.push_str(&dialect.quote(self.schema));
+            name.push('.');
+        }
+        name.push_str(&dialect.quote(self.relation));
+        self.sql_named(dialect, &name)
+    }
+
+    /// The same, for a driver that writes the relation's name itself.
+    ///
+    /// DuckDB is why this is separate: its schemas are reported as
+    /// `database.schema` because its namespace has a level the trait does not,
+    /// and that name is already SQL. Quoting it as one identifier would name a
+    /// schema with a dot in it, which is a different schema or none.
+    pub fn sql_named(&self, dialect: &dbsql::Dialect, name: &str) -> String {
+        let mut sql = String::from("SELECT ");
+        if let (Some(rows), dbsql::RowLimit::Top) = (self.limit, dialect.row_limit) {
+            sql.push_str(&format!("TOP ({rows}) "));
+        }
+        sql.push_str("* FROM ");
+        sql.push_str(name);
+
+        if let Some(filter) = self.filter.map(str::trim).filter(|f| !f.is_empty()) {
+            // As typed. The filter bar takes an expression in the database's own
+            // language, and a client that rewrote it would be parsing SQL in
+            // order to hand it back.
+            sql.push_str(" WHERE ");
+            sql.push_str(filter);
+        }
+
+        let mut terms = Vec::new();
+        if let Some(order) = self.order.map(str::trim).filter(|o| !o.is_empty()) {
+            terms.push(order.to_string());
+        }
+        terms.extend(self.keys.iter().map(|key| dialect.quote(key)));
+        if !terms.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(&terms.join(", "));
+        }
+
+        if let (Some(rows), dbsql::RowLimit::Limit) = (self.limit, dialect.row_limit) {
+            sql.push_str(&format!(" LIMIT {rows}"));
+        }
+        sql
+    }
 }
 
 /// One step of transaction control.
@@ -313,4 +417,68 @@ pub trait CursorCancel: Send + Sync {
     /// Delivered is not interrupted, as with `Driver::cancel`: a fetch that had
     /// already finished leaves nothing to stop and this still succeeds.
     async fn cancel(&self) -> DbResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Browse;
+
+    fn browse<'a>(
+        filter: Option<&'a str>,
+        order: Option<&'a str>,
+        keys: &'a [String],
+    ) -> Browse<'a> {
+        Browse {
+            schema: "bench",
+            relation: "orders",
+            filter,
+            order,
+            keys,
+            limit: None,
+        }
+    }
+
+    /// The defect this whole call exists for: a front end wrote PostgreSQL's
+    /// quoting for every database, and MySQL reads it as a string.
+    #[test]
+    fn mysql_is_not_given_the_quoting_that_makes_it_read_a_string() {
+        let sql = browse(None, None, &[]).sql(&dbsql::MYSQL);
+        assert!(!sql.contains('"'), "{sql}");
+    }
+
+    /// A row ceiling is a dialect fact, not a suffix: T-SQL has no LIMIT.
+    #[test]
+    fn sql_server_bounds_a_result_before_the_columns() {
+        let mut what = browse(None, None, &[]);
+        what.limit = Some(1000);
+        let sql = what.sql(&dbsql::MSSQL);
+        assert_eq!(sql, "SELECT TOP (1000) * FROM bench.orders");
+    }
+
+    /// The filter and the order are the user's own words and reach the statement
+    /// as typed; the key columns are this side's and are quoted.
+    #[test]
+    fn the_users_order_comes_first_and_the_key_makes_it_total() {
+        let keys = ["id".to_string()];
+        let sql = browse(Some("qty > 10"), Some("label desc"), &keys).sql(&dbsql::POSTGRES);
+        assert_eq!(
+            sql,
+            "SELECT * FROM bench.orders WHERE qty > 10 ORDER BY label desc, id"
+        );
+    }
+
+    /// A name that needs quoting gets it, and a database with no schema layer
+    /// does not get a leading dot.
+    #[test]
+    fn a_name_that_is_a_keyword_is_still_the_name_it_is() {
+        let what = Browse {
+            schema: "",
+            relation: "order",
+            filter: None,
+            order: None,
+            keys: &[],
+            limit: None,
+        };
+        assert_eq!(what.sql(&dbsql::POSTGRES), r#"SELECT * FROM "order""#);
+    }
 }

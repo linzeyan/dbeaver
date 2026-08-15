@@ -281,9 +281,25 @@ impl MongoSource {
 
     /// Runs the statement, buffers the sample, and settles the schema.
     async fn start(&self, sql: &str, batch_rows: usize) -> Result<Reader, MongoError> {
-        let command = parse_statement(sql)?;
+        let mut command = parse_statement(sql)?;
         let mark = self.mark();
-        let db = self.client.database(&self.default);
+        // `$db` is where MongoDB's own protocol carries the database, so a
+        // statement that names one is using the field the wire format uses
+        // rather than a convention invented here. Taken out before the command
+        // is sent, because the driver puts it back from whichever database the
+        // command is run against — leaving it in would send it twice.
+        //
+        // Without this a browse could only ever read the database the
+        // connection opened on, while the navigator lists every database on the
+        // deployment: choosing a collection in another one would have read a
+        // collection of the same name in this one, or nothing at all.
+        let named = match command.remove("$db") {
+            Some(Bson::String(name)) => Some(name),
+            _ => None,
+        };
+        let db = self
+            .client
+            .database(named.as_deref().unwrap_or(&self.default));
         self.began(&mark);
 
         let is_cursor = verb(&command).is_some_and(|v| CURSOR_COMMANDS.contains(&v));

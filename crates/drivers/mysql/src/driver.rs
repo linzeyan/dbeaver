@@ -8,8 +8,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
-    DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
+    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
     TriggerInfo, TxStep,
 };
 
@@ -76,6 +76,14 @@ impl Driver for MySqlSource {
         Ok(Box::new(
             MySqlSource::query(self, statement, batch_rows).await?,
         ))
+    }
+
+    /// `SELECT * FROM …`, quoted with backticks rather than the standard's
+    /// double quotes: without `ANSI_QUOTES` in `sql_mode`, which is off by
+    /// default, MySQL reads `"orders"` as the string "orders" and the statement
+    /// selects from nothing.
+    fn browse(&self, what: &Browse<'_>) -> String {
+        what.sql(&dbsql::MYSQL)
     }
 
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {

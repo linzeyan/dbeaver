@@ -10,8 +10,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
-    DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
+    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
     TriggerInfo, TxStep,
 };
 
@@ -69,6 +69,44 @@ impl Driver for MongoSource {
         Ok(Box::new(
             MongoSource::query(self, statement, batch_rows).await?,
         ))
+    }
+
+    /// A `find` command, because this database has no SELECT to write.
+    ///
+    /// The database is named with `$db`, which is the field MongoDB's own wire
+    /// protocol carries it in — not a convention invented here, and the reason a
+    /// browse can reach a collection outside the one the connection opened on.
+    ///
+    /// `filter` and `order` are the user's own JSON — a filter document and a
+    /// sort document — and go in unaltered. Text that is not JSON produces a
+    /// statement this driver refuses at `query`, pointing at the character it
+    /// stopped on.
+    fn browse(&self, what: &Browse<'_>) -> String {
+        let quoted = |text: &str| serde_json::Value::String(text.to_string()).to_string();
+        let mut parts = vec![
+            format!("\"find\": {}", quoted(what.relation)),
+            format!("\"$db\": {}", quoted(what.schema)),
+        ];
+        if let Some(filter) = what.filter.map(str::trim).filter(|f| !f.is_empty()) {
+            parts.push(format!("\"filter\": {filter}"));
+        }
+        // The user's sort document, or one built from the key columns. Not both:
+        // merging them would mean parsing the user's JSON in order to hand it
+        // back, and a sort this side rewrote is no longer the one they wrote.
+        if let Some(sort) = what.order.map(str::trim).filter(|o| !o.is_empty()) {
+            parts.push(format!("\"sort\": {sort}"));
+        } else if !what.keys.is_empty() {
+            let terms: Vec<String> = what
+                .keys
+                .iter()
+                .map(|key| format!("{}: 1", quoted(key)))
+                .collect();
+            parts.push(format!("\"sort\": {{{}}}", terms.join(", ")));
+        }
+        if let Some(rows) = what.limit {
+            parts.push(format!("\"limit\": {rows}"));
+        }
+        format!("{{{}}}", parts.join(", "))
     }
 
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {

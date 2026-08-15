@@ -8,8 +8,8 @@
 
 use dbcatalog::{Kind, Names};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,6 +95,10 @@ impl Driver for Fake {
     }
     async fn triggers(&self, _: &str, _: &str) -> DbResult<Vec<TriggerInfo>> {
         Ok(Vec::new())
+    }
+
+    fn browse(&self, _: &Browse<'_>) -> String {
+        unreachable!("completion never browses a relation")
     }
     async fn query(&self, _: &str, _: usize) -> DbResult<Box<dyn ResultStream>> {
         unreachable!("completion never runs a statement")

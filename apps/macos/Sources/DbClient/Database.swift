@@ -145,6 +145,45 @@ final class Database: @unchecked Sendable {
         db_names_forget(handle)
     }
 
+    /// The statement that reads a relation's rows.
+    ///
+    /// Asked of the core rather than assembled here, because a statement is the
+    /// database's own language and this side does not know it: quoting differs
+    /// between them, and MongoDB's browse is not SQL at all. What comes back is
+    /// run through `cursor` like anything typed into the editor.
+    ///
+    /// `keys` orders the rows so that a browse looks the same twice; `limit`
+    /// belongs to a caller seeding the editor rather than to the Content tab,
+    /// whose bound is the cursor.
+    func browseStatement(
+        schema: String, relation: String, filter: String?, order: String?,
+        keys: [String], limit: UInt32? = nil
+    ) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        let request = BrowseRequest(
+            schema: schema, relation: relation, filter: filter, order: order,
+            keys: keys, limit: limit)
+        guard let raw = db_browse_statement(handle, request.json, &err) else {
+            throw DbError(description: Database.take(&err) ?? "browse statement failed")
+        }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    private struct BrowseRequest: Encodable {
+        let schema: String
+        let relation: String
+        let filter: String?
+        let order: String?
+        let keys: [String]
+        let limit: UInt32?
+
+        var json: String {
+            let data = (try? JSONEncoder().encode(self)) ?? Data()
+            return String(data: data, encoding: .utf8) ?? "{}"
+        }
+    }
+
     /// The statements a grid's pending changes would take.
     ///
     /// Written by the core and run by the caller, which is what puts an edit

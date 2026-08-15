@@ -13,8 +13,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
-    DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
+    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
     TriggerInfo, TxStep,
 };
 
@@ -80,6 +80,12 @@ impl Driver for ChSource {
         Ok(Box::new(
             ChSource::query(self, statement, batch_rows).await?,
         ))
+    }
+
+    /// `SELECT * FROM …`. The schema is ClickHouse's database, and the two-part
+    /// name is what reaches a table outside the one the connection opened on.
+    fn browse(&self, what: &Browse<'_>) -> String {
+        what.sql(&dbsql::CLICKHOUSE)
     }
 
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {

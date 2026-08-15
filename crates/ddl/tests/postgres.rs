@@ -13,8 +13,8 @@
 //! the constant it shows up in, with the reason.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use driver_postgres::PgSource;
 
@@ -226,6 +226,9 @@ impl Driver for Fixture {
         Ok(self.triggers.clone())
     }
 
+    fn browse(&self, _: &Browse<'_>) -> String {
+        unreachable!("DDL is rendered from metadata, never from a browse")
+    }
     async fn query(&self, _: &str, _: usize) -> DbResult<Box<dyn ResultStream>> {
         unreachable!("DDL is rendered from metadata, never from a query")
     }

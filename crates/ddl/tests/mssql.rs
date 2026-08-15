@@ -8,8 +8,8 @@
 //! the fixture drifted; one that breaks the first means the renderer did.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use driver_mssql::MsSqlSource;
 use tokio::sync::OnceCell;
@@ -116,6 +116,9 @@ impl Driver for Fixture {
         unreachable!("SQL Server's table DDL has no trigger section")
     }
 
+    fn browse(&self, _: &Browse<'_>) -> String {
+        unreachable!("DDL is rendered from metadata, never from a browse")
+    }
     async fn query(&self, _: &str, _: usize) -> DbResult<Box<dyn ResultStream>> {
         unreachable!("this renderer builds its statement out of metadata")
     }

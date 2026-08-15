@@ -8,6 +8,8 @@ license.workspace = true
 [dependencies]
 arrow.workspace = true
 dbconn = { path = "../../conn" }
+# For the one dialect constant this driver writes statements in.
+dbsql = { path = "../../sql" }
 async-trait.workspace = true
 tokio.workspace = true
 tokio-postgres = { workspace = true, features = [

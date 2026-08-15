@@ -620,6 +620,85 @@ relation_metadata! {
     db_triggers_json => triggers
 }
 
+/// What a browse is asking for, as it crosses the boundary.
+///
+/// Owned, because the JSON it is decoded from is a C string this side does not
+/// keep; the borrowed [`dbconn::Browse`] is built from it a line later.
+#[derive(serde::Deserialize)]
+struct BrowseRequest {
+    schema: String,
+    relation: String,
+    filter: Option<String>,
+    order: Option<String>,
+    /// Absent means "no key columns", which is a relation with no primary key
+    /// rather than a caller who forgot.
+    #[serde(default)]
+    keys: Vec<String>,
+    limit: Option<u32>,
+}
+
+/// The statement that reads one relation's rows, as plain text. Release with
+/// `db_string_free`.
+///
+/// Written and not run, like `db_edit_sql_json`: what comes back goes to the
+/// server through `db_cursor` or `db_query`, and can be shown to whoever is
+/// about to run it.
+///
+/// `what` is one relation and the filter bar's two fields:
+///
+/// ```json
+/// {"schema": …, "relation": …, "filter": …, "order": …, "keys": […], "limit": …}
+/// ```
+///
+/// The driver writes it, which is the whole point of this call existing: a front
+/// end that assembled `SELECT * FROM "schema"."relation"` was writing PostgreSQL
+/// for every database it could open, and MySQL reads those quotes as a string
+/// while MongoDB has no SELECT at all.
+///
+/// # Safety
+/// `handle` must be live; `what` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_browse_statement(
+    handle: *mut DbHandle,
+    what: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || what.is_null() {
+        unsafe { set_err(err, "null handle or browse request") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let text = match unsafe { CStr::from_ptr(what) }.to_str() {
+        Ok(text) => text,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    let requested: BrowseRequest = match serde_json::from_str(text) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    let statement = h.driver.browse(&dbconn::Browse {
+        schema: &requested.schema,
+        relation: &requested.relation,
+        filter: requested.filter.as_deref(),
+        order: requested.order.as_deref(),
+        keys: &requested.keys,
+        limit: requested.limit,
+    });
+    match CString::new(statement) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// The statements that would recreate one relation, as plain text. Release with
 /// `db_string_free`.
 ///

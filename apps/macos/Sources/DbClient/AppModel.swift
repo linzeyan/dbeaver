@@ -1171,10 +1171,21 @@ final class AppModel {
         // Reseed the editor only when it still holds text this method wrote.
         // Selecting a table used to overwrite the editor unconditionally, which
         // silently discarded whatever statement the user was in the middle of.
-        let suggestion = "SELECT * FROM \(selected.qualifiedName) LIMIT 1000"
-        if queryText.isEmpty || queryText == suggestedQueryText {
-            queryText = suggestion
-            suggestedQueryText = suggestion
+        //
+        // The core writes it, for the reason `browseAsk` gives: this side wrote
+        // PostgreSQL for every database, and the seed for a MySQL table was a
+        // statement that could not run. A row ceiling here and not on the
+        // browse, because the Query pane holds everything it fetches.
+        let schema = selected.schema
+        let name = selected.name
+        run { db in
+            try db.browseStatement(
+                schema: schema, relation: name, filter: nil, order: nil, keys: [], limit: 1000)
+        } then: { [self] suggestion in
+            if queryText.isEmpty || queryText == suggestedQueryText {
+                queryText = suggestion
+                suggestedQueryText = suggestion
+            }
         }
     }
 
@@ -1263,19 +1274,32 @@ final class AppModel {
         let ddl: String?
     }
 
-    /// Builds the browse query from the filter bar.
+    /// What the browse asks the core to write.
     ///
-    /// Filters become SQL rather than filtering fetched rows, so they apply to
-    /// the whole table instead of only the window already in memory.
-    private func browseSQL(for relation: RelationInfo) -> String {
-        var sql = "SELECT * FROM \(relation.qualifiedName)"
+    /// The filter and the order go to the server rather than filtering rows
+    /// already fetched, so they apply to the whole table instead of only the
+    /// window in memory. Nothing here is a statement: the driver writes that,
+    /// because quoting is the database's own and MongoDB's browse is not SQL.
+    ///
+    /// No limit. The cursor is what bounds a page, and it holds its own
+    /// position.
+    private func browseAsk(for relation: RelationInfo) -> BrowseAsk {
         let predicate = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !predicate.isEmpty { sql += " WHERE \(predicate)" }
-        if let order = totalOrder { sql += " ORDER BY \(order)" }
-        // No LIMIT and no OFFSET: the cursor is what bounds a page, and it holds
-        // its own position. A statement per page is what made the order below
-        // load-bearing.
-        return sql
+        let user = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        return BrowseAsk(
+            schema: relation.schema, relation: relation.name,
+            filter: predicate.isEmpty ? nil : predicate,
+            order: user.isEmpty ? nil : user,
+            keys: keyColumnsAfterTheUsersOrder)
+    }
+
+    /// One relation and the filter bar, as the core is asked for it.
+    private struct BrowseAsk: Sendable {
+        let schema: String
+        let relation: String
+        let filter: String?
+        let order: String?
+        let keys: [String]
     }
 
     /// The browse's ORDER BY, made total by the primary key.
@@ -1287,16 +1311,10 @@ final class AppModel {
     /// plan produced, which is stable within a cursor and arbitrary between
     /// two. A relation with no primary key gets no such promise, and now pages
     /// anyway.
-    private var totalOrder: String? {
-        let user = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var keyColumnsAfterTheUsersOrder: [String] {
         // The user's own order may already name the key; repeating it is
-        // harmless to Postgres but noise in the statement.
-        let keys =
-            columns
-            .filter { $0.isPrimaryKey && $0.name != parsedOrder?.column }
-            .map { "\"\($0.name)\"" }
-        let terms = user.isEmpty ? keys : [user] + keys
-        return terms.isEmpty ? nil : terms.joined(separator: ", ")
+        // harmless to a server and noise in the statement.
+        columns.filter { $0.isPrimaryKey && $0.name != parsedOrder?.column }.map(\.name)
     }
 
     /// Whether the browse can fetch a further page. Needs a page boundary to
@@ -1363,13 +1381,19 @@ final class AppModel {
         // two connections and two open transactions for one pane showing one
         // result, and the second would outlive every reference to it.
         discardBrowse()
-        let sql = browseSQL(for: selected)
+        let ask = browseAsk(for: selected)
         let label = selected.name
         let page = browsePage
         beginBrowseFetch()
         let started = CFAbsoluteTimeGetCurrent()
         run { db -> Cursor in
-            try db.cursor(sql, batchRows: page)
+            // Written and opened in one trip. Writing it is string building in
+            // the core rather than a question for the server, so it costs
+            // nothing worth splitting the round trip for.
+            let sql = try db.browseStatement(
+                schema: ask.schema, relation: ask.relation, filter: ask.filter,
+                order: ask.order, keys: ask.keys)
+            return try db.cursor(sql, batchRows: page)
         } then: { [self] cursor in
             browseCursor = cursor
             fetchBrowsePage(

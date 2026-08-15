@@ -8,8 +8,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
-    DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
+    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
     TriggerInfo, TxStep,
 };
 
@@ -74,6 +74,11 @@ impl Driver for PgSource {
         Ok(Box::new(
             PgSource::query(self, statement, batch_rows).await?,
         ))
+    }
+
+    /// `SELECT * FROM …`, with the standard's quoting, which is PostgreSQL's own.
+    fn browse(&self, what: &Browse<'_>) -> String {
+        what.sql(&dbsql::POSTGRES)
     }
 
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {

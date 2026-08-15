@@ -13,8 +13,8 @@
 use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use driver_duckdb::DuckSource;
 use std::path::PathBuf;
@@ -134,6 +134,9 @@ impl Driver for Fixture {
         unreachable!("DuckDB has no triggers to render")
     }
 
+    fn browse(&self, _: &Browse<'_>) -> String {
+        unreachable!("DDL is rendered from what the fixture holds, never from a browse")
+    }
     async fn query(&self, statement: &str, _: usize) -> DbResult<Box<dyn ResultStream>> {
         self.asked
             .lock()

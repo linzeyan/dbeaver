@@ -9,8 +9,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi, DbError,
-    DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
+    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
     TriggerInfo, TxStep,
 };
 
@@ -68,6 +68,13 @@ impl Driver for SqliteSource {
         Ok(Box::new(
             SqliteSource::query(self, statement, batch_rows).await?,
         ))
+    }
+
+    /// `SELECT * FROM …`. SQLite takes double quotes, backticks and brackets;
+    /// the standard's spelling is what it is given, so the statement reads as
+    /// SQL rather than as SQLite.
+    fn browse(&self, what: &Browse<'_>) -> String {
+        what.sql(&dbsql::SQLITE)
     }
 
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {

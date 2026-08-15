@@ -8,6 +8,10 @@ license.workspace = true
 [dependencies]
 arrow.workspace = true
 async-trait.workspace = true
+# For `Browse::sql` and nothing else: quoting a name is dialect-specific, and
+# the six drivers that speak SQL would otherwise each keep a copy of the rule.
+# `dbsql` has no dependencies of its own, so this costs a compilation unit.
+dbsql = { path = "../sql" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

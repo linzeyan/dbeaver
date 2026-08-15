@@ -20,8 +20,8 @@
 use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use driver_sqlite::SqliteSource;
 use std::collections::VecDeque;
@@ -258,6 +258,9 @@ impl Driver for Fixture {
         unreachable!("upstream leaves triggers out of a SQLite table's DDL")
     }
 
+    fn browse(&self, _: &Browse<'_>) -> String {
+        unreachable!("DDL is rendered from what the fixture holds, never from a browse")
+    }
     async fn query(&self, statement: &str, _: usize) -> DbResult<Box<dyn ResultStream>> {
         self.asked
             .lock()

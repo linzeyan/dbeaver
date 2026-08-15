@@ -8,7 +8,7 @@
 //! harness, which is where "this text is valid SQL" belongs.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
+    Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
     RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
 };
 use dbedit::Edits;
@@ -68,6 +68,10 @@ impl Driver for Fake {
     }
     async fn triggers(&self, _: &str, _: &str) -> DbResult<Vec<TriggerInfo>> {
         unreachable!("the server fires its own triggers")
+    }
+
+    fn browse(&self, _: &Browse<'_>) -> String {
+        unreachable!("this crate writes statements of its own")
     }
     async fn query(&self, _: &str, _: usize) -> DbResult<Box<dyn ResultStream>> {
         unreachable!("this crate writes statements and runs none")
