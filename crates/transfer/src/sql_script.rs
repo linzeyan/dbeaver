@@ -1,7 +1,7 @@
 //! A result written as `INSERT` statements.
 
 use arrow::array::RecordBatch;
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Schema};
 use arrow::error::ArrowError;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use dbsql::Dialect;
@@ -25,9 +25,7 @@ pub struct SqlWriter<W: Write> {
     inner: W,
     dialect: &'static Dialect,
     table: String,
-    /// Built once from the first batch, because the column list is repeated on
-    /// every statement and re-quoting it per row is work for nothing.
-    columns: Option<String>,
+    insert: Option<Insert>,
     buffer: Vec<u8>,
 }
 
@@ -42,74 +40,35 @@ impl<W: Write> SqlWriter<W> {
             inner,
             dialect,
             table,
-            columns: None,
+            insert: None,
             buffer: Vec::with_capacity(FLUSH_BYTES * 2),
         }
     }
 
     pub fn write(&mut self, batch: &RecordBatch) -> Result<(), ArrowError> {
-        if self.columns.is_none() {
-            let names: Vec<String> = batch
-                .schema()
-                .fields()
-                .iter()
-                .map(|f| self.dialect.quote(f.name()))
-                .collect();
-            self.columns = Some(names.join(", "));
+        if self.insert.is_none() {
+            self.insert = Some(Insert::new(
+                self.dialect,
+                self.table.clone(),
+                batch.schema().as_ref(),
+            ));
         }
-        // Set immediately above when it was absent.
-        let columns = self.columns.clone().unwrap();
-
-        let options = FormatOptions::default();
-        let formatters = batch
-            .columns()
-            .iter()
-            .map(|c| ArrayFormatter::try_new(c.as_ref(), &options))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let schema = batch.schema();
-        let mut text = String::new();
-        for row in 0..batch.num_rows() {
-            if row % ROWS_PER_STATEMENT == 0 {
-                if row > 0 {
-                    self.buffer.extend_from_slice(b";\n");
-                }
-                write_str(
-                    &mut self.buffer,
-                    &format!("INSERT INTO {} ({}) VALUES\n", self.table, columns),
-                );
-            } else {
-                self.buffer.extend_from_slice(b",\n");
-            }
-
-            self.buffer.push(b'(');
-            for (c, formatter) in formatters.iter().enumerate() {
-                if c > 0 {
-                    self.buffer.extend_from_slice(b", ");
-                }
-                if batch.column(c).is_null(row) {
-                    self.buffer.extend_from_slice(b"NULL");
-                    continue;
-                }
-                text.clear();
-                formatter.value(row).write(&mut text)?;
-                let literal = if unquoted(schema.field(c).data_type()) {
-                    text.clone()
-                } else {
-                    self.dialect.string_literal(&text)
-                };
-                write_str(&mut self.buffer, &literal);
-            }
-            self.buffer.push(b')');
-
+        let mut offset = 0;
+        while offset < batch.num_rows() {
+            let rows = std::cmp::min(ROWS_PER_STATEMENT, batch.num_rows() - offset);
+            // Set immediately above when it was absent. Scoped so the borrow is
+            // over before `flush_buffer` wants `self` back.
+            let statement = {
+                let insert = self.insert.as_ref().unwrap();
+                insert.statement(self.dialect, batch, offset, rows)?
+            };
+            write_str(&mut self.buffer, &statement);
             if self.buffer.len() >= FLUSH_BYTES {
                 self.flush_buffer()?;
             }
+            offset += rows;
         }
 
-        if batch.num_rows() > 0 {
-            self.buffer.extend_from_slice(b";\n");
-        }
         Ok(())
     }
 
@@ -126,6 +85,76 @@ impl<W: Write> SqlWriter<W> {
         self.inner.write_all(&self.buffer)?;
         self.buffer.clear();
         Ok(())
+    }
+}
+
+/// One table's `INSERT` statements, rendered from batches.
+///
+/// Separate from the writer above because a file is not the only destination:
+/// a database-to-database transfer sends these same statements to a server. Two
+/// copies of "how a value becomes SQL" would be two copies to keep in step, and
+/// the one that drifted would be the one nobody had a test for.
+pub(crate) struct Insert {
+    table: String,
+    columns: String,
+}
+
+impl Insert {
+    pub(crate) fn new(dialect: &Dialect, table: String, schema: &Schema) -> Self {
+        let columns: String = schema
+            .fields()
+            .iter()
+            .map(|f| dialect.quote(f.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Self { table, columns }
+    }
+
+    pub(crate) fn statement(
+        &self,
+        dialect: &Dialect,
+        batch: &RecordBatch,
+        offset: usize,
+        rows: usize,
+    ) -> Result<String, ArrowError> {
+        let options = FormatOptions::default();
+        let formatters: Vec<_> = batch
+            .columns()
+            .iter()
+            .map(|c| ArrayFormatter::try_new(c.as_ref(), &options))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let schema = batch.schema();
+        let mut text = String::new();
+        let mut result = format!("INSERT INTO {} ({}) VALUES\n", self.table, self.columns);
+
+        for (i, row) in (offset..).take(rows).enumerate() {
+            if i > 0 {
+                result.push_str(",\n");
+            }
+            result.push('(');
+            for (c, formatter) in formatters.iter().enumerate() {
+                if c > 0 {
+                    result.push_str(", ");
+                }
+                if batch.column(c).is_null(row) {
+                    result.push_str("NULL");
+                    continue;
+                }
+                text.clear();
+                formatter.value(row).write(&mut text)?;
+                let literal = if unquoted(schema.field(c).data_type()) {
+                    text.clone()
+                } else {
+                    dialect.string_literal(&text)
+                };
+                result.push_str(&literal);
+            }
+            result.push(')');
+        }
+
+        result.push_str(";\n");
+        Ok(result)
     }
 }
 
