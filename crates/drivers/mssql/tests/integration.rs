@@ -86,8 +86,48 @@ async fn run(client: &mut Client<Compat<TcpStream>>, sql: &str) {
         .unwrap_or_else(|e| panic!("fixture statement failed: {e}\n{sql}"));
 }
 
+/// What the database must have been built from, for the copy on the server to
+/// count as this file's fixture.
+///
+/// The container outlives every run and `DDL` does not, so "does `sales.customer`
+/// exist" answered yes for a table built by an older version of this file. A test
+/// added alongside a new column then failed against a fixture that predated it,
+/// and the failure named the column rather than the staleness — which reads
+/// exactly like the driver losing a column. Comparing what the database was built
+/// from is the only question whose answer cannot drift.
+fn fixture_fingerprint() -> String {
+    // FNV-1a rather than a hash crate: this is a cache key for a test fixture,
+    // so the only property required of it is that different DDL gives a
+    // different answer.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for statement in DDL {
+        for byte in statement.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
 async fn build_fixture() {
+    let wanted = fixture_fingerprint();
     let mut master = raw("master").await;
+
+    // Rebuilt rather than migrated. A migration would have to describe every
+    // shape this fixture has ever had, and none of those shapes is interesting:
+    // what the tests need is that the database matches the DDL beside them.
+    //
+    // An unstamped database is rebuilt too, and that is the case that matters
+    // most: every database built before this check existed is unstamped, and
+    // every one of them is stale by definition.
+    if exists(&mut master).await && stamp(&mut master).await.as_deref() != Some(wanted.as_str()) {
+        run(
+            &mut master,
+            "ALTER DATABASE dbeaver_test SET SINGLE_USER WITH ROLLBACK IMMEDIATE; \
+             DROP DATABASE dbeaver_test",
+        )
+        .await;
+    }
     run(
         &mut master,
         "IF DB_ID('dbeaver_test') IS NULL CREATE DATABASE dbeaver_test",
@@ -121,6 +161,47 @@ async fn build_fixture() {
     for statement in DDL {
         run(&mut db, statement).await;
     }
+    // Written last, so a seed that died halfway leaves no stamp and the next run
+    // rebuilds instead of trusting a half-built database.
+    run(
+        &mut db,
+        &format!(
+            "EXEC sys.sp_addextendedproperty @name = N'dbclient_fixture', \
+             @value = N'{wanted}'"
+        ),
+    )
+    .await;
+}
+
+async fn exists(master: &mut Client<Compat<TcpStream>>) -> bool {
+    // Cast because `DB_ID` answers `smallint`, and a decoder asked for the wrong
+    // width fails rather than widening.
+    let id: Option<i32> = master
+        .simple_query("SELECT CAST(DB_ID('dbeaver_test') AS int)")
+        .await
+        .expect("asking for the fixture database")
+        .into_row()
+        .await
+        .expect("asking for the fixture database")
+        .and_then(|row| row.get(0));
+    id.is_some()
+}
+
+/// The fingerprint the database on the server was built from, or `None` when
+/// nothing stamped it — which is what every database built before this check
+/// existed will answer.
+async fn stamp(master: &mut Client<Compat<TcpStream>>) -> Option<String> {
+    master
+        .simple_query(
+            "SELECT CAST(value AS nvarchar(64)) FROM dbeaver_test.sys.extended_properties \
+             WHERE class = 0 AND name = 'dbclient_fixture'",
+        )
+        .await
+        .expect("reading the fixture stamp")
+        .into_row()
+        .await
+        .expect("reading the fixture stamp")
+        .and_then(|row| row.get::<&str, _>(0).map(str::to_string))
 }
 
 /// One statement per entry, because `CREATE SCHEMA` and `CREATE TRIGGER` each
