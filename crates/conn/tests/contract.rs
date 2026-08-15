@@ -103,8 +103,13 @@ struct Scratch {
 }
 
 impl Scratch {
-    /// The statements in ordinary SQL, which is what every transactional driver
-    /// here happens to speak.
+    /// The statements in ordinary SQL, for the subjects that speak it.
+    ///
+    /// Not all of them do, and `CREATE TABLE IF NOT EXISTS` is where they part:
+    /// SQL Server has no such clause and writes the check out as an `IF`. That
+    /// subject builds its own `Scratch` rather than this growing a dialect
+    /// switch, which would put a decision about one database in the path of
+    /// every other.
     fn sql(table: &str) -> Self {
         Self {
             create: format!("CREATE TABLE IF NOT EXISTS {table} (n INT)"),
@@ -425,9 +430,20 @@ async fn mssql() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
-        // As MySQL: pooled connections, so there is nothing for a transaction to
-        // stay open on.
-        scratch: None,
+        // T-SQL rather than `Scratch::sql`, because SQL Server has no `CREATE
+        // TABLE IF NOT EXISTS`. Bending the shared helper to cover that would
+        // hand every other subject a statement written for this one; the
+        // statements live in the subject exactly so a database can spell them
+        // its own way.
+        scratch: Some(Scratch {
+            create: "IF OBJECT_ID('dbo.contract_tx', 'U') IS NULL \
+                     CREATE TABLE dbo.contract_tx (n int)"
+                .to_string(),
+            clear: "DELETE FROM dbo.contract_tx".to_string(),
+            insert: "INSERT INTO dbo.contract_tx (n) VALUES (1)".to_string(),
+            read: "SELECT n FROM dbo.contract_tx".to_string(),
+            drop: "DROP TABLE dbo.contract_tx".to_string(),
+        }),
         _fixture: None,
     }
 }

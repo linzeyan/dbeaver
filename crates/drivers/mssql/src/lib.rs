@@ -34,9 +34,13 @@
 //! it is a known way to corrupt the connection (upstream issues #79 and #300).
 //! What is left is `KILL <spid>` from a second connection, which ends the
 //! session rather than the statement — so after a cancel the connection is gone
-//! and, for a cursor, the browse is over rather than paused. That is also why a
-//! cancel is aimed only at a session that is actually running something: see
-//! `Inflight`.
+//! and, for a cursor, the browse is over rather than paused. For a statement it
+//! costs more than it does anywhere else here: statements share one connection
+//! so that a transaction can span them, so a cancel takes the open transaction
+//! with it and the next statement starts on a connection that has none. The
+//! server rolled that transaction back before this side found out, so nothing is
+//! lost by admitting it. That is also why a cancel is aimed only at a session
+//! that is actually running something: see `Inflight`.
 
 mod arrow_map;
 mod driver;
@@ -47,6 +51,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnLayout, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
@@ -56,7 +61,9 @@ use std::sync::{Arc, Mutex};
 use tiberius::error::IoErrorKind;
 use tiberius::{Client, ColumnType, Config};
 use tokio::net::TcpStream;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{
+    Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, mpsc, oneshot,
+};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 /// A SQL Server connection, as tiberius drives it once tokio's socket has been
@@ -525,18 +532,120 @@ pub struct DatabaseInfo {
 
 /// A session against one SQL Server database.
 ///
-/// Statements and cursors each take a connection of their own and give it up
-/// when they finish, because cancelling means killing a session and a killed
-/// session cannot be handed to the next caller. Metadata reads come out of a
-/// small pool, so expanding a schema does not queue behind a result that is
-/// still streaming — the same arrangement, and the same reason, as the
-/// PostgreSQL driver's.
+/// Statements run on one connection and nothing else does, because a transaction
+/// belongs to a connection: a `BEGIN` sent down a borrowed one opens a
+/// transaction the next statement will not be given and nobody can commit. One
+/// connection also means one statement at a time, so the second one waits — that
+/// queueing is what a transaction costs, and it is why metadata reads take a
+/// connection from a small pool instead of joining the queue. Expanding a schema
+/// then does not sit behind a result that is still streaming.
+///
+/// A cursor is the exception and takes a connection of its own. Its pages come
+/// off a statement left open, so on the session connection it would hold the
+/// transaction hostage for the whole browse; the trait puts a cursor outside
+/// whatever the session has open for that reason. The same arrangement, and the
+/// same reasons, as the PostgreSQL driver's.
 pub struct MsSqlSource {
     conn_str: String,
     database: String,
+    /// The connection statements run on, empty when the last one left it
+    /// unusable.
+    ///
+    /// `Option` rather than a `Session`, because this driver cancels by ending
+    /// the session: a `KILL` leaves a socket that will never answer again, and
+    /// handing it to the next statement would turn one cancelled statement into
+    /// every statement after it failing. Emptied by whoever saw it die, filled
+    /// again by whoever wants it next — which is also where a server that is
+    /// down can report itself, rather than in a reconnect nobody asked for.
+    session: Arc<AsyncMutex<Option<Session>>>,
     pool: Arc<Mutex<Vec<Session>>>,
     semaphore: Arc<Semaphore>,
     inflight: Arc<Inflight>,
+}
+
+/// The session connection, held for the length of one statement.
+struct Held {
+    slot: OwnedMutexGuard<Option<Session>>,
+}
+
+impl Held {
+    /// Filled by `MsSqlSource::hold` before this value exists, and only ever
+    /// emptied by `discard`, which consumes it — so it is `Some` for the whole
+    /// life of any reference taken through here.
+    fn session(&mut self) -> &mut Session {
+        self.slot.as_mut().unwrap()
+    }
+
+    fn spid(&self) -> i16 {
+        self.slot.as_ref().unwrap().spid
+    }
+
+    /// Gives the connection up rather than back, for a statement that ended it.
+    fn discard(mut self) {
+        *self.slot = None;
+    }
+}
+
+/// Where a statement's connection came from, and what becomes of it afterwards.
+enum Lease {
+    /// The session connection, returned when the statement ends so that the next
+    /// one — and any transaction it is inside — finds it where it was left.
+    Session(Held),
+    /// A connection of the statement's own, closed with it. What a cursor takes:
+    /// it holds its connection for as long as somebody is paging, which is not a
+    /// thing the session connection can be asked to do.
+    ///
+    /// Boxed because a tiberius `Client` is the better part of a kilobyte and
+    /// the other variant is a pointer. This value is moved into a task for every
+    /// statement, so the unboxed enum would copy that kilobyte each time to hold
+    /// something a cursor alone ever uses.
+    Own(Box<Session>),
+}
+
+impl Lease {
+    fn session(&mut self) -> &mut Session {
+        match self {
+            Lease::Session(held) => held.session(),
+            Lease::Own(session) => session,
+        }
+    }
+
+    fn spid(&self) -> i16 {
+        match self {
+            Lease::Session(held) => held.spid(),
+            Lease::Own(session) => session.spid,
+        }
+    }
+
+    /// Ends the lease, keeping the connection only if it can still be used.
+    fn release(self, reusable: bool) {
+        match self {
+            Lease::Session(held) if !reusable => held.discard(),
+            // Either the session connection going back into its slot, or a
+            // statement's own connection closing with it. Both are a drop.
+            _ => {}
+        }
+    }
+}
+
+/// Whether a failure leaves the connection unusable.
+///
+/// Asked because the session connection outlives the statement that failed on
+/// it, so the answer decides whether the next statement inherits it. A statement
+/// that failed on its own merits — a syntax error, a missing table — left the
+/// session exactly as it was, transaction included, and throwing the connection
+/// away for that would roll back work nobody asked to abandon. What does end a
+/// connection is what `looks_like_a_kill` describes, and for the same reason it
+/// describes it: severity 20 and above terminates the connection outright, and an
+/// I/O error means it is already gone.
+fn ends_the_connection(e: &MsSqlError) -> bool {
+    match e {
+        MsSqlError::Cancelled(_) => true,
+        MsSqlError::Tds(inner) | MsSqlError::Statement { error: inner, .. } => {
+            looks_like_a_kill(inner)
+        }
+        _ => false,
+    }
 }
 
 /// A pooled connection, borrowed for one call and returned when it goes out of
@@ -596,10 +705,28 @@ impl MsSqlSource {
         Ok(Self {
             conn_str,
             database,
-            pool: Arc::new(Mutex::new(vec![session])),
+            // The connection that was opened to check the password becomes the
+            // one statements run on. The pool starts empty and opens its first
+            // connection when a metadata call wants one.
+            session: Arc::new(AsyncMutex::new(Some(session))),
+            pool: Arc::new(Mutex::new(Vec::new())),
             semaphore: Arc::new(Semaphore::new(4)),
             inflight: Arc::new(Inflight::default()),
         })
+    }
+
+    /// Takes the session connection, waiting for the statement before it.
+    ///
+    /// Opens one when the slot is empty, which is how a session that was killed
+    /// — or a connection that dropped — is replaced. The replacement carries no
+    /// transaction, because the server ended the old one when it ended the
+    /// session.
+    async fn hold(&self) -> Result<Held, MsSqlError> {
+        let mut slot = Arc::clone(&self.session).lock_owned().await;
+        if slot.is_none() {
+            *slot = Some(Session::connect(&self.conn_str).await?);
+        }
+        Ok(Held { slot })
     }
 
     /// The one database this connection can see.
@@ -728,8 +855,15 @@ impl MsSqlSource {
     /// that produces rows means after the first `COLMETADATA` has arrived — so
     /// the grid can be laid out before a single row is read. An execution
     /// failure can still surface from `next_batch`.
+    ///
+    /// On the session connection, which is what lets a transaction opened by one
+    /// statement still be there for the next. The cost is that one connection
+    /// carries one statement at a time, so this waits for the result before it
+    /// to be read to the end or let go of — a front end that keeps a result open
+    /// and asks for another keeps the second one waiting.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, MsSqlError> {
-        self.start(sql, batch_rows).await
+        let lease = Lease::Session(self.hold().await?);
+        self.start(lease, sql, batch_rows).await
     }
 
     /// Reads `sql` forward, a page at a time.
@@ -746,9 +880,16 @@ impl MsSqlSource {
     /// serializable transaction *and* the `ORDER BY` is over columns guaranteed
     /// unique; the `ORDER BY (SELECT NULL)` everybody reaches for guarantees
     /// nothing, and on a keyless table there is no expression that fixes it.
+    ///
+    /// The connection is the cursor's own and not the session's, which is what
+    /// the trait means by a cursor being outside whatever the session has open:
+    /// a browse is held for as long as somebody is looking at it, and a
+    /// transaction that could not be committed until then would be a transaction
+    /// held open by a scrollbar.
     pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, MsSqlError> {
+        let lease = Lease::Own(Box::new(Session::connect(&self.conn_str).await?));
         Ok(Cursor {
-            stream: self.start(sql, batch_rows).await?,
+            stream: self.start(lease, sql, batch_rows).await?,
         })
     }
 
@@ -773,14 +914,80 @@ impl MsSqlSource {
         kill(&self.conn_str, &targets).await
     }
 
-    /// Opens a connection, registers it so a cancel can find it, and starts
+    /// Takes one step of transaction control, on the connection statements run
+    /// on.
+    ///
+    /// That connection and no other, which is the whole reason this driver keeps
+    /// one. The words are T-SQL's rather than the standard's — `SAVE
+    /// TRANSACTION` where PostgreSQL writes `SAVEPOINT` — so they live here and
+    /// not in the caller.
+    ///
+    /// Sent as a batch and not through `execute`, which is not a stylistic
+    /// choice: tiberius' `execute` wraps the statement in `sp_executesql`, and a
+    /// `BEGIN TRANSACTION` that opens inside a procedure and does not close
+    /// before it returns is error 266 — the transaction survives and the caller
+    /// is told it failed.
+    ///
+    /// Nothing here touches `SET IMPLICIT_TRANSACTIONS`. SQL Server commits each
+    /// statement on its own unless one of these has opened a transaction, which
+    /// is exactly what `TxStep` describes; it has no step for autocommit, and
+    /// turning implicit transactions on would open one after every commit
+    /// without anybody having asked for it.
+    pub async fn transaction(&self, step: &TxStep) -> Result<(), MsSqlError> {
+        let statement = match step {
+            TxStep::Begin => "BEGIN TRANSACTION".to_string(),
+            TxStep::Commit => "COMMIT TRANSACTION".to_string(),
+            TxStep::Rollback => "ROLLBACK TRANSACTION".to_string(),
+            TxStep::Savepoint(name) => format!("SAVE TRANSACTION {name}"),
+            TxStep::RollbackTo(name) => format!("ROLLBACK TRANSACTION {name}"),
+            // T-SQL has no RELEASE, and this is not a step SQL Server is missing
+            // — it is a step it does not need. A savepoint here is a mark in the
+            // log with no resources of its own, kept until the transaction that
+            // holds it ends. Nothing is left open by not releasing it, so this
+            // succeeds rather than refusing a caller who paired a savepoint with
+            // a release and did nothing wrong.
+            //
+            // One difference is worth stating rather than hiding: the standard
+            // says a released savepoint can no longer be rolled back to, and SQL
+            // Server will still accept `ROLLBACK TRANSACTION <name>` afterwards.
+            // This driver promises less than the standard there, not more.
+            TxStep::Release(_) => return Ok(()),
+        };
+
+        let mut held = self.hold().await?;
+        let outcome = match held.session().client.simple_query(&statement).await {
+            // Drained rather than dropped: a batch reports its failures in the
+            // token stream, so a step that was refused looks like a success
+            // until somebody reads to the end of it.
+            Ok(stream) => stream.into_results().await.map(drop),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let e = MsSqlError::Tds(e);
+                // The same rule the statement path follows: a connection that
+                // did not survive is given up rather than handed on.
+                if ends_the_connection(&e) {
+                    held.discard();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Registers a statement's connection so a cancel can find it, and starts
     /// reading.
-    async fn start(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, MsSqlError> {
+    async fn start(
+        &self,
+        lease: Lease,
+        sql: &str,
+        batch_rows: usize,
+    ) -> Result<ArrowStream, MsSqlError> {
         let batch_rows = batch_rows.max(1);
-        let session = Session::connect(&self.conn_str).await?;
         // Registered before the statement is sent, so there is no window in
         // which something is running that a cancel cannot see.
-        let ticket = self.inflight.register(session.spid);
+        let ticket = self.inflight.register(lease.spid());
 
         let (schema_tx, schema_rx) = oneshot::channel();
         // One batch in flight. The reader stops on a full channel, so a result
@@ -795,7 +1002,7 @@ impl MsSqlSource {
         let id = ticket.id;
         tokio::spawn(async move {
             pump(
-                session, owned_sql, batch_rows, schema_tx, batch_tx, affected, inflight, id,
+                lease, owned_sql, batch_rows, schema_tx, batch_tx, affected, inflight, id,
             )
             .await;
         });
@@ -961,7 +1168,7 @@ impl Described {
 /// Reads one statement to the end, sending its schema and then its batches.
 #[allow(clippy::too_many_arguments)]
 async fn pump(
-    mut session: Session,
+    mut lease: Lease,
     sql: String,
     batch_rows: usize,
     schema_tx: oneshot::Sender<Result<SchemaRef, MsSqlError>>,
@@ -971,21 +1178,26 @@ async fn pump(
     ticket: u64,
 ) {
     let mut schema_tx = Some(schema_tx);
-    let result = read(
-        &mut session,
+    let outcome = read(
+        lease.session(),
         &sql,
         batch_rows,
         &mut schema_tx,
         &batch_tx,
         &rows_affected,
     )
-    .await;
-    if let Err(e) = result {
-        // Classified here, while both halves of the answer are still in reach:
-        // the statement text, which is what turns a line number into a place,
-        // and the ticket, which is what says whether this driver killed the
-        // session out from under it.
-        let e = classify(&inflight, ticket, e, &sql);
+    .await
+    // Classified here, while both halves of the answer are still in reach: the
+    // statement text, which is what turns a line number into a place, and the
+    // ticket, which is what says whether this driver killed the session out from
+    // under it.
+    .map_err(|e| classify(&inflight, ticket, e, &sql));
+
+    let reusable = match &outcome {
+        Ok(()) => true,
+        Err(e) => !ends_the_connection(e),
+    };
+    if let Err(e) = outcome {
         // Which way the failure goes out depends on how far this got: a
         // statement that never produced a schema failed at `query`, and one that
         // did fails at the batch the caller is waiting for. Both are dropped
@@ -996,11 +1208,17 @@ async fn pump(
             None => drop(batch_tx.send(Err(e)).await),
         }
     }
-    // The connection goes with the task. It is never returned to the pool, and
-    // that is the invariant that makes tiberius' cancel-unsafety harmless here:
-    // a stream abandoned part-read leaves the connection in an indeterminate
-    // state, so no other caller is ever given it.
+    // Forgotten before the connection is given back, and that order is the whole
+    // point: the session connection is about to be somebody else's, and a ticket
+    // still holding its session id could send a `KILL` to the statement that
+    // inherited it.
     inflight.forget(ticket);
+    // A result the caller stopped reading leaves rows on the wire. Handing that
+    // connection on is safe because tiberius drains a dirty stream before its
+    // next statement — the one thing it does do about a stream let go of early,
+    // and the reason a partly read result is not a reason to throw a session
+    // away.
+    lease.release(reusable);
 }
 
 async fn read(

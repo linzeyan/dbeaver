@@ -86,19 +86,14 @@ impl Driver for MsSqlSource {
         Ok(MsSqlSource::cancel(self).await?)
     }
 
-    /// Not yet: this session takes a connection from its pool for each
-    /// statement, so there is none holding a transaction for the next statement
-    /// to join.
+    /// Statements share one connection here, which is what a transaction needs
+    /// in order to span them.
     fn transactional(&self) -> bool {
-        false
+        true
     }
 
-    /// Refused rather than skipped, so that nobody is told a transaction is open
-    /// when nothing is.
-    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
-        Err(DbError::new(
-            "SQL Server: every statement in this session runs on a pooled connection, so there is no transaction to control",
-        ))
+    async fn transaction(&self, step: &TxStep) -> DbResult<()> {
+        Ok(MsSqlSource::transaction(self, step).await?)
     }
 }
 

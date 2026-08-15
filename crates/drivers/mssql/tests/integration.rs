@@ -33,7 +33,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::{ConstraintKind, DbError, Driver, RelationKind};
+use dbconn::{ConstraintKind, DbError, Driver, RelationKind, TxStep};
 use driver_mssql::MsSqlSource;
 use std::collections::HashSet;
 use tiberius::{Client, Config};
@@ -393,6 +393,63 @@ async fn a_cancelled_statement_is_not_a_fault_and_a_fault_is_not_a_cancellation(
     assert!(
         !broken.is_cancelled(),
         "a syntax error is not somebody pressing Cancel: {broken}"
+    );
+}
+
+/// A cancel ends the connection statements share, and the next statement gets
+/// another one.
+///
+/// Statements run on one connection so that a transaction can span them, and
+/// this driver cancels by killing that connection: what is left is a socket that
+/// will never answer again. Without replacing it, one Cancel would end not just
+/// the statement but every statement after it — which is the failure this
+/// arrangement could plausibly have and the one worth pinning.
+///
+/// What does not survive is the transaction, and that is checked too rather than
+/// left to be discovered. The server rolled it back when it ended the session,
+/// so the honest thing is to come back with a connection that says so.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn a_cancel_that_ends_the_session_leaves_the_next_statement_a_live_one() {
+    let driver = source().await;
+    driver
+        .transaction(&TxStep::Begin)
+        .await
+        .expect("could not begin");
+
+    let slow = async {
+        let mut stream = driver.query("WAITFOR DELAY '00:00:30'", 10).await?;
+        stream.next_batch().await
+    };
+    let stop = async {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        driver.cancel().await
+    };
+    let (outcome, cancelled) = tokio::join!(slow, stop);
+    cancelled.expect("the cancel itself should be delivered");
+    assert!(
+        outcome
+            .expect_err("a killed session cannot finish its statement")
+            .is_cancelled()
+    );
+
+    let mut stream = driver
+        .query(READ, 10)
+        .await
+        .expect("the statement after a cancel needs a connection that is alive");
+    let batch = stream.next_batch().await.unwrap().expect("rows");
+    assert_eq!(batch.num_rows(), 10);
+    // Let go of before asking for anything else, and not as a tidiness: the
+    // session carries one statement at a time, so a result still being held is
+    // one the next statement would wait behind for as long as it was held.
+    drop(stream);
+
+    let mut open = driver.query("SELECT @@TRANCOUNT", 1).await.unwrap();
+    let batch = open.next_batch().await.unwrap().expect("a count");
+    assert_eq!(
+        ints(&batch).next(),
+        Some(0),
+        "the transaction went with the session the KILL ended"
     );
 }
 
