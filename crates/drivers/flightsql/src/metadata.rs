@@ -217,6 +217,7 @@ impl FlightSqlSource {
                         // would mean asking the engine, which is the thing this
                         // driver does not do.
                         default_value: None,
+                        computed: None,
                     });
                 }
             }

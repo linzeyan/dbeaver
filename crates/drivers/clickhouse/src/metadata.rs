@@ -226,6 +226,12 @@ impl ChSource {
                 // saying something ClickHouse never promised.
                 is_primary_key: r.is_in_primary_key != 0,
                 default_value: default_of(&r.default_kind, r.default_expression),
+                // `default_of` already writes the kind into the text —
+                // `MATERIALIZED a+b`, `ALIAS a+b` — so a reader of that field
+                // can see what it is looking at, and this crate writes no
+                // column declarations: ClickHouse DDL is the statement the
+                // server kept.
+                computed: None,
                 name: r.name,
             })
             .collect())

@@ -104,6 +104,7 @@ impl RedisSource {
                 nullable: column.nullable,
                 position: at as i32 + 1,
                 default_value: None,
+                computed: None,
             })
             .collect())
     }

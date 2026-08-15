@@ -74,6 +74,7 @@ impl Driver for Fake {
                 position: i as i32 + 1,
                 is_primary_key: i == 0,
                 default_value: None,
+                computed: None,
             })
             .collect())
     }

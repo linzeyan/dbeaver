@@ -287,6 +287,10 @@ pub async fn columns(
                 // default is stored unquoted, so `CURRENT_TIMESTAMP` and the
                 // literal string of the same name look alike from here.
                 default_value,
+                // `COLUMN_DEFAULT` is NULL for a generated column — MySQL keeps
+                // that expression in `GENERATION_EXPRESSION`, which this query
+                // does not ask for — so nothing here can be a computation.
+                computed: None,
             },
         )
         .collect())

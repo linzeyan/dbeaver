@@ -33,7 +33,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::{ConstraintKind, DbError, Driver, RelationKind, TxStep};
+use dbconn::{Computed, ConstraintKind, DbError, Driver, RelationKind, TxStep};
 use driver_mssql::MsSqlSource;
 use std::collections::HashSet;
 use tiberius::{Client, Config};
@@ -151,6 +151,7 @@ const DDL: &[&str] = &[
         doc          xml               NULL,
         row_ver      rowversion,
         display_name AS (name + N' <' + ISNULL(code, '') + N'>'),
+        tier_doubled AS (tier * 2) PERSISTED,
         CONSTRAINT pk_customer PRIMARY KEY CLUSTERED (customer_id),
         CONSTRAINT uq_customer_ext UNIQUE (ext_id),
         CONSTRAINT ck_customer_tier CHECK (tier BETWEEN 1 AND 5))",
@@ -843,14 +844,33 @@ async fn states_a_column_the_way_the_database_states_it() {
     assert!(!by_name("name").nullable);
     assert!(by_name("code").nullable);
     assert_eq!(by_name("tier").default_value.as_deref(), Some("((1))"));
+    assert_eq!(by_name("tier").computed, None);
     // A computed column has no default, so the expression goes where the
     // default would have been — the shared shape has nowhere else for it, and
     // showing nothing would hide the only interesting thing about the column.
-    let computed = by_name("display_name").default_value;
+    // What says which of the two is there is the flag beside it, and without it
+    // the DDL for this column is a default the server would refuse.
+    let display_name = by_name("display_name");
     assert!(
-        computed.as_deref().unwrap_or_default().contains("isnull"),
-        "{computed:?}"
+        display_name
+            .default_value
+            .as_deref()
+            .unwrap_or_default()
+            .contains("isnull"),
+        "{:?}",
+        display_name.default_value
     );
+    assert_eq!(display_name.computed, Some(Computed::Virtual));
+    // And `sys.computed_columns.is_persisted` is the whole of the difference
+    // between this one and the last: the server stores this column's value with
+    // the row, which is the `PERSISTED` its DDL has to say.
+    let tier_doubled = by_name("tier_doubled");
+    assert_eq!(
+        tier_doubled.default_value.as_deref(),
+        Some("([tier]*(2))"),
+        "{tier_doubled:?}"
+    );
+    assert_eq!(tier_doubled.computed, Some(Computed::Stored));
 }
 
 #[tokio::test]

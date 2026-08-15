@@ -8,8 +8,9 @@
 //! the fixture drifted; one that breaks the first means the renderer did.
 
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver,
+    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use driver_mssql::MsSqlSource;
 use tokio::sync::OnceCell;
@@ -29,7 +30,7 @@ const DATABASE: &str = "dbclient_ddl";
 /// constraint, which `SQLServerCheckConstraintManager` writes as an `ALTER TABLE`
 /// of its own, and the indexes.
 ///
-/// Deliberately different from upstream in three places, each recorded on the
+/// Deliberately different from upstream in four places, each recorded on the
 /// line that shows it:
 ///
 /// - `id int NOT NULL` where upstream has `id int IDENTITY(1,1) NOT NULL`.
@@ -39,6 +40,10 @@ const DATABASE: &str = "dbclient_ddl";
 ///   generic `isIncludeIndexInDDL` would emit after having already declared the
 ///   constraint that made it — a script that stops with "there is already an
 ///   object named parts_sku_key".
+/// - `sku_safe` carries no `NOT NULL`, although the catalog says the column is
+///   not nullable and upstream's `NotNullModifier` would therefore write one.
+///   SQL Server refuses `NOT NULL` on a computed column it does not store
+///   (Msg 8183), so upstream's script does not run.
 /// - The doubled brackets in `CHECK (([qty]>(0)))` and `DEFAULT ((1))` are the
 ///   server's own text, printed as upstream prints it.
 const PARTS: &str = "-- Drop table
@@ -50,6 +55,8 @@ CREATE TABLE dbo.parts (
 \tsku varchar(32) NOT NULL,
 \tqty int DEFAULT ((1)) NOT NULL,
 \tparent_id int NULL,
+\tqty_doubled AS ([qty]*(2)) PERSISTED NOT NULL,
+\tsku_safe AS (isnull([sku],'')),
 \tCONSTRAINT parts_pkey PRIMARY KEY (id),
 \tCONSTRAINT parts_sku_key UNIQUE (sku),
 \tCONSTRAINT parts_parent_fkey FOREIGN KEY (parent_id) REFERENCES dbo.parts_parent(id) ON DELETE CASCADE
@@ -148,6 +155,26 @@ fn column(name: &str, data_type: &str, nullable: bool, default: Option<&str>) ->
         position: 1,
         is_primary_key: false,
         default_value: default.map(str::to_string),
+        computed: None,
+    }
+}
+
+/// A computed column, whose expression the driver reports where a default would
+/// have been.
+///
+/// The empty `data_type` is the one place this fixture is deliberately unlike
+/// the server, which reports `int` for `qty_doubled` as it does for any other
+/// column. A declaration that names the type is one SQL Server rejects, so
+/// leaving it blank here means a renderer that printed it could not pass.
+fn computed(name: &str, expression: &str, computed: Computed, nullable: bool) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: String::new(),
+        nullable,
+        position: 1,
+        is_primary_key: false,
+        default_value: Some(expression.to_string()),
+        computed: Some(computed),
     }
 }
 
@@ -179,6 +206,10 @@ fn parts() -> Fixture {
             column("sku", "varchar(32)", false, None),
             column("qty", "int", false, Some("((1))")),
             column("parent_id", "int", true, None),
+            // Both kinds, because they are written differently and only one of
+            // the two can carry `NOT NULL`.
+            computed("qty_doubled", "([qty]*(2))", Computed::Stored, false),
+            computed("sku_safe", "(isnull([sku],''))", Computed::Virtual, false),
         ],
         indexes: vec![
             // The primary key's index and the unique constraint's, both of which
@@ -226,6 +257,39 @@ async fn rendered(driver: &dyn Driver, relation: &RelationInfo) -> String {
 async fn a_table_is_assembled_the_way_upstream_assembles_one() {
     let ddl = rendered(&parts(), &relation("dbo", "parts", RelationKind::Table)).await;
     assert_eq!(ddl, PARTS);
+}
+
+/// A computed column is written as a computation, not as a default.
+///
+/// The regression this file exists to hold onto. Before `ColumnInfo` could tell
+/// the two apart, the expression arrived where a default arrives and came out as
+/// `qty_doubled int DEFAULT ([qty]*(2))` — a declaration SQL Server refuses,
+/// since a default cannot name a column, wearing the shape of one it would
+/// accept.
+#[tokio::test]
+async fn a_computed_column_is_written_as_a_computation() {
+    let fixture = Fixture {
+        columns: vec![
+            column("qty", "int", false, Some("((1))")),
+            computed("qty_doubled", "([qty]*(2))", Computed::Stored, false),
+            computed("sku_safe", "(isnull([sku],''))", Computed::Virtual, false),
+        ],
+        ..Fixture::default()
+    };
+    let ddl = rendered(&fixture, &relation("dbo", "parts", RelationKind::Table)).await;
+
+    assert!(
+        ddl.contains("\tqty_doubled AS ([qty]*(2)) PERSISTED NOT NULL,\n"),
+        "{ddl}"
+    );
+    // No `NOT NULL` on this one although the column is not nullable, and no
+    // `NULL` either: SQL Server takes neither on a computed column it does not
+    // store.
+    assert!(ddl.contains("\tsku_safe AS (isnull([sku],''))\n"), "{ddl}");
+    // The column that really does have a default still gets one, so this is
+    // about telling the two apart rather than about dropping the clause.
+    assert!(ddl.contains("\tqty int DEFAULT ((1)) NOT NULL,\n"), "{ddl}");
+    assert_eq!(ddl.matches("DEFAULT").count(), 1, "{ddl}");
 }
 
 /// A view is the source the server kept, and nothing is built around it.
@@ -304,12 +368,24 @@ async fn seed() {
         "IF OBJECT_ID('dbo.open_parts') IS NOT NULL DROP VIEW dbo.open_parts",
         "IF OBJECT_ID('dbo.parts') IS NOT NULL DROP TABLE dbo.parts",
         "IF OBJECT_ID('dbo.parts_parent') IS NOT NULL DROP TABLE dbo.parts_parent",
+        // The schema the generated script is replayed into, and the table its
+        // foreign key will point at once every name in it has been moved over.
+        "IF OBJECT_ID('replay.parts') IS NOT NULL DROP TABLE replay.parts",
+        "IF OBJECT_ID('replay.parts_parent') IS NOT NULL DROP TABLE replay.parts_parent",
+        "IF SCHEMA_ID('replay') IS NULL EXEC('CREATE SCHEMA replay')",
         "CREATE TABLE dbo.parts_parent (id int NOT NULL CONSTRAINT parts_parent_pkey PRIMARY KEY)",
+        "CREATE TABLE replay.parts_parent (id int NOT NULL CONSTRAINT parts_parent_pkey PRIMARY KEY)",
+        // The two kinds of computed column, and both end up not nullable in the
+        // catalog — `ISNULL(…)` cannot return one, so the server works that out
+        // for `sku_safe` without being told. Only the persisted one is allowed
+        // to say so in a declaration, which is what makes the pair worth having.
         "CREATE TABLE dbo.parts (
             id int NOT NULL IDENTITY(1,1),
             sku varchar(32) NOT NULL,
             qty int NOT NULL CONSTRAINT parts_qty_default DEFAULT 1,
             parent_id int NULL,
+            qty_doubled AS (qty * 2) PERSISTED NOT NULL,
+            sku_safe AS (ISNULL(sku, '')),
             CONSTRAINT parts_pkey PRIMARY KEY (id),
             CONSTRAINT parts_sku_key UNIQUE (sku),
             CONSTRAINT parts_qty_positive CHECK (qty > 0),
@@ -355,6 +431,32 @@ async fn a_table_on_the_server_renders_to_what_the_fake_renders() {
     let relation = listed(&source, "parts").await;
     let ddl = rendered(&source, &relation).await;
     assert_eq!(ddl, PARTS);
+}
+
+/// The script this writes is a script the server takes back.
+///
+/// The check the rest of this file cannot make. Everything above compares text
+/// against text, and text that reads plausibly is exactly what a wrong
+/// declaration looks like — `qty_doubled int DEFAULT ([qty]*(2))` would have
+/// passed a reviewer and failed the server. So the generated script is executed,
+/// and then the copy it built is rendered in its turn: if the server took the
+/// script and read the same table back out of it, the two strings are equal.
+///
+/// Into a schema of its own, because the script names the table it came from and
+/// dropping `dbo.parts` to make room would take the fixture out from under the
+/// tests running beside this one.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn the_script_it_writes_is_one_the_server_accepts() {
+    let source = live().await;
+    let script = rendered(&source, &listed(&source, "parts").await)
+        .await
+        .replace("dbo.", "replay.");
+
+    run(&source, &script).await;
+
+    let copy = relation("replay", "parts", RelationKind::Table);
+    assert_eq!(rendered(&source, &copy).await, script);
 }
 
 /// And a view's source comes back as it was typed.

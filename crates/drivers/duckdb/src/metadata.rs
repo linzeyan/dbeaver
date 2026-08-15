@@ -152,6 +152,7 @@ pub(crate) fn columns(
             // is nothing to shift.
             position: row.get(3)?,
             default_value: row.get(4)?,
+            computed: None,
             is_primary_key: row.get(5)?,
         })
     })?;

@@ -274,6 +274,7 @@ fn columns(spec: &[(&str, &str, bool, Option<&str>)]) -> Vec<ColumnInfo> {
             position: i as i32 + 1,
             is_primary_key: false,
             default_value: default.map(str::to_string),
+            computed: None,
         })
         .collect()
 }
