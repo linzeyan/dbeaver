@@ -760,9 +760,17 @@ final class GridRenderer {
                 // NULL is drawn as the word, dimmed. `text` returns "" for both
                 // NULL and an empty string, and rendering them the same way
                 // hides a distinction the user is querying on.
+                //
+                // Unless the server declared the column NOT NULL, where the word
+                // would be the lie instead: the only NULL that can reach such a
+                // column is one a driver substituted for a value Arrow has no
+                // shape for. Measured on MySQL 8.4 — the server clears its NOT
+                // NULL flag on the nullable side of an outer join, so a result
+                // column that still carries it cannot hold a NULL from the data.
                 if table.isNull(row: r, column: c) {
                     emitCell(
-                        "NULL", x: x, width: w, maxChars: maxChars, y: y + 3,
+                        table.columns[c].declaredNotNull ? "" : "NULL",
+                        x: x, width: w, maxChars: maxChars, y: y + 3,
                         color: Theme.Grid.nullText.simd, alignRight: false)
                 } else {
                     emitCell(
