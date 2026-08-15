@@ -22,6 +22,7 @@ members = [
     "crates/edit",
     "crates/ffi",
     "crates/sql",
+    "crates/transfer",
 ]
 # The vendored tiberius is built as a dependency, never as one of ours. Excluding
 # it keeps `--workspace` meaning "code this repository wrote": upstream's source
