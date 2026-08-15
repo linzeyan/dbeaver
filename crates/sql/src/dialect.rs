@@ -152,6 +152,27 @@ impl Dialect {
         let inner = name.replace(close, &format!("{close}{close}"));
         format!("{open}{inner}{close}")
     }
+
+    /// `value` written so that this database reads it as the characters it is.
+    ///
+    /// Next to `quote` because it is the same kind of fact — how this database
+    /// spells something back to itself — and because two callers that generate
+    /// SQL, the cell editor and the SQL exporter, would otherwise each keep a
+    /// copy of a rule that is wrong in a way nobody notices until a value with
+    /// a backslash in it comes back different.
+    ///
+    /// The quote is doubled everywhere, which is the SQL standard's own escape.
+    /// The backslash is doubled only where the dialect says a backslash escapes
+    /// — MySQL and ClickHouse — because on PostgreSQL, where it does not, a
+    /// doubled backslash is two backslashes and the value comes back changed.
+    pub fn string_literal(&self, value: &str) -> String {
+        let escaped = if self.backslash_escapes {
+            value.replace('\\', "\\\\").replace('\'', "''")
+        } else {
+            value.replace('\'', "''")
+        };
+        format!("'{escaped}'")
+    }
 }
 
 /// The row every other row is a difference from.

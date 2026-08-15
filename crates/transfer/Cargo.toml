@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 arrow.workspace = true
+# For the SQL writer only: quoting a name and escaping a string literal are
+# dialect-specific, and the cell editor already reads the same two rules from
+# here. A second copy is one that goes wrong quietly.
+dbsql = { path = "../sql" }
 # The Arrow-to-Parquet writer, which is the whole reason not to write one: the
 # format is column chunks, pages, encodings, statistics and a footer, and this
 # takes a RecordBatch straight to all of it. Writing it by hand would be
@@ -20,3 +24,5 @@ parquet = { version = "58", default-features = false, features = [
 # Reading a Parquet file back is the only way to check one was written: a
 # subtly wrong file is still a file, and its size looks fine.
 bytes = "1"
+# The dialects the SQL writer is checked against.
+dbsql = { path = "../sql" }

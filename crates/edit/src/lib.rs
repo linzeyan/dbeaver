@@ -469,22 +469,7 @@ impl Table<'_> {
                 )))
             };
         }
-        Ok(self.quoted(value))
-    }
-
-    /// A string literal this database will read as the characters it was given.
-    ///
-    /// The quote is doubled everywhere, which is the SQL standard's own escape.
-    /// The backslash is doubled only where the dialect says a backslash escapes
-    /// — MySQL and ClickHouse — because on PostgreSQL, where it does not, a
-    /// doubled backslash is two backslashes and the value comes back changed.
-    fn quoted(&self, value: &str) -> String {
-        let escaped = if self.dialect.backslash_escapes {
-            value.replace('\\', "\\\\").replace('\'', "''")
-        } else {
-            value.replace('\'', "''")
-        };
-        format!("'{escaped}'")
+        Ok(self.dialect.string_literal(value))
     }
 }
 

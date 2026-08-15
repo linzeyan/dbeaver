@@ -8,12 +8,15 @@
 
 mod delimited;
 mod parquet_file;
+mod sql_script;
 
 pub use delimited::DelimitedWriter;
 pub use parquet_file::ParquetWriter;
+pub use sql_script::SqlWriter;
 
 use arrow::array::RecordBatch;
 use arrow::error::ArrowError;
+use dbsql::Dialect;
 use std::io::Write;
 
 /// A format a result can be written to.
@@ -103,5 +106,33 @@ where
         }
         Sink::Parquet(w) => w.finish()?,
     }
+    Ok(rows)
+}
+
+/// Writes every batch as `INSERT` statements into `table`, and reports how many
+/// rows that was.
+///
+/// Its own entry point rather than a fifth `Format`, because it is the only one
+/// that cannot be chosen by a file extension alone: an `INSERT` needs a table to
+/// name and a dialect to spell it in. Folding those into `export` would give
+/// four of the five formats two arguments that mean nothing to them.
+pub fn export_sql<W, I>(
+    batches: I,
+    dialect: &'static Dialect,
+    table: String,
+    into: W,
+) -> Result<u64, ArrowError>
+where
+    W: Write,
+    I: IntoIterator<Item = Result<RecordBatch, ArrowError>>,
+{
+    let mut writer = SqlWriter::new(into, dialect, table);
+    let mut rows = 0u64;
+    for batch in batches {
+        let batch = batch?;
+        rows += batch.num_rows() as u64;
+        writer.write(&batch)?;
+    }
+    writer.finish()?;
     Ok(rows)
 }

@@ -184,3 +184,134 @@ fn parquet_comes_back_as_the_batches_that_went_in() {
         .collect();
     assert_eq!(notes, vec![Some("a"), Some(""), None]);
 }
+
+#[test]
+fn an_apostrophe_in_a_value_does_not_end_the_string_it_is_in() {
+    // The failure this prevents is not a syntax error. A value with an
+    // apostrophe, written into a script unescaped, closes its own literal and
+    // the rest of the row becomes SQL — which is how a generated script stops
+    // being data and starts being a statement somebody did not write.
+    let mut out = Vec::new();
+    let rows = dbtransfer::export_sql(
+        vec![Ok::<_, ArrowError>(batch(
+            vec![Some(1)],
+            vec![Some("O'Brien')); DROP TABLE t; --")],
+        ))],
+        &dbsql::POSTGRES,
+        "public.people".to_string(),
+        &mut out,
+    )
+    .expect("export failed");
+    assert_eq!(rows, 1);
+
+    let sql = String::from_utf8(out).expect("not utf-8");
+    assert_eq!(
+        sql,
+        "INSERT INTO public.people (id, note) VALUES\n\
+         (1, 'O''Brien'')); DROP TABLE t; --');\n"
+    );
+}
+
+#[test]
+fn a_backslash_is_doubled_only_where_the_dialect_reads_it_as_an_escape() {
+    // MySQL treats a backslash as an escape and PostgreSQL does not, so one
+    // rule for both is wrong on one of them — and wrong in the direction that
+    // silently changes the value rather than failing.
+    let path = vec![Some(r"C:\tmp\x")];
+    let mut mysql = Vec::new();
+    dbtransfer::export_sql(
+        vec![Ok::<_, ArrowError>(batch(vec![Some(1)], path.clone()))],
+        &dbsql::MYSQL,
+        "t".to_string(),
+        &mut mysql,
+    )
+    .expect("mysql export failed");
+    assert!(
+        String::from_utf8(mysql).unwrap().contains(r"'C:\\tmp\\x'"),
+        "MySQL reads a lone backslash as an escape, so it has to be doubled"
+    );
+
+    let mut postgres = Vec::new();
+    dbtransfer::export_sql(
+        vec![Ok::<_, ArrowError>(batch(vec![Some(1)], path))],
+        &dbsql::POSTGRES,
+        "t".to_string(),
+        &mut postgres,
+    )
+    .expect("postgres export failed");
+    assert!(
+        String::from_utf8(postgres).unwrap().contains(r"'C:\tmp\x'"),
+        "doubling on PostgreSQL would put two backslashes in the value"
+    );
+}
+
+#[test]
+fn a_null_is_the_keyword_and_an_empty_string_is_a_literal() {
+    // Written as `''` a NULL becomes the empty string, which is a different
+    // value and one that passes every NOT NULL constraint the real one fails.
+    let mut out = Vec::new();
+    dbtransfer::export_sql(
+        vec![Ok::<_, ArrowError>(batch(
+            vec![Some(1), None],
+            vec![None, Some("")],
+        ))],
+        &dbsql::POSTGRES,
+        "t".to_string(),
+        &mut out,
+    )
+    .expect("export failed");
+    let sql = String::from_utf8(out).unwrap();
+    assert!(sql.contains("(1, NULL)"), "{sql}");
+    assert!(sql.contains("(NULL, '')"), "{sql}");
+}
+
+#[test]
+fn a_column_whose_name_needs_quoting_gets_it() {
+    // An unquoted `order` is a keyword on every one of these databases, and a
+    // script naming it bare fails on the first statement.
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("order", DataType::Int32, true),
+        Field::new("Mixed Case", DataType::Utf8, true),
+    ]));
+    let id: ArrayRef = Arc::new(Int32Array::from(vec![Some(1)]));
+    let note: ArrayRef = Arc::new(StringArray::from(vec![Some("a")]));
+    let b = RecordBatch::try_new(schema, vec![id, note]).expect("batch");
+
+    let mut out = Vec::new();
+    dbtransfer::export_sql(
+        vec![Ok::<_, ArrowError>(b)],
+        &dbsql::POSTGRES,
+        "t".to_string(),
+        &mut out,
+    )
+    .expect("export failed");
+    let sql = String::from_utf8(out).unwrap();
+    assert!(
+        sql.starts_with(r#"INSERT INTO t ("order", "Mixed Case") VALUES"#),
+        "{sql}"
+    );
+}
+
+#[test]
+fn a_result_longer_than_one_statement_is_split_into_valid_ones() {
+    // One statement for a million rows exceeds what most databases will parse,
+    // so the writer breaks them up — and every piece has to be terminated, or
+    // the second INSERT is read as a continuation of the first.
+    let ids: Vec<Option<i32>> = (0..450).map(Some).collect();
+    let notes: Vec<Option<&str>> = (0..450).map(|_| Some("x")).collect();
+    let mut out = Vec::new();
+    dbtransfer::export_sql(
+        vec![Ok::<_, ArrowError>(batch(ids, notes))],
+        &dbsql::POSTGRES,
+        "t".to_string(),
+        &mut out,
+    )
+    .expect("export failed");
+    let sql = String::from_utf8(out).unwrap();
+
+    assert_eq!(sql.matches("INSERT INTO").count(), 3, "200 + 200 + 50");
+    assert_eq!(sql.matches(";\n").count(), 3, "each one terminated");
+    assert!(sql.ends_with(";\n"), "including the last");
+    // The rows themselves must all be there, split or not.
+    assert_eq!(sql.matches("'x'").count(), 450);
+}
