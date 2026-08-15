@@ -1697,3 +1697,60 @@ pub unsafe extern "C" fn db_export_sql(
         }
     }
 }
+
+/// Drains the cursor into `target` as INSERT statements for `table`.
+///
+/// The dialect comes from the target connection, because the statements are
+/// written for the database they are being sent to — a DuckDB cursor feeding
+/// a PostgreSQL target needs PostgreSQL quoting, and the source's dialect is
+/// irrelevant to the INSERTs that reach the server.
+///
+/// Returns the row count on success. Returns -1 when the target refused the
+/// statement (a table that does not exist, a type mismatch, a constraint
+/// violation) and -2 when the source was cancelled — the same convention
+/// `db_export_sql` uses, so a caller that already handles one can handle the
+/// other without a second branch.
+///
+/// # Safety
+/// `cursor` must come from `db_cursor` and not have been freed. `target` must
+/// come from `db_connect` and not have been freed. `table` must be a valid
+/// NUL-terminated C string. `err` must be null or point to writable storage
+/// for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_transfer(
+    cursor: *mut DbCursor,
+    target: *mut DbHandle,
+    table: *const c_char,
+    err: *mut *mut c_char,
+) -> i64 {
+    if cursor.is_null() || target.is_null() || table.is_null() {
+        unsafe { set_err(err, "null cursor, target, or table") };
+        return -1;
+    }
+    let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let t = unsafe { &*target };
+    let Some(dialect) = t.dialect else {
+        unsafe { set_err(err, "this build has no dialect for this database") };
+        return -1;
+    };
+    let c = unsafe { &mut (*cursor).cursor };
+    match runtime().block_on(dbtransfer::transfer(
+        c.as_mut(),
+        t.driver.as_ref(),
+        dialect,
+        table_str.to_string(),
+    )) {
+        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+        Err(e) => {
+            let cancelled = e.is_cancelled();
+            unsafe { set_err(err, e) };
+            if cancelled { -2 } else { -1 }
+        }
+    }
+}
