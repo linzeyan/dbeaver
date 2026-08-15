@@ -148,9 +148,26 @@ impl Table<'_> {
         ))
     }
 
+    /// One new row.
+    ///
+    /// An insert carrying no cells is a row of the table's own defaults and not
+    /// a mistake: a grid's new row starts with every column untouched, and every
+    /// untouched column is left out of the statement so the schema decides it —
+    /// so a row where the user touched nothing is a row where the schema decides
+    /// everything. The dialect answers how to spell that, because the databases
+    /// here do not agree, and one of them has no spelling for it. Refused by name
+    /// there rather than written anyway: `INSERT INTO t` with nothing after it is
+    /// not a statement, and the refusal has to say which table and which
+    /// database, because that pair is the whole of the reason.
     fn insert(&self, insert: &Insert) -> DbResult<String> {
         if insert.set.is_empty() {
-            return Err(DbError::new("an insert with no values"));
+            let Some(defaults) = self.dialect.default_row else {
+                return Err(DbError::new(format!(
+                    "{} cannot be given a row of defaults: {} has no way to write one",
+                    self.qualified, self.dialect.name
+                )));
+            };
+            return Ok(format!("INSERT INTO {} {defaults}", self.qualified));
         }
         let mut names = Vec::with_capacity(insert.set.len());
         let mut values = Vec::with_capacity(insert.set.len());

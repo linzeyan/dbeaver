@@ -58,9 +58,10 @@ let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
-// `--verify-transaction`, `--verify-editing` and `--verify-metadata` run the
-// checks for the pieces of pure logic in the front-end and exit with their
-// verdict. None needs a window or a database, so they run before either exists.
+// `--verify-transaction`, `--verify-editing`, `--verify-metadata` and
+// `--verify-preferences` run the checks for the pieces of pure logic in the
+// front-end and exit with their verdict. None needs a window or a database, so
+// they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
@@ -78,6 +79,12 @@ if CommandLine.arguments.contains("--verify-editing") {
 }
 if CommandLine.arguments.contains("--verify-metadata") {
     exit(MetadataChecks.run() ? 0 : 1)
+}
+// The only one of these that has to state its isolation. `Preferences` is
+// main-actor isolated because the window reads it, and top-level code runs on
+// the main thread without being statically known to.
+if CommandLine.arguments.contains("--verify-preferences") {
+    exit(MainActor.assumeIsolated { PreferencesChecks.run() } ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -244,6 +251,59 @@ if CommandLine.arguments.contains("--edit") {
         exit(kept == 1 && gone == 0 && added == 1 ? 0 : 1)
     } catch {
         fputs("edit: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
+/// `--preferences` drives all three settings through the live window, each way
+/// round, and prints what the window did.
+///
+/// Exists because `--verify-preferences` checks the rules and cannot check the
+/// wiring: which side of a switch a behaviour is on is the one mistake here that
+/// compiles, passes every unit check, and is invisible until somebody loses a
+/// row. So this presses Save and reads the grid, with each setting off and then
+/// on, and reports the difference — the pair of lines is the whole claim, and a
+/// build ignoring a setting prints the same thing twice.
+///
+/// It writes. `prefs_probe` is created and dropped in the database `--conn`
+/// names, so point it at a scratch database rather than at anything that
+/// matters. `--relation prefs_probe` is what opens it, so the two go together;
+/// the Makefile target passes both.
+///
+/// The table is built here, before the window connects, because the navigator
+/// reads its inventory once at connect time — a table created after that is one
+/// the sidebar has never heard of.
+let preferencesProbe = CommandLine.arguments.contains("--preferences")
+if preferencesProbe {
+    guard let conn = connArgument else {
+        fputs("--preferences needs --conn\n", stderr)
+        exit(2)
+    }
+    do {
+        let db = try Database(connString: conn)
+        func ran(_ sql: String) throws {
+            let query = try db.query(sql, batchRows: 1000)
+            while try query.nextBatch() != nil {}
+        }
+        try ran("DROP TABLE IF EXISTS prefs_probe")
+        // `gap` is the column this fixture exists for: declared, and null in
+        // every row. It stands in for MongoDB's `_extra`, which is the column
+        // the hiding setting was asked about — and which needs a MongoDB to
+        // produce, while any database at all can produce this.
+        //
+        // `serial` rather than a plain `int`, which makes this the one probe
+        // here that is PostgreSQL-shaped rather than portable: a row of nothing
+        // but defaults can only be inserted into a table whose primary key has
+        // a default, so a fixture for that setting has to have one. That is the
+        // setting's real precondition rather than an accident of this file.
+        try ran(
+            "CREATE TABLE prefs_probe (id serial PRIMARY KEY, label varchar(32), "
+                + "gap varchar(32), note varchar(32) DEFAULT 'from the schema')")
+        try ran(
+            "INSERT INTO prefs_probe (label, note) VALUES "
+                + "('one', 'typed'), ('two', 'typed'), ('three', 'typed')")
+    } catch {
+        fputs("preferences: could not build the fixture: \(error)\n", stderr)
         exit(1)
     }
 }
@@ -656,6 +716,243 @@ func addRows(model: AppModel, count: Int) {
         fputs("rows added      \(count) · \(model.browseRowCount) drawn\n", stderr)
     }
     poll()
+}
+
+/// Drives `--preferences`: each of the three settings, off and then on, through
+/// the window that reads them.
+///
+/// Polls between steps for the reason `markRowsForDeletion` does — a Save goes
+/// out through the model's own background queue and comes back through a re-read
+/// — and every step waits for the window to be idle before it acts, so a report
+/// never describes a result that is still arriving.
+///
+/// Each pair of lines is the claim. A build that read a setting from the wrong
+/// place, or wired a behaviour to the wrong side of one, prints the same thing
+/// for both halves of a pair; only the differences here are evidence.
+@MainActor
+func probePreferences(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    /// Whether Save put the question, and what it was answered.
+    var asked: DeleteConfirmation?
+    var answer = false
+    model.confirmDeletion = { confirmation in
+        asked = confirmation
+        return answer
+    }
+
+    func report(_ what: String, _ said: String) {
+        fputs("prefs  \(what.padding(toLength: 16, withPad: " ", startingAt: 0))\(said)\n", stderr)
+    }
+
+    /// The columns the grid is being told not to draw, by name — an index would
+    /// say nothing about whether the right column was chosen.
+    func hiddenNames() -> String {
+        let names = model.hiddenBrowseColumns.sorted().map {
+            model.browseResult.table.columns[$0].name
+        }
+        return names.isEmpty ? "(none)" : names.joined(separator: ", ")
+    }
+
+    /// Marks the nth row of the browse, counting from one.
+    func mark(row: Int) {
+        model.browseResult.selection = GridSelection(row: row - 1, column: 0)
+        model.toggleDeleteSelectedRows()
+    }
+
+    /// One Save, described by what it was asked and what it left behind.
+    ///
+    /// The staged count matters as much as the row count: a Save answered "no"
+    /// has to leave the marks alone, or saying no once would throw away the
+    /// marking the user spent a minute doing.
+    func saved(_ what: String) {
+        let question = asked == nil ? "not asked" : "asked"
+        let refusal = model.errorMessage.map { " · refused: \($0)" } ?? ""
+        report(
+            what,
+            "\(question) · \(model.browseResult.rowCount) rows left · "
+                + "\(model.staged.count) still staged\(refusal)")
+        asked = nil
+    }
+
+    var steps: [() -> Void] = []
+    var next = 0
+
+    /// Where the cursor actually is, by column name. Read through the model's
+    /// own clamp, which is what the grid and the inspector strip both read.
+    func cursorName() -> String {
+        guard let at = model.browseSelection?.column,
+            at < model.browseResult.table.columns.count
+        else { return "(none)" }
+        return model.browseResult.table.columns[at].name
+    }
+
+    // Through the menu item rather than by calling the window's own opener, for
+    // the reason `--reconnect` goes through Connect…: an item wired to nothing
+    // would pass every check on the settings themselves and still leave them
+    // unreachable. A preference that can only be changed with `defaults write`
+    // is not a setting, it is a hidden key.
+    steps.append {
+        guard
+            let item = NSApp.mainMenu?.items.first?.submenu?
+                .items.first(where: { $0.title == "Settings…" })
+        else {
+            fputs("no Settings… item in the application menu\n", stderr)
+            exit(1)
+        }
+        guard let action = item.action, item.target != nil else {
+            fputs("the Settings… item has no target to send to\n", stderr)
+            exit(1)
+        }
+        NSApp.sendAction(action, to: item.target, from: item)
+        guard let panel = NSApp.windows.first(where: { $0.title == "Settings" }) else {
+            fputs("the Settings… item did not open a window\n", stderr)
+            exit(1)
+        }
+        report(
+            "settings", "“\(item.title)” ⌘\(item.keyEquivalent) · \(Int(panel.frame.width))pt wide")
+        // Closed again, so the shots and the steps below are of the session
+        // window rather than of a panel sitting over it.
+        panel.close()
+    }
+
+    // The evidence is gathered whichever way the setting is set, so both answers
+    // below come from the one browse that has already happened.
+    steps.append {
+        model.preferences.hidesEmptyColumns = false
+        // Parked on the empty column on purpose, so that turning the setting on
+        // has a cursor to move. Found by reading the grid rather than by asking
+        // the model which column it hid: aiming with the answer under test would
+        // make the next line agree with itself.
+        let grid = model.browseResult.table
+        if let empty = grid.columns.indices.first(where: { column in
+            grid.rowCount > 0
+                && (0..<grid.rowCount).allSatisfy { grid.isNull(row: $0, column: column) }
+        }) {
+            model.browseResult.selection = GridSelection(row: 0, column: empty)
+        }
+        report("hide off", "\(hiddenNames()) · cursor \(cursorName())")
+    }
+    // Its own step rather than a second line in the one above, so a turn of the
+    // run loop passes with the setting on: the grid then genuinely redraws
+    // without the column, rather than only being told to and told back again
+    // before it ever laid out.
+    steps.append {
+        model.preferences.hidesEmptyColumns = true
+    }
+    steps.append {
+        report("hide on", "\(hiddenNames()) · cursor \(cursorName())")
+        // Left off, so the rows below are addressed by the coordinates the grid
+        // draws them at rather than by a shifted set.
+        model.preferences.hidesEmptyColumns = false
+    }
+
+    steps.append {
+        model.preferences.confirmsDeletions = false
+        mark(row: 1)
+        model.applyEdits()
+    }
+    steps.append { saved("delete off") }
+
+    steps.append {
+        model.preferences.confirmsDeletions = true
+        answer = false
+        mark(row: 1)
+        model.applyEdits()
+    }
+    steps.append { saved("delete on, no") }
+
+    // The same mark, answered the other way. Deliberately not re-marked: saying
+    // no leaves the row staged, so pressing Save again is the whole of what a
+    // user does next, and re-marking here would silently unmark it instead.
+    steps.append {
+        answer = true
+        model.applyEdits()
+    }
+    steps.append { saved("delete on, yes") }
+
+    steps.append {
+        model.preferences.insertsRowOfDefaults = false
+        model.addDraftRow()
+        model.applyEdits()
+    }
+    steps.append { saved("empty row off") }
+
+    steps.append {
+        model.errorMessage = nil
+        model.preferences.insertsRowOfDefaults = true
+        model.applyEdits()
+    }
+    steps.append { saved("empty row on") }
+
+    // A browse reads through a cursor, and a cursor is a transaction that stays
+    // open for as long as somebody is looking at the rows — so `DROP TABLE
+    // prefs_probe` from anywhere would wait on this window until it closed.
+    // Moving the browse to another relation is what lets go of it; nothing else
+    // reachable from here does. Smallest first, because the point is to stop
+    // reading this table rather than to read another one.
+    steps.append {
+        let elsewhere =
+            model.relations.values.flatMap { $0 }
+            .filter { $0.name != "prefs_probe" }
+            .min { ($0.estimatedRows ?? .max) < ($1.estimatedRows ?? .max) }
+        guard let elsewhere else {
+            fputs("preferences: no other relation to move the browse to\n", stderr)
+            exit(1)
+        }
+        model.selected = elsewhere
+        report("parked on", "\(elsewhere.schema).\(elsewhere.name)")
+    }
+
+    func finish() {
+        // Read back through a connection of its own, because the claim is about
+        // what is in the table rather than about what the window is showing:
+        // a row of pure defaults has to have taken the schema's default, or the
+        // statement inserted a row of NULLs and merely looked right.
+        var defaulted = -1
+        do {
+            let db = try Database(connString: connArgument ?? "")
+            func ran(_ sql: String) throws -> Int {
+                let query = try db.query(sql, batchRows: 1000)
+                while try query.nextBatch() != nil {}
+                return query.rowsAffected ?? 0
+            }
+            defaulted = try ran(
+                "SELECT id FROM prefs_probe WHERE note = 'from the schema' AND label IS NULL")
+            _ = try ran("DROP TABLE prefs_probe")
+        } catch {
+            fputs("preferences: reading back failed: \(error)\n", stderr)
+            exit(1)
+        }
+        report("defaulted rows", "\(defaulted)")
+        exit(defaulted == 1 ? 0 : 1)
+    }
+
+    func pump() {
+        guard model.browseResult.hasRun, !model.browseResult.isLoading, !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("preferences probe timed out waiting for the window\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(pump)
+            }
+            return
+        }
+        guard next < steps.count else {
+            finish()
+            return
+        }
+        let step = steps[next]
+        next += 1
+        step()
+        // A step that only reports leaves the window idle, so the next one would
+        // run in the same turn; a beat between them keeps each report on the
+        // state its own step produced.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(pump)
+        }
+    }
+    pump()
 }
 
 /// The SQL editor's text view, wherever SwiftUI put it.
@@ -1336,7 +1633,7 @@ if benchMode {
             history = QueryHistory()
         }
         let model = AppModel(
-            history: history,
+            history: history, preferences: Preferences(),
             initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
@@ -1369,6 +1666,7 @@ if benchMode {
         if showHistory || historyPick != nil {
             driveHistory(model: model, open: showHistory, pick: historyPick)
         }
+        if preferencesProbe { probePreferences(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }

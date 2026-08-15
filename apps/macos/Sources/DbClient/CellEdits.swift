@@ -29,6 +29,39 @@ struct DraftRow {
     var values: [Int: PendingValue] = [:]
 }
 
+/// What Save has to put to the user before it sends.
+///
+/// Only deletions get asked about, and only because a setting says so. Every
+/// other signal a staged deletion has is already on screen — the row stays there
+/// struck through in red, the count beside Save includes it, and Revert takes it
+/// all back — which is the argument that this is a second confirmation. The
+/// argument for it is the one case those signals do not cover: a press of Save
+/// that was about a cell somebody just edited, carrying rows they marked ten
+/// minutes ago out with it. Deletions are also the only staged change with
+/// nothing to undo them afterwards — an overwritten value is on screen to be
+/// retyped, an inserted row can be deleted again — and that is what tips the
+/// default to asking.
+struct DeleteConfirmation: Equatable {
+    /// How many rows go. The number is the whole of the question being put.
+    let rows: Int
+    /// The other statements riding along. Nought is the ordinary case; anything
+    /// else is the situation this exists for.
+    let others: Int
+
+    /// Main-actor isolated for the reason `QueryHistoryOutcome.label` is: the
+    /// counts go through the window's own number formatter.
+    @MainActor
+    var question: String { "Send \(AppModel.pluralized(rows, "deleted row"))?" }
+
+    @MainActor
+    var detail: String {
+        let deleted = "\(AppModel.pluralized(rows, "row")) will be deleted."
+        guard others > 0 else { return "\(deleted) This cannot be undone." }
+        return "\(deleted) \(AppModel.pluralized(others, "other change")) will be sent with it. "
+            + "This cannot be undone."
+    }
+}
+
 /// What a grid is holding but has not sent.
 ///
 /// Three kinds, staged differently because they are different questions. A
@@ -56,6 +89,34 @@ struct StagedChanges {
     /// report of what it sent will contradict it.
     var count: Int {
         updates.keys.filter { !deletes.contains($0.row) }.count + deletes.count + drafts.count
+    }
+
+    /// Why Save will not send this, or nil where it will.
+    ///
+    /// A new row nobody typed into is the one thing staged here that can be
+    /// refused before the core sees it. Every untouched column is left out of the
+    /// INSERT so the table's own defaults apply to it, so a row where nothing was
+    /// touched is asking for a row that is nothing but defaults — which the
+    /// databases here spell three different ways, and one of them cannot spell at
+    /// all. Whether it may be asked for is the setting; while that is off, the
+    /// row is named here, on screen, next to the row itself, rather than sent for
+    /// a server to answer about in a sentence about SQL.
+    ///
+    /// Numbered from one and among the drafts, because "new row 2" is what the
+    /// inspector strip calls it while the cursor is in it. Its number in the grid
+    /// would be a hundred thousand and change.
+    func refusal(sendingRowOfDefaults: Bool) -> String? {
+        guard !sendingRowOfDefaults,
+            let empty = drafts.firstIndex(where: { $0.values.isEmpty })
+        else { return nil }
+        return "New row \(empty + 1) has nothing in it. Fill a column in, discard the row, or "
+            + "turn on “Insert a row of defaults for an empty new row” in Settings."
+    }
+
+    /// What Save has to ask before it sends this, or nil where it may just send.
+    func confirmation(askingBeforeDeleting: Bool) -> DeleteConfirmation? {
+        guard askingBeforeDeleting, !deletes.isEmpty else { return nil }
+        return DeleteConfirmation(rows: deletes.count, others: count - deletes.count)
     }
 }
 
@@ -104,8 +165,9 @@ extension StagedChanges {
         // Columns nobody typed into are absent rather than NULL, so the table's
         // defaults apply to them — which is the whole difference between adding
         // a row and dictating every column of one. A draft that is empty is left
-        // in and refused by the core, because the alternative is dropping a row
-        // the user asked for without saying so.
+        // in and becomes an insert with no cells, which the core reads as a row
+        // of every default; whether it may be sent at all is `refusal`'s
+        // question, asked before this one and answered by a setting.
         for draft in drafts {
             let set = draft.values.keys.sorted().map { column in
                 EditRequest.Cell(

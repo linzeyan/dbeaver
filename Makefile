@@ -253,9 +253,23 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-transaction
 	./$(APP_BIN) --verify-editing
 	./$(APP_BIN) --verify-metadata
+	./$(APP_BIN) --verify-preferences
+
+# The settings checked against a live window rather than as rules on their own.
+# Separate from `test-swift`, which is the set of checks that need no server:
+# this one browses a real relation and presses Save, because which side of a
+# switch a behaviour sits on is the mistake that compiles, passes every unit
+# check, and is invisible until somebody loses a row.
+#
+# PostgreSQL specifically, and not because that is the container that happens to
+# be up: a row of nothing but defaults needs a table whose primary key has a
+# default, and `serial` is how the fixture gets one.
+.PHONY: test-preferences
+test-preferences: release db-check ## Drive each setting both ways through the window
+	./$(APP_BIN) --preferences --conn "$(PG_CONN)" --relation prefs_probe
 
 .PHONY: test-all
-test-all: test test-integration test-swift ## Every test
+test-all: test test-integration test-swift test-preferences ## Every test
 
 ##@ Quality
 

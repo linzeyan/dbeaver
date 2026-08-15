@@ -91,6 +91,24 @@ final class GridRenderer {
     var declaredTypes: [String: String] = [:] {
         didSet { if declaredTypes != oldValue { typeLabels.removeAll() } }
     }
+    /// Columns not to draw, by index into `table.columns`.
+    ///
+    /// Given no width rather than removed from the layout, which is what keeps
+    /// every index in this file — the selection, the sort, the pending marks,
+    /// the hit test — an index into the result itself. A renderer that packed
+    /// the drawn columns into their own numbering would need a map back at each
+    /// of those, and one of them would be the one nobody remembered.
+    ///
+    /// Changing the set re-derives the widths, so a column coming back gets one.
+    /// That costs whatever the user had dragged, which is a fair price for an
+    /// act as deliberate as changing a setting.
+    var hiddenColumns: Set<Int> = [] {
+        didSet {
+            guard hiddenColumns != oldValue else { return }
+            columnWidths.removeAll()
+            columnOffsets = [0]
+        }
+    }
     var scrollRow: Double = 0
     /// Horizontal scroll offset in points.
     var scrollX: Float = 0
@@ -237,7 +255,10 @@ final class GridRenderer {
     }
 
     func setColumnWidth(_ width: Float, at index: Int) {
-        guard index < columnWidths.count else { return }
+        // A hidden column has no edge to drag, and the clamp below would give it
+        // the minimum width — putting an empty column back on screen through a
+        // gesture aimed at its neighbour.
+        guard index < columnWidths.count, !hiddenColumns.contains(index) else { return }
         columnWidths[index] = min(maxColumnWidth, max(minColumnWidth, width))
         rebuildColumnOffsets()
     }
@@ -252,6 +273,11 @@ final class GridRenderer {
     private func layoutColumns(for table: ArrowTable) {
         let sample = min(table.rowCount, widthSampleRows)
         columnWidths = table.columns.indices.map { c in
+            // Zero width is how a column is hidden. Everything downstream — the
+            // offsets, the binary search that turns an x into a column, the
+            // visible slice — then leaves it out without being told about it,
+            // because a column occupying no points is one no point is inside.
+            if hiddenColumns.contains(c) { return 0 }
             // The type gets a say in the width, but a bounded one. It has to be
             // recognisable, not complete, and a long type name is routinely
             // longer than every value it describes — letting it size the column
@@ -309,10 +335,30 @@ final class GridRenderer {
     /// The column boundary within `tolerance` points of `x`, as the index of the
     /// column to its left. Drives the header's resize handles.
     func columnEdge(nearX x: Float, tolerance: Float) -> Int? {
-        for c in columnWidths.indices where abs(columnOffsets[c + 1] - x) <= tolerance {
+        // A hidden column's trailing edge sits exactly on its neighbour's, so
+        // skipping it here is what makes the handle at that point belong to the
+        // column the user can actually see.
+        for c in columnWidths.indices
+        where !hiddenColumns.contains(c) && abs(columnOffsets[c + 1] - x) <= tolerance {
             return c
         }
         return nil
+    }
+
+    /// The nearest drawn column to `from` in the direction `step` points, or
+    /// `from` itself where there is none.
+    ///
+    /// The keyboard is the one way a cursor can reach a hidden column: a click
+    /// cannot land on something zero points wide, and a hidden column would
+    /// otherwise swallow one press of the arrow key and leave the cursor
+    /// apparently stuck.
+    func drawnColumn(from: Int, step: Int) -> Int {
+        var next = from
+        while next >= 0, next < columnWidths.count {
+            if !hiddenColumns.contains(next) { return next }
+            next += step
+        }
+        return from
     }
 
     private func visibleColumns(viewWidth: Float) -> Range<Int> {
@@ -625,7 +671,8 @@ final class GridRenderer {
             for (i, r) in rows.enumerated() {
                 let y = rowY(i)
                 guard y + rowHeight > headerHeight, y < viewH else { continue }
-                for c in cols where pending.contains(GridCell(row: r, column: c)) {
+                for c in cols
+                where !hiddenColumns.contains(c) && pending.contains(GridCell(row: r, column: c)) {
                     let cx = columnX(c) - scrollX
                     let cw = columnWidth(c)
                     guard cx + cw > 0, cx < viewW else { continue }
@@ -637,7 +684,7 @@ final class GridRenderer {
         // The cursor cell is drawn separately: within a multi-row selection it
         // is the one cell the keyboard and the inspector act on, so it needs to
         // stay distinguishable from the band around it.
-        if let selection, rows.contains(selection.row) {
+        if let selection, rows.contains(selection.row), !hiddenColumns.contains(selection.column) {
             let y = rowY(selection.row - rows.lowerBound)
             if y + rowHeight > headerHeight, y < viewH {
                 let cx = columnX(selection.column) - scrollX
@@ -656,7 +703,7 @@ final class GridRenderer {
         }
 
         // Column separators.
-        for c in cols {
+        for c in cols where !hiddenColumns.contains(c) {
             let x = columnOffsets[c + 1] - scrollX
             guard x >= 0, x < viewW else { continue }
             fill(
@@ -672,7 +719,7 @@ final class GridRenderer {
         // Cells, column-major so per-column geometry is resolved once rather
         // than per cell. Draw order within the cell block does not matter: the
         // fills beneath them are already in the buffer.
-        for c in cols {
+        for c in cols where !hiddenColumns.contains(c) {
             let x = columnX(c) - scrollX
             let w = columnWidth(c)
             let maxChars = charsFitting(w)

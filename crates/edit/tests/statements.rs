@@ -193,6 +193,43 @@ async fn an_inserted_row_names_only_the_columns_it_was_given() {
     );
 }
 
+/// A new row nobody typed into is a row of the table's own defaults, and the
+/// three databases here spell that three different ways.
+///
+/// The front end decides whether such a row may be sent at all — its setting
+/// defaults to refusing it there, by name — but once it arrives the statement
+/// has to be the one this database reads. `DEFAULT VALUES` sent to MySQL is a
+/// syntax error, and empty parentheses sent to PostgreSQL are another.
+#[tokio::test]
+async fn a_row_of_nothing_takes_each_database_at_its_own_word() {
+    let edits: Edits =
+        serde_json::from_str(r#"{"schema":"public","relation":"lines","inserts":[{"set":[]}]}"#)
+            .unwrap();
+
+    let postgres = dbedit::statements(&Fake, &dbsql::POSTGRES, &edits)
+        .await
+        .unwrap();
+    assert_eq!(postgres, ["INSERT INTO public.lines DEFAULT VALUES"]);
+
+    let mysql = dbedit::statements(&Fake, &dbsql::MYSQL, &edits)
+        .await
+        .unwrap();
+    // Backticks because `lines` is one of MySQL's own keywords, which is the
+    // same quoting every other statement in this file gets there.
+    assert_eq!(mysql, ["INSERT INTO public.`lines` () VALUES ()"]);
+
+    // Named rather than approximated. A database with no way to say this gets a
+    // refusal carrying both halves of the reason — which table, and which
+    // database — because a statement invented here would fail at the server
+    // with a syntax error that points at nothing the user did.
+    let why = dbedit::statements(&Fake, &dbsql::CLICKHOUSE, &edits)
+        .await
+        .expect_err("clickhouse has no spelling for a row of defaults")
+        .to_string();
+    assert!(why.contains("public.lines"), "{why}");
+    assert!(why.contains("clickhouse"), "{why}");
+}
+
 #[tokio::test]
 async fn a_deleted_row_is_named_the_same_way_an_updated_one_is() {
     let statements = written(

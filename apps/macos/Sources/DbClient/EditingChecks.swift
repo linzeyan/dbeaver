@@ -126,11 +126,14 @@ enum EditingChecks {
             summary(of: two), "insert label=first | insert label=second",
             "two new rows are two INSERTs, in the order they were added")
 
+        // A row nobody typed into still becomes an insert, carrying no cells,
+        // which is how the core is asked for a row of every default. Whether it
+        // may be asked for at all is a setting and is decided before this — see
+        // `StagedChanges.refusal` and `--verify-preferences`. What is checked
+        // here is only that the empty row is not quietly dropped on the way.
         var empty = StagedChanges()
         empty.drafts = [DraftRow()]
-        expect(
-            summary(of: empty), "insert ",
-            "a row nobody typed into is still sent, for the core to refuse by name")
+        expect(summary(of: empty), "insert ", "an untouched new row keeps its place in the batch")
     }
 
     /// The number beside Save is the number of statements Save will send.
