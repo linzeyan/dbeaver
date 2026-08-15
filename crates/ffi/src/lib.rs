@@ -1068,7 +1068,7 @@ savepoint_step! {
     db_tx_release => release
 }
 
-/// Prepares `sql` and returns a stream over its results.
+/// Prepares `statement` and returns a stream over its results.
 ///
 /// `err_position` carries the server's error cursor as a number rather than
 /// leaving it inside the message: it is the one part of an error the front end
@@ -1078,12 +1078,12 @@ savepoint_step! {
 /// server counts from one.
 ///
 /// # Safety
-/// `handle` must be live; `sql` must be a valid NUL-terminated C string;
+/// `handle` must be live; `statement` must be a valid NUL-terminated C string;
 /// `err_position` must be null or point to writable `int` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_query(
     handle: *mut DbHandle,
-    sql: *const c_char,
+    statement: *const c_char,
     batch_rows: usize,
     err: *mut *mut c_char,
     err_position: *mut c_int,
@@ -1091,12 +1091,12 @@ pub unsafe extern "C" fn db_query(
     if !err_position.is_null() {
         unsafe { *err_position = 0 };
     }
-    if handle.is_null() || sql.is_null() {
-        unsafe { set_err(err, "null handle or sql") };
+    if handle.is_null() || statement.is_null() {
+        unsafe { set_err(err, "null handle or statement") };
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let s = match unsafe { CStr::from_ptr(sql) }.to_str() {
+    let s = match unsafe { CStr::from_ptr(statement) }.to_str() {
         Ok(s) => s,
         Err(e) => {
             unsafe { set_err(err, e) };
@@ -1234,7 +1234,7 @@ pub unsafe extern "C" fn db_string_free(s: *mut c_char) {
     }
 }
 
-/// Opens a cursor over `sql` and returns a handle to fetch pages.
+/// Opens a cursor over `statement` and returns a handle to fetch pages.
 ///
 /// A cursor occupies its connection while open, so the handle owns a
 /// connection of its own for the lifetime of the cursor. Freeing the cursor
@@ -1242,12 +1242,12 @@ pub unsafe extern "C" fn db_string_free(s: *mut c_char) {
 /// front-end that drops a result mid-scroll leaves nothing behind.
 ///
 /// # Safety
-/// `handle` must be live; `sql` must be a valid NUL-terminated C string;
+/// `handle` must be live; `statement` must be a valid NUL-terminated C string;
 /// `err_position` must be null or point to writable `int` storage.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_cursor(
     handle: *mut DbHandle,
-    sql: *const c_char,
+    statement: *const c_char,
     batch_rows: usize,
     err: *mut *mut c_char,
     err_position: *mut c_int,
@@ -1255,12 +1255,12 @@ pub unsafe extern "C" fn db_cursor(
     if !err_position.is_null() {
         unsafe { *err_position = 0 };
     }
-    if handle.is_null() || sql.is_null() {
-        unsafe { set_err(err, "null handle or sql") };
+    if handle.is_null() || statement.is_null() {
+        unsafe { set_err(err, "null handle or statement") };
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    let s = match unsafe { CStr::from_ptr(sql) }.to_str() {
+    let s = match unsafe { CStr::from_ptr(statement) }.to_str() {
         Ok(s) => s,
         Err(e) => {
             unsafe { set_err(err, e) };
