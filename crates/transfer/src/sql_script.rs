@@ -13,7 +13,7 @@ use std::io::Write;
 /// and one statement for a million rows exceeds what most of them will parse.
 /// A few hundred is where neither is true, and it is also small enough that a
 /// failure names a readable part of the file.
-const ROWS_PER_STATEMENT: usize = 200;
+pub(crate) const ROWS_PER_STATEMENT: usize = 200;
 
 /// Turns record batches into `INSERT` statements for one table.
 ///

@@ -179,7 +179,7 @@ test-integration: db-check db-check-compatible db-check-mongo db-check-clickhous
 # StarRocks into a job where neither server is running.
 .PHONY: test-postgres
 test-postgres: db-check db-check-compatible ## Integration tests behind PostgreSQL and the servers read through its driver
-	cargo test -p driver-postgres -p dbffi -- --ignored
+	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored
 	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		postgres_satisfies_the_contract \

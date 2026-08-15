@@ -19,6 +19,11 @@ parquet = { version = "58", default-features = false, features = [
     "arrow",
     "zstd",
 ] }
+# A transfer sends its statements through the `Driver` trait rather than to any
+# one database, which is what lets the same code copy PostgreSQL to DuckDB. The
+# file writers above need none of this, so this is the only dependency the
+# crate has on a live connection.
+dbconn = { path = "../conn" }
 
 [dev-dependencies]
 # Reading a Parquet file back is the only way to check one was written: a
@@ -26,3 +31,14 @@ parquet = { version = "58", default-features = false, features = [
 bytes = "1"
 # The dialects the SQL writer is checked against.
 dbsql = { path = "../sql" }
+# DuckDB as a real embedded database for end-to-end transfer tests: two
+# in-memory instances give a genuine database-to-database transfer with no
+# server, and the driver implements the Driver trait so the test calls the
+# same code path the application uses.
+driver-duckdb = { path = "../drivers/duckdb" }
+# A real server, for the one property DuckDB cannot show: PostgreSQL accepts a
+# statement before it runs it, so a violated constraint is only reported to a
+# caller that reads the stream back. That is what `TargetWriter` drains for.
+driver-postgres = { path = "../drivers/postgres" }
+# The async runtime for #[tokio::test] in the transfer test suite.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -9,13 +9,16 @@
 mod delimited;
 mod parquet_file;
 mod sql_script;
+mod target;
 
 pub use delimited::DelimitedWriter;
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;
+pub use target::TargetWriter;
 
 use arrow::array::RecordBatch;
 use arrow::error::ArrowError;
+use dbconn::DbResult;
 use dbsql::Dialect;
 use std::io::Write;
 
@@ -135,4 +138,28 @@ where
     }
     writer.finish()?;
     Ok(rows)
+}
+
+/// Fetch one batch at a time from `source` and send each to `target`.
+///
+/// Builds the `TargetWriter` from the first batch's schema, not from
+/// `source.schema()`, so an empty result sends nothing at all rather than an
+/// INSERT with no rows. Nothing is held between batches, which is what makes
+/// the size of the result irrelevant.
+pub async fn transfer(
+    source: &mut dyn dbconn::Cursor,
+    target: &dyn dbconn::Driver,
+    dialect: &'static Dialect,
+    table: String,
+) -> DbResult<u64> {
+    let mut total = 0u64;
+    let mut writer: Option<TargetWriter> = None;
+
+    while let Some(batch) = source.fetch().await? {
+        let writer = writer
+            .get_or_insert_with(|| TargetWriter::new(dialect, table.clone(), batch.schema_ref()));
+        total += writer.write(target, &batch).await?;
+    }
+
+    Ok(total)
 }
