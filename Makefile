@@ -124,13 +124,16 @@ test-integration: db-check db-check-compatible db-check-mongo db-check-clickhous
 # these five are a partition of it — a new crate with `#[ignore]`d tests is
 # picked up by `--workspace` above and has to be added to one of these by hand.
 #
-# The contract suite is one binary holding a subject per database, so each
-# family takes its share by test name. `--exact`, because the compatibility
-# subjects carry the driver's name as well as their own: a plain `mysql` filter
-# would pull TiDB and StarRocks into a job where neither server is running.
+# Two crates hold tests for more than one database and are split further. `dbddl`
+# has a test file per database, so `--test` names its share exactly. The contract
+# suite is one binary holding a subject per database, so that one is split by
+# test name — `--exact`, because the compatibility subjects carry the driver's
+# name as well as their own and a plain `mysql` filter would pull TiDB and
+# StarRocks into a job where neither server is running.
 .PHONY: test-postgres
 test-postgres: db-check db-check-compatible ## Integration tests behind PostgreSQL and the servers read through its driver
-	cargo test -p driver-postgres -p dbffi -p dbddl -- --ignored
+	cargo test -p driver-postgres -p dbffi -- --ignored
+	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		postgres_satisfies_the_contract \
 		cockroachdb_satisfies_the_contract_through_the_postgres_driver \
@@ -139,6 +142,7 @@ test-postgres: db-check db-check-compatible ## Integration tests behind PostgreS
 .PHONY: test-mysql
 test-mysql: db-check-mysql db-check-tidb db-check-starrocks ## Integration tests behind MySQL and the servers read through its driver
 	cargo test -p driver-mysql -- --ignored
+	cargo test -p dbddl --test mysql -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		mysql_satisfies_the_contract \
 		tidb_satisfies_the_contract_through_the_mysql_driver \
@@ -152,6 +156,7 @@ test-mssql: db-check-mssql ## Integration tests behind SQL Server
 .PHONY: test-clickhouse
 test-clickhouse: db-check-clickhouse ## Integration tests behind ClickHouse
 	cargo test -p driver-clickhouse -- --ignored
+	cargo test -p dbddl --test clickhouse -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact clickhouse_satisfies_the_contract
 
 .PHONY: test-mongodb
