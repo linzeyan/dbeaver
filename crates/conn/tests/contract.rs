@@ -465,6 +465,9 @@ async fn mssql() -> Subject {
             insert: "INSERT INTO dbo.contract_tx (n) VALUES (1)".to_string(),
             read: "SELECT n FROM dbo.contract_tx".to_string(),
             drop: "DROP TABLE dbo.contract_tx".to_string(),
+            // `SAVE TRANSACTION` and `ROLLBACK TRANSACTION <name>`, spelled by
+            // the driver. Release is the T-SQL no-op described there.
+            savepoints: true,
         }),
         _fixture: None,
     }
