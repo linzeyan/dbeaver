@@ -16,6 +16,13 @@
 //!
 //! **`money` has already lost precision by the time we see it.** See
 //! `money_to_arrow`.
+//!
+//! **Two column types have no one Arrow type, and both become text.** A
+//! `sql_variant` states its type per value, so a column of them can hold an
+//! `int` in one row and an `nvarchar` in the next; text is the only Arrow type
+//! that holds every base type it can produce. A `geography`, `geometry` or
+//! `hierarchyid` is a CLR type whose bytes are a private structure — see
+//! `crate::udt` for what those become and why it is text and not hex.
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Decimal128Builder, Float32Builder,
@@ -23,12 +30,14 @@ use arrow::array::{
     Time64MicrosecondBuilder, TimestampMicrosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
+use arrow::temporal_conversions::{date32_to_datetime, time64us_to_time, timestamp_us_to_datetime};
 use std::sync::Arc;
 use tiberius::numeric::Numeric;
 use tiberius::time::{Date, DateTime, DateTime2, SmallDateTime, Time};
 use tiberius::{ColumnData, ColumnType};
 
 use crate::MsSqlError;
+use crate::udt::{self, UdtKind};
 
 /// Days from tiberius' date epoch (0001-01-01, which it numbers day 0) to
 /// Arrow's (1970-01-01).
@@ -63,17 +72,19 @@ const MONEY_SCALE: i8 = 4;
 const NUMERIC_PRECISION: u8 = 38;
 const NUMERIC_SCALE: i8 = 10;
 
-/// A result column's TDS type, plus the decimal layout the server declared for
-/// it where we were able to ask.
+/// A result column's TDS type, plus what else is needed to name and read it.
 ///
-/// A pair because neither is enough on its own: the type says which builder to
-/// use and the layout says what to call the column, and only decimals have the
-/// second.
-#[derive(Debug, Clone, Copy)]
+/// The TDS type alone is not enough twice over: a decimal needs the precision
+/// and scale the server declared, and a `Udt` needs the CLR type name, because
+/// `geometry`, `geography` and `hierarchyid` share one type byte and their
+/// values are opaque byte strings.
+#[derive(Debug, Clone)]
 pub struct ColumnLayout {
     pub column_type: ColumnType,
     /// Declared precision and scale, for `decimal`/`numeric` only.
     pub decimal: Option<(u8, i8)>,
+    /// The CLR type name, for a `Udt` column only.
+    pub udt: Option<String>,
 }
 
 impl ColumnLayout {
@@ -81,6 +92,16 @@ impl ColumnLayout {
     /// normalized fallback.
     fn decimal_layout(&self) -> (u8, i8) {
         self.decimal.unwrap_or((NUMERIC_PRECISION, NUMERIC_SCALE))
+    }
+
+    /// Which CLR type this column holds, for a `Udt` column this driver can
+    /// read; the failure names the type so a reader knows what was refused.
+    fn udt_kind(&self, name: &str) -> Result<UdtKind, MsSqlError> {
+        let type_name = self.udt.as_deref().unwrap_or("");
+        UdtKind::from_type_name(type_name).ok_or_else(|| MsSqlError::UnsupportedType {
+            column: name.to_string(),
+            sql_type: format!("the CLR user-defined type {type_name:?}"),
+        })
     }
 }
 
@@ -150,24 +171,19 @@ pub fn arrow_field(name: &str, column: &ColumnLayout) -> Result<Field, MsSqlErro
         // narrowest honest answer — every value in it is null, and a reader that
         // has a case for strings has a case for this.
         ColumnType::Null => DataType::Utf8,
-        // Unreachable in practice, and worth writing anyway. tiberius panics
-        // while parsing the column metadata for these two — before any row and
-        // before this function is called — which is why `lib.rs` refuses such a
-        // statement before it is sent. This arm is what catches it if that guard
-        // is ever bypassed, and the day tiberius learns to describe them without
-        // decoding them it is already correct.
+        // `geometry`, `geography` and `hierarchyid`. Text, because the bytes are
+        // a private serialization and the text is what SQL Server itself calls
+        // the value; see `crate::udt`. A CLR type somebody registered has no
+        // text this side could invent, and `udt_kind` refuses it by name here —
+        // before a schema exists, which is the only place a whole column can
+        // still be turned down cleanly.
         ColumnType::Udt => {
-            return Err(MsSqlError::UnsupportedType {
-                column: name.to_string(),
-                sql_type: "a CLR user-defined type (geometry, geography, hierarchyid)".to_string(),
-            });
+            column.udt_kind(name)?;
+            DataType::Utf8
         }
-        ColumnType::SSVariant => {
-            return Err(MsSqlError::UnsupportedType {
-                column: name.to_string(),
-                sql_type: "sql_variant".to_string(),
-            });
-        }
+        // A `sql_variant` states its type per value, so the column has no one
+        // type and every value is rendered as text. See `variant_text`.
+        ColumnType::SSVariant => DataType::Utf8,
     };
     // Every field is nullable. NOT NULL is a constraint this path has not read,
     // and claiming non-null without it corrupts Arrow's validity buffers.
@@ -194,11 +210,17 @@ pub enum ColBuilder {
     Timestamp(TimestampMicrosecondBuilder),
     TimestampTz(TimestampMicrosecondBuilder),
     Binary(BinaryBuilder),
+    /// Carries which CLR type the column holds, because the bytes of one are
+    /// indistinguishable from the bytes of another.
+    Udt(StringBuilder, UdtKind),
+    /// `sql_variant`, where every value arrives under whichever `ColumnData`
+    /// variant it actually is and is rendered from there.
+    Variant(StringBuilder),
 }
 
 impl ColBuilder {
-    pub fn new(column: &ColumnLayout, capacity: usize) -> Self {
-        match column.column_type {
+    pub fn new(column: &ColumnLayout, name: &str, capacity: usize) -> Result<Self, MsSqlError> {
+        let builder = match column.column_type {
             ColumnType::Bit | ColumnType::Bitn => {
                 Self::Bool(BooleanBuilder::with_capacity(capacity))
             }
@@ -241,11 +263,19 @@ impl ColBuilder {
             ColumnType::BigBinary | ColumnType::BigVarBin | ColumnType::Image => {
                 Self::Binary(BinaryBuilder::with_capacity(capacity, capacity * 32))
             }
+            ColumnType::Udt => Self::Udt(
+                StringBuilder::with_capacity(capacity, capacity * 48),
+                column.udt_kind(name)?,
+            ),
+            ColumnType::SSVariant => {
+                Self::Variant(StringBuilder::with_capacity(capacity, capacity * 24))
+            }
             // Strings, GUIDs, XML, and the typeless column, all of which render
             // as text. Anything that reached here past `arrow_field`'s check
             // lands here too.
             _ => Self::Utf8(StringBuilder::with_capacity(capacity, capacity * 24)),
-        }
+        };
+        Ok(builder)
     }
 
     pub fn append(&mut self, data: &ColumnData<'_>) -> Result<(), MsSqlError> {
@@ -289,6 +319,19 @@ impl ColBuilder {
                 b.append_option(v.map(|d| datetime2_to_arrow(d.datetime2())));
             }
             (Self::Binary(b), ColumnData::Binary(v)) => b.append_option(v.as_deref()),
+            // The CLR types. tiberius hands the body over as bytes and the
+            // column's type name says how to read them; both halves are needed,
+            // which is why the kind travels in the builder.
+            (Self::Udt(b, kind), ColumnData::Binary(v)) => {
+                let text = match v {
+                    Some(bytes) => udt::to_text(*kind, bytes)?,
+                    None => None,
+                };
+                b.append_option(text);
+            }
+            // A `sql_variant` cell can be anything, so this is the one builder
+            // that takes every variant there is.
+            (Self::Variant(b), other) => b.append_option(variant_text(other)?),
             // A column whose every value is null still has to have a builder,
             // and the server sends the null under whichever variant it likes.
             (builder, other) if is_null(other) => builder.append_null(),
@@ -316,6 +359,7 @@ impl ColBuilder {
             Self::Time(b) => b.append_null(),
             Self::Timestamp(b) | Self::TimestampTz(b) => b.append_null(),
             Self::Binary(b) => b.append_null(),
+            Self::Udt(b, _) | Self::Variant(b) => b.append_null(),
         }
     }
 
@@ -335,6 +379,8 @@ impl ColBuilder {
             Self::Timestamp(_) => "timestamp",
             Self::TimestampTz(_) => "timestamp with offset",
             Self::Binary(_) => "binary",
+            Self::Udt(..) => "a CLR user-defined type",
+            Self::Variant(_) => "sql_variant",
         }
     }
 
@@ -353,7 +399,83 @@ impl ColBuilder {
             Self::Timestamp(b) => Arc::new(b.finish()),
             Self::TimestampTz(b) => Arc::new(b.finish().with_timezone("UTC")),
             Self::Binary(b) => Arc::new(b.finish()),
+            Self::Udt(b, _) | Self::Variant(b) => Arc::new(b.finish()),
         }
+    }
+}
+
+/// One `sql_variant` cell as text.
+///
+/// Every base type a variant can hold is written here, because the alternative
+/// is a cell that reads "unsupported" for a value the server was perfectly able
+/// to send. The forms are ISO-8601 for the date and time types and the plain
+/// number for everything numeric, which is what the rest of this driver's text
+/// columns already look like; `binary` becomes the `0x…` literal SQL Server
+/// itself accepts back.
+///
+/// A base type tiberius has no decoder for never reaches here — it fails in the
+/// decoder, naming the type byte — so there is no arm for "something else".
+fn variant_text(data: &ColumnData<'_>) -> Result<Option<String>, MsSqlError> {
+    let text = match data {
+        ColumnData::U8(v) => v.map(|v| v.to_string()),
+        ColumnData::I16(v) => v.map(|v| v.to_string()),
+        ColumnData::I32(v) => v.map(|v| v.to_string()),
+        ColumnData::I64(v) => v.map(|v| v.to_string()),
+        ColumnData::F32(v) => v.map(|v| v.to_string()),
+        ColumnData::F64(v) => v.map(|v| v.to_string()),
+        ColumnData::Bit(v) => v.map(|v| u8::from(v).to_string()),
+        ColumnData::String(v) => v.as_ref().map(|v| v.to_string()),
+        ColumnData::Guid(v) => v.map(|v| v.to_string()),
+        ColumnData::Numeric(v) => v.map(|v| v.to_string()),
+        ColumnData::Xml(v) => v.as_ref().map(|v| v.as_ref().to_string()),
+        // `0x` and two hex digits per byte, which is the literal T-SQL reads
+        // back — a bare run of hex would not be.
+        ColumnData::Binary(v) => v.as_ref().map(|bytes| {
+            let mut out = String::with_capacity(2 + bytes.len() * 2);
+            out.push_str("0x");
+            for byte in bytes.iter() {
+                out.push_str(&format!("{byte:02X}"));
+            }
+            out
+        }),
+        ColumnData::Date(v) => v
+            .map(|d| {
+                date32_to_datetime(date_to_arrow(d))
+                    .map(|d| d.date().to_string())
+                    .ok_or_else(|| undecodable("date"))
+            })
+            .transpose()?,
+        ColumnData::Time(v) => v
+            .map(|t| {
+                time64us_to_time(time_to_arrow(t))
+                    .map(|t| t.to_string())
+                    .ok_or_else(|| undecodable("time"))
+            })
+            .transpose()?,
+        ColumnData::DateTime(v) => v.map(datetime_to_arrow).map(stamp).transpose()?,
+        ColumnData::SmallDateTime(v) => v.map(small_datetime_to_arrow).map(stamp).transpose()?,
+        ColumnData::DateTime2(v) => v.map(datetime2_to_arrow).map(stamp).transpose()?,
+        // Already brought to UTC by tiberius, and said so rather than left to
+        // look like a local reading. `datetimeoffset` is not a base type
+        // `sql_variant` accepts, so this is here for completeness rather than
+        // because a server sends it.
+        ColumnData::DateTimeOffset(v) => v
+            .map(|d| stamp(datetime2_to_arrow(d.datetime2())).map(|s| format!("{s} UTC")))
+            .transpose()?,
+    };
+    Ok(text)
+}
+
+fn stamp(micros: i64) -> Result<String, MsSqlError> {
+    timestamp_us_to_datetime(micros)
+        .map(|d| d.to_string())
+        .ok_or_else(|| undecodable("timestamp"))
+}
+
+fn undecodable(sql_type: &'static str) -> MsSqlError {
+    MsSqlError::UndecodableValue {
+        sql_type,
+        reason: "the value is outside the range a calendar date can hold".to_string(),
     }
 }
 
@@ -526,6 +648,7 @@ mod tests {
         ColumnLayout {
             column_type,
             decimal: None,
+            udt: None,
         }
     }
 
@@ -745,6 +868,7 @@ mod tests {
         let declared = ColumnLayout {
             column_type: ColumnType::Decimaln,
             decimal: Some((18, 4)),
+            udt: None,
         };
         assert_eq!(
             arrow_field("credit_limit", &declared).unwrap().data_type(),
@@ -773,22 +897,50 @@ mod tests {
         );
     }
 
+    fn clr(type_name: &str) -> ColumnLayout {
+        ColumnLayout {
+            column_type: ColumnType::Udt,
+            decimal: None,
+            udt: Some(type_name.to_string()),
+        }
+    }
+
     #[test]
-    fn a_type_tiberius_cannot_decode_fails_loudly() {
-        // The statement should never get this far — it is refused before it is
-        // sent, because reading one of these panics inside tiberius' metadata
-        // parser and takes the process with it. This is the backstop.
-        let err = arrow_field("place", &bare(ColumnType::Udt)).unwrap_err();
+    fn the_clr_types_and_sql_variant_are_text_columns() {
+        // Text and not binary. These used to be refused outright — reading one
+        // panicked inside tiberius and took the process with it — and the point
+        // of the patched client is that the value now arrives and can be shown
+        // as what SQL Server itself calls it.
+        for type_name in ["geography", "geometry", "hierarchyid"] {
+            assert_eq!(
+                arrow_field("place", &clr(type_name)).unwrap().data_type(),
+                &DataType::Utf8,
+                "mapping for {type_name}"
+            );
+        }
+        // A `sql_variant` states its type per value, so text is the only Arrow
+        // type that can hold a column of them.
+        assert_eq!(
+            arrow_field("v", &bare(ColumnType::SSVariant))
+                .unwrap()
+                .data_type(),
+            &DataType::Utf8
+        );
+    }
+
+    #[test]
+    fn a_clr_type_this_driver_cannot_read_is_refused_by_name() {
+        // A type somebody registered themselves. Its bytes mean whatever its
+        // assembly says they mean, so there is nothing honest to show; the
+        // refusal has to name it, or nobody can tell which column was the
+        // problem.
+        let err = arrow_field("shape", &clr("Point3D")).unwrap_err();
         match err {
             MsSqlError::UnsupportedType { column, sql_type } => {
-                assert_eq!(column, "place");
-                assert!(sql_type.contains("geography"), "got {sql_type}");
+                assert_eq!(column, "shape");
+                assert!(sql_type.contains("Point3D"), "got {sql_type}");
             }
             other => panic!("expected UnsupportedType, got {other:?}"),
         }
-        assert!(matches!(
-            arrow_field("v", &bare(ColumnType::SSVariant)),
-            Err(MsSqlError::UnsupportedType { .. })
-        ));
     }
 }

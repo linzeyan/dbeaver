@@ -191,8 +191,11 @@ const DDL: &[&str] = &[
      SELECT n, CONCAT(N'row-', n)
      FROM (SELECT TOP (500) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n
            FROM sys.all_objects a CROSS JOIN sys.all_objects b) x",
-    // The four types that would take the process down, kept in one table so the
-    // rest of the fixture stays readable.
+    // The four types that used to take the process down, kept in one table so
+    // the rest of the fixture stays readable. The shapes cover every branch of
+    // the spatial reader — the two shorthands, rings, and a nested collection —
+    // and the `sql_variant` values cover a base type from each family, because a
+    // variant states its type per value and the decoder has an arm per type.
     "CREATE TABLE sales.exotic (
         id       int NOT NULL PRIMARY KEY,
         node     hierarchyid NULL,
@@ -204,6 +207,38 @@ const DDL: &[&str] = &[
              geography::Point(47.6, -122.3, 4326), CAST(42 AS int))",
     "INSERT INTO sales.exotic (id, node, shape, place, anything)
      VALUES (2, NULL, NULL, NULL, CAST(N'a string' AS nvarchar(20)))",
+    // A negative, dotted label — the specification's own worked example — and
+    // the single-line-segment shorthand.
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (3, hierarchyid::Parse('/1/-2.18/'),
+             geometry::Parse('LINESTRING (0 0, 1 1, 2 4)'),
+             geography::Parse('LINESTRING (-122.36 47.66, -122.34 47.59)'),
+             CAST(12345.6789 AS decimal(18,4)))",
+    // The root, which encodes to no bytes at all, and a polygon with a hole in
+    // it, which is two figures under one shape.
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (4, hierarchyid::GetRoot(),
+             geometry::Parse('POLYGON ((0 0, 0 3, 3 3, 3 0, 0 0), (1 1, 1 2, 2 2, 2 1, 1 1))'),
+             geography::Parse('POLYGON ((-122.4 47.6, -122.3 47.6, -122.3 47.7, -122.4 47.7, -122.4 47.6))'),
+             CAST('2024-01-15T09:30:00.123' AS datetime2(3)))",
+    // Shapes that contain other shapes: a collection whose members keep their
+    // own type names, and a multipoint whose members do not.
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (5, hierarchyid::Parse('/1/2/3/'),
+             geometry::Parse('GEOMETRYCOLLECTION (POINT (1 2), LINESTRING (0 0, 1 1))'),
+             geography::Parse('MULTIPOINT ((-122.3 47.6), (-122.2 47.5))'),
+             CAST(0x0A0B AS varbinary(8)))",
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (6, NULL, NULL, NULL, CAST(1 AS bit))",
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (7, NULL, NULL, NULL,
+             CAST('11111111-2222-3333-4444-555555555555' AS uniqueidentifier))",
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (8, NULL, NULL, NULL, CAST('ascii only' AS varchar(16)))",
+    // A null variant, which carries no base type at all and so cannot say what
+    // kind of null it is.
+    "INSERT INTO sales.exotic (id, node, shape, place, anything)
+     VALUES (9, NULL, NULL, NULL, NULL)",
     "CREATE VIEW sales.active_customer AS
         SELECT customer_id, name, credit_limit
         FROM sales.customer
@@ -698,43 +733,163 @@ async fn a_batch_the_server_will_not_describe_is_still_run() {
     assert_eq!(b.value(1), -37_500_000_000);
 }
 
-/// A `geography` column is refused rather than read, because reading it is fatal.
+/// Browsing a table with a `geography`, a `hierarchyid` and a `sql_variant` in
+/// it returns rows.
 ///
-/// The failure asserted here is the specific one the guard produces. That
-/// matters: if the guard ever stopped working, tiberius would panic inside the
-/// reader task and this driver would report the task having gone away — an error
-/// either way, and only one of them means the protection is still there. In a
-/// release build the same regression is not an error at all, it is an abort.
+/// This is the test that matters. Before the patched client in
+/// `third_party/tiberius`, this statement did not fail — it aborted the process,
+/// because tiberius walked into `todo!()` while parsing the column metadata and
+/// this workspace builds release with `panic = "abort"`. There was no error to
+/// catch and no message to show. `SELECT *` is deliberate: it is what a person
+/// double-clicking a table in a navigator sends, and it names none of the types
+/// it is about to hit.
 #[tokio::test]
 #[ignore = "requires a SQL Server"]
-async fn a_column_tiberius_cannot_decode_is_refused_before_it_is_read() {
+async fn a_table_with_the_clr_types_in_it_can_simply_be_browsed() {
     let driver = source().await;
-    for (sql, wanted) in [
-        ("SELECT * FROM sales.exotic", "hierarchyid"),
-        ("SELECT place FROM sales.exotic", "geography"),
-        ("SELECT shape FROM sales.exotic", "geometry"),
-        ("SELECT anything FROM sales.exotic", "sql_variant"),
-    ] {
-        let err = failure(&driver, sql).await;
-        let message = err.to_string();
-        assert!(
-            message.contains(wanted) && message.contains("cast it to text"),
-            "expected a refusal naming {wanted}, got: {message}"
+    let batches = drain(&driver, "SELECT * FROM sales.exotic ORDER BY id").await;
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 9, "every row of the fixture came back");
+
+    // Every one of the four is a text column, which is what makes them
+    // sortable, filterable and copyable like any other.
+    let schema = batches[0].schema();
+    for column in ["node", "shape", "place", "anything"] {
+        let field = schema.field_with_name(column).expect("column is present");
+        assert_eq!(
+            field.data_type(),
+            &DataType::Utf8,
+            "{column} should arrive as text"
         );
     }
 
-    // The columns beside them are perfectly readable, which is what makes
-    // refusing the statement rather than the table the right unit.
-    let mut stream = driver
-        .query("SELECT id FROM sales.exotic ORDER BY id", 10)
-        .await
-        .expect("the ordinary columns of that table are fine");
-    let batch = stream.next_batch().await.unwrap().unwrap();
-    assert_eq!(batch.num_rows(), 2);
-
-    // And the session is still usable, which it would not be if the guard were
-    // catching a panic rather than preventing one.
+    // And the session is still usable afterwards, which it would not be if the
+    // decoder had lost its place in the token stream.
     driver.schemas().await.expect("the session survived");
+}
+
+/// What the three CLR types show is what SQL Server itself calls them.
+///
+/// Asserted against the server's own `.ToString()` rather than against strings
+/// written here, because that is the claim being made: a cell in the grid says
+/// the same thing as the same value does in SSMS, in a hand-written query, and
+/// in Microsoft's documentation. A literal expectation would only prove this
+/// decoder agrees with whoever typed the literal.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn the_clr_types_read_back_as_the_text_the_server_gives_them() {
+    let driver = source().await;
+
+    // The server's answer, through columns that are already nvarchar, so
+    // nothing under test is involved in producing it.
+    let expected = drain(
+        &driver,
+        "SELECT node.ToString(), shape.ToString(), place.ToString() \
+         FROM sales.exotic ORDER BY id",
+    )
+    .await;
+    let ours = drain(
+        &driver,
+        "SELECT node, shape, place FROM sales.exotic ORDER BY id",
+    )
+    .await;
+
+    for (column, name) in [(0, "hierarchyid"), (1, "geometry"), (2, "geography")] {
+        let expected = text_column(&expected, column);
+        let ours = text_column(&ours, column);
+        assert_eq!(
+            ours, expected,
+            "{name} does not read back as the server's own text"
+        );
+    }
+
+    // Spelled out for the two forms somebody is most likely to meet, so that a
+    // change to both sides at once still has to explain itself.
+    let node = text_column(&ours, 0);
+    assert_eq!(node[0].as_deref(), Some("/1/2/"));
+    // The specification's own worked example: a negative label, a dotted level,
+    // and a level whose value carries antiambiguity bits.
+    assert_eq!(node[2].as_deref(), Some("/1/-2.18/"));
+    // The root is encoded as no bytes at all.
+    assert_eq!(node[3].as_deref(), Some("/"));
+    // Stored latitude first, written longitude first.
+    assert_eq!(
+        text_column(&ours, 2)[0].as_deref(),
+        Some("POINT (-122.3 47.6)")
+    );
+    // A null CLR value is a null cell and not the word "null".
+    assert_eq!(node[1], None);
+}
+
+/// A `sql_variant` shows the value that is actually in it, whatever type that
+/// is.
+///
+/// The column has no one type — row 1 holds an `int` and row 8 a `varchar` — so
+/// the decoder reads the base type out of each value's own header. Getting that
+/// wrong shows a plausible number for a completely different value, which is why
+/// each base type is pinned rather than sampled.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn a_sql_variant_shows_whichever_type_the_value_actually_is() {
+    let driver = source().await;
+    let rows = drain(&driver, "SELECT anything FROM sales.exotic ORDER BY id").await;
+    let values = text_column(&rows, 0);
+
+    assert_eq!(values[0].as_deref(), Some("42"), "int");
+    assert_eq!(values[1].as_deref(), Some("a string"), "nvarchar");
+    assert_eq!(values[2].as_deref(), Some("12345.6789"), "decimal(18,4)");
+    assert_eq!(
+        values[3].as_deref(),
+        Some("2024-01-15 09:30:00.123"),
+        "datetime2(3)"
+    );
+    assert_eq!(values[4].as_deref(), Some("0x0A0B"), "varbinary");
+    assert_eq!(values[5].as_deref(), Some("1"), "bit");
+    assert_eq!(
+        values[6].as_deref(),
+        Some("11111111-2222-3333-4444-555555555555"),
+        "uniqueidentifier"
+    );
+    // A codepage string rather than UTF-16, decoded through the collation the
+    // value carries with it.
+    assert_eq!(values[7].as_deref(), Some("ascii only"), "varchar");
+    // A null variant states no base type at all, so there is nothing that could
+    // have been rendered instead of a null.
+    assert_eq!(values[8], None, "null");
+}
+
+/// Every batch a statement produces, read to the end.
+async fn drain(driver: &MsSqlSource, sql: &str) -> Vec<arrow::array::RecordBatch> {
+    let mut stream = driver
+        .query(sql, 100)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}\nfailed: {e}"));
+    let mut batches = Vec::new();
+    while let Some(batch) = stream
+        .next_batch()
+        .await
+        .unwrap_or_else(|e| panic!("{sql}\nfailed: {e}"))
+    {
+        batches.push(batch);
+    }
+    batches
+}
+
+/// Every value of a text column in a set of batches, in order.
+fn text_column(batches: &[arrow::array::RecordBatch], column: usize) -> Vec<Option<String>> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let a = batch.column(column);
+            let a = a
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("a text column");
+            (0..a.len())
+                .map(|i| a.is_valid(i).then(|| a.value(i).to_string()))
+                .collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 #[tokio::test]
