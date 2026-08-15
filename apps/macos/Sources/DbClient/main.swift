@@ -187,7 +187,9 @@ if CommandLine.arguments.contains("--edit") {
             return query.rowsAffected ?? 0
         }
         _ = try ran("DROP TABLE IF EXISTS edit_probe")
-        _ = try ran("CREATE TABLE edit_probe (id int PRIMARY KEY, label text, qty numeric(9,2))")
+        _ = try ran(
+            "CREATE TABLE edit_probe (id int PRIMARY KEY, label text, "
+                + "qty numeric(9,2) DEFAULT 9.99)")
         _ = try ran("INSERT INTO edit_probe VALUES (1, 'before', 1.00), (2, 'doomed', 2.00)")
 
         // One request with both arms, because that is what one press of Save
@@ -203,6 +205,15 @@ if CommandLine.arguments.contains("--edit") {
                         EditRequest.Cell(column: "qty", value: "3.25")
                     ])
             ],
+            // Two columns of three, because that is what a new row usually is:
+            // `qty` is left out so the table's default applies to it, which is
+            // the difference between adding a row and dictating every column.
+            inserts: [
+                EditRequest.Insert(set: [
+                    EditRequest.Cell(column: "id", value: "3"),
+                    EditRequest.Cell(column: "label", value: "added")
+                ])
+            ],
             deletes: [EditRequest.Delete(key: [EditRequest.Cell(column: "id", value: "2")])])
         let statements = try db.editStatements(request)
         for sql in statements { print(sql) }
@@ -211,10 +222,14 @@ if CommandLine.arguments.contains("--edit") {
         // claim as a row that holds what was typed.
         let kept = try ran("SELECT id FROM edit_probe WHERE label = 'after' AND qty = 3.25")
         let gone = try ran("SELECT id FROM edit_probe WHERE id = 2")
+        // The default is what proves the column was left out rather than sent
+        // empty: a NULL here would mean the insert overrode a schema's defaults.
+        let added = try ran("SELECT id FROM edit_probe WHERE id = 3 AND qty = 9.99")
         print("rows matching the edit: \(kept)")
         print("rows left of the deleted one: \(gone)")
+        print("rows added with the default: \(added)")
         _ = try ran("DROP TABLE edit_probe")
-        exit(kept == 1 && gone == 0 ? 0 : 1)
+        exit(kept == 1 && gone == 0 && added == 1 ? 0 : 1)
     } catch {
         fputs("edit: \(error)\n", stderr)
         exit(1)
@@ -393,6 +408,11 @@ let initialCell = argument("--cell")
 /// thing that catches a mark drawn in the wrong place, or in a colour that
 /// disappears under the selection band, is a screenshot of a marked row.
 let deleteRowSpec = argument("--delete-row")
+
+/// `--add-row 2` adds that many rows to the browse and fills nothing in, so a
+/// capture can show what a draft row looks like before anything is typed into
+/// it. Exists for the reason `--delete-row` does.
+let addRowCount = argument("--add-row").flatMap(Int.init)
 
 /// `--history-store dev.dbclient.capture` keeps the query history in a named
 /// defaults suite, emptied at launch, instead of the user's own.
@@ -583,7 +603,45 @@ func markRowsForDeletion(model: AppModel, spec: String) {
             fputs("the rows were selected and the mark did not take\n", stderr)
             exit(1)
         }
-        fputs("rows marked     \(first)…\(last) · \(model.deleteRowsTitle ?? "(no button)")\n", stderr)
+        fputs(
+            "rows marked     \(first)…\(last) · \(model.deleteRowsTitle ?? "(no button)")\n", stderr
+        )
+    }
+    poll()
+}
+
+/// Drives `--add-row`. Polls, and stays up rather than exiting, for the reasons
+/// `markRowsForDeletion` does.
+@MainActor
+func addRows(model: AppModel, count: Int) {
+    guard count >= 1 else {
+        fputs("--add-row takes a count of 1 or more\n", stderr)
+        exit(1)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    func poll() {
+        guard model.browseResult.hasRun, !model.browseResult.isLoading, !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("add-row probe timed out waiting for the rows\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        guard model.canAddRow else {
+            fputs("this result cannot take a new row; nothing to add\n", stderr)
+            exit(1)
+        }
+        for _ in 0..<count { model.addDraftRow() }
+        guard model.draftRows.count == count else {
+            fputs(
+                "asked for \(count) new rows and the grid holds \(model.draftRows.count)\n", stderr)
+            exit(1)
+        }
+        fputs("rows added      \(count) · \(model.browseRowCount) drawn\n", stderr)
     }
     poll()
 }
@@ -1260,6 +1318,7 @@ if benchMode {
 
         if let initialCell { openValueViewer(model: model, on: initialCell) }
         if let deleteRowSpec { markRowsForDeletion(model: model, spec: deleteRowSpec) }
+        if let addRowCount { addRows(model: model, count: addRowCount) }
         if let reconnectTo { reconnectWhenReady(model: model, to: reconnectTo) }
         if let stopAfter { stopWhenRunning(model: model, after: stopAfter) }
         if let loadMorePages { loadMoreWhenReady(model: model, pages: loadMorePages) }

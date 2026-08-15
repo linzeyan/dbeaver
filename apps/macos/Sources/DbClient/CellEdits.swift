@@ -17,27 +17,45 @@ struct PendingValue: Equatable {
     let text: String?
 }
 
+/// A row that is not in the result, holding what has been typed into it.
+///
+/// Values by column index and not by name, so that it is addressed exactly as
+/// the rows above it are: the grid draws a draft in the same coordinates it
+/// draws everything else, and the editor writes into it through the same
+/// selection. A column with no entry is left out of the INSERT rather than sent
+/// as NULL, which is what makes the table's own defaults apply — the difference
+/// between adding a row and dictating every one of its columns.
+struct DraftRow {
+    var values: [Int: PendingValue] = [:]
+}
+
 /// What a grid is holding but has not sent.
 ///
-/// Two kinds so far, staged differently because they are different questions. A
+/// Three kinds, staged differently because they are different questions. A
 /// changed cell is a coordinate into rows that are on screen; a deleted row is
-/// one of those rows entire, and has no cell to point at.
+/// one of those rows entire, and has no cell to point at; a new row is not in
+/// the result at all and so has to carry its own values.
 struct StagedChanges {
     /// Cells changed in rows the result already holds.
     var updates: [GridCell: PendingValue] = [:]
     /// Rows marked to go, by their place in the result.
     var deletes: Set<Int> = []
+    /// Rows added and not yet sent, in the order they were added. They sit after
+    /// the last fetched row, which is where a row nobody has an ordering for
+    /// belongs — and where a further page landing above them leaves them alone.
+    var drafts: [DraftRow] = []
 
-    var isEmpty: Bool { updates.isEmpty && deletes.isEmpty }
+    var isEmpty: Bool { updates.isEmpty && deletes.isEmpty && drafts.isEmpty }
 
     /// How many changes there are to send.
     ///
     /// A row marked for deletion counts once however many of its cells were
-    /// typed into, because the statement that goes is the delete: the count on
+    /// typed into, and a new row counts once however many were filled in,
+    /// because the statement that goes is the delete or the insert: the count on
     /// screen has to be the number of statements Save will send, or Save's own
     /// report of what it sent will contradict it.
     var count: Int {
-        updates.keys.filter { !deletes.contains($0.row) }.count + deletes.count
+        updates.keys.filter { !deletes.contains($0.row) }.count + deletes.count + drafts.count
     }
 }
 
@@ -82,6 +100,18 @@ extension StagedChanges {
                 EditRequest.Cell(column: rows.columnNames[cell.column], value: updates[cell]?.text)
             }
             request.updates.append(EditRequest.Update(key: key, set: set))
+        }
+        // Columns nobody typed into are absent rather than NULL, so the table's
+        // defaults apply to them — which is the whole difference between adding
+        // a row and dictating every column of one. A draft that is empty is left
+        // in and refused by the core, because the alternative is dropping a row
+        // the user asked for without saying so.
+        for draft in drafts {
+            let set = draft.values.keys.sorted().map { column in
+                EditRequest.Cell(
+                    column: rows.columnNames[column], value: draft.values[column]?.text)
+            }
+            request.inserts.append(EditRequest.Insert(set: set))
         }
         for row in deletes.sorted() {
             guard let key = key(of: row, keyColumns: keyColumns, rows: rows) else { return nil }

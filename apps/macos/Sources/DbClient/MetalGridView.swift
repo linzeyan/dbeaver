@@ -65,6 +65,9 @@ struct MetalGridView: NSViewRepresentable {
     /// Rows marked to be deleted when the changes are sent. Empty for the Query
     /// pane, for the reason `pending` is.
     var deleted: Set<Int> = []
+    /// Rows added and not yet sent, drawn after the last one the result holds.
+    /// Empty for the Query pane, for the reason `pending` is.
+    var drafts: [DraftRow] = []
     /// Called with a column index when its header is clicked. Nil means this
     /// grid does not sort — the Query pane shows the result of a statement the
     /// user wrote, and appending an ORDER BY to arbitrary SQL is not something
@@ -122,6 +125,7 @@ struct MetalGridView: NSViewRepresentable {
         renderer.sort = sort
         renderer.pending = pending
         renderer.deleted = deleted
+        renderer.drafts = drafts
 
         if context.coordinator.lastGeneration != generation {
             context.coordinator.lastGeneration = generation

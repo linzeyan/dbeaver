@@ -25,6 +25,7 @@ enum EditingChecks {
         checkAChangedCellNamesItsRowByWhatTheDatabaseSaid()
         checkOneRowIsOneStatement()
         checkAMarkedRowGoesWholeAndTakesItsEditsWithIt()
+        checkANewRowSendsOnlyTheColumnsItWasGiven()
         checkTheCountOnScreenIsTheNumberOfStatements()
         checkARowThatCannotBeNamedIsRefused()
         if failures == 0 {
@@ -95,6 +96,43 @@ enum EditingChecks {
         expect(summary(of: many), "delete id=1 | delete id=3", "deletes go in row order")
     }
 
+    /// A column nobody typed into is absent from the INSERT, which is what makes
+    /// the table's default apply to it.
+    ///
+    /// The distinction the three states carry is the whole of this feature's
+    /// correctness: sending NULL for every untouched column would override every
+    /// default a schema has — a `created_at DEFAULT now()` would land empty —
+    /// and refusing to send NULL at all would make an explicitly emptied column
+    /// impossible to write.
+    private static func checkANewRowSendsOnlyTheColumnsItWasGiven() {
+        var one = StagedChanges()
+        one.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
+        expect(summary(of: one), "insert label=new", "only the column that was filled in")
+
+        var nulled = StagedChanges()
+        nulled.drafts = [
+            DraftRow(values: [1: PendingValue(text: nil), 2: PendingValue(text: "4")])
+        ]
+        expect(
+            summary(of: nulled), "insert label=NULL,qty=4",
+            "an emptied column is sent as NULL, in column order")
+
+        var two = StagedChanges()
+        two.drafts = [
+            DraftRow(values: [1: PendingValue(text: "first")]),
+            DraftRow(values: [1: PendingValue(text: "second")])
+        ]
+        expect(
+            summary(of: two), "insert label=first | insert label=second",
+            "two new rows are two INSERTs, in the order they were added")
+
+        var empty = StagedChanges()
+        empty.drafts = [DraftRow()]
+        expect(
+            summary(of: empty), "insert ",
+            "a row nobody typed into is still sent, for the core to refuse by name")
+    }
+
     /// The number beside Save is the number of statements Save will send.
     ///
     /// They are counted in two different places — one for the strip, one for the
@@ -115,6 +153,10 @@ enum EditingChecks {
         staged.deletes.insert(0)
         expect(staged.count, 3, "deleting the row those two cells were in")
         expect(statements(of: staged), 3, "leaves one UPDATE and two DELETEs")
+
+        staged.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
+        expect(staged.count, 4, "and a new row counts once however many columns it holds")
+        expect(statements(of: staged), 4, "which is what Save sends")
     }
 
     /// A row the result cannot identify produces nothing at all.
@@ -166,8 +208,9 @@ enum EditingChecks {
                 schema: "app", relation: "orders", keyColumns: ["id"], rows: table)
         else { return "(refused)" }
         let updates = request.updates.map { "update \(cells($0.key)) → \(cells($0.set))" }
+        let inserts = request.inserts.map { "insert \(cells($0.set))" }
         let deletes = request.deletes.map { "delete \(cells($0.key))" }
-        return (updates + deletes).joined(separator: " | ")
+        return (updates + inserts + deletes).joined(separator: " | ")
     }
 
     private static func statements(of staged: StagedChanges) -> Int {

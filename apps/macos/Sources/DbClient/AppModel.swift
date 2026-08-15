@@ -826,9 +826,10 @@ final class AppModel {
     /// every reader of a selection has to do this; sharing it keeps the two
     /// readers from disagreeing about what counts as selected.
     private func selectedCell(in result: ResultSet) -> GridSelection? {
+        let rows = result === browseResult ? browseRowCount : result.table.rowCount
         guard let s = result.selection,
             s.column < result.table.columns.count,
-            s.row < result.table.rowCount
+            s.row < rows
         else { return nil }
         return s
     }
@@ -836,6 +837,7 @@ final class AppModel {
     func inspectedCell(in result: ResultSet) -> InspectedCell? {
         let grid = result.table
         guard let s = selectedCell(in: result) else { return nil }
+        if result === browseResult, isDraft(row: s.row) { return draftCell(at: s) }
         let name = grid.columns[s.column].name
         let isNull = grid.isNull(row: s.row, column: s.column)
         // The relation's declared type where we have it; the Query tab may
@@ -864,6 +866,32 @@ final class AppModel {
             toggleExpanded: { [weak self] in self?.isValueViewerOpen.toggle() })
     }
 
+    /// A cell of a row that is not in the database yet.
+    ///
+    /// Everything here comes from what was typed and from the catalogue, because
+    /// there is no Arrow buffer behind it: the type is the column's declared one
+    /// rather than an Arrow kind, and the value is a plain string — a draft has
+    /// no bytes for the viewer to render as JSON or hex, and will not until the
+    /// row has been sent and read back.
+    private func draftCell(at s: GridSelection) -> InspectedCell {
+        let name = browseResult.table.columns[s.column].name
+        let held = staged.drafts[s.row - firstDraftRow].values[s.column]
+        return InspectedCell(
+            column: name,
+            type: columns.first { $0.name == name }?.dataType ?? "",
+            // Three states and two of them are not values: nothing typed leaves
+            // the column out of the INSERT altogether, which is not the same as
+            // typing NULL into it, and the strip has to be able to say which.
+            value: held.map { $0.text ?? "NULL" } ?? "DEFAULT",
+            // Both of those seed an empty field rather than the word they are
+            // drawn as, which is what `isNull` is read for.
+            isNull: held?.text == nil,
+            address: "new row \(Self.formatted(s.row - firstDraftRow + 1))",
+            rendering: .text,
+            isExpanded: isValueViewerOpen,
+            toggleExpanded: { [weak self] in self?.isValueViewerOpen.toggle() })
+    }
+
     // MARK: - Editing the browse result
 
     /// Changes made to the browse result and not yet sent.
@@ -878,6 +906,15 @@ final class AppModel {
 
     /// The rows the grid should mark as going.
     var deletedRows: Set<Int> { staged.deletes }
+
+    /// The rows the grid should draw after the last fetched one.
+    var draftRows: [DraftRow] { staged.drafts }
+
+    /// Where the drafts start, which is one past the last row the database sent.
+    private var firstDraftRow: Int { browseResult.table.rowCount }
+
+    /// Whether a row of the browse is a draft rather than something read.
+    private func isDraft(row: Int) -> Bool { row >= firstDraftRow }
 
     /// Whether the selected cell can be changed at all.
     ///
@@ -916,21 +953,24 @@ final class AppModel {
         staged.updates[GridCell(row: row, column: column)] != nil
     }
 
-    /// What the button that marks rows for deletion should say, or nil where
-    /// there is no row to mark.
+    /// What the button that removes rows should say, or nil where there is no
+    /// row to act on.
     ///
     /// It says both what pressing it does and what state the selection is in: a
     /// marked row is undone by the same button, and a control that read "Delete"
-    /// over a row already crossed out would be offering to do it twice.
+    /// over a row already crossed out would be offering to do it twice. A draft
+    /// discards rather than deletes, because there is nothing in the database to
+    /// delete and nothing to undo afterwards.
     var deleteRowsTitle: String? {
         guard canEditCell, let rows = selectedRows else { return nil }
-        let marked = rows.allSatisfy { staged.deletes.contains($0) }
         let noun = rows.count > 1 ? "\(Self.formatted(rows.count)) Rows" : "Row"
+        if isDraft(row: rows.lowerBound) { return "Discard \(noun)" }
+        let marked = rows.allSatisfy { staged.deletes.contains($0) }
         return marked ? "Keep \(noun)" : "Delete \(noun)"
     }
 
-    /// Marks the selected rows for deletion, or unmarks them if they are already
-    /// marked.
+    /// Marks the selected rows for deletion, unmarks them if they are already
+    /// marked, or drops them if they were never in the database.
     ///
     /// Marked rather than deleted: nothing has been sent, and the row stays on
     /// screen crossed out until Save or Revert says which way it goes. That is
@@ -938,6 +978,20 @@ final class AppModel {
     /// person deleting rows from a grid picks several and then decides.
     func toggleDeleteSelectedRows() {
         guard canEditCell, let rows = selectedRows else { return }
+        if isDraft(row: rows.lowerBound) {
+            // Removed outright, so the ones below shift up: a draft is
+            // identified by its place in the list, and marking one would leave
+            // the grid drawing a row that no statement is going to be made from.
+            let first = rows.lowerBound - firstDraftRow
+            staged.drafts.removeSubrange(first...(rows.upperBound - firstDraftRow))
+            // The cursor lands on whatever took the discarded row's place, or on
+            // the last row left. A selection pointing past the end draws nothing
+            // and takes the editor strip with it.
+            browseResult.selection =
+                browseRowCount > 0
+                ? GridSelection(row: min(rows.lowerBound, browseRowCount - 1), column: 0) : nil
+            return
+        }
         if rows.allSatisfy({ staged.deletes.contains($0) }) {
             staged.deletes.subtract(rows)
         } else {
@@ -945,9 +999,42 @@ final class AppModel {
         }
     }
 
-    /// The browse rows the selection covers, bounds-checked against the result.
+    /// Adds a row after the last one, with every column at whatever the table
+    /// says it defaults to until something is typed into it.
+    ///
+    /// Selected as it is added, on the first column, because the next thing the
+    /// user does is fill it in and a new row nobody is standing on is a row they
+    /// have to go and find.
+    func addDraftRow() {
+        guard canAddRow else { return }
+        staged.drafts.append(DraftRow())
+        browseResult.selection = GridSelection(row: browseRowCount - 1, column: 0)
+    }
+
+    /// Whether a row can be added at all.
+    ///
+    /// `canEditCell`'s questions minus the cell: a table with no rows in it is
+    /// exactly where adding one is worth offering, and there is nothing selected
+    /// there to ask about. The columns are the one extra thing needed — a row is
+    /// added by typing into it, and a result with no columns has nowhere to
+    /// type.
+    var canAddRow: Bool {
+        activeTab == .content && selected?.kind == .table && !isBusy
+            && columns.contains(where: \.isPrimaryKey)
+            && !browseResult.table.columns.isEmpty
+    }
+
+    /// The rows the browse grid draws: what the database sent, plus the drafts
+    /// waiting under them.
+    var browseRowCount: Int { browseResult.table.rowCount + staged.drafts.count }
+
+    /// The browse rows the selection covers, bounds-checked against what is
+    /// drawn, and never straddling the join between the two kinds — a span of
+    /// fetched rows and a span of drafts are acted on differently, and one
+    /// command cannot be both.
     private var selectedRows: ClosedRange<Int>? {
-        guard let s = browseResult.selection, s.rows.upperBound < browseResult.table.rowCount
+        guard let s = browseResult.selection, s.rows.upperBound < browseRowCount,
+            isDraft(row: s.rows.lowerBound) == isDraft(row: s.rows.upperBound)
         else { return nil }
         return s.rows
     }
@@ -959,6 +1046,13 @@ final class AppModel {
     /// could not change their mind in.
     func stageEdit(_ value: String?) {
         guard canEditCell, let s = selectedCell(in: browseResult) else { return }
+        if isDraft(row: s.row) {
+            // No "back to what it held" here: a draft holds nothing until it is
+            // typed into, and clearing a cell is done with the NULL button —
+            // which is a value, not the absence of one.
+            staged.drafts[s.row - firstDraftRow].values[s.column] = PendingValue(text: value)
+            return
+        }
         let cell = GridCell(row: s.row, column: s.column)
         // Typing a cell back to what it already held is not a change. Keeping it
         // would put an UPDATE on the wire that says nothing and a dirty mark on

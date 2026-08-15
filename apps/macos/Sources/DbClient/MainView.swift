@@ -843,6 +843,7 @@ struct ContentPane: View {
                     sort: model.gridSort,
                     pending: model.pendingCells,
                     deleted: model.deletedRows,
+                    drafts: model.draftRows,
                     onSortColumn: { model.toggleSort(column: $0) }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
@@ -869,9 +870,13 @@ struct ContentPane: View {
 /// The two buttons that end it sit here as well, and only appear with something
 /// to act on: a Save that is dimmed for the whole of a session is a control
 /// nobody reads twice.
+///
+/// The cell is optional because Add Row is here too, and the moment it is most
+/// wanted — a table with nothing in it yet — is the moment there is no cell to
+/// be selected.
 private struct CellEditorRow: View {
     @Bindable var model: AppModel
-    let cell: AppModel.InspectedCell
+    let cell: AppModel.InspectedCell?
     @State private var typed = ""
 
     var body: some View {
@@ -885,21 +890,29 @@ private struct CellEditorRow: View {
                     .foregroundStyle(Theme.textTertiary.color)
                     .lineLimit(1)
             } else {
-                FieldLabel(text: cell.column)
-                TextField("", text: $typed)
-                    .textFieldStyle(.plain)
-                    .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
-                    .onSubmit { model.stageEdit(typed) }
-                    .help("Return stages the change; nothing is sent until Save")
-                Button("Set") { model.stageEdit(typed) }
-                    .help("Hold this value for the selected cell")
-                Button("NULL") { model.stageEdit(nil) }
-                    .help("Hold NULL for the selected cell, which is not an empty string")
+                if let cell {
+                    FieldLabel(text: cell.column)
+                    TextField("", text: $typed)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Typography.mono)
+                        .foregroundStyle(Theme.text.color)
+                        .onSubmit { model.stageEdit(typed) }
+                        .help("Return stages the change; nothing is sent until Save")
+                    Button("Set") { model.stageEdit(typed) }
+                        .help("Hold this value for the selected cell")
+                    Button("NULL") { model.stageEdit(nil) }
+                        .help("Hold NULL for the selected cell, which is not an empty string")
+                }
                 if let title = model.deleteRowsTitle {
                     Button(title) { model.toggleDeleteSelectedRows() }
                         .disabled(model.isBusy)
                         .help("Mark the selected rows to be deleted when Save is pressed")
+                }
+                if model.canAddRow {
+                    Button("Add Row") { model.addDraftRow() }
+                        .help(
+                            "Add a row after the last one; columns left alone take the "
+                                + "table's defaults")
                 }
             }
 
@@ -923,14 +936,23 @@ private struct CellEditorRow: View {
         // Seeded from whichever cell is selected, and re-seeded when that moves:
         // a field still holding the last cell's text is one keystroke away from
         // writing it into this one.
-        .onChange(of: cell.address + "\u{1}" + cell.column) { typed = seed }
-        .task(id: cell.address + "\u{1}" + cell.column) { typed = seed }
+        .onChange(of: identity) { typed = seed }
+        .task(id: identity) { typed = seed }
+    }
+
+    /// Which cell the field is showing, as one string to watch.
+    private var identity: String {
+        cell.map { $0.address + "\u{1}" + $0.column } ?? ""
     }
 
     /// A NULL seeds an empty field rather than the word: the field's contents
     /// are what would be written, and "NULL" typed into a text column is four
-    /// characters.
-    private var seed: String { cell.isNull ? "" : cell.value }
+    /// characters. A draft column nobody has filled in seeds an empty field for
+    /// the same reason — DEFAULT is what it will do, not what it holds.
+    private var seed: String {
+        guard let cell, !cell.isNull else { return "" }
+        return cell.value
+    }
 }
 
 /// WHERE and ORDER BY, the two filters a browse pane actually needs. They build
@@ -1504,8 +1526,10 @@ struct CellInspector: View {
                 Rectangle().fill(Theme.separator.color).frame(height: 1)
                 CellValueViewer(rendered: rendered)
             }
-            if let editing, let cell {
+            if let editing {
                 Rectangle().fill(Theme.separator.color).frame(height: 1)
+                // Without a cell as well, because a table with no rows in it is
+                // where Add Row is worth most and there is nothing to select.
                 CellEditorRow(model: editing, cell: cell)
             }
         }

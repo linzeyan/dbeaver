@@ -104,6 +104,10 @@ final class GridRenderer {
     /// change is to the row rather than to anything in it, so there is no cell
     /// for the pending mark to sit on.
     var deleted: Set<Int> = []
+    /// Rows added and not yet sent, drawn after the last one the database
+    /// returned. They are not in `table` and cannot be: it is a window onto
+    /// Arrow buffers the core owns, and these exist only here.
+    var drafts: [DraftRow] = []
     /// Whether the grid holds keyboard focus. Drawn as an inset border: the
     /// selection alone does not say which surface the arrow keys will move.
     var isFocused = false
@@ -412,9 +416,13 @@ final class GridRenderer {
     /// Scrolling past this would leave blank space below the last row, and would
     /// make the scrollbar reach its end before the data does.
     func maxScrollRow(viewSize: CGSize) -> Double {
-        guard let table else { return 0 }
-        return max(0, Double(table.rowCount) - Double(visibleRowSpan(viewSize: viewSize)))
+        return max(0, Double(totalRows) - Double(visibleRowSpan(viewSize: viewSize)))
     }
+
+    /// Every row the grid draws: what the database sent, and the drafts under
+    /// them. Scrolling, hit testing and the scrollbar all count in these, so a
+    /// draft is reachable by every means a fetched row is.
+    var totalRows: Int { (table?.rowCount ?? 0) + drafts.count }
 
     func maxScrollX(viewWidth: CGFloat) -> Float {
         max(0, contentWidth - Float(viewWidth))
@@ -423,8 +431,8 @@ final class GridRenderer {
     /// Whether each bar is needed. Computed together because each one shortens
     /// the other's track.
     private func scrollbarsNeeded(viewSize: CGSize) -> (vertical: Bool, horizontal: Bool) {
-        guard let table else { return (false, false) }
-        let vertical = Float(table.rowCount) > visibleRowSpan(viewSize: viewSize)
+        guard table != nil else { return (false, false) }
+        let vertical = Float(totalRows) > visibleRowSpan(viewSize: viewSize)
         let horizontal = contentWidth > Float(viewSize.width)
         return (vertical, horizontal)
     }
@@ -436,14 +444,14 @@ final class GridRenderer {
 
         switch axis {
         case .vertical:
-            guard needed.vertical, let table else { return nil }
+            guard needed.vertical, table != nil else { return nil }
             let span = visibleRowSpan(viewSize: viewSize)
             let trackStart = headerHeight
             let trackLength = viewH - headerHeight - (needed.horizontal ? scrollbarGutter : 0)
             guard trackLength > 0 else { return nil }
             let thumbLength = min(
                 trackLength,
-                max(minThumbLength, trackLength * span / Float(table.rowCount)))
+                max(minThumbLength, trackLength * span / Float(totalRows)))
             let maxScroll = maxScrollRow(viewSize: viewSize)
             let progress = maxScroll > 0 ? Float(scrollRow / maxScroll) : 0
             return ScrollbarMetrics(
@@ -557,7 +565,7 @@ final class GridRenderer {
 
         let viewW = Float(viewSize.width)
         let viewH = Float(viewSize.height)
-        let rows = visibleRowRange(viewHeight: viewSize.height, rowCount: table.rowCount)
+        let rows = visibleRowRange(viewHeight: viewSize.height, rowCount: totalRows)
 
         // Only the horizontal slice actually on screen; without this the whole
         // schema would be built every frame regardless of what is visible.
@@ -574,6 +582,17 @@ final class GridRenderer {
             let y = rowY(i)
             guard y + rowHeight > headerHeight, y < viewH else { continue }
             fill(x: 0, y: y, w: viewW, h: rowHeight, color: Theme.Grid.banding.simd)
+        }
+
+        // Rows that are not in the database yet, tinted the whole way across so
+        // that the place the result ends and the new rows begin is legible
+        // without counting.
+        if !drafts.isEmpty {
+            for (i, r) in rows.enumerated() where r >= table.rowCount {
+                let y = rowY(i)
+                guard y + rowHeight > headerHeight, y < viewH else { continue }
+                fill(x: 0, y: y, w: viewW, h: rowHeight, color: Theme.Grid.draftRow.simd)
+            }
         }
 
         // Rows on their way out, under the selection: the row somebody just
@@ -684,6 +703,13 @@ final class GridRenderer {
             for (i, r) in rows.enumerated() {
                 let y = rowY(i)
                 guard y < viewH, y + rowHeight > headerHeight else { continue }
+                if r >= table.rowCount {
+                    let (text, colour) = draftText(row: r - table.rowCount, column: c)
+                    emitCell(
+                        text, x: x, width: w, maxChars: maxChars, y: y + 3,
+                        color: colour, alignRight: alignRight && colour == Theme.Grid.text.simd)
+                    continue
+                }
                 // NULL is drawn as the word, dimmed. `text` returns "" for both
                 // NULL and an empty string, and rendering them the same way
                 // hides a distinction the user is querying on.
@@ -713,6 +739,21 @@ final class GridRenderer {
         }
     }
 
+    /// What a draft's cell says, and in which colour.
+    ///
+    /// Three states, because a new row has one more than a fetched row does: a
+    /// value, an explicit NULL, and a column nobody typed into — which is left
+    /// out of the INSERT so the table's own default applies. Drawn as the words
+    /// they mean rather than as an empty cell, which would say the same thing
+    /// about all three.
+    private func draftText(row: Int, column: Int) -> (String, SIMD4<Float>) {
+        guard let value = drafts[row].values[column] else {
+            return ("DEFAULT", Theme.Grid.defaultText.simd)
+        }
+        guard let text = value.text else { return ("NULL", Theme.Grid.nullText.simd) }
+        return (text, Theme.Grid.text.simd)
+    }
+
     // MARK: - Hit testing
 
     /// The cell at a point in view coordinates, or `nil` for the header and the
@@ -721,7 +762,7 @@ final class GridRenderer {
         let y = Float(point.y)
         guard y >= headerHeight else { return nil }
         let row = Int(scrollRow + Double((y - headerHeight) / rowHeight))
-        guard row >= 0, row < table.rowCount,
+        guard row >= 0, row < totalRows,
             let column = columnIndex(atX: Float(point.x) + scrollX)
         else { return nil }
         return GridSelection(row: row, column: column)

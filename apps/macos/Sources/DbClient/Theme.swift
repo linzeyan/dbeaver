@@ -115,6 +115,16 @@ enum Theme {
         /// gets: both are unsent, but one of them takes the row away, and that
         /// is worth being able to tell apart at a glance across a long result.
         static let deletedRow = Theme.danger.opacity(0.26)
+        /// A row that is not in the database yet. Green, the third of the three
+        /// signals a grid full of unsent work needs — added, changed, going —
+        /// and the same green the Run button uses for the thing that has not
+        /// happened yet.
+        static let draftRow = Theme.run.opacity(0.20)
+        /// A draft column nobody has typed into, drawn as the word DEFAULT.
+        /// Dimmer than a value and dimmer than NULL, because unlike either of
+        /// them it is not what the row will hold — it is what the table will
+        /// decide.
+        static let defaultText = Tone(0x6475_8B)
         static let cursor = Theme.accent
         /// The scrollbar sits over the data rather than beside it, so the track
         /// is barely there and the thumb carries the whole signal.

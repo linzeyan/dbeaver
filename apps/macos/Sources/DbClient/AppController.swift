@@ -398,10 +398,12 @@ final class GridView: MTKView {
     }
 
     override func keyDown(with event: NSEvent) {
-        guard let renderer, let table = renderer.table, table.rowCount > 0 else { return }
+        guard let renderer, let table = renderer.table, renderer.totalRows > 0 else { return }
 
         let current = renderer.selection ?? GridSelection(row: Int(renderer.scrollRow), column: 0)
-        let lastRow = table.rowCount - 1
+        // Counts the draft rows too, so the keyboard reaches a row that has just
+        // been added the same way the mouse does.
+        let lastRow = renderer.totalRows - 1
         let lastColumn = max(0, table.columns.count - 1)
         let page = max(
             1,
