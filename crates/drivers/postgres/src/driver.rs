@@ -92,7 +92,11 @@ impl Driver for PgSource {
     }
 
     async fn cancel(&self) -> DbResult<()> {
-        Ok(PgSource::cancel(self).await?)
+        // The reach is dropped rather than carried into the trait: it differs
+        // per driver — some have one connection to name — and a front end that
+        // branched on it would be reading the pool, not the cancellation.
+        PgSource::cancel(self).await?;
+        Ok(())
     }
 
     /// Statements run on a connection of their own here, which is what a

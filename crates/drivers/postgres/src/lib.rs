@@ -16,6 +16,7 @@ use dbconn::{
     TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -123,6 +124,10 @@ fn describe(e: &tokio_postgres::Error) -> String {
     out
 }
 
+/// The cancel tokens of every connection currently running a statement, keyed
+/// by checkout. See `PgSource::busy`.
+type Registry = Arc<Mutex<HashMap<u64, CancelToken>>>;
+
 /// A connection to one PostgreSQL database, plus spare connections for looking things up.
 ///
 /// Statements run on the session connection and nothing else does, because a transaction
@@ -135,10 +140,28 @@ pub struct PgSource {
     pool: Arc<Mutex<Vec<Client>>>,
     semaphore: Arc<Semaphore>,
     conn_str: String,
-    /// One cancel token per connection this session has ever opened, kept
-    /// because `cancel` has to name a backend and the connection running the
-    /// statement may be checked out of the pool and unreachable through it.
-    cancels: Arc<Mutex<Vec<CancelToken>>>,
+    /// The connections a statement is on right now, by checkout.
+    ///
+    /// `cancel` has to name a backend and the one running the statement may be
+    /// checked out of the pool and unreachable through it, so the registry is
+    /// kept here rather than derived. Only the busy ones, because the request
+    /// is not free: sent to an idle backend it arrives after that connection
+    /// has moved on and stops whatever it moved on to.
+    busy: Registry,
+    /// Keys are handed out rather than taken from the connection, because the
+    /// same connection can be checked out again before the previous entry's
+    /// removal — which drop can only spawn — has run.
+    next_checkout: AtomicU64,
+    /// Number of times `cancel` has been called since this `PgSource` was
+    /// created.
+    ///
+    /// A counter rather than a flag: a flag set by a cancel that landed long
+    /// ago cannot be distinguished from one that happened during the current
+    /// borrow, so a reader could never tell whether the connection it was
+    /// handed was still possibly-cancelled. The counter lets a reader compare
+    /// the value at checkout with the value at drop — if they differ, a cancel
+    /// happened somewhere in between, and the connection must be retired.
+    cancellations: Arc<AtomicU64>,
 }
 
 /// A pooled connection, borrowed for one call and returned when it goes out of scope.
@@ -146,6 +169,13 @@ struct AcquiredConnection {
     client: Option<Client>,
     pool: Arc<Mutex<Vec<Client>>>,
     _permit: OwnedSemaphorePermit,
+    busy: Busy,
+    /// Shared counter that `cancel` bumps.
+    cancellations: Arc<AtomicU64>,
+    /// Value of `cancellations` at the moment this connection was checked out.
+    /// If the current value differs at drop, a cancel happened during the
+    /// borrow and the connection must be retired.
+    cancellations_at_checkout: u64,
 }
 
 impl Deref for AcquiredConnection {
@@ -170,10 +200,67 @@ impl Drop for AcquiredConnection {
     fn drop(&mut self) {
         // This must be in a spawned task because drop cannot await
         let pool = Arc::clone(&self.pool);
+        let cancellations = Arc::clone(&self.cancellations);
+        let cancellations_at_checkout = self.cancellations_at_checkout;
         let client = self.client.take().unwrap();
+        // Taken over from the guard so both happen in one task, in this order.
+        // Left to run itself the removal is a second, unordered task, and a
+        // token still in the registry after the connection is back in the pool
+        // is one a cancel can aim at whoever borrows it next.
+        let entry = self.busy.take_entry();
         tokio::spawn(async move {
+            if let Some((id, busy)) = entry {
+                busy.lock().await.remove(&id);
+            }
+            // If a cancel happened between checkout and now, the connection
+            // may still carry an unlanded signal. Pushing it back into the pool
+            // risks killing the next borrower's statement, so close it instead.
+            // The pool refills itself on demand in `acquire_connection`, so
+            // losing a connection costs one reconnect and nothing else.
+            //
+            // Read after the removal above, so a cancel that could still find
+            // this connection is one whose count this load already includes.
+            if cancellations.load(Ordering::SeqCst) != cancellations_at_checkout {
+                drop(client);
+                return;
+            }
             let mut pool_guard = pool.lock().await;
             pool_guard.push(client);
+        });
+    }
+}
+
+/// Holds a connection in `PgSource::busy` for as long as it lives.
+///
+/// A guard rather than a pair of calls because what has to be true is a span,
+/// not two events: the token must be findable for exactly as long as the
+/// statement can still be stopped. Every way out of that span — the borrow
+/// ending, the stream being dropped, an error unwinding past it — is a drop.
+struct Busy {
+    id: u64,
+    /// `None` once a holder has taken the removal over, which is what stops
+    /// this guard from spawning a second one behind their back.
+    busy: Option<Registry>,
+}
+
+impl Busy {
+    /// Hands the removal to a caller that will perform it themselves.
+    ///
+    /// For a caller that has something else to order against it. `Drop` can
+    /// only spawn, and a spawned removal is ordered against nothing.
+    fn take_entry(&mut self) -> Option<(u64, Registry)> {
+        self.busy.take().map(|busy| (self.id, busy))
+    }
+}
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        let Some(busy) = self.busy.take() else { return };
+        // This must be in a spawned task because drop cannot await
+        let id = self.id;
+        tokio::spawn(async move {
+            let mut busy_guard = busy.lock().await;
+            busy_guard.remove(&id);
         });
     }
 }
@@ -198,15 +285,43 @@ impl PgSource {
         // which acquire_connection already does.
         let pool = Arc::new(Mutex::new(Vec::new()));
         let semaphore = Arc::new(Semaphore::new(4));
-        let cancels = Arc::new(Mutex::new(vec![session.cancel_token()]));
+        // The session's token is not registered here. It belongs in the registry
+        // only while a statement is on it, and connecting is not that.
+        let busy = Arc::new(Mutex::new(HashMap::new()));
+        let cancellations = Arc::new(AtomicU64::new(0));
 
         Ok(Self {
             session,
             pool,
             semaphore,
             conn_str: conn_str.to_string(),
-            cancels,
+            busy,
+            next_checkout: AtomicU64::new(0),
+            cancellations,
         })
+    }
+
+    /// Registers `token` as busy for as long as the returned guard is held, and
+    /// reports the cancellation count as of that moment.
+    ///
+    /// Both under one lock, which is the whole reason they are one call. Split
+    /// apart, a cancel can land between them: it finds the token and signals
+    /// this connection, and the count read afterwards already includes it, so
+    /// at drop the two agree and a signalled connection goes back into the pool
+    /// looking untouched — the one outcome this registry exists to prevent.
+    async fn mark_busy(&self, token: CancelToken) -> (Busy, u64) {
+        let id = self.next_checkout.fetch_add(1, Ordering::SeqCst);
+        let mut busy = self.busy.lock().await;
+        busy.insert(id, token);
+        let cancellations = self.cancellations.load(Ordering::SeqCst);
+        drop(busy);
+        (
+            Busy {
+                id,
+                busy: Some(Arc::clone(&self.busy)),
+            },
+            cancellations,
+        )
     }
 
     /// Acquire a connection from the pool. This will block if all connections
@@ -218,23 +333,23 @@ impl PgSource {
             .await
             .map_err(|_| PgError::PoolExhausted)?;
 
-        // Try to get an existing connection from the pool
-        {
-            let mut pool = self.pool.lock().await;
-            if let Some(client) = pool.pop() {
-                return Ok(AcquiredConnection {
-                    client: Some(client),
-                    pool: Arc::clone(&self.pool),
-                    _permit: permit,
-                });
-            }
+        // Try to get an existing connection from the pool. The guard is released
+        // before registering, so the two locks are never held at once.
+        let pooled = self.pool.lock().await.pop();
+        if let Some(client) = pooled {
+            let (busy, cancellations_at_checkout) = self.mark_busy(client.cancel_token()).await;
+            return Ok(AcquiredConnection {
+                client: Some(client),
+                pool: Arc::clone(&self.pool),
+                _permit: permit,
+                busy,
+                cancellations: Arc::clone(&self.cancellations),
+                cancellations_at_checkout,
+            });
         }
 
         // If no connection available, create a new one
         let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls).await?;
-        // Registered before it is handed out, so a statement can never be running
-        // on a connection `cancel` does not know about.
-        self.cancels.lock().await.push(client.cancel_token());
         // The connection future drives the socket and must outlive us. Phase 0
         // has no reconnect story; a dropped connection surfaces as a query error.
         tokio::spawn(async move {
@@ -243,39 +358,58 @@ impl PgSource {
             }
         });
 
+        // Registered before it is handed out, so a statement can never be running
+        // on a connection `cancel` does not know about.
+        let (busy, cancellations_at_checkout) = self.mark_busy(client.cancel_token()).await;
+
         Ok(AcquiredConnection {
             client: Some(client),
             pool: Arc::clone(&self.pool),
             _permit: permit,
+            busy,
+            cancellations: Arc::clone(&self.cancellations),
+            cancellations_at_checkout,
         })
     }
 
-    /// Asks the server to abandon whatever this session is currently running.
+    /// Asks the server to abandon whatever this session is currently running,
+    /// and answers how many backends were named.
     ///
     /// The request travels on a connection of its own, which is why this can be
     /// called while a socket is busy streaming a result: the protocol has no way
     /// to interleave one, so a cancel sent in-band would sit in the queue behind
     /// the statement it is trying to stop.
     ///
-    /// Every connection is named, not just the session, because a session owns
-    /// several and the caller cannot see which one is busy: statements run on the
-    /// session, metadata reads run on whichever connection the pool handed out,
-    /// and a pooled connection in use is not in the pool to be found. Naming an
-    /// idle backend costs a round trip and does nothing, which is the price of
-    /// not having to know. A cursor is the exception — it carries its own
-    /// canceller, because it is handed to the caller and outlives the call that
-    /// made it.
+    /// Every connection with a statement on it is named, not just the session,
+    /// because a session runs on several and the caller cannot see which one is
+    /// busy: statements run on the session, metadata reads run on whichever
+    /// connection the pool handed out, and a pooled connection in use is not in
+    /// the pool to be found. Idle ones are left out, because naming one is not
+    /// free: this call returns when the postmaster accepts the request, and the
+    /// signal arrives at the backend afterwards — by which time an idle
+    /// connection has been handed to somebody else, and their statement is what
+    /// stops. A cursor is the exception — it carries its own canceller, because
+    /// it is handed to the caller and outlives the call that made it.
     ///
-    /// Best-effort by design. The server may finish before the request lands, or
-    /// the statement may be between commands with nothing to cancel, and neither
-    /// is an error — success here means the requests were delivered, not that
-    /// anything was interrupted. What actually happened shows up as the running
-    /// statement failing with `is_cancelled`, or not failing at all.
-    pub async fn cancel(&self) -> Result<(), PgError> {
+    /// Best-effort by design. The count is how many were asked, not how many
+    /// stopped: the server may finish before the request lands, or the statement
+    /// may be between commands with nothing to cancel, and neither is an error.
+    /// What actually happened shows up as the running statement failing with
+    /// `is_cancelled`, or not failing at all. Zero is the one that carries
+    /// information — there was nothing running to stop.
+    pub async fn cancel(&self) -> Result<usize, PgError> {
         // Cloned out from under the lock: a cancel is a round trip, and holding
         // the registry across all of them would block the connection being opened
         // by whatever we are trying to cancel.
-        let tokens = self.cancels.lock().await.clone();
+        let tokens = {
+            let busy = self.busy.lock().await;
+            // Counted under the same lock the registry is read under, so a
+            // checkout either registers early enough to be signalled here and
+            // reads the lower count, or registers too late for both. See
+            // `mark_busy` for what splitting the two costs.
+            self.cancellations.fetch_add(1, Ordering::SeqCst);
+            busy.values().cloned().collect::<Vec<_>>()
+        };
         // Every connection is asked before the first refusal is reported, so one
         // dropped connection cannot spare the rest.
         let results =
@@ -283,7 +417,7 @@ impl PgSource {
         for result in results {
             result?;
         }
-        Ok(())
+        Ok(tokens.len())
     }
 
     /// Takes one step of transaction control on the session connection.
@@ -297,6 +431,10 @@ impl PgSource {
     /// every database — the words live here rather than in the caller for that
     /// reason.
     pub async fn transaction(&self, step: &TxStep) -> Result<(), PgError> {
+        // The count is for connections that can be retired, and the session is
+        // not one of them: it carries the open transaction, so closing it would
+        // roll back the work the user is in the middle of.
+        let (_busy, _) = self.mark_busy(self.session.cancel_token()).await;
         let statement = match step {
             TxStep::Begin => "BEGIN".to_string(),
             TxStep::Commit => "COMMIT".to_string(),
@@ -425,6 +563,11 @@ impl PgSource {
     /// same connection and transaction context, and that cancellation targets
     /// a specific backend.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, PgError> {
+        // Registered here and not alongside the stream below: `query_raw` does
+        // not resolve until the server has run the whole statement, so the
+        // cancel most worth catching arrives while this call is still awaiting,
+        // and would find nothing if the token went in afterwards.
+        let (busy, _) = self.mark_busy(self.session.cancel_token()).await;
         let stmt = self.session.prepare(sql).await?;
 
         let types: Vec<ColumnType> = stmt
@@ -456,6 +599,7 @@ impl PgSource {
             rows: Box::pin(rows),
             batch_rows,
             exhausted: false,
+            _busy: busy,
         })
     }
 
@@ -521,6 +665,7 @@ pub struct ArrowStream {
     rows: Pin<Box<RowStream>>,
     batch_rows: usize,
     exhausted: bool,
+    _busy: Busy,
 }
 
 /// A cursor over a PostgreSQL query result.
@@ -698,14 +843,6 @@ impl ArrowStream {
             Arc::clone(&self.schema),
             arrays,
         )?))
-    }
-}
-
-impl Drop for ArrowStream {
-    fn drop(&mut self) {
-        // When the stream is dropped, we don't need to return anything to the pool
-        // because we used the session connection directly, not a pooled connection
-        // The session connection is kept alive for the lifetime of the PgSource
     }
 }
 
