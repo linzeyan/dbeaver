@@ -317,6 +317,109 @@ async fn mongodb() -> Subject {
     }
 }
 
+const CASSANDRA_NODE: &str = "127.0.0.1:59042";
+
+/// Cassandra, in the one database here whose rows cannot be given a total order
+/// by asking for one.
+///
+/// `read` pins the partition, and that is not a stylistic choice. CQL allows
+/// `ORDER BY` only on clustering columns and only once the partition key is
+/// restricted, so `SELECT id FROM nums ORDER BY id` over a whole table is not a
+/// slower plan, it is a refused statement. The fixture is a single partition —
+/// `bucket = 0` — which is the one table shape that can honour what `read`
+/// promises the checks. `Driver::browse` reads the whole table and therefore
+/// declines to order it at all; see the driver.
+///
+/// Seeded through the `scylla` crate rather than the driver, as MongoDB's and
+/// MySQL's are, with the one concession that the seeding session installs the
+/// same address translator `CassandraSource::connect` does. Without it the driver
+/// crate cannot reach a Cassandra published on any host port but 9042 — the
+/// reasoning is in `OneEndpoint` in the driver, and `driver-cassandra`'s own
+/// suite pins it.
+async fn cassandra() -> Subject {
+    use scylla::client::session_builder::SessionBuilder;
+    use scylla::errors::TranslationError;
+    use scylla::policies::address_translator::{AddressTranslator, UntranslatedPeer};
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    struct AtNode(SocketAddr);
+
+    #[async_trait::async_trait]
+    impl AddressTranslator for AtNode {
+        async fn translate_address(
+            &self,
+            _peer: &UntranslatedPeer,
+        ) -> Result<SocketAddr, TranslationError> {
+            Ok(self.0)
+        }
+    }
+
+    let at: SocketAddr = CASSANDRA_NODE.parse().expect("a literal address");
+    let session = SessionBuilder::new()
+        .known_node_addr(at)
+        .address_translator(Arc::new(AtNode(at)))
+        .build()
+        .await
+        .expect("Cassandra unreachable; run `make db-up-cassandra`");
+
+    // Written in fifties, in the one case Cassandra's own documentation endorses
+    // a batch for: every statement hits the same partition, so the coordinator
+    // applies it as a single mutation instead of fanning out.
+    let mut seed = vec![
+        "CREATE KEYSPACE IF NOT EXISTS dbclient_contract WITH replication = \
+         {'class': 'SimpleStrategy', 'replication_factor': 1}"
+            .to_string(),
+        "CREATE TABLE IF NOT EXISTS dbclient_contract.nums \
+         (bucket int, id int, label text, PRIMARY KEY (bucket, id))"
+            .to_string(),
+    ];
+    for chunk in (1..=500).collect::<Vec<i32>>().chunks(50) {
+        let mut batch = String::from("BEGIN UNLOGGED BATCH ");
+        for i in chunk {
+            batch.push_str(&format!(
+                "INSERT INTO dbclient_contract.nums (bucket, id, label) \
+                 VALUES (0, {i}, 'row-{i}'); "
+            ));
+        }
+        batch.push_str("APPLY BATCH");
+        seed.push(batch);
+    }
+    for statement in &seed {
+        session
+            .query_unpaged(statement.as_str(), &[])
+            .await
+            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    }
+
+    let driver =
+        driver_cassandra::CassandraSource::connect("cassandra://127.0.0.1:59042/dbclient_contract")
+            .await
+            .expect("the Cassandra driver could not connect");
+    Subject {
+        driver: Box::new(driver),
+        // A keyspace, which is the level Cassandra has and the only one.
+        schema: "dbclient_contract".to_string(),
+        relation: "nums".to_string(),
+        key: "id".to_string(),
+        read: "SELECT id FROM dbclient_contract.nums WHERE bucket = 0 ORDER BY id".to_string(),
+        broken: "SELECT id FROM dbclient_contract.nums WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM dbclient_contract.no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        cursors: true,
+        // Cassandra's parser reports `line 1:34`, counted in characters, which
+        // is one of the few here that needs no reconstructing.
+        positions: true,
+        // Nothing to write to, because there is no transaction to control. A
+        // lightweight transaction is one statement's compare-and-set and a
+        // BATCH is sent whole, so neither has a moment in which a client could
+        // read its own uncommitted change — which is the thing the transaction
+        // check exists to observe.
+        scratch: None,
+        _fixture: None,
+    }
+}
+
 const MYSQL_ROOT: &str = "mysql://root:test@127.0.0.1:53306/";
 
 /// MySQL, in a database of this file's own rather than the driver's `bench`.
@@ -1140,6 +1243,12 @@ async fn clickhouse_satisfies_the_contract() {
 #[ignore = "requires a MongoDB server"]
 async fn mongodb_satisfies_the_contract() {
     every_check(&mongodb().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Cassandra server"]
+async fn cassandra_satisfies_the_contract() {
+    every_check(&cassandra().await).await;
 }
 
 // ---------------------------------------------------------------------------

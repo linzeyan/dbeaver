@@ -18,6 +18,7 @@ serde = { version = "1", features = ["derive"] }
 # A dev-dependency cycle, which cargo permits and which is the point: the trait
 # is only worth testing through the drivers that implement it, and they are the
 # ones that depend on this crate.
+driver-cassandra = { path = "../drivers/cassandra" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-mongodb = { path = "../drivers/mongodb" }
@@ -34,6 +35,9 @@ bson = "2"
 mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls-ring",
 ] }
+# Seeds the Cassandra fixture, for the reason every other vendor crate here is
+# named: a fixture built by the driver under test would be vouching for it.
+scylla = "1.8"
 tiberius = { version = "0.12.3", default-features = false, features = [
     "tds73",
     "rustls",
