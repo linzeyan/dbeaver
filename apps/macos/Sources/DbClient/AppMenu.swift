@@ -131,9 +131,12 @@ enum AppMenu {
     /// nothing in this window is a document with unsaved changes, and binding
     /// Save to something that is not one teaches the wrong reflex.
     ///
-    /// Two export items rather than one with a format popup in the panel's
-    /// accessory view: the popup is a control nobody looks for, and the menu is
-    /// where a user goes to find out what an application can do.
+    /// One item per format rather than one item with a format popup in the
+    /// panel's accessory view: the popup is a control nobody looks for, and the
+    /// menu is where a user goes to find out what an application can do. The
+    /// panel's accessory view is spent on the one question the menu cannot ask
+    /// — how much of the result to write — and only when there is more of it
+    /// than the window is showing.
     private static func fileMenu(connection: ConnectionCommand, export: ExportCommands)
         -> NSMenuItem
     {
@@ -157,6 +160,24 @@ enum AppMenu {
             withTitle: "Export Result as TSV…",
             action: #selector(ExportCommands.exportTSV(_:)), keyEquivalent: "")
         tsv.target = export
+
+        // Only CSV keeps a shortcut. The other four are picked from the menu by
+        // somebody who already knows which file they want, and four more
+        // modified letters would be spent on choices nobody makes twice a day.
+        let json = menu.addItem(
+            withTitle: "Export Result as JSON Lines…",
+            action: #selector(ExportCommands.exportJSON(_:)), keyEquivalent: "")
+        json.target = export
+
+        let parquet = menu.addItem(
+            withTitle: "Export Result as Parquet…",
+            action: #selector(ExportCommands.exportParquet(_:)), keyEquivalent: "")
+        parquet.target = export
+
+        let sql = menu.addItem(
+            withTitle: "Export Result as SQL…",
+            action: #selector(ExportCommands.exportSQL(_:)), keyEquivalent: "")
+        sql.target = export
 
         item.submenu = menu
         return item
@@ -616,23 +637,42 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
 
     @objc func exportTSV(_ sender: Any?) { present(.tsv) }
 
-    /// Greys both items out while there is nothing to write, so the panel is
+    @objc func exportJSON(_ sender: Any?) { present(.jsonl) }
+
+    @objc func exportParquet(_ sender: Any?) { present(.parquet) }
+
+    @objc func exportSQL(_ sender: Any?) { present(.sql) }
+
+    /// Greys the items out while there is nothing to write, so the panel is
     /// never opened for a result that does not exist yet.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canExport }
 
-    private func present(_ format: DelimitedFormat) {
+    /// The scope control, kept alive between building the panel and reading the
+    /// answer out of it. An `NSSavePanel` accessory view is not retained by
+    /// anything else the completion handler can see.
+    private var scopeControl: NSSegmentedControl?
+
+    private func present(_ format: ExportFormat) {
         guard model.canExport else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [format.contentType]
-        panel.nameFieldStringValue = model.exportFilename(format)
+        // Asked before the name is proposed, because the name says which scope
+        // it is — a file called `-first-200000-rows` holding the whole table is
+        // the same lie the suffix exists to prevent, pointing the other way.
+        let control = model.exportScopeIsAChoice ? scopeChooser() : nil
+        scopeControl = control
+        panel.accessoryView = control.map(scopeAccessory)
+        panel.nameFieldStringValue = model.exportFilename(format, scope: scope(from: control))
         // The panel is the last surface between the user and a file that will
         // be read without them, so it is where the result gets described.
         panel.message = model.exportMessage
         panel.canCreateDirectories = true
 
-        let write: (NSApplication.ModalResponse) -> Void = { [model] response in
+        let write: (NSApplication.ModalResponse) -> Void = { [model, weak self] response in
+            let chosen = self?.scope(from: self?.scopeControl) ?? .wholeResult
+            self?.scopeControl = nil
             guard response == .OK, let url = panel.url else { return }
-            model.exportCurrentResult(to: url, format: format)
+            model.exportCurrentResult(to: url, format: format, scope: chosen)
         }
         // A sheet, so the panel is attached to the result it is describing.
         // The free-standing fallback covers the window not being key, which is
@@ -642,5 +682,38 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         } else {
             panel.begin(completionHandler: write)
         }
+    }
+
+    /// The two answers, with the cheap one selected.
+    ///
+    /// The rows already on screen are the default because they are what the
+    /// window is showing and they cost nothing more to write. Re-reading a
+    /// large table is a minutes-long operation, and defaulting somebody into
+    /// one they did not ask for is the worse mistake of the two.
+    private func scopeChooser() -> NSSegmentedControl {
+        let rows = model.current.rowCount
+        let control = NSSegmentedControl(
+            labels: [
+                "The \(AppModel.formatted(rows)) rows here", "The whole result"
+            ], trackingMode: .selectOne, target: nil, action: nil)
+        control.selectedSegment = 0
+        return control
+    }
+
+    private func scope(from control: NSSegmentedControl?) -> ExportScope {
+        guard let control else { return .wholeResult }
+        return control.selectedSegment == 1
+            ? .wholeResult : .firstRows(model.current.rowCount)
+    }
+
+    /// Wraps the control with a label, because a bare segmented control above a
+    /// file name is a pair of buttons with no question attached to them.
+    private func scopeAccessory(_ control: NSSegmentedControl) -> NSView {
+        let label = NSTextField(labelWithString: "Rows to write:")
+        let stack = NSStackView(views: [label, control])
+        stack.orientation = .horizontal
+        stack.spacing = 8
+        stack.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
+        return stack
     }
 }

@@ -38,6 +38,11 @@ struct DbError: Error, CustomStringConvertible {
 final class Database: @unchecked Sendable {
     private let handle: OpaquePointer
 
+    /// For `Cursor.exportSql` and nothing else: writing INSERT statements
+    /// needs the connection's dialect, which lives behind this handle, and the
+    /// export itself belongs on the cursor beside the formats that do not.
+    fileprivate var rawHandle: OpaquePointer { handle }
+
     init(connString: String) throws {
         var err: UnsafeMutablePointer<CChar>?
         guard let h = db_connect(connString, &err) else {
@@ -395,6 +400,24 @@ final class Cursor: @unchecked Sendable {
     func export(to url: URL, format: ExportFormat, rowLimit: Int64) throws -> Int64 {
         var err: UnsafeMutablePointer<CChar>?
         let rows = db_export(handle, format.wireName, url.path, rowLimit, &err)
+        return try Cursor.written(rows, &err)
+    }
+
+    /// The same, as `INSERT` statements for `table`.
+    ///
+    /// Takes the connection as well, which the other formats do not need: an
+    /// identifier and a string literal are spelled differently on each
+    /// database, and only the connection knows which one this is.
+    func exportSql(to url: URL, handle db: Database, table: String, rowLimit: Int64) throws -> Int64
+    {
+        var err: UnsafeMutablePointer<CChar>?
+        let rows = db_export_sql(db.rawHandle, handle, table, url.path, rowLimit, &err)
+        return try Cursor.written(rows, &err)
+    }
+
+    private static func written(
+        _ rows: Int64, _ err: inout UnsafeMutablePointer<CChar>?
+    ) throws -> Int64 {
         guard rows >= 0 else {
             throw DbError(
                 description: Database.take(&err) ?? "export failed",

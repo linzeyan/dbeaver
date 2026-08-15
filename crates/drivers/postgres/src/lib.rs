@@ -241,6 +241,11 @@ struct Busy {
     /// `None` once a holder has taken the removal over, which is what stops
     /// this guard from spawning a second one behind their back.
     busy: Option<Registry>,
+    /// Taken at construction, because `tokio::spawn` panics off the runtime and
+    /// this guard is dropped wherever its holder is. An `ArrowStream` is handed
+    /// across the FFI and freed by the front end on a thread that has never
+    /// been inside one — a bare `spawn` in `Drop` kills the process there.
+    runtime: tokio::runtime::Handle,
 }
 
 impl Busy {
@@ -258,7 +263,7 @@ impl Drop for Busy {
         let Some(busy) = self.busy.take() else { return };
         // This must be in a spawned task because drop cannot await
         let id = self.id;
-        tokio::spawn(async move {
+        self.runtime.spawn(async move {
             let mut busy_guard = busy.lock().await;
             busy_guard.remove(&id);
         });
@@ -319,6 +324,7 @@ impl PgSource {
             Busy {
                 id,
                 busy: Some(Arc::clone(&self.busy)),
+                runtime: tokio::runtime::Handle::current(),
             },
             cancellations,
         )

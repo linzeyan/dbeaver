@@ -53,8 +53,20 @@ final class ResultSet {
 
     func abandonLoading() { isLoading = false }
 
+    /// The statement these rows came from, for anything that has to ask the
+    /// server the same question again.
+    ///
+    /// Export is that: it re-reads through a cursor of its own rather than
+    /// writing out the rows the grid is holding, because those are as many as
+    /// the grid stopped at. Kept here rather than recomposed from `selected` or
+    /// `queryText`, both of which the user can change while a result is still
+    /// on screen — and a file written from a statement the result did not come
+    /// from is wrong in the way nobody checks for.
+    private(set) var statement = ""
+
     /// Publishes rows already appended to `table` by the caller.
-    func finish(capped: Bool, milliseconds: Double, summary: String) {
+    func finish(statement: String, capped: Bool, milliseconds: Double, summary: String) {
+        self.statement = statement
         generation += 1
         // Land the cursor on the first cell. It gives the arrow keys a starting
         // point and puts a real value in the inspector, instead of asking the
@@ -86,6 +98,7 @@ final class ResultSet {
         capped = false
         milliseconds = 0
         summary = ""
+        statement = ""
         selection = nil
         isLoading = false
     }
@@ -294,6 +307,12 @@ final class AppModel {
     /// never did. Letting go of it is what closes that connection, so every
     /// path that abandons a browse goes through `discardBrowse`.
     private var browseCursor: Cursor?
+    /// The statement `browseCursor` was opened over, so an export can ask the
+    /// server the same question through a cursor of its own.
+    private var browseStatementText = ""
+    /// The cursor an export is draining, so Stop can reach it. Nil except
+    /// while one is running.
+    private var exportCursor: Cursor?
     private var browseFetchInFlight = false
 
     /// What the pages fetched so far say about which browse columns are empty.
@@ -1490,16 +1509,22 @@ final class AppModel {
         let page = browsePage
         beginBrowseFetch()
         let started = CFAbsoluteTimeGetCurrent()
-        run { db -> Cursor in
+        run { db -> (String, Cursor) in
             // Written and opened in one trip. Writing it is string building in
             // the core rather than a question for the server, so it costs
             // nothing worth splitting the round trip for.
             let sql = try db.browseStatement(
                 schema: ask.schema, relation: ask.relation, filter: ask.filter,
                 order: ask.order, keys: ask.keys)
-            return try db.cursor(sql, batchRows: page)
-        } then: { [self] cursor in
+            return (sql, try db.cursor(sql, batchRows: page))
+        } then: { [self] opened in
+            let (sql, cursor) = opened
             browseCursor = cursor
+            // Carried out of the closure because the core wrote it and nothing
+            // on this side can write it again: the filter, the order and the
+            // key columns are all things the user can change while the rows
+            // from the old statement are still on screen.
+            browseStatementText = sql
             fetchBrowsePage(
                 from: cursor, takingSchema: true, describedAs: label,
                 since: started, appending: false)
@@ -1606,7 +1631,8 @@ final class AppModel {
                 capped: capped, milliseconds: fetched.milliseconds, summary: summary)
         } else {
             browseResult.finish(
-                capped: capped, milliseconds: fetched.milliseconds, summary: summary)
+                statement: browseStatementText, capped: capped,
+                milliseconds: fetched.milliseconds, summary: summary)
         }
         isBusy = false
     }
@@ -1950,7 +1976,9 @@ final class AppModel {
             // Nothing in the Query pane imposes a LIMIT, so nothing it returns
             // is capped: what is on screen is the whole of what the statement
             // produced.
-            result.finish(capped: false, milliseconds: out.milliseconds, summary: summary)
+            result.finish(
+                statement: statements[i], capped: false, milliseconds: out.milliseconds,
+                summary: summary)
             steps.append(
                 ScriptStep(
                     id: i + 1, sql: statements[i], range: ranges[i], summary: summary,
@@ -2083,49 +2111,103 @@ final class AppModel {
     /// page is very often exactly what someone wants — and a comment row inside
     /// the file would be worse still, because it is a row that is not data and
     /// every parser downstream would read it as one.
-    func exportFilename(_ format: DelimitedFormat) -> String {
+    ///
+    /// The suffix is only proposed for the scope that earns it. Now that the
+    /// whole result can be written, `-first-200000-rows` on a file holding the
+    /// whole table would be the same lie pointing the other way.
+    func exportFilename(_ format: ExportFormat, scope: ExportScope) -> String {
         let base = activeTab == .query ? "query" : (selected?.name ?? "result")
         // Raw digits, not `formatted`: a comma in the name of a CSV file is a
         // joke that stops being funny at the first script that splits on one.
-        let suffix = current.capped ? "-first-\(current.rowCount)-rows" : ""
+        let suffix: String
+        switch scope {
+        case .wholeResult: suffix = ""
+        case .firstRows(let rows): suffix = "-first-\(rows)-rows"
+        }
         return "\(base)\(suffix).\(format.fileExtension)"
     }
 
-    /// What the save panel says above the name field.
+    /// Whether the panel has to ask how much to write.
     ///
-    /// Says the same thing as `truncationHelp`, in the same order and for the
-    /// same reason, because this is the last moment at which it can be said.
+    /// Only when the two answers differ. A result the grid holds in full has
+    /// one, and a choice with no wrong answer is worse than no choice: it puts
+    /// a decision in front of somebody who has no way to make it.
+    var exportScopeIsAChoice: Bool { current.capped }
+
+    /// What the save panel says above the name field.
     var exportMessage: String {
-        let count = Self.formatted(current.rowCount)
         guard current.capped else {
             return "Writes this result in full — \(Self.pluralized(current.rowCount, "row"))."
         }
+        let count = Self.formatted(current.rowCount)
         let shown =
-            "This result is the first \(count) rows, not the whole table. "
-            + "Only those rows will be written."
+            "The grid is holding the first \(count) rows of this statement. "
+            + "Choose whether to write those or re-read the whole result from the server."
         guard let obstacle = pagingObstacle else { return shown }
         return "\(shown) \(obstacle.detail)"
     }
 
     /// Writes the result the window is showing to `url`.
     ///
-    /// The rows are snapshotted on the way out and formatted on the export
-    /// queue. The snapshot is what makes that safe: it owns the Arrow batches,
-    /// so re-running the query while the file is still being written replaces
-    /// the grid without pulling the buffers out from under the writer.
-    func exportCurrentResult(to url: URL, format: DelimitedFormat) {
+    /// Reads the statement again through a cursor of its own rather than
+    /// writing out the rows the grid is holding. Those are as many rows as the
+    /// grid stopped at, which is why the old export could not write a table
+    /// longer than the scrollback at all; and a cursor is a snapshot, so the
+    /// file is one moment of the table even while the grid moves on.
+    ///
+    /// Nothing is formatted here. Every row is written in the core, which is
+    /// what keeps a large export bound by the socket and the disk rather than
+    /// by this process.
+    func exportCurrentResult(to url: URL, format: ExportFormat, scope: ExportScope) {
         guard canExport else { return }
-        let rows = current.table.snapshot()
+        let statement = current.statement
+        guard !statement.isEmpty else {
+            errorMessage = "This result did not come from a statement that can be read again."
+            return
+        }
+        let table = exportTableName
+        let limit = scope.rowLimit
+        let page = batchRows
         isExporting = true
-        exportStatus =
-            "Exporting \(Self.pluralized(rows.rowCount, "row")) to \(url.lastPathComponent)…"
+        exportStatus = "Exporting to \(url.lastPathComponent)…"
         // A new export supersedes the previous failure, as a new query does.
         errorMessage = nil
-        dispatch(on: exportQueue) {
-            try DelimitedWriter.write(rows, format: format, to: url)
-        } then: { [self] _ in
+        exportCursor = nil
+        run { [self] db -> Int64 in
+            let cursor = try db.cursor(statement, batchRows: page)
+            // Published before the drain begins, so Stop has something to name
+            // for all of it. A cursor handed over after `export` returns would
+            // arrive once there was nothing left to cancel.
+            DispatchQueue.main.async { [self] in exportCursor = cursor }
+            if format.needsTable {
+                return try cursor.exportSql(to: url, handle: db, table: table, rowLimit: limit)
+            }
+            return try cursor.export(to: url, format: format, rowLimit: limit)
+        } then: { [self] rows in
             isExporting = false
+            exportCursor = nil
+            status = "\(Self.pluralized(Int(rows), "row")) written to \(url.lastPathComponent)"
         }
+    }
+
+    /// The table an `INSERT` script names.
+    ///
+    /// The relation being browsed, where there is one, because a script whose
+    /// statements name the table they came from is one somebody can run. A
+    /// query has no such answer, so it gets a placeholder that is obviously a
+    /// placeholder rather than a plausible name pointing at the wrong table.
+    private var exportTableName: String {
+        guard activeTab != .query, let selected else { return "exported_rows" }
+        guard !selected.schema.isEmpty else { return selected.name }
+        return "\(selected.schema).\(selected.name)"
+    }
+
+    /// Stops an export part way through.
+    ///
+    /// The export runs on a cursor of its own, so `Database.cancel()` does not
+    /// reach it for the same reason it does not reach a browse.
+    func cancelExport() {
+        exportCursor?.cancel()
     }
 
     // MARK: - Query execution

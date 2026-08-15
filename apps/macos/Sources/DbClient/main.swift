@@ -541,7 +541,10 @@ let refreshAfter = argument("--refresh-after").flatMap(Double.init)
 @MainActor
 func exportWhenReady(model: AppModel, to path: String) {
     let url = URL(fileURLWithPath: path)
-    let format = DelimitedFormat(pathExtension: url.pathExtension) ?? .csv
+    let format = ExportFormat(pathExtension: url.pathExtension) ?? .csv
+    // The whole result, which is what a script asking for a file wants: the
+    // grid's cap is a property of a window nobody is looking at here.
+    let scope = ExportScope.wholeResult
     let deadline = CFAbsoluteTimeGetCurrent() + 180
     var started = false
 
@@ -563,9 +566,9 @@ func exportWhenReady(model: AppModel, to path: String) {
             started = true
             // The two things the save panel would have shown, printed where a
             // script can assert on them.
-            fputs("export name     \(model.exportFilename(format))\n", stderr)
+            fputs("export name     \(model.exportFilename(format, scope: scope))\n", stderr)
             fputs("export message  \(model.exportMessage)\n", stderr)
-            model.exportCurrentResult(to: url, format: format)
+            model.exportCurrentResult(to: url, format: format, scope: scope)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
