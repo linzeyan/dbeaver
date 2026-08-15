@@ -1146,6 +1146,7 @@ dependencies = [
  "dbddl",
  "dbedit",
  "dbsql",
+ "dbtransfer",
  "driver-athena",
  "driver-bigquery",
  "driver-cassandra",
