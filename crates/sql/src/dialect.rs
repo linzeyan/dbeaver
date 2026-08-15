@@ -234,14 +234,29 @@ pub const ALL: &[&Dialect] = &[&POSTGRES, &MYSQL, &MSSQL, &SQLITE, &DUCKDB, &CLI
 /// an editor at all, and PostgreSQL's grammar is the one the SQL standard is
 /// closest to. A wrong guess costs colour, not correctness — the statement is
 /// sent as typed either way.
+///
+/// Callers for whom a wrong guess costs more than colour want [`of_scheme`].
 pub fn for_scheme(scheme: &str) -> &'static Dialect {
+    of_scheme(scheme).unwrap_or(&POSTGRES)
+}
+
+/// The dialect a connection scheme is written in, or `None` where this build
+/// does not know that database's SQL.
+///
+/// The same question [`for_scheme`] answers, without the guess. MongoDB is the
+/// case that made this necessary: it has no dialect here, `for_scheme` hands it
+/// PostgreSQL's, and anything downstream that generates SQL rather than painting
+/// it then produces a PostgreSQL statement about a collection — which is the
+/// exact failure `dbddl::for_dialect` refuses to make one level lower.
+pub fn of_scheme(scheme: &str) -> Option<&'static Dialect> {
     match scheme {
-        "mysql" => &MYSQL,
-        "sqlserver" => &MSSQL,
-        "sqlite" => &SQLITE,
-        "duckdb" => &DUCKDB,
-        "clickhouse" | "clickhouses" => &CLICKHOUSE,
-        _ => &POSTGRES,
+        "postgres" | "postgresql" => Some(&POSTGRES),
+        "mysql" => Some(&MYSQL),
+        "sqlserver" => Some(&MSSQL),
+        "sqlite" => Some(&SQLITE),
+        "duckdb" => Some(&DUCKDB),
+        "clickhouse" | "clickhouses" => Some(&CLICKHOUSE),
+        _ => None,
     }
 }
 
@@ -263,6 +278,12 @@ mod tests {
                 "{} is in the table but not reachable",
                 dialect.name
             );
+            assert_eq!(
+                of_scheme(dialect.name).map(|d| d.name),
+                Some(dialect.name),
+                "{} is reachable only through the guess",
+                dialect.name
+            );
         }
     }
 
@@ -270,5 +291,17 @@ mod tests {
     fn an_unknown_scheme_is_read_as_postgresql() {
         assert_eq!(for_scheme("mongodb").name, "postgres");
         assert_eq!(for_scheme("").name, "postgres");
+    }
+
+    /// The same two schemes, asked the question that does not guess.
+    ///
+    /// This is the answer anything generating SQL has to use: painting MongoDB's
+    /// editor with PostgreSQL's keywords costs colour, and writing a PostgreSQL
+    /// `CREATE TABLE` for one of its collections costs a statement that cannot
+    /// run.
+    #[test]
+    fn a_database_with_no_dialect_here_is_not_given_one() {
+        assert!(of_scheme("mongodb").is_none());
+        assert!(of_scheme("").is_none());
     }
 }

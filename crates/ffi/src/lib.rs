@@ -17,7 +17,7 @@ use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbcatalog::{Kind, Names};
 use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
-use dbsql::{Origin, TokenKind};
+use dbsql::{Dialect, Origin, TokenKind};
 use session::Session;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
@@ -53,6 +53,15 @@ pub struct DbHandle {
     driver: Arc<dyn Driver>,
     names: Names,
     session: Session,
+    /// The dialect this connection is actually in, where this build knows it.
+    ///
+    /// `Names` carries the editor's answer, which guesses PostgreSQL for a
+    /// database it does not know — a wrong guess there costs colour. This is the
+    /// answer for everything that generates SQL rather than painting it, where a
+    /// wrong guess costs a statement: without it a MongoDB collection renders as
+    /// a PostgreSQL `CREATE TABLE`, which is the failure `dbddl::for_dialect`
+    /// exists to refuse and cannot see coming from one level up.
+    dialect: Option<&'static Dialect>,
 }
 
 pub struct DbQuery {
@@ -98,11 +107,13 @@ pub unsafe extern "C" fn db_connect(
     match runtime().block_on(registry::connect(s)) {
         Ok(driver) => {
             let driver: Arc<dyn Driver> = Arc::from(driver);
-            let names = Names::new(driver.clone(), dbsql::for_scheme(registry::scheme_of(s)));
+            let scheme = registry::scheme_of(s);
+            let names = Names::new(driver.clone(), dbsql::for_scheme(scheme));
             Box::into_raw(Box::new(DbHandle {
                 driver,
                 names,
                 session: Session::new(),
+                dialect: dbsql::of_scheme(scheme),
             }))
         }
         Err(e) => {
@@ -653,9 +664,14 @@ pub unsafe extern "C" fn db_ddl_text(
         }
     };
     let written = runtime().block_on(async {
+        let Some(dialect) = h.dialect else {
+            return Err(dbconn::DbError::new(
+                "this build does not write DDL for this database",
+            ));
+        };
         let listed = h.driver.relations(s).await?;
         match listed.into_iter().find(|info| info.name == r) {
-            Some(info) => dbddl::definition(h.driver.as_ref(), h.names.dialect(), &info).await,
+            Some(info) => dbddl::definition(h.driver.as_ref(), dialect, &info).await,
             None => Err(dbconn::DbError::new(format!("{s}.{r} is not there"))),
         }
     });
@@ -722,11 +738,19 @@ pub unsafe extern "C" fn db_edit_sql_json(
             return ptr::null_mut();
         }
     };
-    match runtime().block_on(dbedit::statements(
-        h.driver.as_ref(),
-        h.names.dialect(),
-        &requested,
-    )) {
+    // The connection's own dialect and not the editor's guess, for the reason
+    // `DbHandle::dialect` gives: an UPDATE written in PostgreSQL's quoting for a
+    // database that is not PostgreSQL is a statement somebody's data goes into.
+    let Some(dialect) = h.dialect else {
+        unsafe {
+            set_err(
+                err,
+                "this build does not write statements for this database",
+            )
+        };
+        return ptr::null_mut();
+    };
+    match runtime().block_on(dbedit::statements(h.driver.as_ref(), dialect, &requested)) {
         Ok(statements) => json_result(&statements, err),
         Err(e) => {
             unsafe { set_err(err, e) };

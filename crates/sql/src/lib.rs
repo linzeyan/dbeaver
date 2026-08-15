@@ -19,7 +19,7 @@ mod script;
 pub use complete::{Completion, Expect, complete};
 pub use dialect::{
     ALL, CLICKHOUSE, DUCKDB, Dialect, DoubleQuote, MSSQL, MYSQL, POSTGRES, Parameter, SQLITE,
-    for_scheme,
+    for_scheme, of_scheme,
 };
 pub use lex::{Token, TokenKind, tokens};
 pub use parse::{Scope, Source, Statement, statement};
