@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{FlightSqlError, FlightSqlSource, Rows, RowsCancel};
@@ -78,6 +78,13 @@ impl Driver for FlightSqlSource {
 
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(FlightSqlSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always: Flight SQL has a command for the primary key and none for
+    /// a unique constraint, so a server that enforces one cannot say so. See
+    /// `metadata.rs`.
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(FlightSqlSource::unique_keys(self, schema, relation).await?)
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

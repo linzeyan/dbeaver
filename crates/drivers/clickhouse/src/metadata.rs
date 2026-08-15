@@ -37,7 +37,7 @@
 use clickhouse::{Client, Row};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
-    SchemaInfo, TriggerInfo,
+    SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use serde::Deserialize;
 
@@ -278,6 +278,23 @@ impl ChSource {
             return Ok(None);
         }
         Ok(some_unless_empty(row.as_select).or_else(|| some_unless_empty(row.create_table_query)))
+    }
+
+    /// Empty, always, and without asking.
+    ///
+    /// ClickHouse has no unique constraint. Its `CONSTRAINT … CHECK` is an
+    /// assertion run per inserted row and nothing enforces uniqueness across a
+    /// table — even `ReplacingMergeTree` only promises to collapse duplicates
+    /// eventually, which is a different claim and not one a `WHERE` clause can
+    /// rely on. The primary key here is a sorting key that permits duplicates,
+    /// which is why `is_primary_key` on a ClickHouse column does not make a row
+    /// editable either.
+    pub async fn unique_keys(
+        &self,
+        _schema: &str,
+        _relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, ChError> {
+        Ok(Vec::new())
     }
 
     /// Data skipping indexes. Not the sorting key — see `Storage::sorting_key`

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{Rows, RowsCancel, TrinoError, TrinoSource, parts};
@@ -83,6 +83,12 @@ impl Driver for TrinoSource {
     /// `metadata.rs`, where the grammar is quoted refusing `CREATE INDEX`.
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(TrinoSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always, and without a statement: Trino enforces no constraint of
+    /// any kind, so nothing here names a row. See `metadata.rs`.
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(TrinoSource::unique_keys(self, schema, relation).await?)
     }
 
     /// Empty, always, and without a statement: Trino declares no foreign keys,

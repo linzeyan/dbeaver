@@ -48,9 +48,9 @@ use dbffi::{
     db_ddl_text, db_definition_json, db_edit_sql_json, db_foreign_keys_json, db_free,
     db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
     db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free, db_triggers_json,
-    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
-    db_tx_savepoint, db_tx_state_json,
+    db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free,
+    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
+    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -1767,5 +1767,197 @@ fn a_changed_cell_becomes_a_statement_the_server_accepts() {
     assert!(why.contains("no primary key"), "got {why}");
 
     ran(handle, "DROP TABLE ffi_edit");
+    unsafe { db_free(handle) };
+}
+
+/// What the identity call answers, insisting it answered.
+fn row_identity(handle: *mut dbffi::DbHandle, schema: &str, relation: &str) -> String {
+    let (schema, relation) = (
+        CString::new(schema).unwrap(),
+        CString::new(relation).unwrap(),
+    );
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_row_identity_json(handle, schema.as_ptr(), relation.as_ptr(), &mut err) };
+    if raw.is_null() {
+        let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(err) };
+        panic!("db_row_identity_json failed: {why}");
+    }
+    assert!(err.is_null(), "db_row_identity_json set err on success");
+    let json = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+    json
+}
+
+#[test]
+fn the_identity_call_says_why_it_could_not_read_its_arguments() {
+    let name = CString::new("public").unwrap();
+    for (handle, schema, relation) in [
+        (ptr::null_mut(), name.as_ptr(), name.as_ptr()),
+        (ptr::null_mut(), ptr::null(), name.as_ptr()),
+        (ptr::null_mut(), name.as_ptr(), ptr::null()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_row_identity_json(handle, schema, relation, &mut err) };
+        assert!(raw.is_null());
+        assert!(
+            !err.is_null(),
+            "db_row_identity_json must say why it failed"
+        );
+        unsafe { db_string_free(err) };
+    }
+}
+
+/// A table with no primary key is editable through a NOT NULL unique key, and
+/// the `UPDATE` names that key.
+///
+/// The decision this exists for. Upstream identifies a row this way too, and the
+/// range it opens up is real: a join table keyed by a unique pair, an import
+/// table with a natural key, anything somebody built without a surrogate id.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_not_null_unique_key_makes_a_table_editable() {
+    let handle = connected();
+    ran(handle, "DROP TABLE IF EXISTS ffi_unique");
+    ran(
+        handle,
+        "CREATE TABLE ffi_unique (
+             email text NOT NULL CONSTRAINT ffi_unique_email UNIQUE,
+             label text)",
+    );
+    ran(
+        handle,
+        "INSERT INTO ffi_unique VALUES ('a@example.com', 'first')",
+    );
+
+    assert_eq!(
+        row_identity(handle, "public", "ffi_unique"),
+        r#"{"columns":["email"],"obstacle":null}"#
+    );
+
+    let json = edit_sql(
+        handle,
+        r#"{"schema":"public","relation":"ffi_unique","updates":[
+            {"key":[{"column":"email","value":"a@example.com"}],
+             "set":[{"column":"label","value":"changed"}]}]}"#,
+    );
+    let statements: Vec<String> = serde_json::from_str(&json).expect("statements should decode");
+    assert_eq!(
+        statements,
+        ["UPDATE public.ffi_unique SET label = 'changed' WHERE email = 'a@example.com'"],
+        "{json}"
+    );
+    // Run rather than read: the point of this harness is that the text is a
+    // statement the server accepts, and that it reaches one row.
+    ran(handle, &statements[0]);
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT email FROM ffi_unique WHERE label = 'changed'"
+        ),
+        1
+    );
+
+    ran(handle, "DROP TABLE ffi_unique");
+    unsafe { db_free(handle) };
+}
+
+/// A unique constraint over a column that can be null is refused, by name.
+///
+/// The server is what makes this worth checking here rather than against a fake:
+/// the two rows below both satisfy `ffi_nullable_email`, because `NULL != NULL`
+/// in a unique index as everywhere else. A client that took this key would write
+/// `WHERE email IS NULL`-shaped nonsense — or, having no NULL literal in an
+/// equality, `WHERE email = NULL`, which matches neither of them.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_nullable_unique_key_is_refused_and_the_reason_names_it() {
+    let handle = connected();
+    ran(handle, "DROP TABLE IF EXISTS ffi_nullable");
+    ran(
+        handle,
+        "CREATE TABLE ffi_nullable (
+             email text CONSTRAINT ffi_nullable_email UNIQUE,
+             label text)",
+    );
+    ran(handle, "INSERT INTO ffi_nullable VALUES (NULL, 'first')");
+    ran(handle, "INSERT INTO ffi_nullable VALUES (NULL, 'second')");
+    assert_eq!(
+        ran(handle, "SELECT label FROM ffi_nullable WHERE email IS NULL"),
+        2,
+        "the constraint admits two rows with no value, which is why it is not a key"
+    );
+
+    let identity = row_identity(handle, "public", "ffi_nullable");
+    assert!(identity.contains(r#""columns":[]"#), "{identity}");
+    assert!(identity.contains("ffi_nullable_email"), "{identity}");
+    assert!(identity.contains("can be null"), "{identity}");
+
+    let refused = CString::new(
+        r#"{"schema":"public","relation":"ffi_nullable","deletes":[
+            {"key":[{"column":"email","value":"a@example.com"}]}]}"#,
+    )
+    .unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    assert!(unsafe { db_edit_sql_json(handle, refused.as_ptr(), &mut err) }.is_null());
+    let why = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(err) };
+    assert!(why.contains("ffi_nullable_email"), "got {why}");
+
+    ran(handle, "DROP TABLE ffi_nullable");
+    unsafe { db_free(handle) };
+}
+
+/// Several candidates, and the choice is the same one every time.
+///
+/// Two of the four constraints below are usable, and neither is the one the
+/// catalog lists first. `ffi_several_code` wins on width over the two-column key
+/// and on name over `ffi_several_ref`; the nullable one is out whatever its
+/// width. Asked repeatedly and on a fresh connection, because an identity that
+/// changed between two runs against one schema would be an identity nobody could
+/// reason about — and the failure would look like an edit that hit the wrong row
+/// rather than like a bug in a sort.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn one_of_several_unique_keys_is_chosen_and_the_choice_does_not_move() {
+    let handle = connected();
+    ran(handle, "DROP TABLE IF EXISTS ffi_several");
+    ran(
+        handle,
+        "CREATE TABLE ffi_several (
+             tenant text NOT NULL,
+             member text NOT NULL,
+             code   text NOT NULL CONSTRAINT ffi_several_code UNIQUE,
+             ref    text NOT NULL CONSTRAINT ffi_several_ref UNIQUE,
+             email  text          CONSTRAINT ffi_several_email UNIQUE,
+             CONSTRAINT ffi_several_pair UNIQUE (tenant, member))",
+    );
+
+    for _ in 0..3 {
+        assert_eq!(
+            row_identity(handle, "public", "ffi_several"),
+            r#"{"columns":["code"],"obstacle":null}"#
+        );
+    }
+    let second = connected();
+    assert_eq!(
+        row_identity(second, "public", "ffi_several"),
+        r#"{"columns":["code"],"obstacle":null}"#
+    );
+    unsafe { db_free(second) };
+
+    let json = edit_sql(
+        handle,
+        r#"{"schema":"public","relation":"ffi_several","deletes":[
+            {"key":[{"column":"code","value":"x"}]}]}"#,
+    );
+    let statements: Vec<String> = serde_json::from_str(&json).expect("statements should decode");
+    assert_eq!(
+        statements,
+        ["DELETE FROM public.ffi_several WHERE code = 'x'"],
+        "{json}"
+    );
+
+    ran(handle, "DROP TABLE ffi_several");
     unsafe { db_free(handle) };
 }

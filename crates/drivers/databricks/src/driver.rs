@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{DatabricksError, DatabricksSource, Rows, RowsCancel, parts};
@@ -103,6 +103,17 @@ impl Driver for DatabricksSource {
     /// `metadata.rs`.
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(DatabricksSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always, and for Snowflake's reason rather than Trino's: Unity
+    /// Catalog has the constraint and does not enforce it.
+    ///
+    /// A primary or unique key there is declared `NOT ENFORCED` — the engine
+    /// takes it as a promise it may optimise against, not as something it checks
+    /// on write. Two rows can satisfy it, and an UPDATE that named a row by one
+    /// would change both of them.
+    async fn unique_keys(&self, _schema: &str, _relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(Vec::new())
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

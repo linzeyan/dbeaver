@@ -37,7 +37,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
-    SchemaInfo, TriggerInfo,
+    SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use scylla::response::query_result::QueryRowsResult;
 use scylla::serialize::row::SerializeRow;
@@ -244,6 +244,21 @@ impl CassandraSource {
     /// for; and the primary key is how the data is partitioned rather than an
     /// index over it, so there is no object here to call primary. Reporting
     /// otherwise would tell a reader the planner can do a lookup it cannot.
+    /// Empty, always, and without asking.
+    ///
+    /// CQL has one uniqueness constraint and it is the primary key, which
+    /// `columns` reports already. A secondary index does not make its column
+    /// unique — see `indexes`, where several rows sharing a value is the case it
+    /// exists for — and there is no `UNIQUE` in the `CREATE TABLE` grammar to
+    /// declare one with.
+    pub async fn unique_keys(
+        &self,
+        _schema: &str,
+        _relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, CassandraError> {
+        Ok(Vec::new())
+    }
+
     pub async fn indexes(
         &self,
         schema: &str,

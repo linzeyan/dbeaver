@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{CassandraError, CassandraSource, Rows, RowsCancel};
@@ -90,6 +90,12 @@ impl Driver for CassandraSource {
 
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(CassandraSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always: CQL's only uniqueness is the primary key, and a secondary
+    /// index does not make its column unique. See `metadata.rs`.
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(CassandraSource::unique_keys(self, schema, relation).await?)
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

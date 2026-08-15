@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, RedisError, RedisSource};
@@ -58,6 +58,12 @@ impl Driver for RedisSource {
 
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(RedisSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always: the key is the only unique thing a Redis relation has, and
+    /// `columns` already reports it as the primary key. See `metadata.rs`.
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(RedisSource::unique_keys(self, schema, relation).await?)
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

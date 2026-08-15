@@ -214,6 +214,7 @@ fn statements() -> Vec<String> {
            KEY bench_child_email_prefix (email(16)),
            KEY bench_child_qty_desc (qty DESC),
            KEY bench_child_email_lower ((LOWER(email))),
+           UNIQUE KEY bench_child_sku_fn ((UPPER(sku))),
            FULLTEXT KEY bench_child_note_ft (note),
            CONSTRAINT bench_child_qty_positive CHECK (qty > 0),
            CONSTRAINT bench_child_line_sane   CHECK (line_no < 1000) NOT ENFORCED,
@@ -881,6 +882,51 @@ async fn an_index_says_what_the_planner_can_actually_use() {
         .expect("indexes");
     assert_eq!(plain.len(), 1);
     assert!(plain[0].is_primary);
+}
+
+/// Unique keys are reported as columns, and only the ones that are over columns.
+///
+/// MySQL has no unique constraint apart from the unique index, so this is the
+/// same `STATISTICS` rows `indexes` reads, cut down to what can go in a `WHERE`
+/// clause: `bench_child_sku_fn` is unique over `UPPER(sku)` and is left out
+/// because no equality on a column reproduces it, and `PRIMARY` is left out
+/// because `ColumnInfo::is_primary_key` already carries it.
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn unique_keys_are_the_ones_stated_as_columns() {
+    let source = source().await;
+    let keys = source
+        .unique_keys("bench", "bench_child")
+        .await
+        .expect("unique keys");
+
+    let named: Vec<(&str, &[String])> = keys
+        .iter()
+        .map(|k| (k.name.as_str(), k.columns.as_slice()))
+        .collect();
+    assert_eq!(
+        named,
+        [("bench_child_sku_key", ["sku"].map(String::from).as_slice())],
+        "got {named:?}"
+    );
+
+    // A table with a primary key and nothing else has none of these, and one
+    // with no key at all has none either — both are answers rather than
+    // failures.
+    assert!(
+        source
+            .unique_keys("bench2", "daily_totals")
+            .await
+            .expect("unique keys")
+            .is_empty()
+    );
+    assert!(
+        source
+            .unique_keys("bench", "no_key")
+            .await
+            .expect("unique keys")
+            .is_empty()
+    );
 }
 
 #[tokio::test]

@@ -47,7 +47,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep,
+    TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use metadata::Capabilities;
@@ -531,6 +531,17 @@ impl MySqlSource {
     ) -> Result<Vec<IndexInfo>, MySqlError> {
         let mut spare = self.acquire().await?;
         let out = metadata::indexes(&mut spare.conn, schema, relation, &self.caps).await;
+        self.release(spare, &out);
+        out
+    }
+
+    pub async fn unique_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, MySqlError> {
+        let mut spare = self.acquire().await?;
+        let out = metadata::unique_keys(&mut spare.conn, schema, relation, &self.caps).await;
         self.release(spare, &out);
         out
     }

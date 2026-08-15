@@ -854,6 +854,61 @@ pub unsafe extern "C" fn db_edit_sql_json(
     }
 }
 
+/// What names one row of a relation, as JSON. Release with `db_string_free`.
+///
+/// ```json
+/// {"columns": ["id"], "obstacle": null}
+/// {"columns": [], "obstacle": "app.audit has no primary key or unique key, …"}
+/// ```
+///
+/// The primary key where there is one, otherwise the narrowest `UNIQUE`
+/// constraint whose columns are all NOT NULL. A front end asks rather than works
+/// it out, for the reason `db_browse_statement` exists: the last thing this side
+/// had that both ends computed separately was the browse statement, and the two
+/// answers differed on every database but the one they were written against.
+///
+/// An empty `columns` is not a failure and does not set `err`. It is the ordinary
+/// answer for a table nothing can name a row of, and `obstacle` is the sentence
+/// to put on screen — naming the table, and naming the constraint that had to be
+/// turned down where there was one. `err` is set only when the catalog could not
+/// be read at all.
+///
+/// # Safety
+/// `handle` must be live; `schema` and `relation` must be valid NUL-terminated C
+/// strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_row_identity_json(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() {
+        unsafe { set_err(err, "null handle, schema, or relation") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let (s, r) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+        ) {
+            (Ok(s), Ok(r)) => (s, r),
+            _ => {
+                set_err(err, "schema or relation is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    match runtime().block_on(dbedit::identity(h.driver.as_ref(), s, r)) {
+        Ok(identity) => json_result(&identity, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Transactions
 // ---------------------------------------------------------------------------

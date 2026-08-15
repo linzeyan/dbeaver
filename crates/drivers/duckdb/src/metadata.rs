@@ -44,7 +44,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo,
+    RelationshipInfo, SchemaInfo, UniqueKeyInfo,
 };
 use duckdb::Connection;
 use duckdb::types::Value;
@@ -226,6 +226,45 @@ pub(crate) fn indexes(
             // partial indexes is not supported currently" — so there is no
             // predicate to have, rather than one this driver cannot find.
             predicate: None,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// UNIQUE constraints that name columns, primary key excluded.
+///
+/// `duckdb_constraints()` for the reason `columns` reads the key from there:
+/// DuckDB maintains a UNIQUE constraint with an index but keeps what it is over
+/// in the constraint list, and `duckdb_indexes()` shows the index without the
+/// columns. It is also the reason nothing has to be filtered out here — DuckDB
+/// refuses a partial index outright, and a UNIQUE constraint is over columns by
+/// construction, so the two cases `UniqueKeyInfo` warns about cannot arise.
+///
+/// The cost of reading only this list is that a `CREATE UNIQUE INDEX` is not
+/// here: DuckDB records it as an index and never as a constraint, and the index
+/// list gives its keys as rendered expressions rather than as column names. A
+/// table whose only uniqueness was created that way is therefore not editable,
+/// which is the same answer this gives to any key it cannot state as columns —
+/// and a smaller price than picking names out of `['(lower(c))', id]`.
+///
+/// One row per constraint with the columns already in declaration order, so
+/// there is no grouping pass.
+pub(crate) fn unique_keys(
+    conn: &Connection,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<UniqueKeyInfo>, DuckError> {
+    let mut stmt = conn.prepare(
+        "SELECT constraint_name, CAST(constraint_column_names AS VARCHAR[]) \
+         FROM duckdb_constraints() \
+         WHERE database_name || '.' || schema_name = ? AND table_name = ? \
+           AND constraint_type = 'UNIQUE' \
+         ORDER BY constraint_name, constraint_index",
+    )?;
+    let rows = stmt.query_map([schema, relation], |row| {
+        Ok(UniqueKeyInfo {
+            name: row.get(0)?,
+            columns: strings(row.get(1)?),
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

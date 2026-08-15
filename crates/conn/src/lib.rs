@@ -48,7 +48,7 @@ mod metadata;
 
 pub use metadata::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
+    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 
 use arrow::array::RecordBatch;
@@ -150,6 +150,20 @@ pub trait Driver: Send + Sync {
     async fn definition(&self, schema: &str, relation: &str) -> DbResult<Option<String>>;
 
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>>;
+
+    /// UNIQUE constraints this relation declares, other than its primary key.
+    ///
+    /// The list a row can be identified by when there is no primary key, which
+    /// is the only thing it is for — so a driver reports a constraint here only
+    /// if it can name the columns the way `columns` names them, and omits the
+    /// ones it cannot state that way. `UniqueKeyInfo` says which those are and
+    /// why leaving them out is the safe direction.
+    ///
+    /// No default, for the reason `transactional` has none: empty means two
+    /// different things — a database with no unique constraints of its own, and
+    /// a catalog this driver cannot read them out of — and both deserve a
+    /// sentence where the driver is, rather than silence inherited from here.
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>>;
 
     /// Foreign keys this relation declares.
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>>;

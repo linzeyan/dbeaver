@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{BigQueryError, BigQuerySource, Rows, RowsCancel};
@@ -96,6 +96,14 @@ impl Driver for BigQuerySource {
     /// this field describes. See `metadata.rs`.
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(BigQuerySource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always, and without a request. BigQuery's primary and foreign keys
+    /// are declared `NOT ENFORCED` and there is no unique constraint at all, so
+    /// there is nothing here a row could be named by that the warehouse promises
+    /// is unique.
+    async fn unique_keys(&self, _schema: &str, _relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(Vec::new())
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

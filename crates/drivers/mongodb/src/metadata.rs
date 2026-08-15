@@ -14,7 +14,7 @@
 use bson::{Bson, Document, doc};
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
+    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use mongodb::Cursor as MongoCursor;
 
@@ -150,6 +150,27 @@ impl MongoSource {
             None => "[]".to_string(),
         };
         Ok(Some(format!("on {on}\n{rendered}")))
+    }
+
+    /// Empty, always, and without asking — although MongoDB has unique indexes
+    /// and `indexes` reports them.
+    ///
+    /// What it cannot report is the other half of the rule. A unique key names
+    /// one row only if its fields cannot be null, and a collection does not
+    /// declare its fields: `columns` samples documents and infers them, so
+    /// "nullable" here is a description of the documents that happened to be
+    /// read rather than a promise about the ones that have not been. A unique
+    /// index in MongoDB also allows one document missing the field entirely, so
+    /// two of them can differ in nothing this could put in a filter.
+    ///
+    /// Returning the indexes anyway would move that guess into the one place the
+    /// rule is decided, which is where it would stop being visible.
+    pub async fn unique_keys(
+        &self,
+        _schema: &str,
+        _relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, MongoError> {
+        Ok(Vec::new())
     }
 
     pub async fn indexes(

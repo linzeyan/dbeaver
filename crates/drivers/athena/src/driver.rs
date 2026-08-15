@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{AthenaError, AthenaSource, Rows, RowsCancel};
@@ -85,6 +85,13 @@ impl Driver for AthenaSource {
     /// Empty, always, and without a request: a Hive table has no index.
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(AthenaSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always, and without a request: a Hive table is a set of files
+    /// under a prefix, and nothing declares — let alone enforces — that a column
+    /// of it holds a value once.
+    async fn unique_keys(&self, _schema: &str, _relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(Vec::new())
     }
 
     /// Empty, always, and without a request: Hive declares no foreign keys,

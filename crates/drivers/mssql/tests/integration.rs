@@ -1151,6 +1151,85 @@ async fn reports_indexes_by_the_keys_they_can_be_seeked_on() {
     assert_eq!(lines[0].columns, vec!["order_id", "line_no"]);
 }
 
+/// Unique keys are reported as the columns the server keeps unique — not the
+/// payload beside them, and not the ones it keeps unique only sometimes.
+///
+/// SQL Server is where the two lists differ most, so the shapes that differ get
+/// a table of their own rather than a place in the shared fixture: `ux_probe_ref`
+/// is unique over `ref` and carries `payload` as an `INCLUDE`, which the server
+/// stores in the index without enforcing anything about — putting it in the key
+/// would add a condition to every `WHERE` that has no business being there. And
+/// `ux_probe_code` is unique over the rows its filter admits and silent about
+/// the rest, so two rows with no code can both exist and neither is named by
+/// `code = …`.
+///
+/// Created and dropped here because the fixture above is built once and skipped
+/// whenever the database already has it, so a shape added to it would not reach
+/// a server that has been up since before this check existed.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn reports_unique_keys_without_their_payload_or_their_filter() {
+    let driver = source().await;
+    let mut db = raw("dbeaver_test").await;
+    // The session settings a filtered index refuses to be created without, as
+    // the fixture sets them for the same reason.
+    run(&mut db, "SET QUOTED_IDENTIFIER ON; SET ANSI_NULLS ON;").await;
+    run(&mut db, "DROP TABLE IF EXISTS sales.unique_probe").await;
+    run(
+        &mut db,
+        "CREATE TABLE sales.unique_probe (
+             id      int          NOT NULL CONSTRAINT pk_probe PRIMARY KEY,
+             ext     int          NOT NULL CONSTRAINT uq_probe_ext UNIQUE,
+             [ref]   nvarchar(40) NOT NULL,
+             code    nvarchar(40)     NULL,
+             payload nvarchar(40)     NULL)",
+    )
+    .await;
+    run(
+        &mut db,
+        "CREATE UNIQUE INDEX ux_probe_ref ON sales.unique_probe ([ref]) INCLUDE (payload)",
+    )
+    .await;
+    run(
+        &mut db,
+        "CREATE UNIQUE INDEX ux_probe_code ON sales.unique_probe (code) WHERE code IS NOT NULL",
+    )
+    .await;
+
+    let keys = driver.unique_keys("sales", "unique_probe").await.unwrap();
+    let named: Vec<(&str, &[String])> = keys
+        .iter()
+        .map(|k| (k.name.as_str(), k.columns.as_slice()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            ("uq_probe_ext", ["ext"].map(String::from).as_slice()),
+            ("ux_probe_ref", ["ref"].map(String::from).as_slice()),
+        ],
+        "got {named:?}"
+    );
+
+    // The primary key is `ColumnInfo::is_primary_key`'s to report; a heap with
+    // no key of any kind answers with an empty list rather than failing.
+    assert!(
+        driver
+            .unique_keys("sales", "order_line")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        driver
+            .unique_keys("sales", "event_log")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    run(&mut db, "DROP TABLE sales.unique_probe").await;
+}
+
 #[tokio::test]
 #[ignore = "requires a SQL Server"]
 async fn reports_a_foreign_key_from_both_ends() {

@@ -731,6 +731,38 @@ async fn an_index_sqlite_made_for_itself_still_reports_its_columns() {
     assert!(primary.is_unique);
 }
 
+/// A unique constraint is reported as the columns it is over, and only where it
+/// is over columns at all.
+///
+/// The same catalog `indexes` reads, filtered by what a key has to be able to
+/// do: name one row through `WHERE column = value`. `authors_email` cannot —
+/// it is over `lower(email)`, which is not a column, and it covers only the rows
+/// its `WHERE` admits, so two rows outside it may share an email. Both are
+/// ordinary indexes and neither is a key.
+#[tokio::test]
+async fn a_unique_constraint_is_reported_as_the_columns_it_is_over() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+
+    assert!(
+        src.unique_keys("main", "authors").await.unwrap().is_empty(),
+        "an expression index over some of the rows is not a key"
+    );
+
+    let keys = src.unique_keys("main", "books").await.unwrap();
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!(keys[0].columns, ["title"]);
+    // SQLite names the index it made for the constraint `sqlite_autoindex_…`,
+    // and that is the only name there is: a refusal has to be able to say which
+    // constraint it turned down, and whatever the database calls it is what the
+    // reader will find in the schema.
+    assert!(!keys[0].name.is_empty());
+    // The composite primary key is an index here too, and it is deliberately
+    // absent: `ColumnInfo::is_primary_key` reports it, and one question with two
+    // answers is one question too many.
+    assert!(!keys.iter().any(|k| k.columns == ["isbn", "region"]));
+}
+
 #[tokio::test]
 async fn a_foreign_key_reports_both_sides_and_what_happens_on_delete() {
     let fixture = Fixture::new(CATALOG);

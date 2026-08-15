@@ -16,7 +16,7 @@ use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_clickhouse::ChSource;
 use std::sync::{Arc, Mutex};
@@ -113,6 +113,10 @@ impl Driver for Fixture {
 
     async fn indexes(&self, _: &str, _: &str) -> DbResult<Vec<IndexInfo>> {
         unreachable!("an index is inside the statement the server writes")
+    }
+
+    async fn unique_keys(&self, _: &str, _: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        unreachable!("ClickHouse has no unique constraint to render")
     }
 
     async fn foreign_keys(&self, _: &str, _: &str) -> DbResult<Vec<RelationshipInfo>> {

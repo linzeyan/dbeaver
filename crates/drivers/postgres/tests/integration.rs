@@ -945,6 +945,53 @@ async fn indexes_keep_key_order_and_describe_what_they_cover() {
     assert_eq!(unique.method, "btree");
 }
 
+/// Unique keys are reported as columns, and only the ones that can name a row.
+///
+/// `bench_child` carries every case at once, which is why the check is here
+/// rather than against a table built for it. Both spellings of a unique key are
+/// reported — the declared `CONSTRAINT … UNIQUE` and the `CREATE UNIQUE INDEX`,
+/// which PostgreSQL records only as an index and which names a row just as well.
+/// The primary key is not, because `ColumnInfo::is_primary_key` reports it. Nor
+/// is the partial index, which is unique over the rows its `WHERE` admits and
+/// silent about the rest, or the one over `lower(email)`, whose key is not a
+/// column any `WHERE column = value` could name.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn unique_keys_are_the_ones_that_can_name_a_row_stated_as_columns() {
+    let src = connect().await;
+    let keys = src
+        .unique_keys("public", "bench_child")
+        .await
+        .expect("unique keys failed");
+
+    let named: Vec<(&str, &[String])> = keys
+        .iter()
+        .map(|k| (k.name.as_str(), k.columns.as_slice()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (
+                "bench_child_order_line_uniq",
+                ["order_id", "line_no", "sku"].map(String::from).as_slice()
+            ),
+            ("bench_child_sku_key", ["sku"].map(String::from).as_slice()),
+        ],
+        "got {named:?}"
+    );
+
+    // A table whose only unique index is over an expression has none of these,
+    // which is the honest answer rather than a key nothing can be matched on.
+    let wide = src
+        .unique_keys("public", "bench_wide")
+        .await
+        .expect("unique keys failed");
+    assert!(
+        !wide.iter().any(|k| k.columns == ["id"]),
+        "the primary key belongs to the column list: {wide:?}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
 async fn foreign_keys_carry_their_target_and_action() {

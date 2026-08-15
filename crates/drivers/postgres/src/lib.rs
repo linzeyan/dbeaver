@@ -13,7 +13,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep,
+    TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use std::ops::{Deref, DerefMut};
@@ -351,6 +351,16 @@ impl PgSource {
         let result = metadata::indexes(&conn, schema, relation).await;
         // Connection is automatically returned to pool when conn goes out of scope
         result
+    }
+
+    /// UNIQUE constraints on one relation, primary key excluded.
+    pub async fn unique_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, PgError> {
+        let conn = self.acquire_connection().await?;
+        metadata::unique_keys(&conn, schema, relation).await
     }
 
     /// Foreign keys declared by one relation.

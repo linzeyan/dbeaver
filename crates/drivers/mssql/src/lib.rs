@@ -53,7 +53,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnLayout, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep,
+    TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
@@ -818,6 +818,16 @@ impl MsSqlSource {
     ) -> Result<Vec<IndexInfo>, MsSqlError> {
         let mut conn = self.acquire().await?;
         metadata::indexes(&mut conn, schema, relation).await
+    }
+
+    /// UNIQUE constraints on one relation, primary key excluded.
+    pub async fn unique_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, MsSqlError> {
+        let mut conn = self.acquire().await?;
+        metadata::unique_keys(&mut conn, schema, relation).await
     }
 
     /// Foreign keys this relation declares.

@@ -117,6 +117,42 @@ pub struct IndexInfo {
     pub predicate: Option<String>,
 }
 
+/// One UNIQUE constraint, in the form that can name a row.
+///
+/// Separate from [`IndexInfo`] although every database here backs a UNIQUE
+/// constraint with a unique index, and the difference is the whole reason this
+/// type exists. `IndexInfo::columns` holds key *expressions* — `lower(email)`,
+/// `id DESC`, a prefix — because a structure pane states what the planner can
+/// use. Deciding which row an `UPDATE` names is a different question: the
+/// columns have to be looked up in [`ColumnInfo`] to find out whether they can
+/// be null, and a name that does not match one is not a key, it is a string that
+/// happened to look like a name.
+///
+/// So a driver reports here only what it can state as columns, and leaves out
+/// what it cannot:
+///
+/// * a key over an expression, which no `WHERE column = value` can reproduce;
+/// * a partial or filtered one, which is unique over some rows rather than over
+///   the table, so two rows outside the predicate can share its values.
+///
+/// Leaving them out is what makes the omission safe: the caller sees a relation
+/// with fewer keys, which costs an edit somebody has to make in SQL, where
+/// including them would name a row that is not the row on screen.
+///
+/// The primary key is not here. Every driver already reports it on
+/// `ColumnInfo::is_primary_key`, and a second answer to the same question is one
+/// that can disagree with the first.
+#[derive(Debug, Clone, Serialize)]
+pub struct UniqueKeyInfo {
+    /// The constraint's own name, which is what a refusal has to say out loud:
+    /// "this table cannot be edited" is not actionable, "uq_orders_email is over
+    /// a column that can be null" is.
+    pub name: String,
+    /// The columns it is over, in key order, spelled exactly as
+    /// `ColumnInfo::name` spells them.
+    pub columns: Vec<String>,
+}
+
 /// One foreign key, seen from whichever relation was asked about.
 ///
 /// The same constraint is a table's own key when looked at from the referencing

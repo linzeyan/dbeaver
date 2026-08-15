@@ -89,6 +89,23 @@ enum MetadataChecks {
              "is_primary_key":false,"default_value":null}
             """)
         expect(column?.defaultValue, nil, "a column with no default")
+
+        // Both halves of the identity, because the two are what the editing
+        // controls read and each is null in the other's case.
+        let named: RowIdentity? = decode(#"{"columns":["id"],"obstacle":null}"#)
+        expect(named?.columns, ["id"], "a table a row can be named in")
+        expect(named?.obstacle, nil, "and nothing to explain")
+
+        let refused: RowIdentity? = decode(
+            """
+            {"columns":[],"obstacle":"bench.audit has no primary key, and the unique key \
+            audit_email_key is over email, which can be null, so there is no way to name \
+            one row of it"}
+            """)
+        expect(refused?.columns, [], "a table nothing names a row of")
+        expect(
+            refused?.obstacle?.contains("audit_email_key"), true,
+            "and the sentence names the constraint that was turned down")
     }
 
     /// A field the core renames stops the decode instead of arriving as a

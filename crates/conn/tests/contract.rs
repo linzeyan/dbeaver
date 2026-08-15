@@ -82,6 +82,15 @@ struct Subject {
     /// here until somebody gives it a fixture, instead of silently testing
     /// nothing.
     scratch: Option<Scratch>,
+    /// A table with a UNIQUE constraint, for the check that a driver states one
+    /// in columns.
+    ///
+    /// About the fixture rather than about the database. It is left out where
+    /// there is nothing to declare — ClickHouse, Cassandra, Redis and Trino have
+    /// no unique constraint at all — and where the subject is another database
+    /// reached through a driver whose own subject already declares one, since
+    /// the code being checked is the same code.
+    unique: Option<Unique>,
     /// Kept alive for the length of the test, and unused otherwise.
     _fixture: Option<TempDir>,
 }
@@ -142,6 +151,49 @@ impl Scratch {
     }
 }
 
+/// A table with a UNIQUE constraint, created and dropped by the key check.
+///
+/// Its own fixture rather than the subject's `relation`, because a table that
+/// exists to be read cannot also declare the constraint under test without every
+/// other check inheriting it.
+struct Unique {
+    /// Run before the create as well as after it: a run that failed part way
+    /// through leaves the table behind, and that is the ordinary state here.
+    drop: String,
+    create: String,
+    /// The name to ask the driver about, which is the created table's own — the
+    /// statements above use it unqualified and land in the schema the subject
+    /// names.
+    relation: String,
+    /// The columns the constraint is over, as the driver has to report them.
+    columns: Vec<String>,
+}
+
+impl Unique {
+    /// The fixture in ordinary SQL, for the subjects that speak it.
+    ///
+    /// `text` is the one word they do not share: MySQL will not index a `TEXT`
+    /// column without a length, and SQL Server spells a string differently
+    /// again. The type comes from the subject and the shape from here.
+    ///
+    /// A primary key as well as the unique constraint, so the check can also see
+    /// that the two are told apart — `unique_keys` is documented as leaving the
+    /// primary key to `ColumnInfo::is_primary_key`, and a driver that reported
+    /// both would make the front end choose between two answers to one question.
+    fn sql(text: &str) -> Self {
+        let relation = "contract_unique";
+        Self {
+            drop: format!("DROP TABLE IF EXISTS {relation}"),
+            create: format!(
+                "CREATE TABLE {relation} \
+                 (id int NOT NULL PRIMARY KEY, email {text} NOT NULL UNIQUE)"
+            ),
+            relation: relation.to_string(),
+            columns: vec!["email".to_string()],
+        }
+    }
+}
+
 async fn sqlite() -> Subject {
     let dir = tempfile::tempdir().expect("no temporary directory");
     let path: PathBuf = dir.path().join("contract.db");
@@ -169,6 +221,7 @@ async fn sqlite() -> Subject {
         cursors: true,
         positions: true,
         scratch: Some(Scratch::sql("contract_tx")),
+        unique: Some(Unique::sql("TEXT")),
         _fixture: Some(dir),
     }
 }
@@ -210,6 +263,7 @@ async fn duckdb() -> Subject {
         // the check above insists the driver says so rather than passing over
         // them.
         scratch: Some(Scratch::sql("contract_tx").without_savepoints()),
+        unique: Some(Unique::sql("VARCHAR")),
         _fixture: None,
     }
 }
@@ -230,6 +284,7 @@ async fn postgres() -> Subject {
         cursors: true,
         positions: true,
         scratch: Some(Scratch::sql("contract_tx")),
+        unique: Some(Unique::sql("text")),
         _fixture: None,
     }
 }
@@ -261,6 +316,9 @@ async fn clickhouse() -> Subject {
         // ClickHouse's transactions are experimental, off by default, and cover
         // one INSERT rather than a session's worth of statements.
         scratch: None,
+        // ClickHouse enforces uniqueness nowhere, its primary key included, so
+        // there is no constraint to declare here.
+        unique: None,
         _fixture: None,
     }
 }
@@ -313,6 +371,10 @@ async fn mongodb() -> Subject {
         // MongoDB's transactions need a replica set and a session this driver
         // does not hold.
         scratch: None,
+        // MongoDB has unique indexes, and the driver deliberately reports none:
+        // a field arrived at by sampling documents cannot promise the next one
+        // will have it. The reasoning is in the driver's `unique_keys`.
+        unique: None,
         _fixture: None,
     }
 }
@@ -417,6 +479,9 @@ async fn redis() -> Subject {
         // whether to keep it. That is a batch, and the check below asserts the
         // driver says so rather than offering buttons that would mislead.
         scratch: None,
+        // The key is the only unique thing a Redis relation has, and it is
+        // already reported as the primary key.
+        unique: None,
         _fixture: None,
     }
 }
@@ -520,6 +585,9 @@ async fn cassandra() -> Subject {
         // read its own uncommitted change — which is the thing the transaction
         // check exists to observe.
         scratch: None,
+        // CQL has no UNIQUE outside the primary key, so there is nothing to
+        // declare — a secondary index does not make its column unique.
+        unique: None,
         _fixture: None,
     }
 }
@@ -586,6 +654,9 @@ async fn trino() -> Subject {
         // same conclusion `Driver::transactional` reaches from the other side.
         // The driver's own suite pins the measurement.
         scratch: None,
+        // Trino enforces no constraint of any kind: `UNIQUE` is no more in its
+        // `CREATE TABLE` grammar than `PRIMARY KEY` is.
+        unique: None,
         _fixture: None,
     }
 }
@@ -691,6 +762,7 @@ async fn mysql() -> Subject {
         // failed, which is a caret in the wrong place rather than no caret.
         positions: false,
         scratch: Some(Scratch::sql("contract_tx")),
+        unique: Some(Unique::sql("VARCHAR(64)")),
         _fixture: None,
     }
 }
@@ -791,6 +863,7 @@ async fn mssql() -> Subject {
             // the driver. Release is the T-SQL no-op described there.
             savepoints: true,
         }),
+        unique: Some(Unique::sql("nvarchar(64)")),
         _fixture: None,
     }
 }
@@ -839,6 +912,9 @@ async fn flightsql() -> Subject {
         // a reason no other subject has: a Flight SQL transaction is a token the
         // client puts on each statement, not a connection it holds back.
         scratch: Some(Scratch::sql("contract_tx").without_savepoints()),
+        // The protocol has no call for a unique constraint, so whatever the
+        // server behind it enforces cannot reach this side.
+        unique: None,
         _fixture: None,
     }
 }
@@ -889,6 +965,10 @@ async fn pg_compatible(
         cursors,
         positions,
         scratch,
+        // Left to `postgres()`, whose fixture declares one: this subject exists
+        // to show the driver reaches another server, not to check the same
+        // catalog query twice.
+        unique: None,
         _fixture: None,
     }
 }
@@ -963,6 +1043,8 @@ async fn mysql_compatible(
         // subjects disagree: the MySQL driver probes for transaction control at
         // connect, and TiDB and StarRocks answer differently.
         scratch,
+        // Left to `mysql()`, for the reason `pg_compatible` gives.
+        unique: None,
         _fixture: None,
     }
 }
@@ -1168,12 +1250,16 @@ async fn walks_the_navigator(subject: &Subject) {
     // hangs a section on.
     assert_eq!(driver.definition(schema, relation).await.unwrap(), None);
 
-    // The remaining four answer for a table that has none of them, which is the
+    // The remaining five answer for a table that has none of them, which is the
     // case a driver is most likely to get wrong by failing instead.
     driver
         .indexes(schema, relation)
         .await
         .expect("indexes failed");
+    driver
+        .unique_keys(schema, relation)
+        .await
+        .expect("unique keys failed");
     driver
         .foreign_keys(schema, relation)
         .await
@@ -1203,6 +1289,13 @@ async fn answers_for_a_relation_that_is_not_there(subject: &Subject) {
 
     assert!(driver.columns(schema, missing).await.unwrap().is_empty());
     assert!(driver.indexes(schema, missing).await.unwrap().is_empty());
+    assert!(
+        driver
+            .unique_keys(schema, missing)
+            .await
+            .unwrap()
+            .is_empty()
+    );
     assert!(
         driver
             .foreign_keys(schema, missing)
@@ -1400,8 +1493,90 @@ async fn every_check(subject: &Subject) {
     }
     reports_where_a_statement_is_wrong(subject).await;
     walks_the_navigator(subject).await;
+    states_a_unique_key_in_columns(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// A UNIQUE constraint is reported as the columns it is over, and those columns
+/// are columns the relation has.
+///
+/// The property one place then decides on: whether a row can be named by that
+/// key is a question about whether its columns can be null, and that is answered
+/// by looking each one up in `columns`. A driver that reported the key as the
+/// planner sees it — `lower(email)`, `email DESC`, an `INCLUDE` payload — would
+/// hand over a name nothing can be looked up by, and the decision would have to
+/// start guessing which parts of the string were a column.
+///
+/// So this check is about two lists agreeing, and it is deliberately not about
+/// the constraint's name: the databases disagree there and none of them is
+/// wrong. PostgreSQL and MySQL derive a name from the column, SQL Server
+/// generates one with a hash in it, SQLite calls it `sqlite_autoindex_…`. What
+/// is required is only that there is one, because a refusal that cannot name
+/// what it refused leaves the reader nothing to act on.
+async fn states_a_unique_key_in_columns(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    let Some(unique) = subject.unique.as_ref() else {
+        return;
+    };
+    run(driver, &unique.drop).await;
+    run(driver, &unique.create).await;
+
+    let schema = subject.schema.as_str();
+    let columns = driver
+        .columns(schema, &unique.relation)
+        .await
+        .expect("columns failed");
+    let keys = driver
+        .unique_keys(schema, &unique.relation)
+        .await
+        .expect("unique keys failed");
+
+    let found = keys
+        .iter()
+        .find(|key| key.columns == unique.columns)
+        .unwrap_or_else(|| {
+            panic!(
+                "the fixture's UNIQUE constraint over {:?} should be reported; got {:?}",
+                unique.columns,
+                keys.iter().map(|k| &k.columns).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        !found.name.is_empty(),
+        "a unique key needs a name for a refusal to say which one it turned down"
+    );
+
+    for key in &keys {
+        assert!(
+            !key.columns.is_empty(),
+            "a key over no columns would name every row"
+        );
+        for column in &key.columns {
+            let known = columns
+                .iter()
+                .find(|c| &c.name == column)
+                .unwrap_or_else(|| panic!("{} names {column}, which is not a column", key.name));
+            // The other half of what the decision needs, and the half that is
+            // easy to assume: a NOT NULL column has to come back saying so, or
+            // every key this reports gets refused as nullable.
+            assert!(
+                !known.nullable,
+                "{column} was declared NOT NULL and is reported nullable"
+            );
+        }
+        // The primary key is `ColumnInfo::is_primary_key`'s to report, and one
+        // question with two answers is one question too many.
+        assert!(
+            !key.columns.iter().all(|c| columns
+                .iter()
+                .any(|col| &col.name == c && col.is_primary_key)),
+            "{} is the primary key, which belongs to the column list",
+            key.name
+        );
+    }
+
+    run(driver, &unique.drop).await;
 }
 
 /// The statement a navigator writes for a table is one this database runs.

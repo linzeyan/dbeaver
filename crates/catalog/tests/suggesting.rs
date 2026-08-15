@@ -9,7 +9,7 @@
 use dbcatalog::{Kind, Names};
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -83,6 +83,9 @@ impl Driver for Fake {
         Ok(None)
     }
     async fn indexes(&self, _: &str, _: &str) -> DbResult<Vec<IndexInfo>> {
+        Ok(Vec::new())
+    }
+    async fn unique_keys(&self, _: &str, _: &str) -> DbResult<Vec<UniqueKeyInfo>> {
         Ok(Vec::new())
     }
     async fn foreign_keys(&self, _: &str, _: &str) -> DbResult<Vec<RelationshipInfo>> {

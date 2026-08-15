@@ -976,6 +976,57 @@ async fn the_index_list_holds_what_the_planner_can_use_and_not_the_key() {
     );
 }
 
+/// A UNIQUE constraint is reported as the columns it is over, from the same
+/// catalog function the primary key comes from.
+///
+/// `duckdb_constraints()` and not `duckdb_indexes()`, which is where the two
+/// differ: the index list has the unique index on `orders` but not the columns
+/// of the constraint on `customers`, and it is the columns a `WHERE` clause is
+/// built from.
+#[tokio::test]
+async fn a_unique_constraint_is_reported_as_the_columns_it_is_over() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+
+    let keys = src.unique_keys(&schema("app"), "customers").await.unwrap();
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    assert_eq!(keys[0].columns, ["email"]);
+    // Not `customers_email_unique`, which is what the fixture declared: DuckDB
+    // derives a name from the table and the column and keeps that instead. The
+    // asserted name is the catalog's rather than the schema author's on purpose
+    // — it is the one a refusal can quote and the one a reader will find if they
+    // go looking in `duckdb_constraints()`.
+    assert_eq!(keys[0].name, "customers_email_key");
+
+    // The primary key is not here: `ColumnInfo::is_primary_key` reports it, and
+    // `regions` has a composite one that would otherwise appear twice.
+    assert!(
+        src.unique_keys(&schema("app"), "regions")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        src.unique_keys(&schema("app"), "notes")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // `orders_cust_ux` is a `CREATE UNIQUE INDEX` and not a declared constraint,
+    // and DuckDB keeps those in `duckdb_indexes()` alone — where the columns
+    // are expressions rather than names. So a DuckDB table whose only uniqueness
+    // was created that way is not editable here, and the honest reason is that
+    // the catalog does not offer its key as columns. Nothing is guessed from the
+    // index list to close the gap.
+    assert!(
+        src.unique_keys(&schema("app"), "orders")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[tokio::test]
 async fn a_composite_foreign_key_keeps_the_order_of_both_sides() {
     let fixture = Fixture::new(CATALOG);

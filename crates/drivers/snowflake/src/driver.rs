@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{Rows, RowsCancel, SnowflakeError, SnowflakeSource, parts, quote};
@@ -113,6 +113,19 @@ impl Driver for SnowflakeSource {
     /// `metadata.rs`.
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(SnowflakeSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always — and this is the one place where having the answer and not
+    /// reporting it is the correct move.
+    ///
+    /// `SHOW UNIQUE KEYS` works, and `constraints` above already shows what it
+    /// returns in the structure pane, where a declaration is worth reading.
+    /// Naming a row by one is different: Snowflake enforces no constraint except
+    /// `NOT NULL`, so a UNIQUE constraint there is a statement of intent and not
+    /// a guarantee, and a table can hold two rows that satisfy it. An UPDATE
+    /// built from one would silently change both.
+    async fn unique_keys(&self, _schema: &str, _relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(Vec::new())
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {
