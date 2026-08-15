@@ -179,6 +179,15 @@ enum AppMenu {
             action: #selector(ExportCommands.exportSQL(_:)), keyEquivalent: "")
         sql.target = export
 
+        menu.addItem(.separator())
+
+        // Below a rule, because it is the only item here that changes the
+        // database. Everything above it writes a file.
+        let importItem = menu.addItem(
+            withTitle: "Import into Table…",
+            action: #selector(ExportCommands.importFile(_:)), keyEquivalent: "")
+        importItem.target = export
+
         item.submenu = menu
         return item
     }
@@ -643,9 +652,46 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
 
     @objc func exportSQL(_ sender: Any?) { present(.sql) }
 
+    /// Asks for a file and reads it into the relation being browsed.
+    ///
+    /// An open panel and no format menu: the file's extension already says what
+    /// it is, and a picker beside it would only offer a way to disagree.
+    @objc func importFile(_ sender: Any?) {
+        guard let table = model.importTableName else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ExportFormat.allCases.filter(\.canImport).map(\.contentType)
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        // The two things the window cannot show. Rows landing in a table is not
+        // undoable, and a user who learns either of these afterwards learns it
+        // from a table that is already different.
+        panel.message = """
+            Rows are read into \(table), which must already exist — no table is created and no \
+            column is added. An import that fails part way leaves behind the rows it had already \
+            written.
+            """
+
+        let read: (NSApplication.ModalResponse) -> Void = { [model] response in
+            guard response == .OK, let url = panel.url else { return }
+            model.importFile(from: url)
+        }
+        // A sheet, so the panel is attached to the table it is describing. The
+        // free-standing fallback covers the window not being key.
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: read)
+        } else {
+            panel.begin(completionHandler: read)
+        }
+    }
+
     /// Greys the items out while there is nothing to write, so the panel is
     /// never opened for a result that does not exist yet.
-    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canExport }
+    ///
+    /// Import asks a different question: it needs a table to read into, not a
+    /// result to read out of, and those are true at different times.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(importFile(_:)) ? model.canImport : model.canExport
+    }
 
     /// The scope control, kept alive between building the panel and reading the
     /// answer out of it. An `NSSavePanel` accessory view is not retained by

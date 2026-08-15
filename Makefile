@@ -254,6 +254,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-editing
 	./$(APP_BIN) --verify-metadata
 	./$(APP_BIN) --verify-schema-metadata
+	./$(APP_BIN) --verify-import
 	./$(APP_BIN) --verify-preferences
 
 # The settings checked against a live window rather than as rules on their own.
