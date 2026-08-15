@@ -468,6 +468,17 @@ int64_t db_export(DbCursor* cursor, const char* format, const char* path, int64_
 int64_t db_export_sql(DbHandle* handle, DbCursor* cursor, const char* table, const char* path,
                       int64_t row_limit, char** err);
 
+// Drains the cursor into `target` as INSERT statements for `table`.
+//
+// The dialect comes from the target connection, because the statements are
+// written for the database they are being sent to — a DuckDB cursor feeding
+// a PostgreSQL target needs PostgreSQL quoting, and the source's dialect is
+// irrelevant to the INSERTs that reach the server.
+//
+// Returns the row count on success, -1 on error, -2 when the source was
+// cancelled. Fails if this build has no dialect for the target database.
+int64_t db_transfer(DbCursor* cursor, DbHandle* target, const char* table, char** err);
+
 #ifdef __cplusplus
 }
 #endif

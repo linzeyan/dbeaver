@@ -49,8 +49,9 @@ use dbffi::{
     db_foreign_keys_json, db_free, db_indexes_json, db_names_forget, db_query, db_query_free,
     db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format,
-    db_sql_scan_json, db_string_free, db_triggers_json, db_tx_autocommit, db_tx_commit,
-    db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_sql_scan_json, db_string_free, db_transfer, db_triggers_json, db_tx_autocommit,
+    db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint,
+    db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -2308,4 +2309,161 @@ fn a_sql_export_writes_statements_the_source_database_would_accept() {
     let _ = std::fs::remove_file(&path);
     unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle) };
+}
+
+#[test]
+fn a_transfer_puts_the_source_rows_in_the_target_table() {
+    // `duckdb://:memory:` opened twice is two independent databases, so this is
+    // a real database-to-database transfer with no server to start.
+    let src = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_src = unsafe { db_connect(src.as_ptr(), &mut err) };
+    assert!(!handle_src.is_null());
+
+    let tgt = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), &mut err) };
+    assert!(!handle_tgt.is_null());
+
+    ran(handle_tgt, "CREATE TABLE people (id INTEGER, name VARCHAR)");
+
+    // An apostrophe and a NULL, because those are the two values that reach the
+    // target as something other than themselves when the rendering is wrong —
+    // one ends its own literal, the other becomes an empty string.
+    let sql = CString::new(
+        "SELECT * FROM (VALUES (1, 'alice'), (2, 'O''Brien'), (3, NULL)) AS t(id, name)",
+    )
+    .unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let table = CString::new("people").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows = unsafe { db_transfer(cursor, handle_tgt, table.as_ptr(), &mut err) };
+    assert_eq!(rows, 3, "every source row was reported written");
+
+    // Asked of the target as predicates rather than counted: a transfer that
+    // wrote three rows of the wrong thing passes a count and fails these.
+    assert_eq!(ran(handle_tgt, "SELECT id FROM people"), 3);
+    assert_eq!(
+        ran(handle_tgt, "SELECT id FROM people WHERE name = 'O''Brien'"),
+        1,
+        "the apostrophe arrived as data, not as syntax"
+    );
+    assert_eq!(
+        ran(handle_tgt, "SELECT id FROM people WHERE name IS NULL"),
+        1,
+        "the NULL arrived a NULL and not an empty string"
+    );
+
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle_src) };
+    unsafe { db_free(handle_tgt) };
+}
+
+// A null cursor, a null target, and a null table each return -1 and set err.
+#[test]
+fn a_transfer_without_a_cursor_says_so_instead_of_crashing() {
+    let tgt = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), &mut err) };
+    assert!(!handle_tgt.is_null());
+
+    let table = CString::new("people").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_transfer(ptr::null_mut(), handle_tgt, table.as_ptr(), &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_transfer must say why it failed");
+    unsafe { db_string_free(err) };
+    unsafe { db_free(handle_tgt) };
+}
+
+#[test]
+fn a_transfer_without_a_target_says_so_instead_of_crashing() {
+    let src = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_src = unsafe { db_connect(src.as_ptr(), &mut err) };
+    assert!(!handle_src.is_null());
+
+    let sql = CString::new("SELECT 1 AS id").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let table = CString::new("people").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_transfer(cursor, ptr::null_mut(), table.as_ptr(), &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_transfer must say why it failed");
+    unsafe { db_string_free(err) };
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle_src) };
+}
+
+#[test]
+fn a_transfer_without_a_table_name_says_so_instead_of_crashing() {
+    let src = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_src = unsafe { db_connect(src.as_ptr(), &mut err) };
+    assert!(!handle_src.is_null());
+
+    let sql = CString::new("SELECT 1 AS id").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let tgt = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), &mut err) };
+    assert!(!handle_tgt.is_null());
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_transfer(cursor, handle_tgt, ptr::null(), &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_transfer must say why it failed");
+    unsafe { db_string_free(err) };
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle_src) };
+    unsafe { db_free(handle_tgt) };
+}
+
+// Transferring into a table that does not exist on the target returns -1 and
+// sets err — the INSERT statement fails on the server.
+#[test]
+fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
+    let src = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_src = unsafe { db_connect(src.as_ptr(), &mut err) };
+    assert!(!handle_src.is_null());
+
+    let sql = CString::new("SELECT 1 AS id").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let tgt = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), &mut err) };
+    assert!(!handle_tgt.is_null());
+
+    // Do NOT create the table — the INSERT will fail on the server.
+    let table = CString::new("ghost_table").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_transfer(cursor, handle_tgt, table.as_ptr(), &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_transfer must say why it failed");
+    let message = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        message.contains("ghost_table")
+            || message.contains("not exist")
+            || message.contains("relation"),
+        "error should mention the missing table, got: {message}"
+    );
+    unsafe { db_string_free(err) };
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle_src) };
+    unsafe { db_free(handle_tgt) };
 }
