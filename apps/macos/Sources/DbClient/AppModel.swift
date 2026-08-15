@@ -1,3 +1,4 @@
+import AppKit
 import CDbFfi
 import Foundation
 import Observation
@@ -192,6 +193,12 @@ final class AppModel {
     /// see `--history-store`.
     let history: QueryHistory
 
+    /// The settings the window reads. Held rather than reached for through a
+    /// global so that a check can hand in a scratch store, the way the history
+    /// is — and so the Settings window and this model are demonstrably looking
+    /// at one object rather than two copies that agree at launch.
+    let preferences: Preferences
+
     /// Whether the history panel under the editor is open.
     ///
     /// Pane state rather than window state, unlike the value viewer: the list
@@ -285,6 +292,26 @@ final class AppModel {
     private var browseCursor: Cursor?
     private var browseFetchInFlight = false
 
+    /// What the pages fetched so far say about which browse columns are empty.
+    ///
+    /// The evidence, kept whether or not anything acts on it, so that switching
+    /// the setting on acts on the result already on screen rather than on the
+    /// next one: a checkbox that appears to do nothing until you reload is a
+    /// checkbox nobody believes. Gathering it costs one null check per column
+    /// per page for every column that holds anything, which is nearly all of
+    /// them.
+    private var emptyColumns = EmptyColumns()
+
+    /// Columns the browse grid should not draw.
+    ///
+    /// The decision, as against the evidence above. The column stays in the
+    /// result either way — Copy and Export write what was fetched — which is the
+    /// whole reason hiding one loses nothing. What it saves is a column of
+    /// screen spent on a value that is never there.
+    var hiddenBrowseColumns: Set<Int> {
+        preferences.hidesEmptyColumns ? emptyColumns.columns : []
+    }
+
     /// Rows a page fetches, for the chrome to name in a control.
     var pageSize: Int { browsePage }
     private let batchRows = 8192
@@ -334,7 +361,8 @@ final class AppModel {
     private let initialSQLIsScript: Bool
 
     init(
-        history: QueryHistory, initialTab: DetailTab = .content, initialSQL: String? = nil,
+        history: QueryHistory, preferences: Preferences,
+        initialTab: DetailTab = .content, initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
@@ -342,6 +370,7 @@ final class AppModel {
     ) {
         self.navigatorFilter = initialFilter ?? ""
         self.history = history
+        self.preferences = preferences
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
@@ -841,7 +870,9 @@ final class AppModel {
     /// readers from disagreeing about what counts as selected.
     private func selectedCell(in result: ResultSet) -> GridSelection? {
         let rows = result === browseResult ? browseRowCount : result.table.rowCount
-        guard let s = result.selection,
+        // The browse's cursor is read through the same clamp the grid reads it
+        // through, so the cell described here is the cell outlined there.
+        guard let s = result === browseResult ? browseSelection : result.selection,
             s.column < result.table.columns.count,
             s.row < rows
         else { return nil }
@@ -1095,8 +1126,21 @@ final class AppModel {
     /// that went on showing the typed value would be showing something that is
     /// not in the database.
     func applyEdits() {
-        guard hasPendingEdits, !isBusy, let selected, let request = editRequest(for: selected)
-        else { return }
+        guard hasPendingEdits, !isBusy, let selected else { return }
+        if let refusal = staged.refusal(sendingRowOfDefaults: preferences.insertsRowOfDefaults) {
+            errorMessage = refusal
+            return
+        }
+        // Asked before the request is built, so a user who says no has not paid
+        // for anything, and after the refusal above, so the two cannot both
+        // interrupt one press.
+        if let confirmation = staged.confirmation(
+            askingBeforeDeleting: preferences.confirmsDeletions),
+            !confirmDeletion(confirmation)
+        {
+            return
+        }
+        guard let request = editRequest(for: selected) else { return }
         isBusy = true
         status = "Saving…"
         errorMessage = nil
@@ -1118,6 +1162,33 @@ final class AppModel {
             refreshTransaction()
             runBrowse()
         }
+    }
+
+    /// Puts the deletion question, and answers whether Save may go on.
+    ///
+    /// A modal alert rather than the inline banner every failure here uses. The
+    /// banner is right for reporting something that has already happened and
+    /// wrong for asking something: this has to be answered before the statements
+    /// go, and a strip the user can ignore is not a question. It is the only
+    /// dialog in this application, which is most of what keeps it from being
+    /// clicked through without reading.
+    ///
+    /// A property rather than a method because it is the one thing here a script
+    /// has to be able to answer: `--preferences` presses Save with the setting
+    /// both ways, and there is nobody at the keyboard to click a sheet.
+    @ObservationIgnored
+    var confirmDeletion: @MainActor (DeleteConfirmation) -> Bool = { confirmation in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = confirmation.question
+        alert.informativeText = confirmation.detail
+        // Delete leads because it is what pressing Save asked for; Cancel takes
+        // the escape key, so dismissing the sheet without reading it sends
+        // nothing rather than everything.
+        alert.addButton(withTitle: "Delete")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     /// The pending changes as one request, or nil where a row cannot be named.
@@ -1391,6 +1462,7 @@ final class AppModel {
         // rather than warned about: every path into this one is either the user
         // asking for the rows again or the rows already having been written.
         staged = StagedChanges()
+        emptyColumns.reset()
         // The old cursor goes before the new one opens. Two cursors would mean
         // two connections and two open transactions for one pane showing one
         // result, and the second would outlive every reference to it.
@@ -1500,6 +1572,9 @@ final class AppModel {
 
         let before = grid.rowCount
         if let batch = fetched.batch { grid.append(batch: batch) }
+        emptyColumns.weigh(
+            rows: before..<grid.rowCount, columnCount: grid.columns.count,
+            isNull: { grid.isNull(row: $0, column: $1) })
         // A short page is the end of the result: the server fills a FETCH to the
         // count asked for until it runs out. Exhausted is not a state the cursor
         // has to be asked about twice, and asking would cost a round trip per
@@ -1516,6 +1591,29 @@ final class AppModel {
                 capped: capped, milliseconds: fetched.milliseconds, summary: summary)
         }
         isBusy = false
+    }
+
+    /// The browse's cursor as the grid and the inspector strip both see it.
+    ///
+    /// Clamped on read rather than corrected on write, so that turning the
+    /// setting off puts the cursor back where the user left it. Both readers go
+    /// through this, which is what keeps the cell the strip describes and the
+    /// cell the grid outlines from being two different cells.
+    var browseSelection: GridSelection? {
+        get { drawn(browseResult.selection) }
+        set { browseResult.selection = newValue }
+    }
+
+    /// `selection` moved off a column the grid is not drawing, or nil where
+    /// there is no drawn column left to move it to.
+    private func drawn(_ selection: GridSelection?) -> GridSelection? {
+        let hidden = hiddenBrowseColumns
+        guard var s = selection, hidden.contains(s.column) else { return selection }
+        guard
+            let first = browseResult.table.columns.indices.first(where: { !hidden.contains($0) })
+        else { return nil }
+        s.column = first
+        return s
     }
 
     func applyFilters() {

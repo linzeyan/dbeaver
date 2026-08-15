@@ -825,8 +825,7 @@ struct ContentPane: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        @Bindable var result = model.browseResult
-        return VStack(spacing: 0) {
+        VStack(spacing: 0) {
             if model.selected == nil {
                 EmptyState(
                     symbol: "tablecells",
@@ -838,7 +837,8 @@ struct ContentPane: View {
                     generation: model.browseResult.generation,
                     rowCount: model.browseResult.rowCount,
                     declaredTypes: model.declaredColumnTypes,
-                    selection: $result.selection,
+                    hidden: model.hiddenBrowseColumns,
+                    selection: $model.browseSelection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
                     pending: model.pendingCells,

@@ -15,6 +15,8 @@ enum AppMenu {
     private static var exportCommands: ExportCommands?
     /// Target of the File menu's Connect item, held for the same reason.
     private static var connectionCommand: ConnectionCommand?
+    /// Target of the application menu's Settings item, held for the same reason.
+    private static var settingsCommand: SettingsCommand?
     /// Target of the View menu's Refresh item, held for the same reason.
     private static var refreshCommand: RefreshCommand?
     /// Target of the View menu's value-viewer item, held for the same reason.
@@ -41,6 +43,8 @@ enum AppMenu {
         exportCommands = commands
         let connection = ConnectionCommand(model: model)
         connectionCommand = connection
+        let settings = SettingsCommand(preferences: model.preferences)
+        settingsCommand = settings
         let refresh = RefreshCommand(model: model)
         refreshCommand = refresh
         let valueViewer = ValueViewerCommand(model: model)
@@ -56,7 +60,7 @@ enum AppMenu {
         let transactions = TransactionCommands(model: model)
         transactionCommands = transactions
         let main = NSMenu()
-        main.addItem(appMenu(named: name))
+        main.addItem(appMenu(named: name, settings: settings))
         main.addItem(fileMenu(connection: connection, export: commands))
         main.addItem(editMenu())
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
@@ -67,13 +71,23 @@ enum AppMenu {
         app.mainMenu = main
     }
 
-    private static func appMenu(named name: String) -> NSMenuItem {
+    /// Settings sits under About and above Hide, with ⌘,, because that is where
+    /// every Mac application has kept it for twenty years — it is the one item
+    /// here a user looks for without reading the menu.
+    private static func appMenu(named name: String, settings: SettingsCommand) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu()
         menu.addItem(
             withTitle: "About \(name)",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: "")
+        menu.addItem(.separator())
+
+        let settingsItem = menu.addItem(
+            withTitle: "Settings…",
+            action: #selector(SettingsCommand.showSettings(_:)), keyEquivalent: ",")
+        settingsItem.keyEquivalentModifierMask = .command
+        settingsItem.target = settings
         menu.addItem(.separator())
 
         let hide = menu.addItem(
@@ -350,6 +364,25 @@ final class ConnectionCommand: NSObject, NSMenuItemValidation {
     /// connection is for — and it stays available over a working session,
     /// because changing database is the thing it exists to do.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { !model.isConnecting }
+}
+
+/// The application menu's Settings item, as something a menu can send to.
+///
+/// Holds the preferences rather than the model, which is the only target here
+/// that does not: nothing in this window has to exist for a setting to be
+/// changed, and the item stays available with no connection for that reason —
+/// which is also why it declares no `validateMenuItem`.
+@MainActor
+final class SettingsCommand: NSObject {
+    private let preferences: Preferences
+    private let window = SettingsWindow()
+
+    init(preferences: Preferences) {
+        self.preferences = preferences
+        super.init()
+    }
+
+    @objc func showSettings(_ sender: Any?) { window.present(preferences) }
 }
 
 /// The View menu's Refresh item, as something a menu can send to.

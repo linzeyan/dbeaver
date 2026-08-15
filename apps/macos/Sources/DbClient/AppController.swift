@@ -427,8 +427,11 @@ final class GridView: MTKView {
         switch event.specialKey {
         case .upArrow: next.row -= 1
         case .downArrow: next.row += 1
-        case .leftArrow: next.column -= 1
-        case .rightArrow: next.column += 1
+        // Past any column the grid is not drawing, so one press of the key moves
+        // the cursor one column the user can see. Stopping on a hidden column
+        // would read as a key that sometimes does nothing.
+        case .leftArrow: next.column = renderer.drawnColumn(from: next.column - 1, step: -1)
+        case .rightArrow: next.column = renderer.drawnColumn(from: next.column + 1, step: 1)
         case .pageUp: next.row -= page
         case .pageDown: next.row += page
         case .home: next.row = 0

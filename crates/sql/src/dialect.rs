@@ -75,6 +75,17 @@ pub struct Dialect {
     pub identifier_quotes: (&'static str, &'static str),
     /// How a statement asks for at most so many rows.
     pub row_limit: RowLimit,
+    /// How this database spells an insert of one row of nothing but its own
+    /// defaults, written after `INSERT INTO <table>`.
+    ///
+    /// A dialect fact for the reason `row_limit` is one: the standard's `DEFAULT
+    /// VALUES` is what PostgreSQL, SQL Server, SQLite and DuckDB take, and MySQL
+    /// takes an empty pair of column and value lists instead. `None` says the
+    /// database has no spelling at all, which is a different answer from not
+    /// having been filled in — ClickHouse's `INSERT` takes values or a `SELECT`
+    /// and has no form meaning "a row of every default". A caller that guessed
+    /// there would hand somebody a statement that does not run.
+    pub default_row: Option<&'static str>,
     /// What this dialect calls a keyword beyond [`keywords::COMMON`].
     pub(crate) extra_keywords: &'static [&'static str],
 }
@@ -162,6 +173,7 @@ const BASE: Dialect = Dialect {
     parameters: &[Parameter::Question],
     identifier_quotes: ("\"", "\""),
     row_limit: RowLimit::Limit,
+    default_row: Some("DEFAULT VALUES"),
     extra_keywords: &[],
 };
 
@@ -190,6 +202,9 @@ pub const MYSQL: Dialect = Dialect {
     string_prefixes: &['x', 'b', 'n'],
     hash_line_comments: true,
     identifier_quotes: ("`", "`"),
+    // MySQL rejects `DEFAULT VALUES` outright; the empty lists are its own way of
+    // saying the same thing, and they are only valid as a pair.
+    default_row: Some("() VALUES ()"),
     extra_keywords: keywords::MYSQL,
     ..BASE
 };
@@ -238,6 +253,11 @@ pub const CLICKHOUSE: Dialect = Dialect {
     backslash_escapes: true,
     hash_line_comments: true,
     parameters: &[Parameter::Question],
+    // ClickHouse has no spelling for it. `INSERT INTO t` must be followed by
+    // `VALUES`, a `FORMAT`, or a `SELECT`, and none of those can be empty — so a
+    // row of pure defaults is a thing this database cannot be asked for, rather
+    // than a thing this table has not been told how to ask for.
+    default_row: None,
     extra_keywords: keywords::CLICKHOUSE,
     ..BASE
 };

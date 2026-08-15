@@ -51,6 +51,13 @@ struct MetalGridView: NSViewRepresentable {
     /// type it does not have. The header falls back to the Arrow kind there,
     /// which is always true of whatever arrived.
     var declaredTypes: [String: String] = [:]
+    /// Columns not to draw, by index into `table.columns`.
+    ///
+    /// Empty for the Query pane, and not because it could not be computed there:
+    /// a statement's columns were named by the person who wrote it, and hiding
+    /// one they typed out would be answering a question they did not ask. A
+    /// browse is `SELECT *`, where nobody named anything.
+    var hidden: Set<Int> = []
     @Binding var selection: GridSelection?
     /// See `GridView.claimsInitialFocus`.
     var claimsInitialFocus = false
@@ -106,6 +113,7 @@ struct MetalGridView: NSViewRepresentable {
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
             renderer.declaredTypes = declaredTypes
+            renderer.hiddenColumns = hidden
             view.renderer = renderer
             view.delegate = context.coordinator.makeDelegate(renderer: renderer)
             context.coordinator.renderer = renderer
@@ -117,6 +125,7 @@ struct MetalGridView: NSViewRepresentable {
         guard let renderer = context.coordinator.renderer else { return }
         renderer.table = table
         renderer.declaredTypes = declaredTypes
+        renderer.hiddenColumns = hidden
         // Re-captured each update so the closure writes through the current
         // binding rather than the one that existed when the view was made.
         context.coordinator.onSelect = { selection = $0 }
