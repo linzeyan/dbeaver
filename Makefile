@@ -67,6 +67,18 @@ TRINO_CONTAINER := trino-test
 TRINO_PORT      := 58080
 TRINO_IMAGE     := trinodb/trino:latest
 
+# A third-party Arrow Flight SQL server, which is the only kind worth testing
+# against: a server written here would agree with this client by construction.
+# The image is the Arrow project's own example server over DuckDB, and it ships
+# a small TPC-H database inside it — so, like Trino, it needs no seeding and its
+# fixture cannot drift. `flight_sql_client` in the image is what readiness is
+# asked with, because a port that accepts a connection is not a server that
+# answers a query.
+FLIGHTSQL_CONTAINER := flightsql-test
+FLIGHTSQL_PORT      := 51337
+FLIGHTSQL_IMAGE     := voltrondata/flight-sql:latest
+FLIGHTSQL_PASSWORD  := flight
+
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
 # waits for someone to type into it, which no script can do. Derived from
@@ -367,6 +379,37 @@ db-down-trino: ## Stop and remove the Trino test container
 db-check-trino: ## Fail unless the Trino test container is reachable
 	@curl -sf http://127.0.0.1:$(TRINO_PORT)/v1/info | grep -q '"starting":false' \
 		|| { echo "trino not running; run 'make db-up-trino'"; exit 1; }
+
+.PHONY: db-up-flightsql
+db-up-flightsql: ## Start the Arrow Flight SQL test container
+	@docker start $(FLIGHTSQL_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(FLIGHTSQL_CONTAINER) \
+			-p $(FLIGHTSQL_PORT):31337 \
+			-e FLIGHT_PASSWORD=$(FLIGHTSQL_PASSWORD) -e TLS_ENABLED=0 \
+			-e DATABASE_BACKEND=duckdb $(FLIGHTSQL_IMAGE)
+	@echo "waiting for flight sql..."
+	@for i in $$(seq 1 60); do \
+		docker exec $(FLIGHTSQL_CONTAINER) flight_sql_client --command Execute \
+			--query 'SELECT 1' --username flight_username \
+			--password $(FLIGHTSQL_PASSWORD) --host localhost --port 31337 \
+			>/dev/null 2>&1 && break; \
+		sleep 2; \
+	done
+	@docker exec $(FLIGHTSQL_CONTAINER) flight_sql_client --command Execute \
+		--query 'SELECT count(*) FROM lineitem' --username flight_username \
+		--password $(FLIGHTSQL_PASSWORD) --host localhost --port 31337
+
+.PHONY: db-down-flightsql
+db-down-flightsql: ## Stop and remove the Arrow Flight SQL test container
+	-docker rm -f $(FLIGHTSQL_CONTAINER)
+
+.PHONY: db-check-flightsql
+db-check-flightsql: ## Fail unless the Arrow Flight SQL test container is reachable
+	@docker exec $(FLIGHTSQL_CONTAINER) flight_sql_client --command Execute \
+		--query 'SELECT 1' --username flight_username \
+		--password $(FLIGHTSQL_PASSWORD) --host localhost --port 31337 \
+		>/dev/null 2>&1 \
+		|| { echo "flight sql not running; run 'make db-up-flightsql'"; exit 1; }
 
 # The two databases that exist to prove protocol compatibility rather than to
 # be supported: they are read by the PostgreSQL driver and no code of their own,
