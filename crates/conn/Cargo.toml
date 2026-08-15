@@ -21,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 driver-cassandra = { path = "../drivers/cassandra" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
+driver-flightsql = { path = "../drivers/flightsql" }
 driver-mongodb = { path = "../drivers/mongodb" }
 driver-mssql = { path = "../drivers/mssql" }
 driver-mysql = { path = "../drivers/mysql" }

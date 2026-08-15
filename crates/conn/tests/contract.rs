@@ -680,6 +680,54 @@ async fn mssql() -> Subject {
     }
 }
 
+/// Arrow Flight SQL, which is the one subject here that names a protocol rather
+/// than a database.
+///
+/// Nothing is seeded. The image ships TPC-H, so `orders` is already there with
+/// more rows than any check reads, and the fixture this file would otherwise
+/// build is exactly the fixture that already exists — which also settles the rule
+/// about seeding through something other than the code under test, by seeding
+/// through nothing at all. The scratch table for the transaction check is created
+/// and dropped by the check, as every other SQL subject's is.
+///
+/// The schema is `TPC-H-small.main` for the reason DuckDB's is `memory.main`:
+/// Flight SQL has a catalog above the schema and the trait has one string. That
+/// it is DuckDB behind this server is a coincidence of the image and not
+/// something the driver knows or asks.
+async fn flightsql() -> Subject {
+    let driver = driver_flightsql::FlightSqlSource::connect(
+        "flightsql://flight_username:flight@127.0.0.1:51337/",
+    )
+    .await
+    .expect("Flight SQL unreachable; run `make db-up-flightsql`");
+    Subject {
+        driver: Box::new(driver),
+        schema: "TPC-H-small.main".to_string(),
+        relation: "orders".to_string(),
+        key: "o_orderkey".to_string(),
+        read: "SELECT o_orderkey FROM orders ORDER BY o_orderkey".to_string(),
+        broken: "SELECT o_orderkey FROM orders WHERE ORDER BY o_orderkey".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        // A Flight ticket names a result the server has already planned, so
+        // paging one is what `DoGet` does rather than something built on top.
+        cursors: true,
+        // The engine behind a Flight SQL endpoint reports a syntax error in its
+        // own prose — DuckDB draws a caret under a `LINE 1:` heading here — and
+        // the gRPC status has no field to put an offset in. Parsing the prose
+        // would be reading DuckDB's today and Dremio's tomorrow, from a protocol
+        // that never said which is behind it.
+        positions: false,
+        // Savepoints are in the protocol and the driver sends them; this server
+        // answers `ActionBeginSavepoint` with `Unimplemented`, so the three steps
+        // are refused rather than skipped. `transactional` is still true, and for
+        // a reason no other subject has: a Flight SQL transaction is a token the
+        // client puts on each statement, not a connection it holds back.
+        scratch: Some(Scratch::sql("contract_tx").without_savepoints()),
+        _fixture: None,
+    }
+}
+
 /// A PostgreSQL-compatible database, seeded and connected through the
 /// PostgreSQL driver.
 ///
@@ -1359,6 +1407,12 @@ async fn redis_satisfies_the_contract() {
 #[ignore = "requires a Cassandra server"]
 async fn cassandra_satisfies_the_contract() {
     every_check(&cassandra().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires an Arrow Flight SQL server"]
+async fn flightsql_satisfies_the_contract() {
+    every_check(&flightsql().await).await;
 }
 
 // ---------------------------------------------------------------------------

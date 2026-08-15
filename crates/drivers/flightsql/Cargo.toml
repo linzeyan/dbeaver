@@ -1,0 +1,37 @@
+[package]
+name = "driver-flightsql"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+# For the one dialect constant this driver writes statements in.
+dbsql = { path = "../../sql" }
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+# Pinned to the same minor as `arrow`, and that is the whole point of this
+# driver: `arrow-flight` 58 depends on `arrow-array` 58, so the `RecordBatch` it
+# decodes off the wire is the one `dbconn` hands the grid. A second `arrow` in
+# the tree would make every batch cross a version boundary, which means a copy.
+arrow-flight = { version = "58.4", features = ["flight-sql"] }
+# Reached directly for two things `arrow-flight` does not wrap: the metadata
+# commands are prost messages that have to be packed into an `Any`, and the
+# bearer token has to go on every call as a gRPC metadata entry.
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = [
+    "codegen",
+    "transport",
+] }
+url = "2"
+percent-encoding = "2"
+# The IPC bodies arrive as `Bytes` and are handed to `Buffer::from` unchanged;
+# naming the crate is what makes that conversion the free one.
+bytes = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+futures-util.workspace = true

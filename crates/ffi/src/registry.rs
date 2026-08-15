@@ -15,6 +15,7 @@ use dbconn::{DbError, Driver};
 use driver_cassandra::CassandraSource;
 use driver_clickhouse::ChSource;
 use driver_duckdb::DuckSource;
+use driver_flightsql::FlightSqlSource;
 use driver_mongodb::MongoSource;
 use driver_mssql::MsSqlSource;
 use driver_mysql::MySqlSource;
@@ -120,6 +121,15 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::Server,
         default_port: Some(6379),
     },
+    // The one entry that names a protocol rather than a database. What is behind
+    // an Arrow Flight SQL endpoint is not knowable from the connection string,
+    // and the label says so rather than guessing at the engine.
+    Catalogued {
+        scheme: "flightsql",
+        label: "Arrow Flight SQL",
+        shape: Shape::Server,
+        default_port: Some(31337),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -204,6 +214,10 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // parser reads — and because the path after the host is the database
         // number rather than a name, so `redis://host:6379/3` opens on db3.
         "redis" => Ok(Box::new(RedisSource::connect(url).await?)),
+        // Passed on whole, and the path after the host is a catalog the navigator
+        // is restricted to rather than a database to open — Flight SQL has no way
+        // to switch to another, so it is a filter and not a target.
+        "flightsql" => Ok(Box::new(FlightSqlSource::connect(url).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
             known()
