@@ -25,6 +25,7 @@ driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-redis = { path = "../drivers/redis" }
 driver-sqlite = { path = "../drivers/sqlite" }
+driver-trino = { path = "../drivers/trino" }
 serde = "1"
 serde_json = "1"
 

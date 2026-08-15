@@ -1,0 +1,35 @@
+[package]
+name = "driver-trino"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+# For the one dialect this driver writes statements in. Trino has no row of its
+# own in `dbsql`; `driver.rs` says which it borrows and why.
+dbsql = { path = "../../sql" }
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+# hyper rather than a higher-level client, because the whole of the Trino client
+# protocol is POST a string, GET a URL, DELETE a URL, and all four of these are
+# already in this workspace's lock file behind the ClickHouse driver. A new HTTP
+# crate would buy a builder API and cost a dependency tree.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Trino sends `varbinary` as base64 and nothing else in this driver decodes it.
+# Already in the lock; the alternative is a table-driven decoder that has to be
+# right on the padding cases.
+base64 = "0.22"
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
