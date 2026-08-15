@@ -354,6 +354,39 @@ pub unsafe extern "C" fn db_sql_scan_json(
     json_result(&scan, err)
 }
 
+/// `text` laid out again, as a caller-owned C string to release with
+/// `db_string_free`.
+///
+/// Takes no scheme, unlike its neighbours here. The formatter treats every
+/// quoted region — backticks, `[brackets]`, `$tag$…$tag$` — as one opaque token
+/// whichever database wrote it, so there is no dialect for it to be told.
+///
+/// Never fails on the text itself: SQL it cannot read comes back as it arrived,
+/// because this runs on a buffer somebody is editing and the worst outcome is
+/// not an ugly result but a lost one.
+///
+/// # Safety
+/// `text` must be a valid NUL-terminated C string; `err` must be null or point
+/// to a writable `*mut c_char`, released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_format(text: *const c_char, err: *mut *mut c_char) -> *mut c_char {
+    if text.is_null() {
+        unsafe { set_err(err, "null text") };
+        return ptr::null_mut();
+    }
+    let Ok(text) = (unsafe { CStr::from_ptr(text) }).to_str() else {
+        unsafe { set_err(err, "text is not valid UTF-8") };
+        return ptr::null_mut();
+    };
+    match CString::new(dbsql::format(text)) {
+        Ok(c) => c.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Where a server's error position lands in the buffer, or -1 when the number
 /// could not have come from what was sent.
 ///

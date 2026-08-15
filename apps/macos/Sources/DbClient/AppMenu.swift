@@ -31,6 +31,8 @@ enum AppMenu {
     private static var historyCommand: QueryHistoryCommand?
     /// Target of the Query menu's transaction items, held for the same reason.
     private static var transactionCommands: TransactionCommands?
+    /// Target of the Query menu's Format item, held for the same reason.
+    private static var formatCommand: FormatCommand?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -59,6 +61,8 @@ enum AppMenu {
         historyCommand = queryHistory
         let transactions = TransactionCommands(model: model)
         transactionCommands = transactions
+        let formatting = FormatCommand(model: model)
+        formatCommand = formatting
         let main = NSMenu()
         main.addItem(appMenu(named: name, settings: settings))
         main.addItem(fileMenu(connection: connection, export: commands))
@@ -66,7 +70,8 @@ enum AppMenu {
         main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
         main.addItem(
             queryMenu(
-                target: query, stop: stop, history: queryHistory, transactions: transactions))
+                target: query, stop: stop, history: queryHistory, transactions: transactions,
+                formatting: formatting))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -285,7 +290,7 @@ enum AppMenu {
     /// with two values and a pair of items would let the window show both as off.
     private static func queryMenu(
         target: QueryCommands, stop: StopCommand, history: QueryHistoryCommand,
-        transactions: TransactionCommands
+        transactions: TransactionCommands, formatting: FormatCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Query")
@@ -300,6 +305,15 @@ enum AppMenu {
             action: #selector(StopCommand.stopRunningStatement(_:)), keyEquivalent: ".")
         stopItem.keyEquivalentModifierMask = .command
         stopItem.target = stop
+
+        // ⌃⌥F, which is what every editor that has this command uses and what
+        // upstream binds. It is offered while a statement is running, unlike
+        // everything above it: laying the buffer out never reaches the server.
+        let formatItem = menu.addItem(
+            withTitle: "Format Statement",
+            action: #selector(FormatCommand.formatQuery(_:)), keyEquivalent: "f")
+        formatItem.keyEquivalentModifierMask = [.control, .option]
+        formatItem.target = formatting
 
         menu.addItem(.separator())
         let recent = menu.addItem(
@@ -478,6 +492,26 @@ final class QueryCommands: NSObject, NSMenuItemValidation {
     /// text and no statements, which is why this asks the model rather than
     /// measuring the string.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canRunScript }
+}
+
+/// The Query menu's Format item, as something a menu can send to.
+///
+/// Its own object for the reason the others are: one target per answer, so
+/// `validateMenuItem` stays a sentence. This one's answer differs from every
+/// other item in that menu — a buffer holding only comments can be laid out,
+/// and so can one on a connection that is busy.
+@MainActor
+final class FormatCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func formatQuery(_ sender: Any?) { model.formatQuery() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFormatQuery }
 }
 
 /// The Query menu's Stop item, as something a menu can send to.

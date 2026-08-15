@@ -48,9 +48,9 @@ use dbffi::{
     db_ddl_text, db_definition_json, db_edit_sql_json, db_foreign_keys_json, db_free,
     db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
     db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_scan_json, db_string_free,
-    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
-    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
+    db_string_free, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
+    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -617,6 +617,36 @@ fn a_scan_says_why_it_could_not_read_its_arguments() {
         let raw = unsafe { db_sql_scan_json(text, scheme, 0, 0, &mut err) };
         assert!(raw.is_null());
         assert!(!err.is_null(), "db_sql_scan_json must say why it failed");
+        unsafe { db_string_free(err) };
+    }
+}
+
+#[test]
+fn formatting_crosses_the_abi_and_keeps_what_it_was_given() {
+    let sql = CString::new("SELECT a,b FROM t WHERE x=1").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_sql_format(sql.as_ptr(), &mut err) };
+    assert!(!raw.is_null(), "db_sql_format must answer");
+    assert!(err.is_null(), "db_sql_format must not set err on success");
+
+    let out = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    assert!(out.contains("SELECT"), "got {out}");
+    assert!(out.contains("FROM"), "got {out}");
+    // The front end replaces a buffer with this. Losing a clause would be the
+    // one failure it could not recover from, so the ABI is checked for it here
+    // and not only in the crate that does the work.
+    assert!(out.contains("WHERE"), "got {out}");
+}
+
+#[test]
+fn formatting_says_why_it_could_not_read_its_argument() {
+    let invalid = CString::new(vec![b'S', b'E', b'L', 0xff, 0xfe]).unwrap();
+    for text in [ptr::null(), invalid.as_ptr()] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_sql_format(text, &mut err) };
+        assert!(raw.is_null());
+        assert!(!err.is_null(), "db_sql_format must say why it failed");
         unsafe { db_string_free(err) };
     }
 }

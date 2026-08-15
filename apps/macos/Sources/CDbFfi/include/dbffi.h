@@ -131,6 +131,17 @@ char* db_drivers_json(char** err);
 char* db_sql_scan_json(const char* text, const char* scheme, uint32_t selection_start,
                        uint32_t selection_end, char** err);
 
+// `text` laid out again. Released with db_string_free.
+//
+// Takes no scheme, unlike its neighbours: the formatter treats every quoted
+// region — backticks, [brackets], $tag$…$tag$ — as one opaque token whichever
+// database wrote it, so there is no dialect to tell it about.
+//
+// Never fails on the text itself. SQL it cannot read comes back as it arrived,
+// because this runs on a buffer somebody is editing, where the worst outcome is
+// not an ugly result but a lost one.
+char* db_sql_format(const char* text, char** err);
+
 // Where a server error position lands in the buffer, or -1 when the number could
 // not have come from what was sent.
 //

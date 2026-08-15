@@ -159,6 +159,24 @@ final class Database: @unchecked Sendable {
         db_names_forget(handle)
     }
 
+    /// `text` laid out again, or `text` itself where the core could not.
+    ///
+    /// Static, and the only call here that needs no connection: laying SQL out
+    /// is a property of the text, so the Query tab can offer it before a
+    /// database has been chosen. It also cannot report a failure — the core
+    /// hands unreadable SQL back unchanged, and a null answer means the string
+    /// did not survive the C boundary, which is not something the user can act
+    /// on and must not cost them their buffer.
+    static func formatted(_ text: String) -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        guard let raw = db_sql_format(text, &err) else {
+            if let err { db_string_free(err) }
+            return text
+        }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The statement that reads a relation's rows.
     ///
     /// Asked of the core rather than assembled here, because a statement is the

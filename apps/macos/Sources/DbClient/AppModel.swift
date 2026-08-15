@@ -1809,6 +1809,31 @@ final class AppModel {
         activeTab == .query && !isBusy && !scan.statements.isEmpty
     }
 
+    /// Whether there is any text to lay out. Unlike `canRunScript` this does not
+    /// wait on `isBusy`: formatting never reaches the server, so there is no
+    /// reason to refuse it while a statement is in flight.
+    var canFormatQuery: Bool {
+        activeTab == .query && !queryText.isEmpty
+    }
+
+    /// Lays the buffer out again, in place.
+    ///
+    /// The core answers with the text unchanged for anything it cannot read, so
+    /// the only case to handle here is the one where nothing moved — and
+    /// assigning the same string back would still push an edit onto the undo
+    /// stack, leaving ⌘Z to undo a command that did nothing.
+    func formatQuery() {
+        let formatted = Database.formatted(queryText)
+        guard formatted != queryText else { return }
+        queryText = formatted
+        // The caret cannot be left where it was: a `TextSelection` holds
+        // `String.Index` values belonging to the old string, and every position
+        // past the first moved token now names a different character anyway. The
+        // end of the buffer is the one place that means the same thing before and
+        // after.
+        querySelection = TextSelection(insertionPoint: queryText.endIndex)
+    }
+
     /// Runs every statement in the buffer, in order, stopping at the first that
     /// fails.
     ///
