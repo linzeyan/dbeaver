@@ -15,7 +15,7 @@
 
 use arrow::array::{Array, Decimal128Array, Int64Array, RecordBatch, StringArray, UInt64Array};
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::{Driver, RelationKind};
+use dbconn::{Driver, RelationKind, TxStep};
 use driver_duckdb::{DuckError, DuckSource};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -646,6 +646,105 @@ async fn cancelling_something_idle_is_not_a_failure() {
 }
 
 // ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+/// How many rows `sql` returns, read to the end so the session is free after.
+async fn count(src: &DuckSource, sql: &str) -> usize {
+    let mut stream = src.query(sql, 100).await.unwrap();
+    let mut seen = 0;
+    while let Some(batch) = stream.next_batch().await.unwrap() {
+        seen += batch.num_rows();
+    }
+    seen
+}
+
+#[tokio::test]
+async fn a_transaction_holds_a_change_back_from_everything_outside_it() {
+    // The property the session connection exists for, checked from the one place
+    // that cannot be fooled: another connection on the same database. Reading
+    // the row back through `query` alone would pass just as well on a driver
+    // that committed each statement on its own.
+    let fixture = Fixture::new("CREATE TABLE t (n INTEGER);");
+    let src = fixture.connect().await;
+
+    src.transaction(&TxStep::Begin).await.unwrap();
+    count(&src, "INSERT INTO t VALUES (1)").await;
+    assert_eq!(count(&src, "SELECT n FROM t").await, 1, "its own change");
+
+    // A cursor is outside the transaction, because it runs on a connection of
+    // its own — the trait says so, and this is the driver making it true.
+    let mut outside = src.cursor("SELECT n FROM t", 10).await.unwrap();
+    assert!(
+        outside.fetch().await.unwrap().is_none(),
+        "a cursor should not see what the session has not committed"
+    );
+    outside.close().await.unwrap();
+
+    // And a catalog read answers rather than queueing behind the open
+    // transaction, which is what a navigator needs while somebody edits.
+    assert!(
+        src.relations(&schema("main"))
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.name == "t")
+    );
+
+    src.transaction(&TxStep::Commit).await.unwrap();
+    let mut after = src.cursor("SELECT n FROM t", 10).await.unwrap();
+    assert_eq!(
+        after.fetch().await.unwrap().expect("a row").num_rows(),
+        1,
+        "and there it is once it is committed"
+    );
+}
+
+#[tokio::test]
+async fn a_savepoint_is_refused_by_name_rather_than_by_duckdbs_parser() {
+    // DuckDB has no savepoints: all three spellings are syntax errors, not
+    // features behind a setting. Two things matter about how that is reported.
+    // The message has to say the database has none — "syntax error at or near
+    // SAVEPOINT" reads as this client sending something malformed — and the
+    // transaction has to survive being asked, or the refusal costs more than the
+    // missing feature does.
+    let fixture = Fixture::new("CREATE TABLE t (n INTEGER);");
+    let src = fixture.connect().await;
+
+    src.transaction(&TxStep::Begin).await.unwrap();
+    count(&src, "INSERT INTO t VALUES (1)").await;
+
+    for step in [
+        TxStep::Savepoint("halfway".into()),
+        TxStep::RollbackTo("halfway".into()),
+        TxStep::Release("halfway".into()),
+    ] {
+        let err = src
+            .transaction(&step)
+            .await
+            .expect_err("DuckDB has no savepoints");
+        let message = err.to_string();
+        assert!(
+            message.contains("savepoint"),
+            "the message should name what is missing, got: {message}"
+        );
+        assert!(
+            !err.is_cancelled(),
+            "a missing feature is not a cancellation"
+        );
+    }
+
+    count(&src, "INSERT INTO t VALUES (2)").await;
+    assert_eq!(
+        count(&src, "SELECT n FROM t").await,
+        2,
+        "the transaction is still open and still takes statements"
+    );
+    src.transaction(&TxStep::Rollback).await.unwrap();
+    assert_eq!(count(&src, "SELECT n FROM t").await, 0);
+}
+
+// ---------------------------------------------------------------------------
 // Failures
 // ---------------------------------------------------------------------------
 
@@ -1144,6 +1243,13 @@ async fn the_trait_sees_everything_the_inherent_api_does() {
             .num_rows(),
         100
     );
+    // Let go of before the next statement, and that is the rule rather than
+    // tidiness. A statement runs on the session connection so that a transaction
+    // can span two of them, and DuckDB steps one statement at a time per
+    // connection — so a result with rows left in it holds the session until it
+    // is read to the end or dropped, and the statement after it waits. The
+    // cursor below needs no such thing: it has a connection of its own.
+    drop(stream);
 
     let mut cursor = driver
         .cursor("SELECT id FROM nums ORDER BY id", 50)

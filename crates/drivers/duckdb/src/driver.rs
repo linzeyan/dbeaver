@@ -82,19 +82,20 @@ impl Driver for DuckSource {
         Ok(())
     }
 
-    /// Not yet: this driver opens a connection per piece of work, as the SQLite
-    /// one does and for the same reason, so there is nothing open between two
-    /// statements to hold a transaction.
+    /// Statements run on the session connection, which is what a transaction
+    /// needs in order to span two of them.
+    ///
+    /// True despite the three steps this database cannot take. The question is
+    /// whether statements on this session can be wrapped in a transaction, and
+    /// they can; savepoints are a step inside one, and `transaction` refuses
+    /// those by name so that the gap is reported where it is rather than by
+    /// hiding Commit and Rollback as well.
     fn transactional(&self) -> bool {
-        false
+        true
     }
 
-    /// Refused rather than skipped, so that nobody is told a transaction is open
-    /// when nothing is.
-    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
-        Err(DbError::new(
-            "DuckDB: this session opens a connection per statement, so there is no transaction to control",
-        ))
+    async fn transaction(&self, step: &TxStep) -> DbResult<()> {
+        Ok(DuckSource::transaction(self, step).await?)
     }
 }
 

@@ -42,6 +42,7 @@ use arrow::datatypes::SchemaRef;
 use arrow_map::Layout;
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use duckdb::{Connection, InterruptHandle};
 use std::path::{Path, PathBuf};
@@ -89,6 +90,15 @@ pub enum DuckError {
     Unreadable { column: String, arrow_type: String },
     #[error("arrow: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+    /// Asked for a savepoint on a database that has none.
+    ///
+    /// Its own variant rather than the parser error DuckDB would raise, because
+    /// the two are different news. "syntax error at or near SAVEPOINT" reads as
+    /// this client having sent something malformed; what happened is that the
+    /// database does not have the feature, and the transaction the caller is in
+    /// is still open and still fine.
+    #[error("DuckDB has no savepoints: the transaction can be committed or rolled back as a whole")]
+    NoSavepoints,
     #[error("the thread this statement was running on stopped before it said why")]
     ReaderGone,
 }
@@ -282,8 +292,23 @@ type Cancels = Arc<Mutex<Vec<(u64, Arc<InterruptHandle>)>>>;
 /// caller that needs one takes one, and the property a pool was protecting — a
 /// navigator that does not queue behind a result being read — holds by
 /// construction.
+///
+/// One of those connections is kept rather than taken and given back, and it is
+/// the one statements run on. A transaction belongs to a connection, so a
+/// `BEGIN` on a connection that is dropped afterwards opens a transaction the
+/// next statement will not be given and nobody can commit. Everything else —
+/// catalog reads, cursors — still takes a connection of its own.
 pub struct DuckSource {
     seed: Arc<Mutex<Connection>>,
+    /// Locked for as long as a statement is being read. `Statement` borrows its
+    /// connection and is neither `Send` nor `Sync`, so a result holds the
+    /// session until it is finished or dropped, and the next statement waits.
+    /// That is what "these two statements are in the same transaction" costs on
+    /// a database that is a library rather than a server.
+    session: Arc<Mutex<Connection>>,
+    /// Taken at connect and kept, because by cancel time the session is inside
+    /// the statement that is to be stopped and there is no borrowing it back.
+    session_interrupt: Arc<InterruptHandle>,
     cancels: Cancels,
     next_id: AtomicU64,
 }
@@ -291,11 +316,14 @@ pub struct DuckSource {
 /// Keeps one connection's interrupt handle reachable by `cancel` for exactly as
 /// long as there is something on it to interrupt.
 ///
-/// Scoped rather than permanent, as in `driver-sqlite` and for the same reason:
-/// a connection here is opened for one piece of work, and a handle whose
-/// connection has been dropped is not something to leave lying in a list.
-/// Interrupting one is harmless — `InterruptHandle::clear` nulls the pointer
-/// when the connection goes — but harmless is not a reason to keep it.
+/// Scoped rather than permanent, as in `driver-sqlite` and for the same two
+/// reasons. A connection opened for one piece of work is dropped after it, and a
+/// handle whose connection has gone is not something to leave lying in a list —
+/// interrupting one is harmless, since `InterruptHandle::clear` nulls the
+/// pointer when the connection goes, but harmless is not a reason to keep it.
+/// The session's connection is the opposite case and wants the same treatment:
+/// it outlives every statement on it, and being registered only while one is in
+/// flight is what keeps a cancel aimed at one statement off the next.
 struct Registration {
     id: u64,
     cancels: Cancels,
@@ -374,6 +402,38 @@ where
     }
 }
 
+/// The connection one result is read on.
+///
+/// Two answers, and which one a result gets is the whole of this driver's
+/// transaction story. A statement takes the session, so that a `BEGIN` and the
+/// statements after it are on one connection. A cursor takes a connection of its
+/// own, because it is held open by whoever is looking at it and the session
+/// cannot be lent out for that long.
+enum Reader {
+    Session(Arc<Mutex<Connection>>),
+    Own(Connection),
+}
+
+impl Reader {
+    /// Runs `work` on the connection, holding the session for the whole of it if
+    /// that is the connection this result is on.
+    fn with<T>(
+        &self,
+        work: impl FnOnce(&Connection) -> Result<T, DuckError>,
+    ) -> Result<T, DuckError> {
+        match self {
+            Reader::Own(conn) => work(conn),
+            // A poisoned lock means a reader panicked with the connection
+            // borrowed. What DuckDB was left in the middle of is not something
+            // to guess at, so the session is treated as gone.
+            Reader::Session(session) => {
+                let session = session.lock().map_err(|_| DuckError::ReaderGone)?;
+                work(&session)
+            }
+        }
+    }
+}
+
 impl DuckSource {
     /// Opens `path`, or an in-memory database for `:memory:` and for nothing at
     /// all.
@@ -383,10 +443,20 @@ impl DuckSource {
         // that as in-memory itself; saying so here means the two spellings
         // cannot drift apart.
         let path = PathBuf::from(if path.is_empty() { IN_MEMORY } else { path });
-        let seed = blocking(move || open(&path)).await?;
+        let seed = Arc::new(Mutex::new(blocking(move || open(&path)).await?));
+
+        // Cloned from the seed rather than opened from the path, which is what
+        // makes `:memory:` work at all: a second `open_in_memory` is a
+        // different, empty database, and the session would then be running
+        // statements against a database the navigator cannot see.
+        let cloned = Arc::clone(&seed);
+        let session = blocking(move || clone_connection(&cloned)).await?;
+        let session_interrupt = session.interrupt_handle();
 
         Ok(Self {
-            seed: Arc::new(Mutex::new(seed)),
+            seed,
+            session: Arc::new(Mutex::new(session)),
+            session_interrupt,
             cancels: Arc::new(Mutex::new(Vec::new())),
             next_id: AtomicU64::new(0),
         })
@@ -402,6 +472,18 @@ impl DuckSource {
     ///
     /// Cooperative at chunk granularity, so the chunk in flight finishes. At
     /// 2048 rows that is not something a person notices.
+    ///
+    /// The session connection is reached the same way everything else is, by
+    /// being in the registry only while it has something running, and that is
+    /// what makes it safe to interrupt a connection several statements share:
+    /// DuckDB clears the flag when a query begins, so a cancel cannot spill onto
+    /// the statement after the one it was aimed at. What it does reach is the
+    /// transaction — DuckDB invalidates an open one when a statement inside it
+    /// fails, and an interrupted statement is a failed statement, so a
+    /// cancellation mid-transaction leaves a transaction that can only be rolled
+    /// back. That is the database's rule rather than this driver's arrangement,
+    /// and the front end learns of it the way it learns anything else about the
+    /// transaction: by asking after the call that could have changed it.
     pub fn cancel(&self) {
         let Ok(cancels) = self.cancels.lock() else {
             return;
@@ -522,6 +604,45 @@ impl DuckSource {
         Ok(Vec::new())
     }
 
+    /// Takes one step of transaction control on the session connection.
+    ///
+    /// On the session and not on a connection cloned for it, which is the whole
+    /// reason this driver holds one: a `BEGIN` on a connection that is dropped
+    /// afterwards opens a transaction nothing can be added to and nobody can
+    /// commit.
+    ///
+    /// Three of the six are refused, and refused rather than skipped, because
+    /// DuckDB has no savepoints — `SAVEPOINT`, `ROLLBACK TO` and `RELEASE` are
+    /// all syntax errors in its parser, not features behind a setting. A client
+    /// that quietly did nothing would leave somebody believing there is a point
+    /// they can come back to, and find out otherwise by rolling back further
+    /// than they meant to.
+    ///
+    /// Waits for the session, which is not a formality here. A result being read
+    /// has the connection until it is finished or dropped, so a Commit pressed
+    /// while a grid is still filling lands after the last row rather than
+    /// between two of them — and it lands, rather than being refused or applied
+    /// to a different connection.
+    pub async fn transaction(&self, step: &TxStep) -> Result<(), DuckError> {
+        let statement = match step {
+            TxStep::Begin => "BEGIN TRANSACTION",
+            TxStep::Commit => "COMMIT",
+            TxStep::Rollback => "ROLLBACK",
+            TxStep::Savepoint(_) | TxStep::RollbackTo(_) | TxStep::Release(_) => {
+                return Err(DuckError::NoSavepoints);
+            }
+        };
+        let session = Arc::clone(&self.session);
+        blocking(move || {
+            session
+                .lock()
+                .map_err(|_| DuckError::ReaderGone)?
+                .execute_batch(statement)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Prepare `sql` and begin streaming its result as Arrow batches of at most
     /// `batch_rows` rows.
     ///
@@ -532,40 +653,66 @@ impl DuckSource {
     /// column's type there is not settled without seeing a value. So "schema
     /// known before rows" is not an embedded-versus-server split — it is a fact
     /// about each database.
+    ///
+    /// Runs on the session connection, so that a statement and the `BEGIN`
+    /// before it are the same connection's business. The consequence is that a
+    /// result nobody has finished reading is a session nobody else can use: the
+    /// next statement waits for this one to reach its last chunk or be dropped.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, DuckError> {
-        self.stream(sql, batch_rows).await
+        self.stream(
+            Reader::Session(Arc::clone(&self.session)),
+            Arc::clone(&self.session_interrupt),
+            sql,
+            batch_rows,
+        )
+        .await
     }
 
     /// Open a cursor over `sql` and return a handle to fetch pages.
     ///
-    /// The same thing as `query`, as in `driver-sqlite`, and reached by a
-    /// different route worth writing down. What Phase 1 wanted from a cursor was
-    /// that page two agrees with page one; PostgreSQL needs `DECLARE CURSOR`
-    /// because otherwise each page is a statement with a snapshot of its own,
-    /// and SQLite gets it from holding a read transaction across a statement's
-    /// steps. DuckDB is MVCC: a statement reads the snapshot fixed when it
-    /// began, so a streaming result read forward is already one consistent view.
+    /// The same thing as `query` apart from the connection, as in
+    /// `driver-sqlite`, and reached by a different route worth writing down.
+    /// What Phase 1 wanted from a cursor was that page two agrees with page one;
+    /// PostgreSQL needs `DECLARE CURSOR` because otherwise each page is a
+    /// statement with a snapshot of its own, and SQLite gets it from holding a
+    /// read transaction across a statement's steps. DuckDB is MVCC: a statement
+    /// reads the snapshot fixed when it began, so a streaming result read
+    /// forward is already one consistent view.
+    ///
+    /// On a connection of its own, and that part is not incidental. A cursor is
+    /// handed to the caller to hold, and the session cannot be lent out for as
+    /// long as somebody leaves a table browser open — the trait says the same
+    /// thing from the other side, that a cursor is outside whatever transaction
+    /// the session has open.
     ///
     /// Deliberately no `BEGIN` around it, following SQLite's driver: that would
     /// hold a transaction open for as long as somebody leaves a table browser
     /// open, blocking checkpointing and growing the write-ahead log, in exchange
     /// for a guarantee already in hand.
     pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, DuckError> {
-        let stream = self.stream(sql, batch_rows).await?;
-        Ok(Cursor { stream })
-    }
-
-    async fn stream(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, DuckError> {
-        // A zero-row batch would be emitted forever without moving the statement
-        // forward, so the one value that cannot mean anything is read as the
-        // smallest one that can.
-        let batch_rows = batch_rows.max(1);
         let seed = Arc::clone(&self.seed);
         let conn = blocking(move || clone_connection(&seed)).await?;
         // Taken before the statement runs, for the reason `Cursor::canceller`
         // gives: by cancel time the connection is inside the fetch that is to be
         // stopped.
         let interrupt = conn.interrupt_handle();
+        let stream = self
+            .stream(Reader::Own(conn), interrupt, sql, batch_rows)
+            .await?;
+        Ok(Cursor { stream })
+    }
+
+    async fn stream(
+        &self,
+        reader: Reader,
+        interrupt: Arc<InterruptHandle>,
+        sql: &str,
+        batch_rows: usize,
+    ) -> Result<ArrowStream, DuckError> {
+        // A zero-row batch would be emitted forever without moving the statement
+        // forward, so the one value that cannot mean anything is read as the
+        // smallest one that can.
+        let batch_rows = batch_rows.max(1);
         let registration = self.register(Arc::clone(&interrupt));
 
         let (schema_tx, schema_rx) = oneshot::channel();
@@ -585,7 +732,7 @@ impl DuckSource {
         // preferable: `Statement` is neither `Send` nor `Sync`, so the statement
         // and the result cannot leave the thread that made them.
         std::thread::spawn(move || {
-            pump(conn, &sql, batch_rows, schema_tx, batch_tx, &affected);
+            pump(reader, &sql, batch_rows, schema_tx, batch_tx, &affected);
         });
 
         let schema = schema_rx.await.map_err(|_| DuckError::ReaderGone)??;
@@ -703,11 +850,17 @@ impl Cursor {
 /// Reads one statement to the end, sending its schema and then its batches.
 ///
 /// Runs on a thread of its own for the life of the result. Everything it needs
-/// is owned by that thread: the connection, the statement prepared from it, and
-/// the chunks stepped out of that. None of those is `Send`, which is why this is
-/// a thread and not a task.
+/// is held here: the connection or a lock on it, the statement prepared from
+/// that, and the chunks stepped out of the statement. None of those is `Send`,
+/// which is why this is a thread and not a task.
+///
+/// The connection is given up before the last batch is, which is what lets a
+/// caller run the next statement the moment it has read this one to the end: the
+/// session lock goes when `with` returns and `batch_tx` goes when this does, so
+/// the `None` that says "finished" cannot arrive while the session is still
+/// held.
 fn pump(
-    conn: Connection,
+    reader: Reader,
     sql: &str,
     batch_rows: usize,
     schema_tx: oneshot::Sender<Result<SchemaRef, DuckError>>,
@@ -715,14 +868,16 @@ fn pump(
     rows_affected: &AtomicI64,
 ) {
     let mut schema_tx = Some(schema_tx);
-    let result = read(
-        &conn,
-        sql,
-        batch_rows,
-        &mut schema_tx,
-        &batch_tx,
-        rows_affected,
-    );
+    let result = reader.with(|conn| {
+        read(
+            conn,
+            sql,
+            batch_rows,
+            &mut schema_tx,
+            &batch_tx,
+            rows_affected,
+        )
+    });
     if let Err(e) = result {
         // Which way the failure goes out depends on how far this got: a
         // statement that never produced a schema failed at `query`, and one that

@@ -21,6 +21,7 @@ use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use rusqlite::{Connection, InterruptHandle, OpenFlags, Row};
 use std::path::{Path, PathBuf};
@@ -92,14 +93,34 @@ type Cancels = Arc<Mutex<Vec<(u64, Arc<InterruptHandle>)>>>;
 
 /// One SQLite database file, and the connections opened against it.
 ///
-/// There is no pool. PostgreSQL keeps one because a connection there is a TCP
-/// session and a process on the server, expensive enough that handing it back is
-/// worth the bookkeeping; here it is an open file, so a caller that needs one
-/// opens one. What survives from that design is the reason behind it — a result
+/// One of them is the session, and statements run on it and nothing else does.
+/// A transaction belongs to a connection, so a `BEGIN` sent down a connection
+/// opened for one statement is a transaction the next statement will not be
+/// given and nobody can commit — which is the whole reason this connection is
+/// held rather than opened per statement.
+///
+/// Everything else still opens its own. There is no pool: PostgreSQL keeps one
+/// because a connection there is a TCP session and a process on the server,
+/// expensive enough that handing it back is worth the bookkeeping; here it is an
+/// open file. What survives from that design is the reason behind it — a result
 /// being read must not make the navigator wait — and it survives more simply,
-/// because every reader has a connection to itself by construction.
+/// because a catalog read has a connection to itself by construction.
+///
+/// A cursor is opened on a connection of its own for the same reason, and the
+/// trait says so: a cursor is outside whatever the session has open. A table
+/// browser holds one for as long as somebody leaves the tab up, and SQLite can
+/// step one statement at a time per connection — so a cursor on the session
+/// would be a session that runs nothing else until the user scrolls to the end.
 pub struct SqliteSource {
     path: PathBuf,
+    /// Locked for as long as a statement is being read, because rusqlite's
+    /// statement borrows its connection and SQLite steps one at a time. The next
+    /// statement waits, which is what "these two statements are in the same
+    /// transaction" costs on a database that is a file rather than a server.
+    session: Arc<Mutex<Connection>>,
+    /// Taken at connect and kept, because by cancel time the session is inside
+    /// the statement that is to be stopped and there is no borrowing it back.
+    session_interrupt: Arc<InterruptHandle>,
     cancels: Cancels,
     next_id: AtomicU64,
 }
@@ -108,11 +129,14 @@ pub struct SqliteSource {
 /// long as there is something on it to interrupt.
 ///
 /// Registration is scoped rather than permanent, which is the opposite of the
-/// PostgreSQL driver's arrangement. There, a connection outlives the statement
-/// and is reused, so its cancel token is registered once at the point it is
-/// opened. Here a connection is opened for one piece of work and closed after
-/// it, and interrupting a handle whose connection has already been dropped is
-/// not something to leave lying in a list.
+/// PostgreSQL driver's arrangement. There, a cancel names a backend that is
+/// doing something, so a token can be registered once at the point a connection
+/// is opened. Here it raises a flag on a connection, and the two connections
+/// this driver has want it for opposite reasons: a catalog read's connection is
+/// closed the moment it answers, and leaving a handle to a dropped connection
+/// lying in a list is not something to do; the session's outlives every
+/// statement on it, and it is exactly by being registered only while a statement
+/// is in flight that a cancel aimed at one statement cannot reach the next.
 struct Registration {
     id: u64,
     cancels: Cancels,
@@ -171,23 +195,58 @@ where
     }
 }
 
+/// The connection one result is read on.
+///
+/// Two answers, and which one a result gets is the whole of this driver's
+/// transaction story. A statement takes the session, so that a `BEGIN` and the
+/// statements after it are on one connection. A cursor takes a connection of its
+/// own, because it is held open by whoever is looking at it and the session
+/// cannot be lent out for that long.
+enum Reader {
+    Session(Arc<Mutex<Connection>>),
+    Own(Connection),
+}
+
+impl Reader {
+    /// Runs `work` on the connection, holding the session for the whole of it if
+    /// that is the connection this result is on.
+    fn with<T>(
+        &self,
+        work: impl FnOnce(&Connection) -> Result<T, SqliteError>,
+    ) -> Result<T, SqliteError> {
+        match self {
+            Reader::Own(conn) => work(conn),
+            // A poisoned lock means a reader panicked with the connection
+            // borrowed. What SQLite was left in the middle of is not something
+            // to guess at, so the session is treated as gone.
+            Reader::Session(session) => {
+                let session = session.lock().map_err(|_| SqliteError::ReaderGone)?;
+                work(&session)
+            }
+        }
+    }
+}
+
 impl SqliteSource {
     pub async fn connect(path: &str) -> Result<Self, SqliteError> {
         let path = PathBuf::from(path);
         let probe = path.clone();
-        blocking(move || {
+        let session = blocking(move || {
             let conn = open(&probe)?;
             // Opening does not read the file — SQLite defers that to the first
             // statement — so a path that is not a database would be accepted
             // here and fail later, with the connection dialog long gone and
             // nothing on screen to correct.
             conn.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))?;
-            Ok(())
+            Ok(conn)
         })
         .await?;
+        let session_interrupt = Arc::new(session.get_interrupt_handle());
 
         Ok(Self {
             path,
+            session: Arc::new(Mutex::new(session)),
+            session_interrupt,
             cancels: Arc::new(Mutex::new(Vec::new())),
             next_id: AtomicU64::new(0),
         })
@@ -205,6 +264,18 @@ impl SqliteSource {
     /// is read finishes normally — so success means the flag was set, not that
     /// anything stopped. What actually happened shows up as the statement
     /// failing with `is_cancelled`, or not failing at all.
+    ///
+    /// The session connection is reached the same way everything else is, by
+    /// being in the registry only while it has something running, and that is
+    /// what makes it safe to interrupt a connection several statements share.
+    /// SQLite documents the flag as clearing once the running statement count
+    /// reaches zero and an interrupt raised over an idle connection as a no-op,
+    /// so a cancel cannot spill onto the statement after the one it was aimed
+    /// at. What it does reach is the transaction: SQLite rolls back the whole of
+    /// an explicit transaction when it interrupts a write inside one. That is
+    /// the database's rule rather than this driver's arrangement, and the front
+    /// end learns of it the same way it learns anything else about the
+    /// transaction — by asking after the call that could have changed it.
     pub fn cancel(&self) {
         let Ok(cancels) = self.cancels.lock() else {
             return;
@@ -366,6 +437,41 @@ impl SqliteSource {
         .await
     }
 
+    /// Takes one step of transaction control on the session connection.
+    ///
+    /// On the session and not on a connection opened for it, which is the whole
+    /// reason this driver holds one: a `BEGIN` on a connection that is closed
+    /// afterwards opens a transaction nothing can be added to and nobody can
+    /// commit.
+    ///
+    /// Waits for the session, which is not a formality here. A result being read
+    /// has the connection until it is finished or dropped, so a Commit pressed
+    /// while a grid is still filling lands after the last row rather than
+    /// between two of them — and it lands, rather than being refused or applied
+    /// to a different connection.
+    ///
+    /// SQLite spells all six the standard way, savepoints included, so nothing
+    /// in the list is this driver's invention.
+    pub async fn transaction(&self, step: &TxStep) -> Result<(), SqliteError> {
+        let statement = match step {
+            TxStep::Begin => "BEGIN".to_string(),
+            TxStep::Commit => "COMMIT".to_string(),
+            TxStep::Rollback => "ROLLBACK".to_string(),
+            TxStep::Savepoint(name) => format!("SAVEPOINT {name}"),
+            TxStep::RollbackTo(name) => format!("ROLLBACK TO SAVEPOINT {name}"),
+            TxStep::Release(name) => format!("RELEASE SAVEPOINT {name}"),
+        };
+        let session = Arc::clone(&self.session);
+        blocking(move || {
+            session
+                .lock()
+                .map_err(|_| SqliteError::ReaderGone)?
+                .execute_batch(&statement)?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Prepare `sql` and begin streaming results as Arrow batches of
     /// `batch_rows` rows.
     ///
@@ -375,37 +481,65 @@ impl SqliteSource {
     /// describes its own columns, here a column's type is not always knowable
     /// without seeing a value — see `arrow_map` — so the schema this returns has
     /// to be paid for with the first row.
+    ///
+    /// Runs on the session connection, so that a statement and the `BEGIN`
+    /// before it are the same connection's business. The consequence is that a
+    /// result nobody has finished reading is a session nobody else can use: the
+    /// next statement waits for this one to reach its last row or be dropped.
+    /// PostgreSQL's driver has the same property for the same reason, arrived at
+    /// by a different route — there the responses come back in the order the
+    /// statements were sent.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, SqliteError> {
-        self.stream(sql, batch_rows).await
+        self.stream(
+            Reader::Session(Arc::clone(&self.session)),
+            Arc::clone(&self.session_interrupt),
+            sql,
+            batch_rows,
+        )
+        .await
     }
 
     /// Open a cursor over `sql` and return a handle to fetch pages.
     ///
-    /// The same thing as `query`, and that is the finding rather than a
-    /// shortcut. What Phase 1 wanted from a cursor was that page two agrees with
-    /// page one, and PostgreSQL needs `DECLARE CURSOR` to get it because
-    /// otherwise each page is a statement of its own with a snapshot of its own.
-    /// SQLite holds a read transaction from a statement's first step until its
-    /// last, so a statement stepped forward already is the cursor, and there is
-    /// nothing left for this to add.
+    /// The same thing as `query` apart from the connection, and that is the
+    /// finding rather than a shortcut. What Phase 1 wanted from a cursor was
+    /// that page two agrees with page one, and PostgreSQL needs `DECLARE CURSOR`
+    /// to get it because otherwise each page is a statement of its own with a
+    /// snapshot of its own. SQLite holds a read transaction from a statement's
+    /// first step until its last, so a statement stepped forward already is the
+    /// cursor, and there is nothing left for this to add.
+    ///
+    /// On a connection of its own, and that part is not incidental. A cursor is
+    /// handed to the caller to hold, and the session cannot be lent out for as
+    /// long as somebody leaves a table browser open — the trait says the same
+    /// thing from the other side, that a cursor is outside whatever transaction
+    /// the session has open.
     ///
     /// Deliberately no `BEGIN` around it. That would hold a read lock for as long
     /// as somebody leaves a table browser open, which in the default journal mode
     /// is enough to refuse every write to the database — a real cost, paid for a
     /// guarantee already in hand.
     pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, SqliteError> {
-        let stream = self.stream(sql, batch_rows).await?;
+        let path = self.path.clone();
+        let conn = blocking(move || open(&path)).await?;
+        let interrupt = Arc::new(conn.get_interrupt_handle());
+        let stream = self
+            .stream(Reader::Own(conn), interrupt, sql, batch_rows)
+            .await?;
         Ok(Cursor { stream })
     }
 
-    async fn stream(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, SqliteError> {
+    async fn stream(
+        &self,
+        reader: Reader,
+        interrupt: Arc<InterruptHandle>,
+        sql: &str,
+        batch_rows: usize,
+    ) -> Result<ArrowStream, SqliteError> {
         // A zero-row batch would be emitted forever without moving the statement
         // forward, so the one value that cannot mean anything is read as the
         // smallest one that can.
         let batch_rows = batch_rows.max(1);
-        let path = self.path.clone();
-        let conn = blocking(move || open(&path)).await?;
-        let interrupt = Arc::new(conn.get_interrupt_handle());
         let registration = self.register(Arc::clone(&interrupt));
 
         let (schema_tx, schema_rx) = oneshot::channel();
@@ -423,7 +557,7 @@ impl SqliteSource {
         // task that finishes — and a pool worker parked on one is a worker
         // nothing else can have.
         std::thread::spawn(move || {
-            pump(conn, &sql, batch_rows, schema_tx, batch_tx, &affected);
+            pump(reader, &sql, batch_rows, schema_tx, batch_tx, &affected);
         });
 
         let schema = schema_rx.await.map_err(|_| SqliteError::ReaderGone)??;
@@ -539,11 +673,17 @@ impl Cursor {
 /// Reads one statement to the end, sending its schema and then its batches.
 ///
 /// Runs on a thread of its own for the life of the result. Everything it needs
-/// is owned: the connection, the statement prepared from it, and the rows
-/// stepped out of that — three borrows that cannot cross an await, which is the
-/// reason this is a thread and not a task.
+/// is held here: the connection or a lock on it, the statement prepared from
+/// that, and the rows stepped out of the statement — three borrows that cannot
+/// cross an await, which is the reason this is a thread and not a task.
+///
+/// The connection is given up before the last batch is, which is what lets a
+/// caller run the next statement the moment it has read this one to the end: the
+/// session lock goes when `with` returns and `batch_tx` goes when this does, so
+/// the `None` that says "finished" cannot arrive while the session is still
+/// held.
 fn pump(
-    conn: Connection,
+    reader: Reader,
     sql: &str,
     batch_rows: usize,
     schema_tx: oneshot::Sender<Result<SchemaRef, SqliteError>>,
@@ -551,14 +691,16 @@ fn pump(
     rows_affected: &AtomicI64,
 ) {
     let mut schema_tx = Some(schema_tx);
-    let result = read(
-        &conn,
-        sql,
-        batch_rows,
-        &mut schema_tx,
-        &batch_tx,
-        rows_affected,
-    );
+    let result = reader.with(|conn| {
+        read(
+            conn,
+            sql,
+            batch_rows,
+            &mut schema_tx,
+            &batch_tx,
+            rows_affected,
+        )
+    });
     if let Err(e) = result {
         // Which way the failure goes out depends on how far this got: a
         // statement that never produced a schema failed at `query`, and one that
