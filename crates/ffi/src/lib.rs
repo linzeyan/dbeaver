@@ -1754,3 +1754,82 @@ pub unsafe extern "C" fn db_transfer(
         }
     }
 }
+
+/// Reads a file into an existing table on `target`.
+///
+/// The file is read in batches so a multi-gigabyte CSV is no heavier than a
+/// small one — the same property `transfer` has, and the reason both live in
+/// this crate rather than in the caller. The table must already exist: this
+/// does not guess a schema, because a file's types are only meaningful in the
+/// context of the table they are being read into.
+///
+/// Returns the row count on success. Returns -1 when the target refused the
+/// statement (a table that does not exist, a type mismatch, a constraint
+/// violation) and -2 when the operation was cancelled — the same convention
+/// `db_transfer` uses, so a caller that already handles one can handle the
+/// other without a second branch.
+///
+/// # Safety
+/// `target` must come from `db_connect` and not have been freed. `format`,
+/// `path`, and `table` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_import(
+    target: *mut DbHandle,
+    format: *const c_char,
+    path: *const c_char,
+    table: *const c_char,
+    err: *mut *mut c_char,
+) -> i64 {
+    if target.is_null() || format.is_null() || path.is_null() || table.is_null() {
+        unsafe { set_err(err, "null target, format, path, or table") };
+        return -1;
+    }
+    let format_str = match unsafe { CStr::from_ptr(format) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let format = match dbtransfer::Format::from_extension(format_str) {
+        Some(f) => f,
+        None => {
+            unsafe { set_err(err, format!("no importer reads {format_str:?} files")) };
+            return -1;
+        }
+    };
+    let t = unsafe { &*target };
+    let Some(dialect) = t.dialect else {
+        unsafe { set_err(err, "this build has no dialect for this database") };
+        return -1;
+    };
+    match runtime().block_on(dbtransfer::import(
+        std::path::Path::new(path_str),
+        format,
+        t.driver.as_ref(),
+        dialect,
+        table_str.to_string(),
+    )) {
+        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+        Err(e) => {
+            let cancelled = e.is_cancelled();
+            unsafe { set_err(err, e) };
+            if cancelled { -2 } else { -1 }
+        }
+    }
+}

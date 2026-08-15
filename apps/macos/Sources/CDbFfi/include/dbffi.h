@@ -479,6 +479,21 @@ int64_t db_export_sql(DbHandle* handle, DbCursor* cursor, const char* table, con
 // cancelled. Fails if this build has no dialect for the target database.
 int64_t db_transfer(DbCursor* cursor, DbHandle* target, const char* table, char** err);
 
+// Reads a file into an existing table on `target`.
+//
+// A batch at a time, so a multi-gigabyte CSV is no heavier than a small one.
+// The table has to exist already: nothing here guesses a type, because a
+// column of `2024-01-02` is a date or text depending on what it is being read
+// into, and the table being read into already knows.
+//
+// `format` is a file extension — "csv", "tsv", "jsonl", "parquet". There is no
+// "sql", because a SQL script is something to run rather than to import.
+//
+// Returns the row count on success, -1 on error, -2 when the operation was
+// cancelled. Fails if this build has no dialect for the target database.
+int64_t db_import(DbHandle* target, const char* format, const char* path,
+                  const char* table, char** err);
+
 #ifdef __cplusplus
 }
 #endif
