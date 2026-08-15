@@ -7,11 +7,13 @@
 //! the cost where it belongs — in the socket and the disk, not in formatting.
 
 mod delimited;
+mod import;
 mod parquet_file;
 mod sql_script;
 mod target;
 
 pub use delimited::DelimitedWriter;
+pub use import::import;
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;
 pub use target::TargetWriter;
