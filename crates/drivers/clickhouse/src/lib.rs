@@ -315,17 +315,26 @@ impl ChSource {
             Ok(columns) => columns,
             // Not everything that can be run can be described: `DESCRIBE (INSERT
             // …)` and `DESCRIBE (SHOW …)` are syntax errors, and so is
-            // `DESCRIBE` of a statement that is simply broken. Both are answered
-            // by running the caller's own text — which reports a broken
-            // statement with an offset into what they actually wrote, and
-            // carries out a statement that has no result set.
+            // `DESCRIBE` of a statement that is simply broken. What separates
+            // those is whether the statement answers with rows — an `INSERT`
+            // does not, a `SHOW` does — and that decides how it has to be sent,
+            // because reading a result means asking for `FORMAT ArrowStream`
+            // and on an `INSERT` that names the format of the data going in.
             Err(_) => {
                 let attempt = Attempt {
                     columns: Vec::new(),
                     ..attempt
                 };
-                attempt.execute().await?;
-                return Ok(Rows::finished(attempt.plan(false).schema));
+                if !answers_with_rows(sql) {
+                    // Running the caller's own text, which reports a broken
+                    // statement with an offset into what they actually wrote and
+                    // carries out one that has no result set.
+                    attempt.execute().await?;
+                    return Ok(Rows::finished(attempt.plan(false).schema));
+                }
+                let registration =
+                    Registration::hold(Arc::clone(&self.live), self.next(), query_id);
+                return Rows::undescribed(attempt, registration).await;
             }
         };
 
@@ -596,6 +605,43 @@ impl Rows {
         })
     }
 
+    /// A result whose columns exist only once the statement has run.
+    ///
+    /// The first block is read here rather than left for `next_page`, because
+    /// the schema is in it and `query` promises the columns before any row is
+    /// handed over. That promise is kept for these statements too — just at the
+    /// cost of the round trip `DESCRIBE` would have made anyway.
+    ///
+    /// The invalid-UTF-8 retry survives this: nothing has been delivered, so a
+    /// re-run repeats no page. What it cannot do is help — sanitizing works by
+    /// wrapping the columns `DESCRIBE` named, and there are none here.
+    async fn undescribed(attempt: Attempt, registration: Registration) -> Result<Self, ChError> {
+        let (mut cursor, plan) = attempt.open(false)?;
+        let first = cursor
+            .next()
+            .await
+            .map_err(|e| ChError::from_server(e, Some(&attempt.original)))?;
+        let Some(batch) = first else {
+            // It ran and answered with nothing at all, which is the shape of a
+            // statement that had no result set after all.
+            return Ok(Self::finished(plan.schema));
+        };
+        Ok(Self {
+            schema: batch.schema(),
+            reader: Some(Reader {
+                cursor,
+                attempt,
+                sanitized: false,
+            }),
+            carry: Some(batch),
+            delivered: 0,
+            drained: false,
+            untouched: true,
+            counted: true,
+            _registration: Some(registration),
+        })
+    }
+
     /// A result with no rows in it and none coming, for a statement that had no
     /// result set to begin with.
     fn finished(schema: SchemaRef) -> Self {
@@ -746,6 +792,30 @@ impl Rows {
         self._registration = None;
         Ok(())
     }
+}
+
+/// Whether a statement ClickHouse will not describe still answers with rows.
+///
+/// Read off the leading keyword, which is as far as this has to look: the
+/// statements the planner refuses to describe are the introspection ones and the
+/// writes, and no member of either group hides its kind behind a prefix the way
+/// a `WITH` hides a `SELECT` — and a `SELECT`, `WITH` or `VALUES` never reaches
+/// here, because `DESCRIBE` answered for it.
+///
+/// Listed by what returns rows rather than by what does not, so a statement this
+/// has never heard of keeps today's behaviour instead of being sent for a result
+/// it may not have. `EXISTS` and `CHECK TABLE` are here for completeness; `SHOW`
+/// is the one that matters, being how every DDL in this build is read.
+fn answers_with_rows(sql: &str) -> bool {
+    let word: String = sql
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect();
+    matches!(
+        word.to_ascii_uppercase().as_str(),
+        "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "EXISTS" | "CHECK"
+    )
 }
 
 /// Stops the statement one reader is running.

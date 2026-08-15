@@ -597,6 +597,47 @@ async fn a_statement_with_no_result_set_still_runs() {
     assert_eq!(batch.num_rows(), 1);
 }
 
+/// A statement with a result set the planner will not describe still has one.
+///
+/// `DESCRIBE (SHOW …)` is the same syntax error as `DESCRIBE (INSERT …)`, and
+/// for a while both were treated as the same thing: run it, hand back nothing.
+/// That is right for the write and silently wrong for the read — `SHOW
+/// DATABASES` typed into the editor drew an empty grid, and a table's DDL, which
+/// is `SHOW CREATE TABLE` and nothing else, could not be read at all.
+#[tokio::test]
+#[ignore = "requires a ClickHouse server"]
+async fn a_show_statement_answers_with_the_rows_it_has() {
+    let source = source().await;
+    let batch = read_all(&source, "SHOW CREATE TABLE bench.types_all").await;
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(batch.schema().field(0).name(), "statement");
+    let statement = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .expect("the statement arrives as text");
+    assert!(
+        statement
+            .value(0)
+            .starts_with("CREATE TABLE bench.types_all"),
+        "{}",
+        statement.value(0)
+    );
+
+    // Rows produced, where the `INSERT` above declines to answer: this one is a
+    // read, and the count of what a read produced is a number the driver has.
+    let mut rows = source
+        .query("SHOW DATABASES", 100)
+        .await
+        .expect("running SHOW DATABASES");
+    let mut produced = 0;
+    while let Some(page) = rows.next_page().await.expect("reading a page") {
+        produced += page.num_rows();
+    }
+    assert!(produced >= 2, "at least bench and system are there");
+    assert_eq!(rows.rows_affected(), Some(produced as u64));
+}
+
 /// A statement that cannot be described has to report its own failure and not
 /// the one `DESCRIBE` had with it.
 #[tokio::test]
