@@ -174,11 +174,18 @@ if CommandLine.arguments.contains("--ddl") {
 /// It writes. `edit_probe` is created and dropped in the database `--conn`
 /// names, so point it at a scratch database rather than at anything that
 /// matters.
+///
+/// `--schema` says which schema the request should name, because the request
+/// says and the connection cannot be asked: PostgreSQL puts a bare table in
+/// `public`, MySQL in the database the connection opened, SQL Server in `dbo`.
+/// Getting it wrong is not a silent pass — the core reads that relation's columns
+/// to find the key, so a wrong schema fails by name.
 if CommandLine.arguments.contains("--edit") {
     guard let conn = connArgument else {
         fputs("--edit needs --conn\n", stderr)
         exit(2)
     }
+    let probeSchema = argument("--schema") ?? "public"
     do {
         let db = try Database(connString: conn)
         func ran(_ sql: String) throws -> Int {
@@ -187,8 +194,10 @@ if CommandLine.arguments.contains("--edit") {
             return query.rowsAffected ?? 0
         }
         _ = try ran("DROP TABLE IF EXISTS edit_probe")
+        // `varchar` rather than `text`: SQL Server's `text` is the deprecated
+        // LOB type and cannot be compared with `=`, which the read-back does.
         _ = try ran(
-            "CREATE TABLE edit_probe (id int PRIMARY KEY, label text, "
+            "CREATE TABLE edit_probe (id int PRIMARY KEY, label varchar(32), "
                 + "qty numeric(9,2) DEFAULT 9.99)")
         _ = try ran("INSERT INTO edit_probe VALUES (1, 'before', 1.00), (2, 'doomed', 2.00)")
 
@@ -196,7 +205,7 @@ if CommandLine.arguments.contains("--edit") {
         // sends: a change and a deletion staged together cross as one document,
         // and a field only the second arm carries would go missing there.
         let request = EditRequest(
-            schema: "public", relation: "edit_probe",
+            schema: probeSchema, relation: "edit_probe",
             updates: [
                 EditRequest.Update(
                     key: [EditRequest.Cell(column: "id", value: "1")],
