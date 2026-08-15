@@ -222,6 +222,23 @@ struct ColumnInfo: Decodable, Hashable, Identifiable {
     }
 }
 
+/// Which columns name one row of a relation, as the core decides it.
+///
+/// Asked for rather than worked out from `ColumnInfo.isPrimaryKey`, which is
+/// what this side used to do. The rule is no longer one field — a table with no
+/// primary key is named by a UNIQUE constraint whose columns cannot be null, and
+/// choosing among several of those is a decision with an order to it — and a
+/// copy of that here would be a second answer to a question the core already
+/// answers, disagreeing with it the day either is corrected.
+struct RowIdentity: Decodable, Hashable {
+    /// The columns whose values name one row, in key order. Empty where nothing
+    /// does, which is the same question as whether the table can be edited.
+    let columns: [String]
+    /// Why there is nothing, naming the table and any constraint that had to be
+    /// turned down. `nil` where `columns` is not empty.
+    let obstacle: String?
+}
+
 /// What the connection's transaction is doing.
 ///
 /// `transactional` decides whether the rest is worth showing at all: a

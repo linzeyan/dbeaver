@@ -9,38 +9,91 @@
 
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use dbedit::Edits;
 
-/// Two tables: one with a compound key, one with none at all.
+/// One column of one table: name, declared type, whether it is in the primary
+/// key, whether it can be null.
+///
+/// The last two are separate because the whole of the unique-key rule lives in
+/// the difference: a table with no primary key and a NOT NULL unique column can
+/// name a row, and the same table with that column nullable cannot.
+type Column = (&'static str, &'static str, bool, bool);
+
+/// Six tables, each the smallest example of one thing a key can be.
 struct Fake;
 
 #[async_trait::async_trait]
 impl Driver for Fake {
     async fn columns(&self, _: &str, relation: &str) -> DbResult<Vec<ColumnInfo>> {
-        let described: &[(&str, &str, bool)] = match relation {
+        let described: &[Column] = match relation {
             "lines" => &[
-                ("order_id", "int4", true),
-                ("line_no", "int2", true),
-                ("sku", "text", false),
-                ("qty", "numeric(9, 2)", false),
-                ("shipped_at", "timestamp", false),
-                ("note", "text", false),
+                ("order_id", "int4", true, false),
+                ("line_no", "int2", true, false),
+                ("sku", "text", false, true),
+                ("qty", "numeric(9, 2)", false, true),
+                ("shipped_at", "timestamp", false, true),
+                ("note", "text", false, true),
             ],
-            "no_key" => &[("label", "text", false)],
+            "no_key" => &[("label", "text", false, true)],
+            // No primary key, one unique key over a column that cannot be null.
+            "sessions" => &[
+                ("token", "text", false, false),
+                ("note", "text", false, true),
+            ],
+            // The same shape with the column nullable, which is the case the
+            // rule has to refuse.
+            "invitations" => &[
+                ("email", "text", false, true),
+                ("note", "text", false, true),
+            ],
+            // Three unique keys, so that one has to be chosen.
+            "memberships" => &[
+                ("tenant", "text", false, false),
+                ("member", "text", false, false),
+                ("code", "text", false, false),
+                ("alias", "text", false, false),
+                ("label", "text", false, true),
+            ],
+            // A driver contradicting itself: a key over a column the column list
+            // does not have.
+            "ghost" => &[("label", "text", false, false)],
             _ => &[],
         };
         Ok(described
             .iter()
             .enumerate()
-            .map(|(i, (name, data_type, key))| ColumnInfo {
+            .map(|(i, (name, data_type, key, nullable))| ColumnInfo {
                 name: name.to_string(),
                 data_type: data_type.to_string(),
-                nullable: !key,
+                nullable: *nullable,
                 position: i as i32 + 1,
                 is_primary_key: *key,
                 default_value: None,
+            })
+            .collect())
+    }
+
+    /// Deliberately not in the order the rule picks from, so that a check which
+    /// passes because the first one happened to be right does not exist.
+    async fn unique_keys(&self, _: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        let declared: &[(&str, &[&str])] = match relation {
+            "sessions" => &[("sessions_token_key", &["token"])],
+            "invitations" => &[("invitations_email_key", &["email"])],
+            "memberships" => &[
+                ("memberships_tenant_member_key", &["tenant", "member"]),
+                ("memberships_code_key", &["code"]),
+                ("memberships_alias_key", &["alias"]),
+            ],
+            "ghost" => &[("ghost_missing_key", &["nowhere"])],
+            _ => &[],
+        };
+        Ok(declared
+            .iter()
+            .map(|(name, columns)| UniqueKeyInfo {
+                name: name.to_string(),
+                columns: columns.iter().map(|c| c.to_string()).collect(),
             })
             .collect())
     }
@@ -55,7 +108,7 @@ impl Driver for Fake {
         unreachable!("nothing here reads a view")
     }
     async fn indexes(&self, _: &str, _: &str) -> DbResult<Vec<IndexInfo>> {
-        unreachable!("the key comes from the columns")
+        unreachable!("a key is a constraint here, not whatever the planner can use")
     }
     async fn foreign_keys(&self, _: &str, _: &str) -> DbResult<Vec<RelationshipInfo>> {
         unreachable!("an edit is one relation's business")
@@ -223,7 +276,7 @@ async fn a_batch_is_ordered_so_that_one_statement_cannot_undo_the_next() {
 }
 
 #[tokio::test]
-async fn a_relation_with_no_primary_key_cannot_be_edited() {
+async fn a_relation_with_nothing_unique_cannot_be_edited() {
     // The whole reason this crate refuses rather than matching on every column:
     // a `WHERE` clause of every column is one that can quietly be false for the
     // row the user was looking at, and then the edit does nothing at all.
@@ -233,7 +286,117 @@ async fn a_relation_with_no_primary_key_cannot_be_edited() {
               "set":[{"column":"label","value":"b"}]}]}"#,
     )
     .await;
-    assert!(why.contains("no primary key"), "{why}");
+    assert!(why.contains("no primary key or unique key"), "{why}");
+}
+
+/// A table with no primary key is editable through its unique key, and the
+/// `WHERE` clause is that key.
+#[tokio::test]
+async fn a_not_null_unique_key_names_a_row_where_there_is_no_primary_key() {
+    let statements = written(
+        r#"{"schema":"public","relation":"sessions","updates":[
+             {"key":[{"column":"token","value":"abc"}],
+              "set":[{"column":"note","value":"seen"}]}]}"#,
+    )
+    .await;
+    assert_eq!(
+        statements,
+        ["UPDATE public.sessions SET note = 'seen' WHERE token = 'abc'"]
+    );
+}
+
+/// The key's value is the one the row was read with, on a unique key exactly as
+/// on a primary one — editing the key column still identifies the row by what it
+/// was.
+#[tokio::test]
+async fn changing_the_unique_key_still_names_the_row_by_its_old_value() {
+    let statements = written(
+        r#"{"schema":"public","relation":"sessions","updates":[
+             {"key":[{"column":"token","value":"old"}],
+              "set":[{"column":"token","value":"new"}]}]}"#,
+    )
+    .await;
+    assert_eq!(
+        statements,
+        ["UPDATE public.sessions SET token = 'new' WHERE token = 'old'"]
+    );
+}
+
+/// A unique column that can be null is not a key, and the refusal says which
+/// constraint it turned down.
+///
+/// `NULL != NULL` is the whole of it: the row holding NULL is matched by no
+/// `WHERE token = …`, and two rows holding NULL are both permitted by the
+/// constraint — so the one thing an identity has to promise, that it names one
+/// row, is exactly what this cannot.
+#[tokio::test]
+async fn a_nullable_unique_key_is_refused_by_name() {
+    let why = refused(
+        r#"{"schema":"public","relation":"invitations","updates":[
+             {"key":[{"column":"email","value":"a@example.com"}],
+              "set":[{"column":"note","value":"x"}]}]}"#,
+    )
+    .await;
+    assert!(why.contains("invitations_email_key"), "{why}");
+    assert!(why.contains("can be null"), "{why}");
+}
+
+/// Several candidates, and the same one every time.
+///
+/// Fewest columns first and then the name: `memberships_alias_key` wins over the
+/// two-column key on width and over `memberships_code_key` on name, and it is
+/// neither the first nor the last thing the driver reported — so a rule that
+/// took whatever arrived first would fail here.
+#[tokio::test]
+async fn one_of_several_unique_keys_is_chosen_and_it_is_always_the_same_one() {
+    let json = r#"{"schema":"public","relation":"memberships","deletes":[
+             {"key":[{"column":"alias","value":"a"}]}]}"#;
+    for _ in 0..5 {
+        assert_eq!(
+            written(json).await,
+            ["DELETE FROM public.memberships WHERE alias = 'a'"]
+        );
+    }
+}
+
+/// A key naming a column the relation does not have is refused rather than
+/// trusted: the two answers contradict each other, and nothing here can say
+/// which one is right.
+#[tokio::test]
+async fn a_unique_key_over_a_column_that_is_not_there_is_refused() {
+    let why = refused(
+        r#"{"schema":"public","relation":"ghost","deletes":[
+             {"key":[{"column":"label","value":"a"}]}]}"#,
+    )
+    .await;
+    assert!(why.contains("ghost_missing_key"), "{why}");
+    assert!(why.contains("no column of"), "{why}");
+}
+
+/// The exported answer is the one the statements are built from, so a front end
+/// that asks does not have to work the rule out again.
+#[tokio::test]
+async fn the_identity_a_front_end_asks_for_is_the_one_the_where_clause_uses() {
+    let named = dbedit::identity(&Fake, "public", "memberships")
+        .await
+        .unwrap();
+    assert_eq!(named.columns, ["alias"]);
+    assert_eq!(named.obstacle, None);
+
+    let compound = dbedit::identity(&Fake, "public", "lines").await.unwrap();
+    assert_eq!(compound.columns, ["order_id", "line_no"]);
+
+    let refused = dbedit::identity(&Fake, "public", "invitations")
+        .await
+        .unwrap();
+    assert!(refused.columns.is_empty());
+    assert!(
+        refused
+            .obstacle
+            .as_deref()
+            .is_some_and(|why| why.contains("invitations_email_key")),
+        "{refused:?}"
+    );
 }
 
 #[tokio::test]

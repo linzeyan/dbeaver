@@ -14,7 +14,7 @@ use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_duckdb::DuckSource;
 use std::path::PathBuf;
@@ -116,6 +116,10 @@ impl Driver for Fixture {
 
     async fn indexes(&self, _: &str, _: &str) -> DbResult<Vec<IndexInfo>> {
         unreachable!("upstream leaves indexes out of a DuckDB table's DDL")
+    }
+
+    async fn unique_keys(&self, _: &str, _: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        unreachable!("a unique key reaches the script through constraints()")
     }
 
     async fn foreign_keys(&self, _: &str, _: &str) -> DbResult<Vec<RelationshipInfo>> {

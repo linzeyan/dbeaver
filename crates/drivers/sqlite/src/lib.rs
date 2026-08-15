@@ -21,7 +21,7 @@ use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep,
+    TxStep, UniqueKeyInfo,
 };
 use rusqlite::{Connection, InterruptHandle, OpenFlags, Row};
 use std::path::{Path, PathBuf};
@@ -380,6 +380,19 @@ impl SqliteSource {
         let (owned, relation) = (schema.to_string(), relation.to_string());
         self.with_schema(schema, move |conn| {
             metadata::indexes(conn, &owned, &relation)
+        })
+        .await
+    }
+
+    /// UNIQUE constraints on one relation, primary key excluded.
+    pub async fn unique_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, SqliteError> {
+        let (owned, relation) = (schema.to_string(), relation.to_string());
+        self.with_schema(schema, move |conn| {
+            metadata::unique_keys(conn, &owned, &relation)
         })
         .await
     }

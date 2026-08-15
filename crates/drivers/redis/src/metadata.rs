@@ -20,7 +20,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
-    SchemaInfo, TriggerInfo,
+    SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use redis::Value;
 
@@ -117,6 +117,20 @@ impl RedisSource {
         _relation: &str,
     ) -> Result<Option<String>, RedisError> {
         Ok(None)
+    }
+
+    /// Always empty, and without asking.
+    ///
+    /// Redis has one unique key and it is the key itself, which `columns`
+    /// already reports as the primary key of every relation here. There is no
+    /// second thing a value could be looked up by — that is the whole shape of a
+    /// key-value store — so there is nothing for this to add.
+    pub async fn unique_keys(
+        &self,
+        _schema: &str,
+        _relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, RedisError> {
+        Ok(Vec::new())
     }
 
     /// Always empty, and without asking.

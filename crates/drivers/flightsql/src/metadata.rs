@@ -49,7 +49,7 @@ use arrow_flight::sql::{
 };
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
-    SchemaInfo, TriggerInfo,
+    SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use std::sync::Arc;
 
@@ -244,6 +244,19 @@ impl FlightSqlSource {
         _relation: &str,
     ) -> Result<Option<String>, FlightSqlError> {
         Ok(None)
+    }
+
+    /// Empty, always, and without asking. The `CommandGet…` set has a call for
+    /// the primary key and for both directions of a foreign key, and none for a
+    /// unique constraint — so a server may well enforce one and the protocol has
+    /// no way to say so. Answering from the primary key alone is what the
+    /// protocol supports; inventing the rest is what it does not.
+    pub async fn unique_keys(
+        &self,
+        _schema: &str,
+        _relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, FlightSqlError> {
+        Ok(Vec::new())
     }
 
     /// Empty, always, and without asking. Flight SQL has no command for an index:

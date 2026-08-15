@@ -11,7 +11,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
+    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use tokio_postgres::Client;
 
@@ -267,6 +267,57 @@ pub(crate) async fn indexes(
             method: r.get(3),
             predicate: r.get(4),
             columns: r.get(5),
+        })
+        .collect())
+}
+
+/// UNIQUE constraints that name columns, primary key excluded.
+///
+/// `pg_index` rather than `pg_constraint`, because `CREATE UNIQUE INDEX` makes a
+/// key just as `UNIQUE (…)` does and PostgreSQL only records the second one as a
+/// constraint. Reading the first list would leave a table whose only key was
+/// created as an index looking like a table with no key at all.
+///
+/// Three conditions do the filtering `UniqueKeyInfo` describes. `indpred IS
+/// NULL` drops the partial index, which is unique over the rows it covers and
+/// says nothing about the rest. `indexprs IS NULL` drops the expression index,
+/// whose keys are not columns. `indnkeyatts = indnatts` drops the one with an
+/// `INCLUDE` list, so a payload column is not mistaken for part of the key.
+pub(crate) async fn unique_keys(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<UniqueKeyInfo>, PgError> {
+    // The columns come from indkey with ordinality rather than from a plain join
+    // against pg_attribute, because attnum order is not key order and a
+    // composite key read in the wrong order is a WHERE clause that pairs each
+    // value with the wrong column.
+    let rows = client
+        .query(
+            "SELECT i.relname, \
+                    ARRAY(SELECT a.attname \
+                          FROM unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord) \
+                          JOIN pg_catalog.pg_attribute a \
+                            ON a.attrelid = ix.indrelid AND a.attnum = k.attnum \
+                          ORDER BY k.ord) \
+             FROM pg_catalog.pg_index ix \
+             JOIN pg_catalog.pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_catalog.pg_class c ON c.oid = ix.indrelid \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = $1 AND c.relname = $2 \
+               AND ix.indisunique AND NOT ix.indisprimary \
+               AND ix.indpred IS NULL AND ix.indexprs IS NULL \
+               AND ix.indnkeyatts = ix.indnatts \
+             ORDER BY i.relname",
+            &[&schema, &relation],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| UniqueKeyInfo {
+            name: r.get(0),
+            columns: r.get(1),
         })
         .collect())
 }

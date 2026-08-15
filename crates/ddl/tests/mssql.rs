@@ -10,6 +10,7 @@
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo,
     RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 use driver_mssql::MsSqlSource;
 use tokio::sync::OnceCell;
@@ -98,6 +99,10 @@ impl Driver for Fixture {
 
     async fn indexes(&self, _: &str, _: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(self.indexes.clone())
+    }
+
+    async fn unique_keys(&self, _: &str, _: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        unreachable!("a unique key reaches the script through constraints()")
     }
 
     async fn foreign_keys(&self, _: &str, _: &str) -> DbResult<Vec<RelationshipInfo>> {

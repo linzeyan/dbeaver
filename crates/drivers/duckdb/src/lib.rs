@@ -42,7 +42,7 @@ use arrow::datatypes::SchemaRef;
 use arrow_map::Layout;
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep,
+    TxStep, UniqueKeyInfo,
 };
 use duckdb::{Connection, InterruptHandle};
 use std::path::{Path, PathBuf};
@@ -559,6 +559,17 @@ impl DuckSource {
     pub async fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<IndexInfo>, DuckError> {
         let (schema, relation) = (schema.to_string(), relation.to_string());
         self.with_connection(move |conn| metadata::indexes(conn, &schema, &relation))
+            .await
+    }
+
+    /// UNIQUE constraints on one relation, primary key excluded.
+    pub async fn unique_keys(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, DuckError> {
+        let (schema, relation) = (schema.to_string(), relation.to_string());
+        self.with_connection(move |conn| metadata::unique_keys(conn, &schema, &relation))
             .await
     }
 

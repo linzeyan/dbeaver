@@ -134,6 +134,10 @@ final class AppModel {
     // Detail
     var activeTab: DetailTab = .content
     private(set) var columns: [ColumnInfo] = []
+    /// Which of those columns name one row, as the core decides it. Read
+    /// alongside the columns, because every question about editing is a question
+    /// about this one.
+    private(set) var rowIdentity: RowIdentity?
     private(set) var indexes: [IndexInfo] = []
     private(set) var foreignKeys: [RelationshipInfo] = []
     private(set) var referencedBy: [RelationshipInfo] = []
@@ -935,29 +939,35 @@ final class AppModel {
     /// Editing is the Content tab's alone. A query result is not attributable to
     /// one relation — a join of five tables has no answer to which of them a cell
     /// belongs to that is right often enough to write into a database — and a
-    /// view has no rows of its own to name. The primary key is the other half of
-    /// the same question: without one there is no way to say which row a change
-    /// is to, so the core refuses and this does not offer.
+    /// view has no rows of its own to name. The key is the other half of the same
+    /// question: without something that names one row there is no way to say
+    /// which row a change is to, so the core refuses and this does not offer.
     var canEditCell: Bool {
-        activeTab == .content && selected?.kind == .table && !isBusy
-            && columns.contains(where: \.isPrimaryKey)
+        activeTab == .content && selected?.kind == .table && !isBusy && hasRowIdentity
             && selectedCell(in: browseResult) != nil
     }
+
+    /// Whether the core found something that names one row of the selection.
+    ///
+    /// Nil while the answer is still being read, which is not the same as "no":
+    /// treating it as no would show the refusal sentence for a table that turns
+    /// out to be perfectly editable, for as long as the catalog takes to answer.
+    private var hasRowIdentity: Bool { !(rowIdentity?.columns.isEmpty ?? true) }
 
     /// Why the selected cell cannot be changed, for a pane that has to say so.
     ///
     /// A control that is simply absent reads as a feature this build does not
     /// have. The two reasons a user can act on — the wrong tab, and a table with
-    /// nothing to identify a row by — are worth a sentence each.
+    /// nothing to identify a row by — are worth a sentence each, and the second
+    /// sentence is the core's own: it is the one place that knows whether a
+    /// unique constraint was turned down and which.
     var editObstacle: String? {
         guard activeTab == .content, let selected else { return "Editing is for a browsed table." }
         guard selected.kind == .table else {
             return "A \(selected.kind.label.lowercased()) has no rows of its own to change."
         }
-        guard columns.contains(where: \.isPrimaryKey) else {
-            return "\(selected.name) has no primary key, so there is no way to name one row of it."
-        }
-        return nil
+        guard let rowIdentity, rowIdentity.columns.isEmpty else { return nil }
+        return rowIdentity.obstacle.map { "\($0)." }
     }
 
     var hasPendingEdits: Bool { !staged.isEmpty }
@@ -1033,8 +1043,7 @@ final class AppModel {
     /// added by typing into it, and a result with no columns has nowhere to
     /// type.
     var canAddRow: Bool {
-        activeTab == .content && selected?.kind == .table && !isBusy
-            && columns.contains(where: \.isPrimaryKey)
+        activeTab == .content && selected?.kind == .table && !isBusy && hasRowIdentity
             && !browseResult.table.columns.isEmpty
     }
 
@@ -1129,7 +1138,7 @@ final class AppModel {
     private func editRequest(for relation: RelationInfo) -> EditRequest? {
         staged.request(
             schema: relation.schema, relation: relation.name,
-            keyColumns: columns.filter(\.isPrimaryKey).map(\.name),
+            keyColumns: rowIdentity?.columns ?? [],
             rows: browseResult.table)
     }
 
@@ -1203,12 +1212,21 @@ final class AppModel {
         }
     }
 
+    /// The columns of the selected relation, and which of them name one row.
+    ///
+    /// Both in one hop, because they are read for the same reason and a window
+    /// that had the columns but not the identity would have to decide what to
+    /// draw for an editing control it cannot yet answer for.
     private func loadColumns(for relation: RelationInfo, then next: @escaping @MainActor () -> Void)
     {
         run { db in
-            try db.columns(schema: relation.schema, relation: relation.name)
-        } then: { [self] cols in
-            columns = cols
+            (
+                try db.columns(schema: relation.schema, relation: relation.name),
+                try db.rowIdentity(schema: relation.schema, relation: relation.name)
+            )
+        } then: { [self] catalog in
+            columns = catalog.0
+            rowIdentity = catalog.1
             next()
         }
     }

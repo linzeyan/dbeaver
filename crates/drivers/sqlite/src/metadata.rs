@@ -21,7 +21,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
+    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -284,6 +284,51 @@ fn index_keys(
                 .unwrap_or_else(|| "?".to_string())
         })
         .collect())
+}
+
+/// UNIQUE keys that name columns, primary key excluded.
+///
+/// Both spellings count: `origin` is `u` for a `UNIQUE` clause in the table's
+/// declaration and `c` for a `CREATE UNIQUE INDEX`, and SQLite enforces the two
+/// identically. `pk` is left out because `ColumnInfo::is_primary_key` already
+/// carries it — and because SQLite would not report the common case here anyway:
+/// an `INTEGER PRIMARY KEY` is the rowid and has no index at all.
+///
+/// A partial index is skipped, being unique only over the rows its `WHERE`
+/// admits. So is an index over an expression, which `pragma_index_info` marks by
+/// answering NULL where a column name would be — the one place this differs from
+/// `indexes`, which fills those blanks from the statement the index was created
+/// from so a structure pane can print `lower(email)`. Here a blank is a key that
+/// cannot be written as `column = value`, and printing the expression would not
+/// change that.
+pub(crate) fn unique_keys(
+    conn: &Connection,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<UniqueKeyInfo>, SqliteError> {
+    let mut stmt = conn.prepare(
+        "SELECT name FROM pragma_index_list(?1, ?2) \
+         WHERE \"unique\" = 1 AND origin <> 'pk' AND partial = 0 ORDER BY name",
+    )?;
+    let names: Vec<String> = stmt
+        .query_map([relation, schema], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+
+    let mut keys = Vec::new();
+    for name in names {
+        let mut stmt = conn.prepare("SELECT name FROM pragma_index_info(?1, ?2) ORDER BY seqno")?;
+        let columns: Vec<Option<String>> = stmt
+            .query_map([&name, &schema.to_string()], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        if columns.iter().any(Option::is_none) {
+            continue;
+        }
+        keys.push(UniqueKeyInfo {
+            name,
+            columns: columns.into_iter().flatten().collect(),
+        });
+    }
+    Ok(keys)
 }
 
 pub(crate) fn foreign_keys(

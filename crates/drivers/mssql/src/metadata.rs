@@ -16,7 +16,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
+    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use tiberius::Row;
 
@@ -299,6 +299,60 @@ pub(crate) async fn definition(
         .first()
         .and_then(|r| r.get::<&str, _>(0))
         .map(str::to_string))
+}
+
+/// UNIQUE keys that name columns, primary key excluded.
+///
+/// `sys.indexes` and not `sys.key_constraints`, because SQL Server enforces a
+/// `UNIQUE` constraint with a unique index and `CREATE UNIQUE INDEX` produces
+/// one that no constraint view lists. Both name a row equally well.
+///
+/// Two filters do the work `UniqueKeyInfo` describes. `filter_definition IS
+/// NULL` drops the filtered index, which is unique over the rows it covers and
+/// promises nothing about the ones it does not. `is_included_column = 0` drops
+/// the `INCLUDE` payload, which is stored in the index without being part of
+/// what the server keeps unique.
+///
+/// The sort direction is left off the column here, unlike in `indexes`: a
+/// descending key is still an equality on that column, and `id DESC` in a
+/// `WHERE` clause is a syntax error rather than a key.
+pub(crate) async fn unique_keys(
+    client: &mut Tds,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<UniqueKeyInfo>, MsSqlError> {
+    let rows = rows(
+        client,
+        "SELECT i.name, c.name AS column_name \
+         FROM sys.indexes i \
+         JOIN sys.objects o ON o.object_id = i.object_id \
+         JOIN sys.schemas s ON s.schema_id = o.schema_id \
+         JOIN sys.index_columns ic \
+                ON ic.object_id = i.object_id AND ic.index_id = i.index_id \
+         JOIN sys.columns c \
+                ON c.object_id = ic.object_id AND c.column_id = ic.column_id \
+         WHERE s.name = @P1 AND o.name = @P2 \
+           AND i.is_unique = 1 AND i.is_primary_key = 0 AND i.name IS NOT NULL \
+           AND i.filter_definition IS NULL AND ic.is_included_column = 0 \
+         ORDER BY i.name, ic.key_ordinal",
+        &[&schema, &relation],
+    )
+    .await?;
+
+    let mut keys: Vec<UniqueKeyInfo> = Vec::new();
+    for r in &rows {
+        let name = text(r, 0);
+        // One row per key column, already grouped by the ORDER BY, so the last
+        // key built is the one this row belongs to.
+        match keys.last_mut() {
+            Some(last) if last.name == name => last.columns.push(text(r, 1)),
+            _ => keys.push(UniqueKeyInfo {
+                name,
+                columns: vec![text(r, 1)],
+            }),
+        }
+    }
+    Ok(keys)
 }
 
 pub(crate) async fn indexes(

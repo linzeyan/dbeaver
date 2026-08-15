@@ -12,7 +12,7 @@
 //! editing a database actually asks for: a statement they can read before it
 //! runs, copy into the editor, and keep.
 //!
-//! **A row is identified by its primary key and nothing else.** A result with no
+//! **A row is identified by a declared key and nothing else.** A result with no
 //! unique key is not editable, which is upstream's answer too, and it is the
 //! reason the first decision is affordable: a key that is an integer, a uuid or
 //! a short string survives the round trip through text exactly, and one that is
@@ -21,13 +21,19 @@
 //! timestamps and floats between the user and their row, and the failure mode of
 //! that is not an error message, it is updating a different row.
 //!
+//! The primary key is the first answer and a `UNIQUE` constraint the second,
+//! which is upstream's order too. What a unique constraint has to prove before
+//! it is used is in [`identity`]: SQL's `NULL != NULL` means a key over a column
+//! that can be null names no row at all, so such a key is refused by name rather
+//! than tried.
+//!
 //! Nothing here runs anything. The statements go back to the caller, which sends
 //! them the way it sends any other statement — inside its transaction, through
 //! its cancel button, with its error positions.
 
-use dbconn::{ColumnInfo, DbError, DbResult, Driver};
+use dbconn::{ColumnInfo, DbError, DbResult, Driver, UniqueKeyInfo};
 use dbsql::Dialect;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Everything a grid has pending for one relation.
 ///
@@ -78,10 +84,9 @@ pub struct Cell {
 
 /// The statements `edits` would take, in the order they have to be sent.
 ///
-/// Reads the relation's columns to find the key and the types, which is one
-/// metadata call rather than a promise from the caller: the front end knows
-/// which cells were typed into and has no business deciding which of them
-/// identifies a row.
+/// Reads the relation's own metadata to find the key and the types rather than
+/// taking a promise from the caller: the front end knows which cells were typed
+/// into and has no business deciding which of them identifies a row.
 ///
 /// Updates go first, then inserts, then deletes. A row updated and then deleted
 /// in one batch is a wasted statement rather than an error, and an insert that
@@ -100,14 +105,17 @@ pub async fn statements(
             edits.schema, edits.relation
         )));
     }
+    let qualified = format!(
+        "{}.{}",
+        dialect.quote(&edits.schema),
+        dialect.quote(&edits.relation)
+    );
+    let key = resolve(driver, &edits.schema, &edits.relation, &qualified, &columns).await?;
     let table = Table {
         dialect,
-        qualified: format!(
-            "{}.{}",
-            dialect.quote(&edits.schema),
-            dialect.quote(&edits.relation)
-        ),
+        qualified,
         columns: &columns,
+        key,
     };
 
     let mut out = Vec::new();
@@ -123,11 +131,194 @@ pub async fn statements(
     Ok(out)
 }
 
+/// What names one row of a relation, for a caller that has to decide whether to
+/// offer editing at all.
+///
+/// The same answer `statements` builds its `WHERE` clauses from, exported
+/// because a front end needs it before anything has been typed: it has to know
+/// which of the grid's columns to send back as the key, and it has to say why a
+/// table is read-only rather than leaving a control mysteriously disabled. A
+/// front end that worked the rule out for itself would be a second copy of it,
+/// and the day either was corrected they would disagree.
+#[derive(Debug, Clone, Serialize)]
+pub struct RowIdentity {
+    /// The columns whose values name one row, in key order. Empty when nothing
+    /// does, which is the same question as whether the relation can be edited.
+    pub columns: Vec<String>,
+    /// Why there is nothing, in a sentence that names the table and the
+    /// constraint it had to turn down. `None` when `columns` is not empty.
+    pub obstacle: Option<String>,
+}
+
+/// What names one row of `relation`.
+///
+/// The primary key first, and a `UNIQUE` constraint only where there is none —
+/// which is the order the decision was taken in, and also the only order that
+/// keeps a schema's own answer ahead of this crate's choice among several.
+///
+/// A unique constraint has to prove two things before it is used:
+///
+/// **None of its columns may be nullable.** `NULL != NULL`, so a `WHERE` over a
+/// nullable key column matches nothing where the row holds NULL, and where two
+/// rows hold NULL the constraint permitted both — one key, several rows. Either
+/// way it is not an identity, and the failure shows up as an edit that quietly
+/// did nothing rather than as an error.
+///
+/// **Its columns have to be columns this relation has.** A driver that names one
+/// the column list does not is a driver whose two answers disagree, and the key
+/// it named cannot be looked up to find out whether it is nullable.
+///
+/// A constraint that fails either is refused by name, and the sentence says
+/// which one and why: the pane showing it is the only place a person finds out
+/// that the table with the obvious unique column is not editable, and "this
+/// table cannot be edited" alone gives them nothing to change.
+pub async fn identity(driver: &dyn Driver, schema: &str, relation: &str) -> DbResult<RowIdentity> {
+    let columns = driver.columns(schema, relation).await?;
+    if columns.is_empty() {
+        return Ok(RowIdentity {
+            columns: Vec::new(),
+            obstacle: Some(format!("{schema}.{relation} has no columns")),
+        });
+    }
+    // Unquoted, because this name is only ever read: it goes into a sentence for
+    // somebody to act on, not into a statement. The schema is skipped where the
+    // database has no schema layer to report — `.orders` is not a relation
+    // anywhere, and this is the one string a user sees.
+    let qualified = if schema.is_empty() {
+        relation.to_string()
+    } else {
+        format!("{schema}.{relation}")
+    };
+    Ok(
+        match resolve(driver, schema, relation, &qualified, &columns).await? {
+            Ok(key) => RowIdentity {
+                columns: key.columns.iter().map(|c| c.name.clone()).collect(),
+                obstacle: None,
+            },
+            Err(obstacle) => RowIdentity {
+                columns: Vec::new(),
+                obstacle: Some(obstacle),
+            },
+        },
+    )
+}
+
+/// The key `qualified`'s rows are named by, or the sentence saying there is
+/// none.
+///
+/// Two nested results, and they are different failures. The outer one is the
+/// catalog not answering, which is nobody's decision; the inner one is the
+/// catalog answering that this table has nothing to name a row by, which is an
+/// answer and is carried as text because that text is what somebody reads.
+async fn resolve<'a>(
+    driver: &dyn Driver,
+    schema: &str,
+    relation: &str,
+    qualified: &str,
+    columns: &'a [ColumnInfo],
+) -> DbResult<Result<Key<'a>, String>> {
+    let primary: Vec<&ColumnInfo> = columns.iter().filter(|c| c.is_primary_key).collect();
+    if !primary.is_empty() {
+        // The catalog's own answer, so nothing is chosen here and the extra
+        // metadata call below is not made at all.
+        return Ok(Ok(Key {
+            columns: primary,
+            source: "its primary key".to_string(),
+        }));
+    }
+
+    let declared = driver.unique_keys(schema, relation).await?;
+    let mut usable: Vec<(&UniqueKeyInfo, Vec<&ColumnInfo>)> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for key in &declared {
+        match usable_columns(key, columns) {
+            Ok(resolved) => usable.push((key, resolved)),
+            Err(why) => refused.push(why),
+        }
+    }
+
+    // Fewest columns first, then the constraint's own name. The second half is
+    // the one that is easy to leave out and the one that matters most: a catalog
+    // may return two constraints of the same width in whatever order it happened
+    // to produce them, and an identity that depends on that is an identity
+    // nobody can reason about — the same edit against the same schema writing a
+    // different `WHERE` clause on Tuesday.
+    //
+    // Fewest columns first because every key column becomes a condition carrying
+    // a value that went to the server as text: the narrower key has fewer
+    // chances to be the one holding a timestamp or a float, and the shorter
+    // statement is the one somebody can read before running it. The name breaks
+    // the remaining ties because it is the only other thing the catalog reports
+    // that is the same on two runs against one schema.
+    usable.sort_by(|(a, columns_a), (b, columns_b)| {
+        columns_a
+            .len()
+            .cmp(&columns_b.len())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(match usable.into_iter().next() {
+        Some((key, columns)) => Ok(Key {
+            columns,
+            source: format!("the unique key {}", key.name),
+        }),
+        None if refused.is_empty() => Err(format!(
+            "{qualified} has no primary key or unique key, so there is no way to name one row of it"
+        )),
+        None => Err(format!(
+            "{qualified} has no primary key, and {}, so there is no way to name one row of it",
+            refused.join("; ")
+        )),
+    })
+}
+
+/// One unique constraint's columns, or why it cannot name a row.
+fn usable_columns<'a>(
+    key: &UniqueKeyInfo,
+    columns: &'a [ColumnInfo],
+) -> Result<Vec<&'a ColumnInfo>, String> {
+    let mut resolved = Vec::with_capacity(key.columns.len());
+    for name in &key.columns {
+        let Some(column) = columns.iter().find(|c| &c.name == name) else {
+            return Err(format!(
+                "the unique key {} is over {name}, which this table has no column of",
+                key.name
+            ));
+        };
+        if column.nullable {
+            return Err(format!(
+                "the unique key {} is over {name}, which can be null",
+                key.name
+            ));
+        }
+        resolved.push(column);
+    }
+    if resolved.is_empty() {
+        return Err(format!("the unique key {} is over no columns", key.name));
+    }
+    Ok(resolved)
+}
+
 /// The relation being written to, and the rules for writing to it.
 struct Table<'a> {
     dialect: &'static Dialect,
     qualified: String,
     columns: &'a [ColumnInfo],
+    /// What names one row here, or the sentence saying why nothing does.
+    ///
+    /// Resolved once for the whole batch and not once per statement: it is a
+    /// fact about the relation, and asking the catalog again for every row would
+    /// also allow two statements in one Save to disagree about what a row is.
+    key: Result<Key<'a>, String>,
+}
+
+/// The columns that name one row, and what said so.
+struct Key<'a> {
+    columns: Vec<&'a ColumnInfo>,
+    /// How to refer to it in a message — "its primary key", "the unique key
+    /// uq_orders_email". A refusal that cannot name what it refused leaves the
+    /// reader to guess which of a table's constraints was meant.
+    source: String,
 }
 
 impl Table<'_> {
@@ -186,24 +377,17 @@ impl Table<'_> {
 
     /// The `WHERE` clause that names one row.
     ///
-    /// Every primary-key column has to be here and nothing else may be. Too few
+    /// Every column of the key has to be here and nothing else may be. Too few
     /// and the statement changes a set of rows; a column that is not part of the
     /// key adds a condition that can be false for the row the user was looking
     /// at, so the edit silently does nothing.
     fn matching(&self, key: &[Cell]) -> DbResult<String> {
-        let expected: Vec<&ColumnInfo> = self
-            .columns
-            .iter()
-            .filter(|column| column.is_primary_key)
-            .collect();
-        if expected.is_empty() {
-            return Err(DbError::new(format!(
-                "{} has no primary key, so there is no way to name one row of it",
-                self.qualified
-            )));
-        }
-        let mut conditions = Vec::with_capacity(expected.len());
-        for column in expected {
+        let identity = match &self.key {
+            Ok(identity) => identity,
+            Err(why) => return Err(DbError::new(why.clone())),
+        };
+        let mut conditions = Vec::with_capacity(identity.columns.len());
+        for column in &identity.columns {
             let cell = key
                 .iter()
                 .find(|cell| cell.column == column.name)
@@ -226,9 +410,10 @@ impl Table<'_> {
             ));
         }
         if key.len() > conditions.len() {
-            return Err(DbError::new(
-                "a row is named by its primary key and nothing else",
-            ));
+            return Err(DbError::new(format!(
+                "a row is named by {} and nothing else",
+                identity.source
+            )));
         }
         Ok(conditions.join(" AND "))
     }

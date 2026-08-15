@@ -36,7 +36,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo,
+    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
@@ -359,13 +359,17 @@ fn statistics_columns(caps: &Capabilities) -> &'static str {
     }
 }
 
-/// Key parts per index, in index order, primary key first.
-async fn key_parts(
+/// Every key part of every index, in index order, primary key first.
+///
+/// Read once and shaped by the two callers rather than twice: `indexes` wants
+/// the part as the text a structure pane prints, `unique_keys` wants the column
+/// name on its own, and the rows they want are the same rows.
+async fn statistics(
     conn: &mut Conn,
     schema: &str,
     relation: &str,
     caps: &Capabilities,
-) -> Result<Vec<(String, bool, String, String)>, MySqlError> {
+) -> Result<Vec<StatisticsRow>, MySqlError> {
     // `CARDINALITY` is deliberately absent: it is cached under
     // `information_schema_stats_expiry` and `IndexInfo` has no field for it.
     let sql = format!(
@@ -374,9 +378,18 @@ async fn key_parts(
          ORDER BY (INDEX_NAME = 'PRIMARY') DESC, INDEX_NAME, SEQ_IN_INDEX",
         statistics_columns(caps)
     );
-    let rows: Vec<StatisticsRow> = conn.exec(sql, (schema, relation)).await?;
+    Ok(conn.exec(sql, (schema, relation)).await?)
+}
 
-    Ok(rows
+/// Key parts per index, in index order, primary key first.
+async fn key_parts(
+    conn: &mut Conn,
+    schema: &str,
+    relation: &str,
+    caps: &Capabilities,
+) -> Result<Vec<(String, bool, String, String)>, MySqlError> {
+    Ok(statistics(conn, schema, relation, caps)
+        .await?
         .into_iter()
         .map(
             |(name, non_unique, method, column, expression, prefix, collation)| {
@@ -420,6 +433,59 @@ pub async fn indexes(
         });
     }
     Ok(indexes)
+}
+
+/// UNIQUE keys that name columns, primary key excluded.
+///
+/// The same `STATISTICS` rows `indexes` reads, filtered to `NON_UNIQUE = 0` and
+/// gathered into whole keys — MySQL has no separate notion of a unique
+/// constraint, `UNIQUE KEY` is an index and `information_schema` reports it as
+/// one.
+///
+/// A functional key part — `UNIQUE ((price * qty))`, where `COLUMN_NAME` is NULL
+/// and `EXPRESSION` holds the text — disqualifies the whole key, because a key
+/// this cannot state as columns is one no `WHERE` clause can reproduce.
+///
+/// A prefix part — `UNIQUE (name(10))` — is kept, and the column is named
+/// without the prefix. Uniqueness over the first ten characters is uniqueness
+/// over the whole value: two rows that share the value would share the prefix,
+/// and the server would already have refused the second one.
+pub async fn unique_keys(
+    conn: &mut Conn,
+    schema: &str,
+    relation: &str,
+    caps: &Capabilities,
+) -> Result<Vec<UniqueKeyInfo>, MySqlError> {
+    let mut keys: Vec<UniqueKeyInfo> = Vec::new();
+    let mut functional: Vec<String> = Vec::new();
+    for (name, non_unique, _, column, expression, _, _) in
+        statistics(conn, schema, relation, caps).await?
+    {
+        // Upstream's own test for the primary key, and there is no better one:
+        // it is the index literally named PRIMARY, and no other index may take
+        // that name. It is left out because `ColumnInfo::is_primary_key`
+        // already carries it.
+        if non_unique != 0 || name == "PRIMARY" {
+            continue;
+        }
+        let Some(column) = column.filter(|_| expression.is_none()) else {
+            // Remembered rather than acted on here: the parts of a key arrive
+            // one row at a time, and the functional one may not be the first.
+            functional.push(name);
+            continue;
+        };
+        // One row per key part, already grouped by the ORDER BY, so the last
+        // key built is the one this row belongs to.
+        match keys.last_mut() {
+            Some(last) if last.name == name => last.columns.push(column),
+            _ => keys.push(UniqueKeyInfo {
+                name,
+                columns: vec![column],
+            }),
+        }
+    }
+    keys.retain(|key| !functional.contains(&key.name));
+    Ok(keys)
 }
 
 /// Foreign keys this relation declares.

@@ -21,7 +21,7 @@ use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_sqlite::SqliteSource;
 use std::collections::VecDeque;
@@ -240,6 +240,10 @@ impl Driver for Fixture {
 
     async fn indexes(&self, _: &str, _: &str) -> DbResult<Vec<IndexInfo>> {
         unreachable!("an index reaches the script as the statement that made it")
+    }
+
+    async fn unique_keys(&self, _: &str, _: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        unreachable!("a unique key is inside the CREATE TABLE SQLite kept")
     }
 
     async fn foreign_keys(&self, _: &str, _: &str) -> DbResult<Vec<RelationshipInfo>> {

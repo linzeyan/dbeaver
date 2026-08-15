@@ -88,6 +88,20 @@ final class Database: @unchecked Sendable {
             db_indexes_json(handle, schema, relation, &errOut), as: [IndexInfo].self)
     }
 
+    /// Which columns name one row of a relation.
+    ///
+    /// The core's answer and not this side's, for the reason `browseStatement`
+    /// is asked for rather than assembled: the rule is the primary key, or the
+    /// narrowest NOT NULL unique key where there is no primary key, and a window
+    /// holding its own copy of that would be a second rule to keep in step.
+    ///
+    /// An empty `columns` is an answer rather than a failure — the relation
+    /// cannot be edited, and `obstacle` says why.
+    func rowIdentity(schema: String, relation: String) throws -> RowIdentity {
+        try decodeJSON(
+            db_row_identity_json(handle, schema, relation, &errOut), as: RowIdentity.self)
+    }
+
     /// The statements that would recreate one relation.
     ///
     /// Plain text, which is what the core sends: this is one value rather than a

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -54,6 +54,10 @@ impl Driver for MySqlSource {
 
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(MySqlSource::indexes(self, schema, relation).await?)
+    }
+
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(MySqlSource::unique_keys(self, schema, relation).await?)
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

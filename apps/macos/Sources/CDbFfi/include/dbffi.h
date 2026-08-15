@@ -260,12 +260,37 @@ char* db_browse_statement(DbHandle* handle, const char* what, char** err);
 // grid has to be able to say both, and one string cannot.
 //
 // Values cross as text and reach the server as literals rather than as bound
-// parameters, which is why a row is named by its primary key and nothing else: a
+// parameters, which is why a row is named by a declared key and nothing else: a
 // key of that shape survives the round trip through text exactly. A relation
-// without one is refused, as are a partial key and text that is not the number
-// its column says it is. Refusals are the point — the failure they prevent is
-// not an error message, it is an UPDATE that silently changes the wrong row.
+// with nothing to name a row by is refused, as are a partial key and text that
+// is not the number its column says it is. Refusals are the point — the failure
+// they prevent is not an error message, it is an UPDATE that silently changes
+// the wrong row.
 char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
+
+// Which columns name one row of a relation. Released with db_string_free:
+//
+//   {"columns": ["id"], "obstacle": null}
+//   {"columns": [], "obstacle": "app.audit has no primary key or unique key, …"}
+//
+// The primary key where there is one; otherwise the narrowest UNIQUE constraint
+// whose columns are all NOT NULL, and among equals the one whose name sorts
+// first — an identity that changed between two runs against one schema would be
+// an identity nobody could reason about.
+//
+// A UNIQUE constraint over a nullable column is refused by name: NULL != NULL,
+// so a WHERE over it matches no row where the value is NULL and several where
+// the constraint let several through.
+//
+// Asked here rather than worked out from db_columns_json, for the reason
+// db_browse_statement exists: the rule has one home, and a window that had a
+// copy of it would disagree with the core the day either was corrected.
+//
+// An empty `columns` is an ordinary answer and does not set err — it means the
+// relation cannot be edited, and `obstacle` is the sentence to show. err is set
+// only when the catalog could not be read.
+char* db_row_identity_json(DbHandle* handle, const char* schema, const char* relation,
+                           char** err);
 
 // What this connection's transaction is doing. Released with db_string_free:
 //

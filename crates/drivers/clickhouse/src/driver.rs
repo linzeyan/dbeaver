@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ChError, ChSource, Rows, RowsCancel};
@@ -58,6 +58,12 @@ impl Driver for ChSource {
 
     async fn indexes(&self, schema: &str, relation: &str) -> DbResult<Vec<IndexInfo>> {
         Ok(ChSource::indexes(self, schema, relation).await?)
+    }
+
+    /// Empty, always: ClickHouse enforces uniqueness nowhere, its primary key
+    /// included. See `metadata.rs`.
+    async fn unique_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<UniqueKeyInfo>> {
+        Ok(ChSource::unique_keys(self, schema, relation).await?)
     }
 
     async fn foreign_keys(&self, schema: &str, relation: &str) -> DbResult<Vec<RelationshipInfo>> {

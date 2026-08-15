@@ -40,7 +40,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
-    SchemaInfo, TriggerInfo,
+    SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use serde_json::Value;
 
@@ -216,6 +216,19 @@ impl TrinoSource {
             .first()
             .map(|row| text(row, 0))
             .filter(|body| !body.is_empty()))
+    }
+
+    /// Empty, always, and without asking. Trino enforces no constraint of any
+    /// kind: a connector's tables are somebody else's storage, and `UNIQUE` is
+    /// not in the `CREATE TABLE` grammar any more than `PRIMARY KEY` is. There
+    /// is therefore nothing here that names a row, which is why the Content tab
+    /// over Trino is read-only whatever the underlying system enforces.
+    pub async fn unique_keys(
+        &self,
+        _schema: &str,
+        _relation: &str,
+    ) -> Result<Vec<UniqueKeyInfo>, TrinoError> {
+        Ok(Vec::new())
     }
 
     /// Empty, always, and without asking. Trino has no indexes: `CREATE INDEX`
