@@ -21,6 +21,7 @@ use driver_mssql::MsSqlSource;
 use driver_mysql::MySqlSource;
 use driver_postgres::PgSource;
 use driver_redis::RedisSource;
+use driver_snowflake::SnowflakeSource;
 use driver_sqlite::SqliteSource;
 use driver_trino::TrinoSource;
 use serde::Serialize;
@@ -137,6 +138,16 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::Server,
         default_port: Some(31337),
     },
+    // 443, because the host is an account name under `snowflakecomputing.com`
+    // and there is no other port to reach it on — Snowflake publishes no
+    // plaintext endpoint. Offered anyway rather than hidden, so that somebody
+    // behind a proxy on another port has somewhere to type it.
+    Catalogued {
+        scheme: "snowflake",
+        label: "Snowflake",
+        shape: Shape::Server,
+        default_port: Some(443),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -234,6 +245,15 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // is restricted to rather than a database to open — Flight SQL has no way
         // to switch to another, so it is a filter and not a target.
         "flightsql" => Ok(Box::new(FlightSqlSource::connect(url).await?)),
+        // Rewritten to `https://` and not `http://`, which is where this one
+        // differs from ClickHouse and Trino: there is no plaintext Snowflake to
+        // fall back to, so the scheme names the database and the transport is
+        // never in question. The path is `database/schema`, both optional, and
+        // the credentials are query parameters — `private_key=` for the key-pair
+        // path, `token=` for an OAuth access token.
+        "snowflake" => Ok(Box::new(
+            SnowflakeSource::connect(&format!("https://{rest}")).await?,
+        )),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
             known()

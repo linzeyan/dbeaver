@@ -1152,6 +1152,7 @@ dependencies = [
  "driver-mysql",
  "driver-postgres",
  "driver-redis",
+ "driver-snowflake",
  "driver-sqlite",
  "driver-trino",
  "rusqlite",
@@ -1401,6 +1402,29 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "driver-snowflake"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "dbconn",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "percent-encoding",
+ "ring",
+ "rustls 0.23.43",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
 ]
 
 [[package]]

@@ -1,0 +1,57 @@
+[package]
+name = "driver-snowflake"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+# `fs` on top of the workspace features, for the one file this driver reads: the
+# private key named in the connection string. Once, at connect time, and through
+# tokio rather than `std::fs` so that a slow or unreachable path does not block
+# the runtime thread a connection dialog is waiting on.
+tokio = { workspace = true, features = ["fs"] }
+thiserror.workspace = true
+# hyper for the reason the Trino driver gives — the whole of the SQL API is POST
+# a JSON body, GET a URL, POST a URL, and hyper is already in this workspace's
+# lock file — plus TLS, which is not optional here: Snowflake publishes no
+# plaintext endpoint, so a driver that could not do HTTPS could not connect at
+# all.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+# `ring` and not `aws-lc-rs`, which is the choice the ClickHouse driver already
+# argued: aws-lc-rs wants cmake and a C toolchain at build time, and this project
+# exists to avoid install-time dependencies. The provider is named explicitly
+# rather than left to `ClientConfig::builder`'s default, which panics when the
+# workspace has enabled both or neither.
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "tls12",
+    "ring",
+    "webpki-roots",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The JWT's three parts are base64url without padding, and Snowflake sends
+# `binary` as hex rather than base64 — so this covers one half of the encoding
+# and `arrow_map` writes the other.
+base64 = "0.22"
+# The RSA signature under every request. Already in the lock behind rustls, and
+# it is the only crypto library here that can both read a PKCS#8 key and sign
+# PKCS#1 v1.5 SHA-256 — which is what RS256 is.
+ring = "0.17"
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

@@ -25,6 +25,7 @@ driver-mssql = { path = "../drivers/mssql" }
 driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-redis = { path = "../drivers/redis" }
+driver-snowflake = { path = "../drivers/snowflake" }
 driver-sqlite = { path = "../drivers/sqlite" }
 driver-trino = { path = "../drivers/trino" }
 serde = "1"
