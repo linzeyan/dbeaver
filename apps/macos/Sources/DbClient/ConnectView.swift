@@ -165,9 +165,9 @@ struct ConnectView: View {
 
     /// The database being connected to.
     ///
-    /// A menu rather than a segmented control: the list is three entries today
-    /// and fifteen when the driver plan is done, and a segmented control that
-    /// grows to fifteen becomes unreadable at exactly the point it matters.
+    /// A menu rather than a segmented control: the list is fifteen entries, and
+    /// a segmented control that long is unreadable at exactly the point it
+    /// matters.
     private var driverRow: some View {
         HStack(spacing: Theme.Space.sm) {
             label("Database")
