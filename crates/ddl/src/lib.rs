@@ -18,9 +18,9 @@
 //!
 //! The first two live in `org.jkiss.dbeaver.model` and are shared by every
 //! database upstream supports, which is why [`Script`] lives here. The third is
-//! per-database and lives behind [`Renderer`] — one implementation today, and
-//! the seam is visible now because the next five arrive against it rather than
-//! against a function that has learned to branch.
+//! per-database and lives behind [`Renderer`], one implementation per dialect —
+//! and only two of the six assemble a script at all, which is why the seam is
+//! there rather than in a function that learned to branch.
 //!
 //! What this does *not* do is read the database twice. Everything rendered comes
 //! from the `Driver` metadata calls the structure pane already makes, which is
@@ -29,6 +29,7 @@
 //! honest answer to that is a refusal rather than a guess.
 
 mod clickhouse;
+mod duckdb;
 mod mssql;
 mod mysql;
 mod postgres;
@@ -90,6 +91,7 @@ const RENDERERS: &[(&Dialect, &dyn Renderer)] = &[
     (&dbsql::MYSQL, &mysql::MYSQL),
     (&dbsql::CLICKHOUSE, &clickhouse::CLICKHOUSE),
     (&dbsql::MSSQL, &mssql::MSSQL),
+    (&dbsql::DUCKDB, &duckdb::DUCKDB),
 ];
 
 /// A script under construction, joined the way upstream joins one.
@@ -136,5 +138,29 @@ impl Script {
     /// string as one that shows it, rather than each of them deciding.
     pub(crate) fn finish(self) -> String {
         self.0.trim_end().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every database the app can connect to can have its DDL written.
+    ///
+    /// This replaces a test that asserted the opposite — that an unwritten
+    /// dialect refuses instead of being rendered as PostgreSQL — which was true
+    /// until the sixth renderer landed and left it nothing to be about. The
+    /// refusal in [`super::definition`] stays, because the next database to
+    /// arrive will reach it before its renderer does; what this pins is that
+    /// nothing already shipping is sitting on it. `dbsql::ALL` is where a
+    /// database is declared, so a new entry there fails here until
+    /// `RENDERERS` learns about it.
+    #[test]
+    fn every_dialect_the_app_speaks_has_a_renderer() {
+        for dialect in dbsql::ALL {
+            assert!(
+                super::for_dialect(dialect).is_some(),
+                "{} is a dialect this build connects with and cannot write DDL for",
+                dialect.name
+            );
+        }
     }
 }

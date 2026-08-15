@@ -18,6 +18,7 @@ async-trait.workspace = true
 # reaches one. Only the tests need it: nothing in the crate knows or cares which
 # driver produced the metadata it is handed.
 driver-clickhouse = { path = "../drivers/clickhouse" }
+driver-duckdb = { path = "../drivers/duckdb" }
 driver-mssql = { path = "../drivers/mssql" }
 driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
@@ -33,4 +34,7 @@ tokio = { workspace = true, features = ["full"] }
 # its live tests run under plain `cargo test`. Built with the library directly,
 # so that a fixture does not depend on the code under test being right.
 rusqlite = { version = "0.40", features = ["bundled"] }
+# DuckDB is a library in this process too, so its fixture is built the same way
+# and for the same reason.
+duckdb = { version = "1", features = ["bundled"] }
 tempfile = "3"
