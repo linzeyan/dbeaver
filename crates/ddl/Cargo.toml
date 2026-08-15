@@ -18,6 +18,7 @@ async-trait.workspace = true
 # reaches one. Only the tests need it: nothing in the crate knows or cares which
 # driver produced the metadata it is handed.
 driver-clickhouse = { path = "../drivers/clickhouse" }
+driver-mssql = { path = "../drivers/mssql" }
 driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }

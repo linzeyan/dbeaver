@@ -151,6 +151,7 @@ test-mysql: db-check-mysql db-check-tidb db-check-starrocks ## Integration tests
 .PHONY: test-mssql
 test-mssql: db-check-mssql ## Integration tests behind SQL Server
 	cargo test -p driver-mssql -- --ignored
+	cargo test -p dbddl --test mssql -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact mssql_satisfies_the_contract
 
 .PHONY: test-clickhouse

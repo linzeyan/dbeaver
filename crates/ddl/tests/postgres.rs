@@ -553,21 +553,21 @@ async fn a_materialized_view_is_refused_rather_than_guessed_at() {
 
 /// A database nobody has written a renderer for says so.
 ///
-/// Not a fallback to PostgreSQL: a SQL Server table rendered as PostgreSQL DDL
-/// is a statement that looks right, reads plausibly, and does not run. The
-/// dialect named here is whichever one is still unwritten — it was MySQL until
-/// MySQL's renderer landed — and the day the last one arrives this test goes,
-/// because there will be nothing left for it to be about.
+/// Not a fallback to PostgreSQL: a DuckDB table rendered as PostgreSQL DDL is a
+/// statement that looks right, reads plausibly, and does not run. The dialect
+/// named here is whichever one is still unwritten — it was MySQL, then SQL
+/// Server — and the day the last one arrives this test goes, because there will
+/// be nothing left for it to be about.
 #[tokio::test]
 async fn a_database_with_no_renderer_yet_says_so_instead_of_guessing() {
     let error = dbddl::definition(
         &Fixture::default(),
-        &dbsql::MSSQL,
+        &dbsql::DUCKDB,
         &relation("app", "orders", RelationKind::Table),
     )
     .await
-    .expect_err("SQL Server DDL was rendered by a renderer written for PostgreSQL");
-    assert!(error.to_string().contains("sqlserver"), "{error}");
+    .expect_err("DuckDB DDL was rendered by a renderer written for PostgreSQL");
+    assert!(error.to_string().contains("duckdb"), "{error}");
 }
 
 // ---------------------------------------------------------------------------

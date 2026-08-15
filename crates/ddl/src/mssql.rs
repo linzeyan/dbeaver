@@ -1,0 +1,291 @@
+//! SQL Server, read out of `ext.mssql`.
+//!
+//! A table takes the same shared path PostgreSQL's does —
+//! `SQLServerTable.getObjectDefinitionText` → `DBStructUtils.generateTableDDL` →
+//! `SQLTableManager.getTableDDL` — so the order is that method's and the parts
+//! come from `ext.mssql`'s managers. A view does not: `SQLServerView` keeps the
+//! source `sys.sql_modules` stored and prints it back, which is SQLite's shape.
+//!
+//! What is *not* here, because SQL Server's managers do not put it there.
+//! There is no trigger section: `SQLServerTableManager.addObjectExtraActions`
+//! appends column comments for a table being created and extended properties
+//! under an option the source viewer does not set, and nothing else — where
+//! `PostgreTableManagerBase` appends triggers. And a CHECK constraint is not
+//! declared inside the parentheses: `SQLServerCheckConstraintManager` is a plain
+//! `SQLObjectEditor` with no nested declaration, so its own create action —
+//! `ALTER TABLE … WITH NOCHECK ADD CONSTRAINT … CHECK (…)` — follows the
+//! `CREATE TABLE`, before the indexes, which is the order `getTableDDL`
+//! aggregates them in.
+
+use crate::{Renderer, Script};
+use async_trait::async_trait;
+use dbconn::{
+    ColumnInfo, ConstraintInfo, ConstraintKind, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo,
+};
+
+pub(crate) static MSSQL: MsSql = MsSql;
+
+pub(crate) struct MsSql;
+
+#[async_trait]
+impl Renderer for MsSql {
+    /// Tables and views, and a refusal for the rest.
+    ///
+    /// SQL Server has no materialized view — an indexed view is a view with an
+    /// index on it — and no partitioned table as a kind of its own, so the
+    /// remaining arms describe objects this database does not have.
+    async fn definition(&self, driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String> {
+        match relation.kind {
+            RelationKind::Table => table(driver, relation).await,
+            RelationKind::View => view(driver, relation).await,
+            kind => Err(DbError::new(format!(
+                "{} is a {kind:?}, and SQL Server has no such object",
+                qualified(&relation.schema, &relation.name)
+            ))),
+        }
+    }
+}
+
+/// A table, as `SQLTableManager.getTableDDL` orders it.
+async fn table(driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String> {
+    let schema = relation.schema.as_str();
+    let name = relation.name.as_str();
+    let qualified_name = qualified(schema, name);
+
+    let columns = driver.columns(schema, name).await?;
+    let indexes = driver.indexes(schema, name).await?;
+    let constraints = driver.constraints(schema, name).await?;
+    let foreign_keys = driver.foreign_keys(schema, name).await?;
+
+    let mut script = Script::new();
+
+    // Commented out, so that reading the DDL tab and pressing Execute does not
+    // drop the table you were looking at — upstream wraps the whole DROP in
+    // `SQLDatabasePersistActionComment`.
+    script.comment("Drop table");
+    script.comment(&format!("DROP TABLE {qualified_name};"));
+
+    // Columns, the primary key, the unique keys, then the foreign keys: the
+    // order `getTableDDL` aggregates the nested commands in, which for
+    // `SQLServerTableManager` is columns, unique keys, check constraints,
+    // foreign keys, indexes — of which the middle one contributes nothing here
+    // and the last contributes nothing nested.
+    let mut items: Vec<String> = columns.iter().map(column).collect();
+    // The primary key is rebuilt from its index, because `Driver::constraints`
+    // deliberately excludes primary and foreign keys — each has a section of its
+    // own in the structure pane. In SQL Server a key and the index behind it are
+    // one object with one name, so `sys.indexes.is_primary_key` names the
+    // constraint as surely as `sys.key_constraints` would.
+    if let Some(key) = indexes.iter().find(|index| index.is_primary) {
+        items.push(format!(
+            "CONSTRAINT {} PRIMARY KEY ({})",
+            quote(&key.name),
+            key.columns.join(", ")
+        ));
+    }
+    items.extend(
+        constraints
+            .iter()
+            .filter(|constraint| constraint.kind == ConstraintKind::Unique)
+            // The driver renders `UNIQUE (a, b)` from `sys.index_columns`, so
+            // the keyword is already in the definition and only the name is
+            // added — the same arrangement the PostgreSQL renderer has with
+            // `pg_get_constraintdef`.
+            .map(|constraint| {
+                format!(
+                    "CONSTRAINT {} {}",
+                    quote(&constraint.name),
+                    constraint.definition
+                )
+            }),
+    );
+    items.extend(foreign_keys.iter().map(foreign_key));
+
+    let declarations: Vec<String> = items.iter().map(|item| format!("\t{item}")).collect();
+    script.statement(&format!(
+        "CREATE TABLE {qualified_name} (\n{}\n)",
+        declarations.join(",\n")
+    ));
+
+    for check in constraints
+        .iter()
+        .filter(|constraint| constraint.kind == ConstraintKind::Check)
+    {
+        script.statement(&check_constraint(&qualified_name, check));
+    }
+
+    // Upstream emits every index it is given, its generic `isIncludeIndexInDDL`
+    // dropping only hidden and inherited ones — and against SQL Server that
+    // produces a script that cannot run, because the index behind a primary key
+    // or a unique constraint has the constraint's own name and is created by the
+    // statement above. Skipped here for that reason, which is also what
+    // `PostgreTableManagerBase.isIncludeIndexInDDL` does upstream on the one
+    // database whose maintainers noticed.
+    let backed_by_constraint: Vec<&str> = constraints
+        .iter()
+        .filter(|constraint| constraint.kind == ConstraintKind::Unique)
+        .map(|constraint| constraint.name.as_str())
+        .collect();
+    for index in &indexes {
+        if index.is_primary || backed_by_constraint.contains(&index.name.as_str()) {
+            continue;
+        }
+        script.statement(&create_index(&qualified_name, index));
+    }
+
+    Ok(script.finish())
+}
+
+/// A view, which is the source the server kept.
+///
+/// `SQLServerView.getObjectDefinitionText` reads `sys.sql_modules` and rewrites
+/// the leading `CREATE` to `ALTER` on the way out
+/// (`SQLServerUtils.changeCreateToAlterDDL`), because upstream's Source tab is an
+/// editor for the view and `ALTER` is what saving it should send. This pane
+/// states what would recreate the object, and an `ALTER VIEW` of a view that is
+/// not there creates nothing — so the source is printed as it was stored.
+async fn view(driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String> {
+    let qualified_name = qualified(&relation.schema, &relation.name);
+    let source = driver
+        .definition(&relation.schema, &relation.name)
+        .await?
+        .ok_or_else(|| {
+            // Two different absences, and the message covers both: a view
+            // created `WITH ENCRYPTION` has a `sys.sql_modules` row whose
+            // definition is NULL, and a view that has been dropped has no row.
+            DbError::new(format!(
+                "{qualified_name} is listed as a view but the server will not show its source"
+            ))
+        })?;
+    Ok(source.trim().to_string())
+}
+
+/// One column declaration.
+///
+/// `SQLServerTableColumnManager.getSupportedModifiers` orders them: type,
+/// `IDENTITY`, `COLLATE`, default, nullability. The default is printed because
+/// the source viewer sets `OPTION_DDL_SOURCE`, which is the flag
+/// `SQLServerDefaultModifier` reads before writing one for a persisted column.
+///
+/// Two of those five are never written, for want of the facts: `IDENTITY(seed,
+/// increment)` (from `sys.identity_columns`) and `COLLATE` (from
+/// `sys.columns.collation_name`), neither of which reaches `ColumnInfo`.
+///
+/// A computed column comes out wrong and knowingly so. Upstream writes `qty AS
+/// ([a]+[b]) PERSISTED` with no type and no default; the driver has one field
+/// for both a default and a computation — the shared shape has nowhere else to
+/// put the expression — so it renders here as a column with a default. Telling
+/// the two apart needs a flag on `ColumnInfo` that no other database has a use
+/// for, and that is a change to the shared shape rather than to this renderer.
+fn column(column: &ColumnInfo) -> String {
+    let mut declaration = format!("{} {}", quote(&column.name), column.data_type);
+    if let Some(default) = &column.default_value {
+        // `sys.default_constraints.definition` arrives parenthesised — `((1))` —
+        // and upstream prints it as it stands, so the doubled brackets in the
+        // output are the server's own.
+        declaration.push_str(&format!(" DEFAULT {default}"));
+    }
+    declaration.push_str(if column.nullable {
+        " NULL"
+    } else {
+        " NOT NULL"
+    });
+    declaration
+}
+
+/// One foreign key, as `SQLForeignKeyManager.getNestedDeclaration` writes it.
+///
+/// The same shared method the PostgreSQL renderer reproduces, down to the bare
+/// comma between column names, and the same omission of `NO ACTION`.
+fn foreign_key(key: &RelationshipInfo) -> String {
+    let mut declaration = format!(
+        "CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({})",
+        quote(&key.name),
+        quoted_list(&key.local_columns),
+        qualified(&key.other_schema, &key.other_table),
+        quoted_list(&key.other_columns)
+    );
+    if key.on_delete != NO_ACTION {
+        declaration.push_str(&format!(" ON DELETE {}", key.on_delete));
+    }
+    if key.on_update != NO_ACTION {
+        declaration.push_str(&format!(" ON UPDATE {}", key.on_update));
+    }
+    declaration
+}
+
+/// What `RelationshipInfo` calls the referential action that changes nothing.
+const NO_ACTION: &str = "NO ACTION";
+
+/// One CHECK constraint, as `SQLServerCheckConstraintManager` adds one.
+///
+/// `WITH NOCHECK` is upstream's, and it is the right default for a constraint
+/// being replayed onto a table that is about to be filled: it adds the rule
+/// without demanding that rows already there satisfy it.
+///
+/// The expression keeps the brackets `sys.check_constraints` stores it with, so
+/// the output has two pairs — `CHECK (([qty]>(0)))` — which is what upstream
+/// emits, its `getCheckConstraintDefinition` returning the catalog string
+/// untouched.
+fn check_constraint(qualified_table: &str, constraint: &ConstraintInfo) -> String {
+    format!(
+        "ALTER TABLE {qualified_table} WITH NOCHECK ADD CONSTRAINT {} CHECK ({})",
+        quote(&constraint.name),
+        constraint.definition
+    )
+}
+
+/// One index, as `SQLServerIndexManager` writes its create action.
+///
+/// `CREATE [UNIQUE] [CLUSTERED|NONCLUSTERED] INDEX name ON schema.table (keys)`,
+/// with no `USING` — SQL Server names the storage kind before the word INDEX
+/// where PostgreSQL names the access method after the table.
+///
+/// `IndexInfo::method` holds `sys.indexes.type_desc`, which says more than
+/// upstream's two words: `NONCLUSTERED COLUMNSTORE`, `SPATIAL`, `XML`. Only the
+/// two that are a valid modifier here are written, because the others belong to
+/// a different `CREATE` syntax altogether and a script claiming to make a
+/// columnstore index with this one would not run.
+fn create_index(qualified_table: &str, index: &IndexInfo) -> String {
+    let unique = if index.is_unique { "UNIQUE " } else { "" };
+    let storage = match index.method.as_str() {
+        kind @ ("CLUSTERED" | "NONCLUSTERED") => format!("{kind} "),
+        _ => String::new(),
+    };
+    let mut statement = format!(
+        "CREATE {unique}{storage}INDEX {} ON {qualified_table} ({})",
+        quote(&index.name),
+        index.columns.join(", ")
+    );
+    if let Some(predicate) = &index.predicate {
+        // `sys.indexes.filter_definition` is stored parenthesised, as the check
+        // constraint above is, and upstream appends it unchanged.
+        statement.push_str(&format!(" WHERE {predicate}"));
+    }
+    statement
+}
+
+/// `schema.name`, both quoted only where SQL Server needs them quoted.
+///
+/// Two levels rather than three. SQL Server qualifies fully as
+/// `database.schema.name`, and this driver holds a connection to one database
+/// and lists relations under a schema, so the database is the one the script
+/// would be run against — which is the same thing the connection already means.
+fn qualified(schema: &str, name: &str) -> String {
+    format!("{}.{}", quote(schema), quote(name))
+}
+
+/// Column names as a foreign key lists them: quoted individually, comma, no
+/// space — `SQLForeignKeyManager.getNestedDeclarationScript` appends `","`.
+fn quoted_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| quote(name))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn quote(name: &str) -> String {
+    dbsql::MSSQL.quote(name)
+}

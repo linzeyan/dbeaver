@@ -29,6 +29,7 @@
 //! honest answer to that is a refusal rather than a guess.
 
 mod clickhouse;
+mod mssql;
 mod mysql;
 mod postgres;
 mod sqlite;
@@ -88,6 +89,7 @@ const RENDERERS: &[(&Dialect, &dyn Renderer)] = &[
     (&dbsql::SQLITE, &sqlite::SQLITE),
     (&dbsql::MYSQL, &mysql::MYSQL),
     (&dbsql::CLICKHOUSE, &clickhouse::CLICKHOUSE),
+    (&dbsql::MSSQL, &mssql::MSSQL),
 ];
 
 /// A script under construction, joined the way upstream joins one.

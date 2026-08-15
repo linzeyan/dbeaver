@@ -942,6 +942,7 @@ dependencies = [
  "dbconn",
  "dbsql",
  "driver-clickhouse",
+ "driver-mssql",
  "driver-mysql",
  "driver-postgres",
  "driver-sqlite",
