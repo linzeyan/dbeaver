@@ -341,9 +341,7 @@ async fn mysql() -> Subject {
         // fragment would find the first occurrence rather than the one that
         // failed, which is a caret in the wrong place rather than no caret.
         positions: false,
-        // The database has transactions; this driver has no connection to hold
-        // one on, because every statement takes one from a pool.
-        scratch: None,
+        scratch: Some(Scratch::sql("contract_tx")),
         _fixture: None,
     }
 }
@@ -504,6 +502,7 @@ async fn mysql_compatible(
     key: &str,
     positions: bool,
     cursors: bool,
+    scratch: Option<Scratch>,
 ) -> Subject {
     use mysql_async::prelude::Queryable;
 
@@ -549,9 +548,10 @@ async fn mysql_compatible(
         missing_is_a_failure: true,
         cursors,
         positions,
-        // The MySQL driver's answer, and it is the driver's rather than the
-        // server's: TiDB and StarRocks both have transactions.
-        scratch: None,
+        // Per server rather than per driver, which is the one place these two
+        // subjects disagree: the MySQL driver probes for transaction control at
+        // connect, and TiDB and StarRocks answer differently.
+        scratch,
         _fixture: None,
     }
 }
@@ -1177,6 +1177,9 @@ async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
         // fragment it stopped at rather than a place in the text.
         false,
         true,
+        // Transactions are the part of MySQL that TiDB implements completely,
+        // savepoints included.
+        Some(Scratch::sql("contract_tx")),
     )
     .await;
     every_check(&subject).await;
@@ -1192,6 +1195,13 @@ async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
 /// so unique constraints come back and checks are simply not claimed. The
 /// capability probe was written for MariaDB and old MySQL and it turns out to
 /// have been the right shape for this too, which is the useful result.
+///
+/// Transactions are where the shape finally shows through, and the driver has to
+/// probe for them to find out. `BEGIN` and `COMMIT` work; `SAVEPOINT` is a
+/// syntax error, and a `SELECT` inside an open transaction refuses to read a
+/// table that transaction has written. Neither is something the MySQL driver can
+/// paper over, and both are things a front end would offer buttons for, so this
+/// subject carries no transaction fixture and the check asserts the refusal.
 #[tokio::test]
 #[ignore = "requires a StarRocks server"]
 async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
@@ -1218,6 +1228,15 @@ async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
         "id",
         false,
         true,
+        // The one check this server does not satisfy, and the driver says so
+        // itself rather than being told: `SAVEPOINT` is a syntax error here, and
+        // a statement inside an open transaction cannot read a table the
+        // transaction has written — "SELECT cannot read table 't' modified
+        // earlier in the same transaction". So `controls_a_transaction` asserts
+        // the refusal instead, which is a real check: the day StarRocks grows
+        // savepoints the probe notices, `transactional` turns true, and this
+        // fails until somebody puts a fixture back.
+        None,
     )
     .await;
     every_check(&subject).await;

@@ -544,6 +544,85 @@ async fn stopping_something_that_is_not_running_is_not_a_failure() {
 }
 
 // ---------------------------------------------------------------------------
+// The session connection
+// ---------------------------------------------------------------------------
+
+/// The transaction dance itself is checked once, against every driver, in the
+/// contract suite. What is left for here are the two things that are true of
+/// this driver in particular now that its statements share a connection.
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn the_session_outlives_the_statement_it_was_told_to_stop() {
+    // A `KILL QUERY` that left the connection out of step used to cost one
+    // result: statements had a connection each and a killed one was thrown
+    // away. Now it would cost the session, the transaction on it, and every
+    // statement after — so the connection being usable afterwards is a property
+    // worth holding onto rather than an accident to notice later.
+    let source = Arc::new(source().await);
+    let running = {
+        let source = Arc::clone(&source);
+        tokio::spawn(async move {
+            let mut stream = source
+                .query(SLOW, 100)
+                .await
+                .expect("the join should start");
+            stream.next_batch().await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    source.cancel().await.expect("delivering the cancel");
+    let err = running
+        .await
+        .expect("the reader task")
+        .expect_err("a cancelled statement fails");
+    assert!(err.is_cancelled(), "{err}");
+
+    // The same connection, asked for something else.
+    let mut stream = source
+        .query("SELECT 1 AS still_here", 1)
+        .await
+        .expect("the session should still take a statement");
+    assert!(
+        stream
+            .next_batch()
+            .await
+            .expect("reading the batch")
+            .is_some(),
+        "the connection the killed statement was on has gone quiet"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn the_navigator_does_not_queue_behind_the_grid() {
+    // Why the pool is still here now that statements have a connection to
+    // themselves: a metadata call carries no transaction and has no reason to
+    // wait for one, and expanding a node while somebody is half way down a
+    // result is the ordinary way this client is used.
+    let source = source().await;
+    let mut stream = source
+        .query("SELECT id FROM bench_wide ORDER BY id", 100)
+        .await
+        .expect("the query should run");
+    stream
+        .next_batch()
+        .await
+        .expect("reading a batch")
+        .expect("a first batch");
+
+    // The stream is deliberately still open, so the session connection is busy
+    // for the length of this call. A timeout rather than a plain await: a
+    // metadata call that had been moved onto the session would wait for a
+    // result nobody is reading, and a test that hung would say less than one
+    // that fails.
+    let schemas = tokio::time::timeout(std::time::Duration::from_secs(10), source.schemas())
+        .await
+        .expect("the navigator queued behind the result the session is holding")
+        .expect("schemas failed");
+    assert!(schemas.iter().any(|s| s.name == "bench"));
+}
+
+// ---------------------------------------------------------------------------
 // Failing
 // ---------------------------------------------------------------------------
 

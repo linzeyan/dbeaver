@@ -7,18 +7,23 @@
 //! by construction. Where a feature has to be detected it is detected by asking
 //! `information_schema` what tables and columns it has, which is a question
 //! every one of these servers answers about itself truthfully because that is
-//! how they announce compatibility.
+//! how they announce compatibility — and where the catalog has nothing to say,
+//! by asking the server to do the thing and seeing whether it will. Transaction
+//! control is the second kind; see `metadata::probe`.
 //!
 //! Three shapes here differ from the PostgreSQL driver, and all three come from
 //! one property of the client protocol: a MySQL connection carries one command
 //! at a time, and `mysql_async` enforces that with a `&mut Conn` borrow that
 //! lasts as long as the result being read.
 //!
-//! **A result owns a connection.** `query` and `cursor` are the same mechanism
-//! here — one `exec_iter` read forward by a task that owns the connection
-//! outright — because there is no other way to hold a result and answer
-//! anything else at the same time. PostgreSQL can run statements on the session
-//! connection because its stream does not borrow the client; MySQL cannot.
+//! **A result holds its connection.** `query` and `cursor` are the same
+//! mechanism here — one `exec_iter` read forward by a task that holds the
+//! connection until the last page — because there is no other way to hold a
+//! result and answer anything else at the same time. Statements still run on the
+//! session connection, as they do in the PostgreSQL driver and for the same
+//! reason, but here they take turns on it: the next statement waits for the
+//! previous result to be read or dropped. That is what a transaction spanning
+//! statements costs on this protocol, and there is nothing else to pay it with.
 //!
 //! **There is no server-side cursor worth having.** MySQL's only one
 //! materializes the whole result into an internal temporary table and then
@@ -42,13 +47,15 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
     ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use futures_util::StreamExt;
 use metadata::Capabilities;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts, OptsBuilder, Row};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
 /// `ER_QUERY_INTERRUPTED`. What a statement stopped by `KILL QUERY` fails with,
 /// verified against 8.4 by killing a scan mid-flight.
@@ -172,32 +179,42 @@ impl Drop for Registration {
     }
 }
 
-/// One pooled connection, kept in the session's registry for as long as it is
+/// One spare connection, kept in the session's registry for as long as it is
 /// held.
-struct Session {
+struct Pooled {
     conn: Conn,
     /// Held rather than read: it is what takes this connection's id back out of
     /// the registry when the connection is dropped instead of pooled.
     _live: Registration,
 }
 
-/// A MySQL session: connections opened as they are needed, and the ids to stop
-/// them by.
+/// A MySQL session: one connection statements run on, spares for looking things
+/// up, and the ids to stop any of them by.
 ///
-/// There is no long-lived "session connection" as in the PostgreSQL driver,
-/// because a MySQL connection reading a result cannot do anything else. What a
-/// caller gets instead is that a metadata call never waits behind a result:
-/// results take a connection of their own for as long as they last, metadata
-/// borrows one from a small idle set and puts it back.
+/// Statements run on `session` and nothing else does, because a transaction
+/// belongs to a connection: a `BEGIN` sent down a borrowed connection opens a
+/// transaction the next statement will not be given and nobody can commit.
+/// Metadata reads carry no transaction and answer quickly, so they borrow from
+/// `idle` instead, and expanding a schema does not queue behind a result that is
+/// still streaming.
 ///
-/// The consequence worth stating: statements do not share a transaction. Every
-/// `query` runs on whichever connection was free, so `BEGIN` in one statement
-/// and `COMMIT` in the next would not be the same transaction. Phase 2 has no
-/// transaction control, and the day it does, a statement connection has to be
-/// pinned to the session.
+/// What that arrangement costs, since it is not free here as it is in the
+/// PostgreSQL driver: two statements cannot run at once. A MySQL connection
+/// carries one command at a time and a result holds it until it has been read or
+/// dropped, so a second `query` waits for the first result to finish — and a
+/// result abandoned half way is drained off the socket before the connection can
+/// take another command. Both are the protocol rather than this arrangement; the
+/// alternative is statements that cannot share a transaction, which is what this
+/// replaced.
 pub struct MySqlSource {
     opts: Opts,
-    idle: Arc<Mutex<Vec<Session>>>,
+    /// The connection statements run on, and the only place a transaction on
+    /// this session can live. Held for as long as a result is being read.
+    session: Arc<tokio::sync::Mutex<Conn>>,
+    /// The number that stops the session connection, put into the registry only
+    /// while something is running on it. `cancel` says why not permanently.
+    session_id: u64,
+    idle: Arc<Mutex<Vec<Pooled>>>,
     live: Arc<Mutex<Vec<u64>>>,
     caps: Capabilities,
 }
@@ -237,17 +254,18 @@ impl MySqlSource {
 
         let live: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         // Opened eagerly so a wrong password fails here rather than at the first
-        // expanded node.
-        let (mut conn, id) = open(&opts).await?;
-        let caps = metadata::probe(&mut conn).await?;
-        let first = Session {
-            conn,
-            _live: register(&live, id),
-        };
+        // expanded node, and kept: this is the connection statements run on.
+        let (mut session, session_id) = open(&opts).await?;
+        let caps = metadata::probe(&mut session).await?;
 
         Ok(Self {
             opts,
-            idle: Arc::new(Mutex::new(vec![first])),
+            session: Arc::new(tokio::sync::Mutex::new(session)),
+            session_id,
+            // Empty. The session connection is already open, so a password that
+            // is wrong has already been refused; the first metadata call opens
+            // the first spare when it needs one.
+            idle: Arc::new(Mutex::new(Vec::new())),
             live,
             caps,
         })
@@ -269,19 +287,19 @@ impl MySqlSource {
     /// whether the statement that just failed is safe to run twice. Asking the
     /// connection whether it is alive has one answer, and it is about the
     /// connection rather than about what was being run on it.
-    async fn acquire(&self) -> Result<Session, MySqlError> {
+    async fn acquire(&self) -> Result<Pooled, MySqlError> {
         loop {
-            let pooled = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
-            let Some(mut session) = pooled else { break };
-            if session.conn.ping().await.is_ok() {
-                return Ok(session);
+            let spare = self.idle.lock().unwrap_or_else(|e| e.into_inner()).pop();
+            let Some(mut spare) = spare else { break };
+            if spare.conn.ping().await.is_ok() {
+                return Ok(spare);
             }
             // Dropped rather than put back, and the loop tries the next one:
             // whatever closed this connection — a restart, a `KILL` — has
             // probably closed the rest of the pool too.
         }
         let (conn, id) = open(&self.opts).await?;
-        Ok(Session {
+        Ok(Pooled {
             conn,
             _live: register(&self.live, id),
         })
@@ -292,7 +310,7 @@ impl MySqlSource {
     /// A connection broken by an I/O fault and returned to the idle set would
     /// fail every call after the one that broke it, and the pool would hand it
     /// out again each time.
-    fn release<T>(&self, session: Session, outcome: &Result<T, MySqlError>) {
+    fn release<T>(&self, spare: Pooled, outcome: &Result<T, MySqlError>) {
         if let Err(e) = outcome
             && !e.left_the_connection_usable()
         {
@@ -300,7 +318,7 @@ impl MySqlSource {
         }
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
         if idle.len() < IDLE_CONNECTIONS {
-            idle.push(session);
+            idle.push(spare);
         }
     }
 
@@ -310,17 +328,34 @@ impl MySqlSource {
     /// the protocol carries one command per connection: sent in-band it would
     /// queue behind the statement it exists to interrupt.
     ///
-    /// Every connection this session has open is named, not just a busy one.
+    /// Every spare connection the pool has opened is named, not just a busy one.
     /// The caller cannot see which is busy, and a `KILL QUERY` against an idle
     /// connection is a documented no-op that costs a round trip — which is the
     /// price of not having to know. A connection that closed between reading the
     /// registry and sending the statement answers `ER_NO_SUCH_THREAD`, and that
     /// is the same no-op arriving a moment later rather than a failure.
     ///
-    /// A cursor is the exception, and it is an exception by construction rather
-    /// than by care: its connection is never put in the registry, so a Cancel
-    /// pressed over the editor cannot stop the table browser somebody left open
-    /// beside it. Stopping a cursor is its canceller's job.
+    /// The session's own connection is listed only while a statement or a
+    /// transaction step is actually on it, and that asymmetry is the one thing
+    /// here that is not free. `KILL QUERY` is a no-op on an idle connection only
+    /// where the server makes it one: TiDB closes the connection instead, idle
+    /// or busy — measured against 7.5 by watching `PROCESSLIST` — and a spare
+    /// closed underneath this driver costs a reconnect nobody sees, while the
+    /// session closed underneath it takes the open transaction with it. So that
+    /// id goes into the registry when there is something to stop and comes out
+    /// when there is not, which has the second effect that a Cancel pressed at a
+    /// quiet moment opens no connection at all.
+    ///
+    /// What that does not fix, because nothing here can: on TiDB a Cancel
+    /// pressed while a statement is running still ends the connection it was
+    /// running on, transaction and all. The spelling that would not — `KILL TIDB
+    /// QUERY` — is a product name written into a statement, which is the one
+    /// thing this driver refuses to do.
+    ///
+    /// A cursor is the other exception, and it is an exception by construction
+    /// rather than by care: its connection is never put in the registry, so a
+    /// Cancel pressed over the editor cannot stop the table browser somebody
+    /// left open beside it. Stopping a cursor is its canceller's job.
     ///
     /// Best-effort, as in every driver here: success means the requests were
     /// delivered. What actually happened surfaces where the statement is, as a
@@ -347,101 +382,122 @@ impl MySqlSource {
         Ok(())
     }
 
-    /// Runs `sql` and streams its result in batches of at most `batch_rows`.
+    /// Runs `sql` on the session connection and streams its result in batches of
+    /// at most `batch_rows`.
+    ///
+    /// On the session and not on a spare, which is what makes a transaction
+    /// worth having here: the `BEGIN` an earlier statement sent is still in
+    /// force for this one. The price is that this waits for the previous result
+    /// to be read or dropped, because the connection carries one command at a
+    /// time.
     ///
     /// Resolves once the statement is prepared, which is where the column types
     /// become known and therefore where a grid can be laid out. A statement that
     /// fails to parse fails here; one that fails while running fails from
     /// `next_batch`.
     pub async fn query(&self, sql: &str, batch_rows: usize) -> Result<ArrowStream, MySqlError> {
-        let reader = self.read(sql, batch_rows, Reachable::BySession).await?;
+        let session = Arc::clone(&self.session).lock_owned().await;
+        // Registered before the statement is sent and unregistered with the task
+        // that reads it, so there is no moment where a statement is running on a
+        // connection `cancel` does not know about — and none where an idle
+        // connection is listed as though one were.
+        let live = register(&self.live, self.session_id);
+        let reader = read(
+            Held::Session {
+                conn: session,
+                _live: live,
+            },
+            sql,
+            batch_rows,
+        )
+        .await?;
         Ok(ArrowStream { reader })
     }
 
-    /// Reads `sql` forward, a page at a time.
+    /// Reads `sql` forward, a page at a time, on a connection of its own.
     ///
-    /// The same mechanism `query` uses. On this database the two differ only in
-    /// who can stop them: a cursor is handed out to be held and outlives the
-    /// call that made it, so it carries a canceller of its own and is left out
-    /// of the session's registry. `MySqlSource::cancel` reaching it would mean a
-    /// Cancel pressed over a query stopping an open table browser as well.
+    /// The same mechanism `query` uses, on a different connection, and the two
+    /// reasons are the same one seen from either end. A cursor is handed out to
+    /// be held: on the session it would keep every other statement waiting for
+    /// as long as somebody leaves a table browser open, and it would be inside
+    /// whatever transaction the session has — which the trait says a cursor is
+    /// not. So it takes its own connection, carries a canceller of its own, and
+    /// is left out of the session's registry, because `MySqlSource::cancel`
+    /// reaching it would mean a Cancel pressed over the query editor stopping
+    /// that table browser as well.
     pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, MySqlError> {
-        let reader = self
-            .read(sql, batch_rows, Reachable::ByItsOwnCanceller)
-            .await?;
+        let (conn, id) = open(&self.opts).await?;
+        let reader = read(Held::Own(conn), sql, batch_rows).await?;
         Ok(Cursor {
             canceller: CursorCancel {
                 opts: self.opts.clone(),
-                id: reader.id,
+                id,
             },
             reader,
         })
     }
 
-    /// Opens a connection, hands it to a task, and waits for the columns.
+    /// Whether a transaction opened here survives to the next statement.
     ///
-    /// A connection of its own rather than one from the idle set: a result holds
-    /// its connection for as long as it is being read, and a caller that leaves
-    /// a grid open would otherwise be holding a quarter of the pool.
-    async fn read(
-        &self,
-        sql: &str,
-        batch_rows: usize,
-        reachable: Reachable,
-    ) -> Result<Reader, MySqlError> {
-        let (conn, id) = open(&self.opts).await?;
-        let registration = match reachable {
-            Reachable::BySession => Some(register(&self.live, id)),
-            Reachable::ByItsOwnCanceller => None,
-        };
-        let (schema_tx, schema_rx) = oneshot::channel();
-        // Capacity one, so a reader that stops reading stops the producer
-        // rather than letting it run ahead into memory. The bound on what a
-        // result costs is this number times the batch size.
-        let (pages_tx, pages_rx) = mpsc::channel(1);
-        tokio::spawn(pump(
-            conn,
-            registration,
-            sql.to_string(),
-            batch_rows,
-            schema_tx,
-            pages_tx,
-        ));
+    /// Two things have to be true, and this driver is the only one where they
+    /// come apart. Statements have to share a connection, which they do. And the
+    /// server has to have the steps `TxStep` names, which is asked at connect
+    /// rather than assumed — see `metadata::probe`. The same driver reaches
+    /// MySQL, TiDB and StarRocks, and the third answers no.
+    pub fn transactional(&self) -> bool {
+        self.caps.transactions
+    }
 
-        let schema = match schema_rx.await {
-            Ok(result) => result?,
-            // The task cannot end before answering unless it panicked, and a
-            // panic there has already been reported by the runtime.
-            Err(_) => {
-                return Err(MySqlError::Decode {
-                    column: sql.to_string(),
-                    expected: "a prepared statement",
-                    value: "a reader that stopped before describing its columns".to_string(),
-                });
-            }
+    /// Takes one step of transaction control on the session connection.
+    ///
+    /// On the session and not on a spare, which is the whole reason this driver
+    /// holds one: a transaction belongs to a connection, so a `BEGIN` sent down
+    /// a borrowed one opens a transaction the next statement will not be given
+    /// and nobody can commit.
+    ///
+    /// Waits for the connection rather than reaching past whatever has it, so a
+    /// step issued while a result is still streaming arrives after that result
+    /// instead of in the middle of it. That is the only order that means
+    /// anything: a `COMMIT` overtaking the statement it was meant to commit
+    /// would commit less than the user watched happen.
+    ///
+    /// MySQL spells all six the standard way, which is not true of every
+    /// database — the words live here rather than in the caller for that reason.
+    /// None of them is checked against `transactional` first: where the server
+    /// does not have a step it refuses the statement itself, in its own words,
+    /// which say more than anything this side could write.
+    pub async fn transaction(&self, step: &TxStep) -> Result<(), MySqlError> {
+        let statement = match step {
+            TxStep::Begin => "BEGIN".to_string(),
+            TxStep::Commit => "COMMIT".to_string(),
+            TxStep::Rollback => "ROLLBACK".to_string(),
+            TxStep::Savepoint(name) => format!("SAVEPOINT {name}"),
+            TxStep::RollbackTo(name) => format!("ROLLBACK TO SAVEPOINT {name}"),
+            TxStep::Release(name) => format!("RELEASE SAVEPOINT {name}"),
         };
-
-        Ok(Reader {
-            schema,
-            pages: pages_rx,
-            rows_affected: None,
-            id,
-        })
+        let mut session = self.session.lock().await;
+        // Listed for the length of the step and no longer, as a statement is. A
+        // `COMMIT` can sit waiting on a lock another session holds, and a Cancel
+        // that could not reach it would leave a frozen window with nothing to
+        // press.
+        let _live = register(&self.live, self.session_id);
+        session.query_drop(statement).await?;
+        Ok(())
     }
 
     /// Databases on this server, which is the level MySQL calls both a schema
     /// and a database and the level the navigator hangs relations off.
     pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::schemas(&mut session.conn).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::schemas(&mut spare.conn).await;
+        self.release(spare, &out);
         out
     }
 
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::relations(&mut session.conn, schema).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::relations(&mut spare.conn, schema).await;
+        self.release(spare, &out);
         out
     }
 
@@ -450,9 +506,9 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<ColumnInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::columns(&mut session.conn, schema, relation).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::columns(&mut spare.conn, schema, relation).await;
+        self.release(spare, &out);
         out
     }
 
@@ -462,9 +518,9 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Option<String>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::definition(&mut session.conn, schema, relation).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::definition(&mut spare.conn, schema, relation).await;
+        self.release(spare, &out);
         out
     }
 
@@ -473,9 +529,9 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<IndexInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::indexes(&mut session.conn, schema, relation, &self.caps).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::indexes(&mut spare.conn, schema, relation, &self.caps).await;
+        self.release(spare, &out);
         out
     }
 
@@ -484,9 +540,9 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<RelationshipInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::foreign_keys(&mut session.conn, schema, relation).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::foreign_keys(&mut spare.conn, schema, relation).await;
+        self.release(spare, &out);
         out
     }
 
@@ -495,9 +551,9 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<RelationshipInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::referenced_by(&mut session.conn, schema, relation).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::referenced_by(&mut spare.conn, schema, relation).await;
+        self.release(spare, &out);
         out
     }
 
@@ -506,9 +562,9 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<ConstraintInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::constraints(&mut session.conn, schema, relation, &self.caps).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::constraints(&mut spare.conn, schema, relation, &self.caps).await;
+        self.release(spare, &out);
         out
     }
 
@@ -517,20 +573,85 @@ impl MySqlSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<TriggerInfo>, MySqlError> {
-        let mut session = self.acquire().await?;
-        let out = metadata::triggers(&mut session.conn, schema, relation).await;
-        self.release(session, &out);
+        let mut spare = self.acquire().await?;
+        let out = metadata::triggers(&mut spare.conn, schema, relation).await;
+        self.release(spare, &out);
         out
     }
 }
 
-/// Who is allowed to stop what a connection is running.
-enum Reachable {
-    /// Named by `MySqlSource::cancel`, which is what a Cancel button over the
-    /// editor reaches.
-    BySession,
-    /// Named by nothing but the handle it was given to.
-    ByItsOwnCanceller,
+/// The connection one result is read on, held until the last page.
+///
+/// A query borrows the session's, so that a `BEGIN` from an earlier statement is
+/// still in force. A cursor takes one of its own, for the reasons
+/// `MySqlSource::cursor` gives. Either way the reading task holds it outright,
+/// because `mysql_async`'s result borrows its connection for as long as it is
+/// being read.
+enum Held {
+    Session {
+        conn: OwnedMutexGuard<Conn>,
+        /// Held rather than read, and kept in here rather than alongside so
+        /// that the two cannot end separately: an id left in the registry after
+        /// the statement finished names an idle connection, which on TiDB is
+        /// not the harmless thing it is on MySQL.
+        _live: Registration,
+    },
+    /// A cursor's own, named by nothing but the canceller it was handed out
+    /// with, which is why there is no registration to hold here.
+    Own(Conn),
+}
+
+impl Deref for Held {
+    type Target = Conn;
+
+    fn deref(&self) -> &Conn {
+        match self {
+            Held::Session { conn, .. } => conn,
+            Held::Own(conn) => conn,
+        }
+    }
+}
+
+impl DerefMut for Held {
+    fn deref_mut(&mut self) -> &mut Conn {
+        match self {
+            Held::Session { conn, .. } => conn,
+            Held::Own(conn) => conn,
+        }
+    }
+}
+
+/// Hands a connection to a task and waits for the columns.
+///
+/// The connection arrives already chosen, because who it belongs to is the whole
+/// difference between a query and a cursor and it is not a decision to make
+/// twice.
+async fn read(conn: Held, sql: &str, batch_rows: usize) -> Result<Reader, MySqlError> {
+    let (schema_tx, schema_rx) = oneshot::channel();
+    // Capacity one, so a reader that stops reading stops the producer rather
+    // than letting it run ahead into memory. The bound on what a result costs is
+    // this number times the batch size.
+    let (pages_tx, pages_rx) = mpsc::channel(1);
+    tokio::spawn(pump(conn, sql.to_string(), batch_rows, schema_tx, pages_tx));
+
+    let schema = match schema_rx.await {
+        Ok(result) => result?,
+        // The task cannot end before answering unless it panicked, and a panic
+        // there has already been reported by the runtime.
+        Err(_) => {
+            return Err(MySqlError::Decode {
+                column: sql.to_string(),
+                expected: "a prepared statement",
+                value: "a reader that stopped before describing its columns".to_string(),
+            });
+        }
+    };
+
+    Ok(Reader {
+        schema,
+        pages: pages_rx,
+        rows_affected: None,
+    })
 }
 
 /// Opens a connection and reads the number that stops it.
@@ -573,12 +694,12 @@ enum Page {
 /// across an FFI boundary together without a self-referential type. Speaking
 /// over channels removes that problem entirely and puts the memory bound in the
 /// channel capacity, where it can be read.
+///
+/// The connection goes back whichever way this ends, including a failure and a
+/// reader that walked away: `conn` is dropped with the task, and dropping a
+/// `Held::Session` is what lets the next statement have the session.
 async fn pump(
-    mut conn: Conn,
-    // Held rather than read: dropping it with this task is what takes the
-    // connection back out of the session's registry, whichever way the task
-    // ends. A cursor's connection was never in it and passes `None`.
-    _live: Option<Registration>,
+    mut conn: Held,
     sql: String,
     batch_rows: usize,
     schema_out: oneshot::Sender<Result<SchemaRef, MySqlError>>,
@@ -771,7 +892,6 @@ struct Reader {
     schema: SchemaRef,
     pages: mpsc::Receiver<Page>,
     rows_affected: Option<u64>,
-    id: u64,
 }
 
 impl Reader {
