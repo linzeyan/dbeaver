@@ -12,6 +12,7 @@
 //! discover its own drivers at startup.
 
 use dbconn::{DbError, Driver};
+use driver_cassandra::CassandraSource;
 use driver_clickhouse::ChSource;
 use driver_duckdb::DuckSource;
 use driver_mongodb::MongoSource;
@@ -94,6 +95,12 @@ pub const CATALOG: &[Catalogued] = &[
         label: "ClickHouse",
         shape: Shape::Server,
         default_port: Some(8123),
+    },
+    Catalogued {
+        scheme: "cassandra",
+        label: "Cassandra",
+        shape: Shape::Server,
+        default_port: Some(9042),
     },
     Catalogued {
         scheme: "duckdb",
@@ -182,6 +189,11 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         "clickhouses" => Ok(Box::new(
             ChSource::connect(&format!("https://{rest}")).await?,
         )),
+        // Passed on whole, and this one for the plainest reason of the lot: the
+        // driver reads the host, port and keyspace out of the URL itself, so
+        // there is nothing here to rewrite. The path is a keyspace rather than a
+        // database, which is the same slot in the same shape of string.
+        "cassandra" => Ok(Box::new(CassandraSource::connect(url).await?)),
         // Same path convention as SQLite, and for the same reason: three
         // slashes give an absolute path, two give one relative to where the
         // client was started. `duckdb://:memory:` opens a database that is

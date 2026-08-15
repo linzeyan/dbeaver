@@ -16,6 +16,7 @@ dbconn = { path = "../conn" }
 dbddl = { path = "../ddl" }
 dbedit = { path = "../edit" }
 dbsql = { path = "../sql" }
+driver-cassandra = { path = "../drivers/cassandra" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-mongodb = { path = "../drivers/mongodb" }

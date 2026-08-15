@@ -4,6 +4,7 @@ members = [
     "crates/catalog",
     "crates/conn",
     "crates/ddl",
+    "crates/drivers/cassandra",
     "crates/drivers/clickhouse",
     "crates/drivers/duckdb",
     "crates/drivers/mongodb",

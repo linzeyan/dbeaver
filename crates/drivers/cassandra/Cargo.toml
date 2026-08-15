@@ -1,0 +1,32 @@
+[package]
+name = "driver-cassandra"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync", "net"] }
+# The maintained Rust CQL driver. Default features only: the optional ones are
+# conversions between its own value types and `chrono`, `time`, `num-bigint` and
+# `bigdecimal`, and this driver reads the raw representations directly on the
+# way to Arrow, so turning them on would buy impls nothing here calls.
+scylla = "1.8"
+# Both arrive with `arrow` already — `arrow-arith` depends on chrono and
+# `arrow-buffer` on num-bigint — so naming them costs no compilation. What they
+# save is the two pieces of arithmetic this driver would otherwise have to write
+# and test itself: a proleptic Gregorian calendar for `date` and `timestamp`
+# nested inside a collection, and arbitrary-precision base conversion for
+# `varint` and `decimal`, whose digits do not fit any fixed-width integer.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+num-bigint = "0.4"
+serde_json = "1"
+thiserror.workspace = true
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
