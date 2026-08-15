@@ -88,20 +88,21 @@ impl Driver for MySqlSource {
         Ok(MySqlSource::cancel(self).await?)
     }
 
-    /// Not yet: this session takes a connection from its pool for each
-    /// statement, so there is none holding a transaction for the next statement
-    /// to join. Giving it a session connection of its own is what makes this
-    /// true, and it is the same change four other drivers need.
+    /// Statements run on the session connection here, which is what a
+    /// transaction needs to span them — where the server has one to span.
+    ///
+    /// The only driver here where that second clause is not rhetorical. The same
+    /// code reaches MySQL, TiDB and StarRocks, so this cannot be a constant:
+    /// StarRocks is a distributed column store whose transactions stop at
+    /// `BEGIN` and `COMMIT`, and which of the three is on the other end of the
+    /// socket is asked at connect rather than assumed. `metadata::probe` has the
+    /// evidence and the reasoning.
     fn transactional(&self) -> bool {
-        false
+        MySqlSource::transactional(self)
     }
 
-    /// Refused rather than skipped, so that nobody is told a transaction is open
-    /// when nothing is.
-    async fn transaction(&self, _step: &TxStep) -> DbResult<()> {
-        Err(DbError::new(
-            "MySQL: every statement in this session runs on a pooled connection, so there is no transaction to control",
-        ))
+    async fn transaction(&self, step: &TxStep) -> DbResult<()> {
+        Ok(MySqlSource::transaction(self, step).await?)
     }
 }
 

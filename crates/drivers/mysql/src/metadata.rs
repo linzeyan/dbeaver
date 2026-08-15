@@ -1,4 +1,5 @@
-//! What the navigator sidebar asks a MySQL server about itself.
+//! What the navigator sidebar asks a MySQL server about itself, and the connect-
+//! time probe that decides which questions it can be asked at all.
 //!
 //! `information_schema` throughout, with no `SHOW` anywhere, for a reason that
 //! is about safety before it is about speed: every `SHOW` variant takes its
@@ -63,12 +64,13 @@ type StatisticsRow = (
 /// swapped in the SQL, not by a flag here.
 type RelationshipRow = (String, String, String, String, String, String, String);
 
-/// What this server's catalog has, asked once at connect.
+/// What this server can do, asked once at connect.
 ///
-/// Existence probes rather than a version test. TiDB reports a MySQL version
-/// that its own `server-version` setting can overwrite, so a version string is
-/// not evidence about anything; the catalog is, because implementing
-/// `information_schema` is how these servers announce what they support.
+/// Probes rather than a version test. TiDB reports a MySQL version that its own
+/// `server-version` setting can overwrite, so a version string is not evidence
+/// about anything. Two of these are answered by the catalog, because
+/// implementing `information_schema` is how these servers announce what they
+/// support; the third has no catalog to ask and is answered by trying.
 #[derive(Debug, Clone, Copy)]
 pub struct Capabilities {
     /// `information_schema.CHECK_CONSTRAINTS`, which arrived with MySQL 8.0.16
@@ -80,6 +82,10 @@ pub struct Capabilities {
     /// server does not have fails the whole statement, so the column list is
     /// chosen once rather than attempted and retried.
     index_expressions: bool,
+    /// Whether the server has the transaction control `TxStep` names. Read by
+    /// the driver rather than by this module, which is why it is the one field
+    /// here that is not private.
+    pub(crate) transactions: bool,
 }
 
 pub async fn probe(conn: &mut Conn) -> Result<Capabilities, MySqlError> {
@@ -99,7 +105,55 @@ pub async fn probe(conn: &mut Conn) -> Result<Capabilities, MySqlError> {
     Ok(Capabilities {
         check_constraints: check_constraints.unwrap_or(0) > 0,
         index_expressions: index_expressions.unwrap_or(0) > 0,
+        transactions: transactions(conn).await?,
     })
+}
+
+/// The savepoint the transaction probe sets and throws away.
+const PROBE_SAVEPOINT: &str = "dbclient_probe";
+
+/// Whether this server has the transaction control `TxStep` names, found out by
+/// asking it for some.
+///
+/// The one question here the catalog cannot answer: no `information_schema`
+/// table lists the statements a server implements, and the servers this driver
+/// reaches do not agree. StarRocks has `BEGIN` and `COMMIT` and stops there —
+/// `SAVEPOINT` is a syntax error, and a statement inside an open transaction
+/// cannot even read a table that transaction has written. So a driver that
+/// concluded "transactional" from `BEGIN` existing would hand a front end a
+/// Rollback To button that cannot work and a grid that will not show the row
+/// just inserted.
+///
+/// Two of the six steps are asked and the other four come with them: a server
+/// with `BEGIN` has `COMMIT` and `ROLLBACK`, and one with `SAVEPOINT` has the
+/// two statements that use a savepoint. That is what all three servers this
+/// driver is tested against do; one that had savepoints but no `RELEASE` would
+/// refuse that step out loud when it was asked for rather than silently.
+///
+/// `SAVEPOINT` is asked inside a transaction because that is the only place the
+/// answer means anything, and the transaction is rolled back whichever way the
+/// answer went — a probe that left one open would put the session's first real
+/// statement inside it.
+async fn transactions(conn: &mut Conn) -> Result<bool, MySqlError> {
+    if !accepted(conn.query_drop("BEGIN").await)? {
+        return Ok(false);
+    }
+    let savepoints = accepted(
+        conn.query_drop(format!("SAVEPOINT {PROBE_SAVEPOINT}"))
+            .await,
+    )?;
+    conn.query_drop("ROLLBACK").await?;
+    Ok(savepoints)
+}
+
+/// A statement the server refused is the answer to the question; a connection
+/// that broke is not, and is passed on rather than read as a no.
+fn accepted(outcome: Result<(), mysql_async::Error>) -> Result<bool, MySqlError> {
+    match outcome {
+        Ok(()) => Ok(true),
+        Err(mysql_async::Error::Server(_)) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Databases, minus the four the server keeps for itself.
@@ -609,10 +663,14 @@ pub async fn triggers(
 mod tests {
     use super::*;
 
+    /// Only the two the statements below choose their columns by; nothing here
+    /// reads a transaction, so it is fixed rather than made an argument nobody
+    /// would vary.
     fn caps(check_constraints: bool, index_expressions: bool) -> Capabilities {
         Capabilities {
             check_constraints,
             index_expressions,
+            transactions: true,
         }
     }
 
