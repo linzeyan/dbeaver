@@ -20,8 +20,8 @@
 use crate::{Renderer, Script};
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationKind, RelationshipInfo,
 };
 
 pub(crate) static MSSQL: MsSql = MsSql;
@@ -172,13 +172,20 @@ async fn view(driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String> 
 /// increment)` (from `sys.identity_columns`) and `COLLATE` (from
 /// `sys.columns.collation_name`), neither of which reaches `ColumnInfo`.
 ///
-/// A computed column comes out wrong and knowingly so. Upstream writes `qty AS
-/// ([a]+[b]) PERSISTED` with no type and no default; the driver has one field
-/// for both a default and a computation — the shared shape has nowhere else to
-/// put the expression — so it renders here as a column with a default. Telling
-/// the two apart needs a flag on `ColumnInfo` that no other database has a use
-/// for, and that is a change to the shared shape rather than to this renderer.
+/// A computed column takes none of those five. `getSupportedModifiers` answers
+/// `{ComputedModifier, NotNullModifier}` for a column that has a computed
+/// definition, so what is written is the expression and nothing else — no type,
+/// no default, no `NULL` — which is also the only form SQL Server takes back: a
+/// type in front of `AS` is a syntax error.
 fn column(column: &ColumnInfo) -> String {
+    // The flag and the expression are read from one catalog row and mean
+    // something only together: a column marked computed with no expression to
+    // compute is not a column this can write, and inventing one would be
+    // inventing the table.
+    if let (Some(computed), Some(expression)) = (column.computed, &column.default_value) {
+        return computed_column(column, computed, expression);
+    }
+
     let mut declaration = format!("{} {}", quote(&column.name), column.data_type);
     if let Some(default) = &column.default_value {
         // `sys.default_constraints.definition` arrives parenthesised — `((1))` —
@@ -191,6 +198,33 @@ fn column(column: &ColumnInfo) -> String {
     } else {
         " NOT NULL"
     });
+    declaration
+}
+
+/// A computed column, as `ComputedModifier` then `NotNullModifier` write one.
+///
+/// The expression keeps the brackets `sys.computed_columns.definition` stores it
+/// with — `([qty]*(2))` — as the check constraint above keeps its own, because
+/// upstream appends the catalog string untouched.
+///
+/// `NOT NULL` is written only for a persisted column, and there upstream is not
+/// followed: its `NotNullModifier` writes the words whenever the column is
+/// required, and SQL Server refuses them on a column it does not store — "CHECK,
+/// FOREIGN KEY, and NOT NULL constraints require that computed columns be
+/// persisted" (Msg 8183). The catalog reaches that state on its own, without
+/// anybody having declared it: a non-persisted `isnull([a],(0))` reports
+/// `is_nullable = 0`, because the server derives nullability from the expression.
+/// So the column upstream's rule would describe cannot be created, and a script
+/// that stops halfway is worse than one that omits a word the server would have
+/// derived anyway.
+fn computed_column(column: &ColumnInfo, computed: Computed, expression: &str) -> String {
+    let mut declaration = format!("{} AS {expression}", quote(&column.name));
+    if computed == Computed::Stored {
+        declaration.push_str(" PERSISTED");
+        if !column.nullable {
+            declaration.push_str(" NOT NULL");
+        }
+    }
     declaration
 }
 

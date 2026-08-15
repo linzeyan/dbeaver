@@ -15,7 +15,7 @@
 //! nothing for a few thousand short rows.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
     RelationshipInfo, SchemaInfo, TriggerInfo,
 };
 use tiberius::Row;
@@ -217,6 +217,7 @@ pub(crate) async fn columns(
                 c.column_id, \
                 dc.definition AS default_definition, \
                 cc.definition AS computed_definition, \
+                cc.is_persisted, \
                 CAST(CASE WHEN pkc.column_id IS NULL THEN 0 ELSE 1 END AS bit) AS is_primary_key \
          FROM sys.columns c \
          JOIN sys.objects o ON o.object_id = c.object_id \
@@ -255,7 +256,7 @@ pub(crate) async fn columns(
             // that ascends by one, so it is counted here from the order the
             // catalog returned.
             position: offset as i32 + 1,
-            is_primary_key: r.get(10).unwrap_or(false),
+            is_primary_key: r.get(11).unwrap_or(false),
             // A computed column has no default and a default is not a
             // computation, so only one of the two is ever set. The expression
             // goes in this field because the shared shape has nowhere else for
@@ -265,6 +266,21 @@ pub(crate) async fn columns(
                 .get::<&str, _>(8)
                 .or_else(|| r.get::<&str, _>(9))
                 .map(str::to_string),
+            // A row in `sys.computed_columns` is what makes a column computed,
+            // so the definition being there is the whole of the test —
+            // `is_persisted` only says which of the two kinds it is. Upstream
+            // reads the same two columns off the same join
+            // (`SQLServerSchema.TableCache.prepareChildrenStatement`) and for
+            // the same reason: without `is_persisted` the DDL cannot say
+            // `PERSISTED`, and without that word the table it describes is a
+            // different table.
+            computed: r.get::<&str, _>(9).map(|_| {
+                if r.get(10).unwrap_or(false) {
+                    Computed::Stored
+                } else {
+                    Computed::Virtual
+                }
+            }),
         })
         .collect())
 }

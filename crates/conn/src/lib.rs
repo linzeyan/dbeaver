@@ -47,7 +47,7 @@
 mod metadata;
 
 pub use metadata::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
     RelationshipInfo, SchemaInfo, TriggerInfo,
 };
 

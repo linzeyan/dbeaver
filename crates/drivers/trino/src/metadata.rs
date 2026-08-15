@@ -184,6 +184,7 @@ impl TrinoSource {
                     empty if empty.is_empty() => None,
                     default => Some(default),
                 },
+                computed: None,
             })
             .collect())
     }

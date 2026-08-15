@@ -55,6 +55,22 @@ pub struct RelationInfo {
     pub estimated_rows: Option<i64>,
 }
 
+/// How a computed column's value is kept.
+///
+/// Named for the fact rather than for one database's keyword: SQL Server writes
+/// `PERSISTED`, while MySQL, SQLite and PostgreSQL write `STORED` for the same
+/// arrangement, and the column that is not stored is the one every one of them
+/// evaluates on read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Computed {
+    /// Evaluated on every read; the table stores nothing for it.
+    Virtual,
+    /// Evaluated on write and stored with the row, so an index can be built on
+    /// it and a constraint can be declared over it.
+    Stored,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ColumnInfo {
     pub name: String,
@@ -69,7 +85,20 @@ pub struct ColumnInfo {
     /// zeroth in another.
     pub position: i32,
     pub is_primary_key: bool,
+    /// The default applied when a statement names no value — or, where
+    /// `computed` says so, the expression the column is computed from.
     pub default_value: Option<String>,
+    /// Which of those two the field above is holding: `None` for a default,
+    /// `Some` for a computation.
+    ///
+    /// One field carried both until a renderer had to write the column back.
+    /// SQL Server accepts `qty AS ([a]+[b]) PERSISTED` and refuses `qty int
+    /// DEFAULT ([a]+[b])`, so a renderer that cannot tell a computation from a
+    /// default emits a script that reads plausibly and does not run — wrong in
+    /// the way that is hardest to notice. The expression stays where it was
+    /// because a structure pane showing nothing for a computed column hides the
+    /// only interesting thing about it; this says what it is.
+    pub computed: Option<Computed>,
 }
 
 #[derive(Debug, Clone, Serialize)]

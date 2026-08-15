@@ -181,6 +181,7 @@ pub(crate) fn columns(
             position: cid + 1,
             is_primary_key: primary_key > 0,
             default_value: row.get(3)?,
+            computed: None,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

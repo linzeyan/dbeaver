@@ -197,6 +197,7 @@ impl CassandraSource {
                     // place, which is a stronger statement than "the default is
                     // null".
                     default_value: None,
+                    computed: None,
                 }
             })
             .collect())

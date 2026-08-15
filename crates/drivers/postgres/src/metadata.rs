@@ -200,6 +200,14 @@ pub(crate) async fn columns(
             position: r.get(3),
             is_primary_key: r.get(4),
             default_value: r.get(5),
+            // Not read here, and the field above is the poorer for it: a
+            // `GENERATED ALWAYS AS (…) STORED` column keeps its expression in
+            // `pg_attrdef` like any default, and only `pg_attribute.attgenerated`
+            // tells the two apart — a column this query does not ask for. So a
+            // generated column arrives looking like a column with a default,
+            // which is the same confusion SQL Server's driver just stopped
+            // making.
+            computed: None,
         })
         .collect())
 }
