@@ -191,6 +191,13 @@ impl SnowflakeSource {
                         empty if empty.is_empty() => None,
                         value => Some(value),
                     },
+                    // `INFORMATION_SCHEMA.COLUMNS` has no column that says a
+                    // value is derived rather than defaulted, so a Snowflake
+                    // virtual column would arrive here as a default. Left as a
+                    // plain default rather than guessed at from the expression's
+                    // shape, which is one more thing that would need a server to
+                    // settle.
+                    computed: None,
                     name: column,
                 }
             })

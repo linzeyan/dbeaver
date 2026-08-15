@@ -166,6 +166,13 @@ impl DatabricksSource {
                         empty if empty.is_empty() => None,
                         value => Some(value),
                     },
+                    // Unity Catalog states a generated column's expression in
+                    // `generation_expression`, a column this query does not ask
+                    // for — and asking for it would be writing the one thing no
+                    // workspace has confirmed is there. So a generated column
+                    // arrives as a column with a default, which is the shape
+                    // this field exists to correct; correcting it needs a server.
+                    computed: None,
                     name: column,
                 }
             })
