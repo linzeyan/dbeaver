@@ -100,6 +100,20 @@ struct Scratch {
     /// Reads the rows back; the check counts them and looks at nothing else.
     read: String,
     drop: String,
+    /// Whether this database has savepoints at all.
+    ///
+    /// A property of the database and not of the driver, which is why it is
+    /// recorded here beside the statements rather than asked of `Driver`. The
+    /// trait already anticipated the split — "a step this database does not have
+    /// is refused rather than skipped" — and DuckDB is the case it named:
+    /// `SAVEPOINT`, `ROLLBACK TO` and `RELEASE` are syntax errors in its parser,
+    /// not features behind a setting.
+    ///
+    /// It does not weaken `transactional`. The question that answers is whether
+    /// statements on the session can be wrapped in a transaction, and DuckDB's
+    /// can; a client that hid Commit and Rollback over a missing savepoint would
+    /// be withholding the two buttons the database does have.
+    savepoints: bool,
 }
 
 impl Scratch {
@@ -112,7 +126,14 @@ impl Scratch {
             insert: format!("INSERT INTO {table} (n) VALUES (1)"),
             read: format!("SELECT n FROM {table}"),
             drop: format!("DROP TABLE {table}"),
+            savepoints: true,
         }
+    }
+
+    /// The same, on a database with no savepoints.
+    fn without_savepoints(mut self) -> Self {
+        self.savepoints = false;
+        self
     }
 }
 
@@ -178,9 +199,12 @@ async fn duckdb() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
-        // As SQLite: a connection per piece of work, and no transaction can
-        // reach across two of them.
-        scratch: None,
+        // The one subject here whose database has transactions and no
+        // savepoints. `BEGIN`, `COMMIT` and `ROLLBACK` all work on the session
+        // connection; the other three are syntax errors in DuckDB's parser, and
+        // the check above insists the driver says so rather than passing over
+        // them.
+        scratch: Some(Scratch::sql("contract_tx").without_savepoints()),
         _fixture: None,
     }
 }
@@ -874,24 +898,46 @@ async fn controls_a_transaction(subject: &Subject) {
         .await
         .expect("could not begin");
     run(driver, &scratch.insert).await;
-    driver
-        .transaction(&TxStep::Savepoint("halfway".to_string()))
-        .await
-        .expect("could not set a savepoint");
-    run(driver, &scratch.insert).await;
-    driver
-        .transaction(&TxStep::RollbackTo("halfway".to_string()))
-        .await
-        .expect("could not roll back to the savepoint");
-    assert_eq!(
-        rows(driver, &scratch.read).await,
-        2,
-        "rolling back to a savepoint should undo only what came after it"
-    );
-    driver
-        .transaction(&TxStep::Release("halfway".to_string()))
-        .await
-        .expect("could not release the savepoint");
+    if scratch.savepoints {
+        driver
+            .transaction(&TxStep::Savepoint("halfway".to_string()))
+            .await
+            .expect("could not set a savepoint");
+        run(driver, &scratch.insert).await;
+        driver
+            .transaction(&TxStep::RollbackTo("halfway".to_string()))
+            .await
+            .expect("could not roll back to the savepoint");
+        assert_eq!(
+            rows(driver, &scratch.read).await,
+            2,
+            "rolling back to a savepoint should undo only what came after it"
+        );
+        driver
+            .transaction(&TxStep::Release("halfway".to_string()))
+            .await
+            .expect("could not release the savepoint");
+    } else {
+        // Checked rather than skipped, which is the whole difference between a
+        // database that has no savepoints and a driver that forgot them. All
+        // three have to say no: one that quietly did nothing would leave
+        // somebody believing there is a point they can come back to, and they
+        // would find out by rolling back further than they meant to.
+        for step in [
+            TxStep::Savepoint("halfway".to_string()),
+            TxStep::RollbackTo("halfway".to_string()),
+            TxStep::Release("halfway".to_string()),
+        ] {
+            assert!(
+                driver.transaction(&step).await.is_err(),
+                "{step:?} should be refused by a database that has no savepoints"
+            );
+        }
+        // And refusing one leaves the transaction usable, or the refusal has
+        // cost more than the missing feature.
+        run(driver, &scratch.insert).await;
+        assert_eq!(rows(driver, &scratch.read).await, 3);
+    }
     driver
         .transaction(&TxStep::Rollback)
         .await
@@ -899,7 +945,7 @@ async fn controls_a_transaction(subject: &Subject) {
     assert_eq!(
         rows(driver, &scratch.read).await,
         1,
-        "the transaction around the savepoint was rolled back too"
+        "the transaction was rolled back, savepoints or no savepoints"
     );
 
     run(driver, &scratch.drop).await;
