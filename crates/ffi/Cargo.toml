@@ -18,6 +18,7 @@ dbedit = { path = "../edit" }
 dbsql = { path = "../sql" }
 driver-cassandra = { path = "../drivers/cassandra" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
+driver-databricks = { path = "../drivers/databricks" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-flightsql = { path = "../drivers/flightsql" }
 driver-mongodb = { path = "../drivers/mongodb" }
@@ -25,6 +26,7 @@ driver-mssql = { path = "../drivers/mssql" }
 driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-redis = { path = "../drivers/redis" }
+driver-snowflake = { path = "../drivers/snowflake" }
 driver-sqlite = { path = "../drivers/sqlite" }
 driver-trino = { path = "../drivers/trino" }
 serde = "1"
