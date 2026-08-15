@@ -124,6 +124,10 @@ fn describe(e: &tokio_postgres::Error) -> String {
     out
 }
 
+/// The cancel tokens of every connection currently running a statement, keyed
+/// by checkout. See `PgSource::busy`.
+type Registry = Arc<Mutex<HashMap<u64, CancelToken>>>;
+
 /// A connection to one PostgreSQL database, plus spare connections for looking things up.
 ///
 /// Statements run on the session connection and nothing else does, because a transaction
@@ -143,11 +147,21 @@ pub struct PgSource {
     /// kept here rather than derived. Only the busy ones, because the request
     /// is not free: sent to an idle backend it arrives after that connection
     /// has moved on and stops whatever it moved on to.
-    busy: Arc<Mutex<HashMap<u64, CancelToken>>>,
+    busy: Registry,
     /// Keys are handed out rather than taken from the connection, because the
     /// same connection can be checked out again before the previous entry's
     /// removal — which drop can only spawn — has run.
     next_checkout: AtomicU64,
+    /// Number of times `cancel` has been called since this `PgSource` was
+    /// created.
+    ///
+    /// A counter rather than a flag: a flag set by a cancel that landed long
+    /// ago cannot be distinguished from one that happened during the current
+    /// borrow, so a reader could never tell whether the connection it was
+    /// handed was still possibly-cancelled. The counter lets a reader compare
+    /// the value at checkout with the value at drop — if they differ, a cancel
+    /// happened somewhere in between, and the connection must be retired.
+    cancellations: Arc<AtomicU64>,
 }
 
 /// A pooled connection, borrowed for one call and returned when it goes out of scope.
@@ -155,7 +169,13 @@ struct AcquiredConnection {
     client: Option<Client>,
     pool: Arc<Mutex<Vec<Client>>>,
     _permit: OwnedSemaphorePermit,
-    _busy: Busy,
+    busy: Busy,
+    /// Shared counter that `cancel` bumps.
+    cancellations: Arc<AtomicU64>,
+    /// Value of `cancellations` at the moment this connection was checked out.
+    /// If the current value differs at drop, a cancel happened during the
+    /// borrow and the connection must be retired.
+    cancellations_at_checkout: u64,
 }
 
 impl Deref for AcquiredConnection {
@@ -180,8 +200,30 @@ impl Drop for AcquiredConnection {
     fn drop(&mut self) {
         // This must be in a spawned task because drop cannot await
         let pool = Arc::clone(&self.pool);
+        let cancellations = Arc::clone(&self.cancellations);
+        let cancellations_at_checkout = self.cancellations_at_checkout;
         let client = self.client.take().unwrap();
+        // Taken over from the guard so both happen in one task, in this order.
+        // Left to run itself the removal is a second, unordered task, and a
+        // token still in the registry after the connection is back in the pool
+        // is one a cancel can aim at whoever borrows it next.
+        let entry = self.busy.take_entry();
         tokio::spawn(async move {
+            if let Some((id, busy)) = entry {
+                busy.lock().await.remove(&id);
+            }
+            // If a cancel happened between checkout and now, the connection
+            // may still carry an unlanded signal. Pushing it back into the pool
+            // risks killing the next borrower's statement, so close it instead.
+            // The pool refills itself on demand in `acquire_connection`, so
+            // losing a connection costs one reconnect and nothing else.
+            //
+            // Read after the removal above, so a cancel that could still find
+            // this connection is one whose count this load already includes.
+            if cancellations.load(Ordering::SeqCst) != cancellations_at_checkout {
+                drop(client);
+                return;
+            }
             let mut pool_guard = pool.lock().await;
             pool_guard.push(client);
         });
@@ -196,13 +238,25 @@ impl Drop for AcquiredConnection {
 /// ending, the stream being dropped, an error unwinding past it — is a drop.
 struct Busy {
     id: u64,
-    busy: Arc<Mutex<HashMap<u64, CancelToken>>>,
+    /// `None` once a holder has taken the removal over, which is what stops
+    /// this guard from spawning a second one behind their back.
+    busy: Option<Registry>,
+}
+
+impl Busy {
+    /// Hands the removal to a caller that will perform it themselves.
+    ///
+    /// For a caller that has something else to order against it. `Drop` can
+    /// only spawn, and a spawned removal is ordered against nothing.
+    fn take_entry(&mut self) -> Option<(u64, Registry)> {
+        self.busy.take().map(|busy| (self.id, busy))
+    }
 }
 
 impl Drop for Busy {
     fn drop(&mut self) {
+        let Some(busy) = self.busy.take() else { return };
         // This must be in a spawned task because drop cannot await
-        let busy = Arc::clone(&self.busy);
         let id = self.id;
         tokio::spawn(async move {
             let mut busy_guard = busy.lock().await;
@@ -234,6 +288,7 @@ impl PgSource {
         // The session's token is not registered here. It belongs in the registry
         // only while a statement is on it, and connecting is not that.
         let busy = Arc::new(Mutex::new(HashMap::new()));
+        let cancellations = Arc::new(AtomicU64::new(0));
 
         Ok(Self {
             session,
@@ -242,17 +297,31 @@ impl PgSource {
             conn_str: conn_str.to_string(),
             busy,
             next_checkout: AtomicU64::new(0),
+            cancellations,
         })
     }
 
-    /// Registers `token` as busy for as long as the returned guard is held.
-    async fn mark_busy(&self, token: CancelToken) -> Busy {
+    /// Registers `token` as busy for as long as the returned guard is held, and
+    /// reports the cancellation count as of that moment.
+    ///
+    /// Both under one lock, which is the whole reason they are one call. Split
+    /// apart, a cancel can land between them: it finds the token and signals
+    /// this connection, and the count read afterwards already includes it, so
+    /// at drop the two agree and a signalled connection goes back into the pool
+    /// looking untouched — the one outcome this registry exists to prevent.
+    async fn mark_busy(&self, token: CancelToken) -> (Busy, u64) {
         let id = self.next_checkout.fetch_add(1, Ordering::SeqCst);
-        self.busy.lock().await.insert(id, token);
-        Busy {
-            id,
-            busy: Arc::clone(&self.busy),
-        }
+        let mut busy = self.busy.lock().await;
+        busy.insert(id, token);
+        let cancellations = self.cancellations.load(Ordering::SeqCst);
+        drop(busy);
+        (
+            Busy {
+                id,
+                busy: Some(Arc::clone(&self.busy)),
+            },
+            cancellations,
+        )
     }
 
     /// Acquire a connection from the pool. This will block if all connections
@@ -268,12 +337,14 @@ impl PgSource {
         // before registering, so the two locks are never held at once.
         let pooled = self.pool.lock().await.pop();
         if let Some(client) = pooled {
-            let busy = self.mark_busy(client.cancel_token()).await;
+            let (busy, cancellations_at_checkout) = self.mark_busy(client.cancel_token()).await;
             return Ok(AcquiredConnection {
                 client: Some(client),
                 pool: Arc::clone(&self.pool),
                 _permit: permit,
-                _busy: busy,
+                busy,
+                cancellations: Arc::clone(&self.cancellations),
+                cancellations_at_checkout,
             });
         }
 
@@ -289,13 +360,15 @@ impl PgSource {
 
         // Registered before it is handed out, so a statement can never be running
         // on a connection `cancel` does not know about.
-        let busy = self.mark_busy(client.cancel_token()).await;
+        let (busy, cancellations_at_checkout) = self.mark_busy(client.cancel_token()).await;
 
         Ok(AcquiredConnection {
             client: Some(client),
             pool: Arc::clone(&self.pool),
             _permit: permit,
-            _busy: busy,
+            busy,
+            cancellations: Arc::clone(&self.cancellations),
+            cancellations_at_checkout,
         })
     }
 
@@ -324,7 +397,15 @@ impl PgSource {
         // Cloned out from under the lock: a cancel is a round trip, and holding
         // the registry across all of them would block the connection being opened
         // by whatever we are trying to cancel.
-        let tokens = self.busy.lock().await.values().cloned().collect::<Vec<_>>();
+        let tokens = {
+            let busy = self.busy.lock().await;
+            // Counted under the same lock the registry is read under, so a
+            // checkout either registers early enough to be signalled here and
+            // reads the lower count, or registers too late for both. See
+            // `mark_busy` for what splitting the two costs.
+            self.cancellations.fetch_add(1, Ordering::SeqCst);
+            busy.values().cloned().collect::<Vec<_>>()
+        };
         // Every connection is asked before the first refusal is reported, so one
         // dropped connection cannot spare the rest.
         let results =
@@ -346,7 +427,10 @@ impl PgSource {
     /// every database — the words live here rather than in the caller for that
     /// reason.
     pub async fn transaction(&self, step: &TxStep) -> Result<(), PgError> {
-        let _busy = self.mark_busy(self.session.cancel_token()).await;
+        // The count is for connections that can be retired, and the session is
+        // not one of them: it carries the open transaction, so closing it would
+        // roll back the work the user is in the middle of.
+        let (_busy, _) = self.mark_busy(self.session.cancel_token()).await;
         let statement = match step {
             TxStep::Begin => "BEGIN".to_string(),
             TxStep::Commit => "COMMIT".to_string(),
@@ -479,7 +563,7 @@ impl PgSource {
         // not resolve until the server has run the whole statement, so the
         // cancel most worth catching arrives while this call is still awaiting,
         // and would find nothing if the token went in afterwards.
-        let busy = self.mark_busy(self.session.cancel_token()).await;
+        let (busy, _) = self.mark_busy(self.session.cancel_token()).await;
         let stmt = self.session.prepare(sql).await?;
 
         let types: Vec<ColumnType> = stmt
