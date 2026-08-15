@@ -46,6 +46,18 @@ MONGO_CONTAINER := mongo-test
 MONGO_PORT      := 57017
 MONGO_IMAGE     := mongo:7
 
+# Redis, for the driver's own tests. Non-default port for the same reason as
+# PostgreSQL's.
+REDIS_CONTAINER := redis-test
+REDIS_PORT      := 56379
+REDIS_IMAGE     := redis:7
+
+# Cassandra, for the driver's own tests. Non-default port for the same reason as
+# PostgreSQL's. It takes a long time to start.
+CASSANDRA_CONTAINER := cassandra-test
+CASSANDRA_PORT      := 59042
+CASSANDRA_IMAGE     := cassandra:5
+
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
 # waits for someone to type into it, which no script can do. Derived from
@@ -245,6 +257,52 @@ db-up-mongo: ## Start the MongoDB test container
 .PHONY: db-down-mongo
 db-down-mongo: ## Stop and remove the MongoDB test container
 	-docker rm -f $(MONGO_CONTAINER)
+
+.PHONY: db-up-redis
+db-up-redis: ## Start the Redis test container
+	@docker start $(REDIS_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(REDIS_CONTAINER) \
+			-p $(REDIS_PORT):6379 $(REDIS_IMAGE)
+	@echo "waiting for redis..."
+	@for i in $$(seq 1 60); do \
+		docker exec $(REDIS_CONTAINER) redis-cli ping \
+			>/dev/null 2>&1 && break; \
+		sleep 1; \
+	done
+	@docker exec $(REDIS_CONTAINER) redis-cli ping
+
+.PHONY: db-down-redis
+db-down-redis: ## Stop and remove the Redis test container
+	-docker rm -f $(REDIS_CONTAINER)
+
+.PHONY: db-check-redis
+db-check-redis: ## Fail unless the Redis test container is reachable
+	@docker exec $(REDIS_CONTAINER) redis-cli ping \
+		>/dev/null 2>&1 \
+		|| { echo "redis not running; run 'make db-up-redis'"; exit 1; }
+
+.PHONY: db-up-cassandra
+db-up-cassandra: ## Start the Cassandra test container
+	@docker start $(CASSANDRA_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(CASSANDRA_CONTAINER) \
+			-p $(CASSANDRA_PORT):9042 $(CASSANDRA_IMAGE)
+	@echo "waiting for cassandra (this takes a while)..."
+	@for i in $$(seq 1 120); do \
+		docker exec $(CASSANDRA_CONTAINER) cqlsh -e "describe keyspaces" \
+			>/dev/null 2>&1 && break; \
+		sleep 2; \
+	done
+	@docker exec $(CASSANDRA_CONTAINER) cqlsh -e "describe keyspaces"
+
+.PHONY: db-down-cassandra
+db-down-cassandra: ## Stop and remove the Cassandra test container
+	-docker rm -f $(CASSANDRA_CONTAINER)
+
+.PHONY: db-check-cassandra
+db-check-cassandra: ## Fail unless the Cassandra test container is reachable
+	@docker exec $(CASSANDRA_CONTAINER) cqlsh -e "describe keyspaces" \
+		>/dev/null 2>&1 \
+		|| { echo "cassandra not running; run 'make db-up-cassandra'"; exit 1; }
 
 # The two databases that exist to prove protocol compatibility rather than to
 # be supported: they are read by the PostgreSQL driver and no code of their own,
