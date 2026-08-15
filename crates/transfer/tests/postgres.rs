@@ -152,3 +152,69 @@ async fn a_row_postgresql_refuses_fails_the_transfer() {
 
     run_pg(&target, "DROP TABLE transfer_refused").await;
 }
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_files_rows_arrive_in_a_postgresql_table() {
+    // Import has otherwise only been read back out of DuckDB, which parses and
+    // stores its own way. What is checked here is that the schema probe asks a
+    // real server for its own types and gets an answer the reader can use: a
+    // `numeric` and a `timestamp` are where a guessed type stops being a
+    // guess and starts being a rejected statement.
+    let target = postgres().await;
+
+    run_pg(&target, "DROP TABLE IF EXISTS import_landing").await;
+    run_pg(
+        &target,
+        "CREATE TABLE import_landing (id integer, note text, amount numeric(12,2))",
+    )
+    .await;
+
+    let mut body = String::from("id,note,amount\n");
+    body.push_str("1,plain,10.50\n");
+    // The two the writer treats differently, so the reader has to as well.
+    body.push_str("2,,20.25\n");
+    body.push_str("3,\"O'Brien\",30.00\n");
+    for i in 4..=300 {
+        body.push_str(&format!("{i},row{i},{i}.00\n"));
+    }
+    let path = std::env::temp_dir().join("dbtransfer-postgres-import.csv");
+    std::fs::write(&path, body).expect("the temp file must be writable");
+
+    let rows = dbtransfer::import(
+        &path,
+        dbtransfer::Format::Csv,
+        &target,
+        &dbsql::POSTGRES,
+        "import_landing".to_string(),
+    )
+    .await
+    .expect("import failed");
+
+    assert_eq!(rows, 300);
+    assert_eq!(
+        count_pg(&target, "SELECT count(*) FROM import_landing").await,
+        300,
+        "every row in the file reached the server"
+    );
+    assert_eq!(
+        count_pg(
+            &target,
+            "SELECT count(*) FROM import_landing WHERE note = 'O''Brien'",
+        )
+        .await,
+        1,
+        "the apostrophe arrived as data, not as syntax"
+    );
+    assert_eq!(
+        count_pg(
+            &target,
+            "SELECT count(*) FROM import_landing WHERE amount = 10.50",
+        )
+        .await,
+        1,
+        "the decimal was read into numeric and not rounded through a float"
+    );
+
+    run_pg(&target, "DROP TABLE import_landing").await;
+}
