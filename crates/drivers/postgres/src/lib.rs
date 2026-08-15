@@ -372,28 +372,32 @@ impl PgSource {
         })
     }
 
-    /// Asks the server to abandon whatever this session is currently running.
+    /// Asks the server to abandon whatever this session is currently running,
+    /// and answers how many backends were named.
     ///
     /// The request travels on a connection of its own, which is why this can be
     /// called while a socket is busy streaming a result: the protocol has no way
     /// to interleave one, so a cancel sent in-band would sit in the queue behind
     /// the statement it is trying to stop.
     ///
-    /// Every connection is named, not just the session, because a session owns
-    /// several and the caller cannot see which one is busy: statements run on the
-    /// session, metadata reads run on whichever connection the pool handed out,
-    /// and a pooled connection in use is not in the pool to be found. Naming an
-    /// idle backend costs a round trip and does nothing, which is the price of
-    /// not having to know. A cursor is the exception — it carries its own
-    /// canceller, because it is handed to the caller and outlives the call that
-    /// made it.
+    /// Every connection with a statement on it is named, not just the session,
+    /// because a session runs on several and the caller cannot see which one is
+    /// busy: statements run on the session, metadata reads run on whichever
+    /// connection the pool handed out, and a pooled connection in use is not in
+    /// the pool to be found. Idle ones are left out, because naming one is not
+    /// free: this call returns when the postmaster accepts the request, and the
+    /// signal arrives at the backend afterwards — by which time an idle
+    /// connection has been handed to somebody else, and their statement is what
+    /// stops. A cursor is the exception — it carries its own canceller, because
+    /// it is handed to the caller and outlives the call that made it.
     ///
-    /// Best-effort by design. The server may finish before the request lands, or
-    /// the statement may be between commands with nothing to cancel, and neither
-    /// is an error — success here means the requests were delivered, not that
-    /// anything was interrupted. What actually happened shows up as the running
-    /// statement failing with `is_cancelled`, or not failing at all.
-    pub async fn cancel(&self) -> Result<(), PgError> {
+    /// Best-effort by design. The count is how many were asked, not how many
+    /// stopped: the server may finish before the request lands, or the statement
+    /// may be between commands with nothing to cancel, and neither is an error.
+    /// What actually happened shows up as the running statement failing with
+    /// `is_cancelled`, or not failing at all. Zero is the one that carries
+    /// information — there was nothing running to stop.
+    pub async fn cancel(&self) -> Result<usize, PgError> {
         // Cloned out from under the lock: a cancel is a round trip, and holding
         // the registry across all of them would block the connection being opened
         // by whatever we are trying to cancel.
@@ -413,7 +417,7 @@ impl PgSource {
         for result in results {
             result?;
         }
-        Ok(())
+        Ok(tokens.len())
     }
 
     /// Takes one step of transaction control on the session connection.

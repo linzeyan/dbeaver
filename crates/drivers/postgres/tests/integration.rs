@@ -1209,36 +1209,42 @@ async fn error_from(src: &PgSource, sql: &str) -> PgError {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
-async fn cancelling_names_the_pooled_connections_too() {
-    // Metadata reads moved off the session onto pooled connections and cancel went
-    // on naming only the session, so Stop during a navigator load was a button that
-    // did nothing. A pooled connection that is in use is not in the pool to be
-    // found, which is why the source keeps a token for every connection it opened.
-    //
-    // What this proves is the mechanism: that the request reaches every backend
-    // without deadlocking on the registry, that naming an idle one is not an error,
-    // and that the session and the pool both still work afterwards. What it does
-    // not prove is the interruption — that needs a catalog read slow enough to
-    // catch in flight, and this database answers every one of them in a
-    // millisecond. The interruption itself is covered on the session by the test
-    // below, and on a cursor by the ffi harness.
+async fn cancelling_names_nothing_when_nothing_is_running() {
+    // The registry once held a token for every connection the session had ever
+    // opened, so Stop with an idle pool sent four cancels to four backends with
+    // nothing to stop. That is not the harmless no-op it looks like: this call
+    // returns when the postmaster accepts the request and the signal reaches the
+    // backend afterwards, so a cancel aimed at an idle connection lands on
+    // whatever that connection is handed next. The count is the observable —
+    // four connections open, none of them busy, nobody named.
     let src = connect().await;
 
     // Four at once cannot share one connection, so the pool ends up holding
-    // several — which is the state the old cancel could not see.
+    // several. This is the state that used to name four backends.
     let (a, b, c, d) = tokio::join!(src.schemas(), src.schemas(), src.schemas(), src.schemas());
     for schemas in [a, b, c, d] {
         assert!(!schemas.expect("metadata read failed").is_empty());
     }
 
-    src.cancel().await.expect("cancel request failed");
+    // Drop can only spawn the deregistration, so a connection stops being busy
+    // a moment after its read returns rather than with it. One yield is enough:
+    // those tasks were queued ahead of this one, and neither the registry nor
+    // the pool is contended, so each runs to completion the first time it is
+    // polled.
+    tokio::task::yield_now().await;
+
+    assert_eq!(
+        src.cancel().await.expect("cancel request failed"),
+        0,
+        "the reads had all finished, so there was no backend to name"
+    );
 
     assert!(
         !src.schemas()
             .await
             .expect("pool unusable after cancel")
             .is_empty(),
-        "cancelling an idle backend is a no-op, not damage"
+        "a cancel that named nobody must have damaged nobody"
     );
     let mut stream = src
         .query("SELECT 1", 8192)
@@ -1287,10 +1293,14 @@ async fn a_running_statement_stops_when_asked_and_says_that_is_why() {
         .expect("the statement was still running 10s after being cancelled");
 
     assert!(err.is_cancelled(), "expected a cancellation, got: {err}");
-    cancel
+    let named = cancel
         .await
         .expect("cancel task panicked")
         .expect("cancel request failed");
+    // Exactly the connection the statement is on. More would mean idle backends
+    // are being named again; fewer would mean the statement's own was missed and
+    // the cancellation above came from somewhere this test does not control.
+    assert_eq!(named, 1, "the session was running the statement, alone");
 
     // Every other failure has to stay distinguishable from this one, or the
     // front end labels real faults as something the user did on purpose.
