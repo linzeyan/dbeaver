@@ -89,6 +89,9 @@ jobs:
           - name: Trino
             up: db-up-trino
             test: test-trino
+          - name: Arrow Flight SQL
+            up: db-up-flightsql
+            test: test-flightsql
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2

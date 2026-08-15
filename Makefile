@@ -159,7 +159,7 @@ test: ## Unit tests (no database required)
 # under a minute to become ready, and about as much memory as MySQL. Its image is
 # five gigabytes, which is a download to do once rather than a cost per run.
 .PHONY: test-integration
-test-integration: db-check db-check-compatible db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks db-check-redis db-check-cassandra db-check-trino ## Tests requiring a database server
+test-integration: db-check db-check-compatible db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks db-check-redis db-check-cassandra db-check-trino db-check-flightsql ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The same suite, split by which server has to be up. CI runs these as separate
@@ -234,6 +234,11 @@ test-cassandra: db-check-cassandra ## Integration tests behind Cassandra
 test-trino: db-check-trino ## Integration tests behind Trino
 	cargo test -p driver-trino -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact trino_satisfies_the_contract
+
+.PHONY: test-flightsql
+test-flightsql: db-check-flightsql ## Integration tests behind Arrow Flight SQL
+	cargo test -p driver-flightsql -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact flightsql_satisfies_the_contract
 
 # The SQL statement splitter's checks live behind a flag on the app binary
 # rather than in a test target: Package.swift declares one executable target and
