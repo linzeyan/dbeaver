@@ -1,0 +1,56 @@
+[package]
+name = "driver-bigquery"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+# For the one dialect this driver writes statements in. GoogleSQL has no row of
+# its own in `dbsql`; `driver.rs` says which it borrows and why.
+dbsql = { path = "../../sql" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+thiserror.workspace = true
+# The Storage Read API is gRPC, and this is the same tonic the Flight SQL driver
+# uses — one HTTP/2 client in the tree rather than two.
+tonic = { version = "0.14", default-features = false, features = [
+    "codegen",
+    "transport",
+    "tls-ring",
+    "tls-webpki-roots",
+] }
+# The prost codec, reached directly rather than through generated code: this
+# driver writes its own messages, and `storage.rs` says why.
+tonic-prost = "0.14"
+prost = "0.14"
+# The record batch arrives as a `Bytes` and is handed to `Buffer::from`
+# unchanged; naming the crate is what makes that conversion the free one.
+bytes = "1"
+# The REST half — job submission, job status, the dataset and table catalog —
+# over the same hyper client the Trino and ClickHouse drivers use, with rustls
+# because every one of these endpoints is HTTPS and there is no plaintext form.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "tls12",
+    "ring",
+    "webpki-tokio",
+] }
+http-body-util = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The service-account key is a PEM, the JWT is base64url, and BigQuery sends
+# `BYTES` columns as base64. Already in the lock behind the Trino driver.
+base64 = "0.22"
+# RS256 over the service-account key. `ring` is already in this tree under
+# rustls, so the JWT costs no new dependency — see `auth.rs`.
+ring = "0.17"
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

@@ -12,6 +12,8 @@
 //! discover its own drivers at startup.
 
 use dbconn::{DbError, Driver};
+use driver_athena::AthenaSource;
+use driver_bigquery::BigQuerySource;
 use driver_cassandra::CassandraSource;
 use driver_clickhouse::ChSource;
 use driver_databricks::DatabricksSource;
@@ -157,6 +159,37 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::Server,
         default_port: Some(443),
     },
+    // The two cloud databases, and the two entries this table fits worst.
+    //
+    // `Shape` has `Server` and `File`, and neither of these is either. There is
+    // no host to name: BigQuery's endpoints are global and Athena's is derived
+    // from the region, so the field the form calls Host holds a project id and a
+    // region respectively — which is stated in each driver's `connect` and is the
+    // one place a two-shape connection form does not reach a cloud service. The
+    // port is 443 because that is what both endpoints listen on, and it is
+    // offered so the form has something true to put in the box; neither driver
+    // reads it, because neither has anywhere else to go.
+    //
+    // Athena fits the rest of the form exactly: the access key id and the secret
+    // are a name and a secret, and go in the user and password fields. BigQuery
+    // does not, and that is worth writing down rather than leaving to be
+    // discovered — its credential is a *file*, named by `?credentials=`, and the
+    // form has no box for a file. A third `Shape` is what that asks for, and it
+    // is not added here, because it is a change to the connection form and to the
+    // Swift that reads this table — and neither of these drivers has yet been run
+    // against anything.
+    Catalogued {
+        scheme: "bigquery",
+        label: "BigQuery",
+        shape: Shape::Server,
+        default_port: Some(443),
+    },
+    Catalogued {
+        scheme: "athena",
+        label: "Athena",
+        shape: Shape::Server,
+        default_port: Some(443),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -271,6 +304,19 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         "databricks" => Ok(Box::new(
             DatabricksSource::connect(&format!("https://{rest}")).await?,
         )),
+        // Passed on whole, and the first driver here whose rest is not a host:
+        // `bigquery://<project>/<dataset>` names a project and a dataset, and the
+        // credential is a query parameter rather than a password because it is a
+        // file on disk. No server has answered this driver — its crate comment
+        // says so in the first sentence.
+        "bigquery" => Ok(Box::new(BigQuerySource::connect(url).await?)),
+        // Passed on whole for the same reason, with a different rest again:
+        // `athena://<key id>:<secret>@<region>/<database>` puts the credentials
+        // where a connection string usually puts them and the region where a host
+        // usually goes. The workgroup and the S3 output location are query
+        // parameters, and `AthenaSource::connect` argues why each belongs in the
+        // string at all. No server has answered this one either.
+        "athena" => Ok(Box::new(AthenaSource::connect(url).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
             known()

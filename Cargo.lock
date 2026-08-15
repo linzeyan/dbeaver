@@ -1143,6 +1143,8 @@ dependencies = [
  "dbddl",
  "dbedit",
  "dbsql",
+ "driver-athena",
+ "driver-bigquery",
  "driver-cassandra",
  "driver-clickhouse",
  "driver-databricks",
@@ -1260,6 +1262,55 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "driver-athena"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dbconn",
+ "dbsql",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "percent-encoding",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "driver-bigquery"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "dbconn",
+ "dbsql",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "percent-encoding",
+ "prost",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "url",
 ]
 
 [[package]]
@@ -4455,11 +4506,13 @@ dependencies = [
  "socket2",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls 0.26.4",
  "tokio-stream",
  "tower",
  "tower-layer",
  "tower-service",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]
