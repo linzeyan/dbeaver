@@ -17,6 +17,7 @@ async-trait.workspace = true
 # The live tests read a real catalog, and the driver is how this workspace
 # reaches one. Only the tests need it: nothing in the crate knows or cares which
 # driver produced the metadata it is handed.
+driver-clickhouse = { path = "../drivers/clickhouse" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }
 tokio = { workspace = true, features = ["full"] }

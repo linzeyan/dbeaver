@@ -28,6 +28,7 @@
 //! column that no metadata type carries is a fact this cannot state, and the
 //! honest answer to that is a refusal rather than a guess.
 
+mod clickhouse;
 mod postgres;
 mod sqlite;
 
@@ -84,6 +85,7 @@ pub fn for_dialect(dialect: &'static Dialect) -> Option<&'static dyn Renderer> {
 const RENDERERS: &[(&Dialect, &dyn Renderer)] = &[
     (&dbsql::POSTGRES, &postgres::POSTGRES),
     (&dbsql::SQLITE, &sqlite::SQLITE),
+    (&dbsql::CLICKHOUSE, &clickhouse::CLICKHOUSE),
 ];
 
 /// A script under construction, joined the way upstream joins one.
