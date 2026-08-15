@@ -1308,6 +1308,47 @@ fn a_completion_stops_at_the_cap_however_many_names_the_schema_has() {
     unsafe { db_free(handle) };
 }
 
+#[test]
+fn a_field_the_driver_annotated_still_carries_its_annotation_across_the_abi() {
+    // Two features rest on the C data interface exporting a *field's* metadata
+    // and not just its type: DuckDB records what a column rendered as text used
+    // to be, and MySQL records that a column was declared NOT NULL so the grid
+    // can tell a substituted NULL from a real one. Neither has any other way to
+    // say it, and if the export ever dropped it both would degrade silently —
+    // the schema would still describe every column, just without the one fact
+    // the front end was reading.
+    //
+    // DuckDB in memory because it is the driver that annotates without a server:
+    // a LIST has no Arrow type this layer renders, so it arrives as text under
+    // `duckdb.rendered_from`.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null(), "duckdb in memory must open");
+
+    let sql = CString::new("SELECT [1, 2, 3] AS items").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut err_position: c_int = 0;
+    let query = unsafe { db_query(handle, sql.as_ptr(), 1000, &mut err, &mut err_position) };
+    assert!(!query.is_null(), "a list literal must be accepted");
+
+    let mut schema = FFI_ArrowSchema::empty();
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(unsafe { db_query_schema(query, &mut schema, &mut err) }, 0);
+
+    let metadata = schema
+        .child(0)
+        .metadata()
+        .expect("the exported field's metadata must be readable");
+    assert!(
+        metadata.contains_key("duckdb.rendered_from"),
+        "the driver's annotation must survive the export: got {metadata:?}"
+    );
+
+    unsafe { db_query_free(query) };
+    unsafe { db_free(handle) };
+}
+
 #[ignore = "requires the benchmark database"]
 #[test]
 fn a_completion_offers_the_columns_of_what_the_statement_selects_from() {
