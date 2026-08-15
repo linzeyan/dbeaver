@@ -46,8 +46,8 @@ use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
     db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
-    db_foreign_keys_json, db_free, db_indexes_json, db_names_forget, db_query, db_query_free,
-    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_foreign_keys_json, db_free, db_import, db_indexes_json, db_names_forget, db_query,
+    db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format,
     db_sql_scan_json, db_string_free, db_transfer, db_triggers_json, db_tx_autocommit,
     db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint,
@@ -2466,4 +2466,259 @@ fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle_src) };
     unsafe { db_free(handle_tgt) };
+}
+
+#[test]
+fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join(format!("dbffi-import-{}.csv", std::process::id()));
+    std::fs::write(&path, "id,name\n1,alice\n2,O'Brien\n3,\n").expect("write csv");
+
+    let table = CString::new("people").unwrap();
+    ran(handle, "CREATE TABLE people (id INTEGER, name VARCHAR)");
+
+    let format = CString::new("csv").unwrap();
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows = unsafe {
+        db_import(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(rows, 3, "every CSV row was reported written");
+
+    assert_eq!(ran(handle, "SELECT id FROM people"), 3);
+    assert_eq!(
+        ran(handle, "SELECT id FROM people WHERE name = 'O''Brien'"),
+        1,
+        "the apostrophe arrived as data, not as syntax"
+    );
+    assert_eq!(
+        ran(handle, "SELECT id FROM people WHERE name IS NULL"),
+        1,
+        "the empty CSV field arrived as NULL"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_import_without_a_target_says_so_instead_of_crashing() {
+    let format = CString::new("csv").unwrap();
+    let path = std::env::temp_dir().join("dbffi-import-null-target.csv");
+    std::fs::write(&path, "id\n1\n").expect("write csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let table = CString::new("t").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            ptr::null_mut(),
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    unsafe { db_string_free(err) };
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn an_import_without_a_format_says_so_instead_of_crashing() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join("dbffi-import-null-format.csv");
+    std::fs::write(&path, "id\n1\n").expect("write csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let table = CString::new("t").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            handle,
+            ptr::null_mut(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    unsafe { db_string_free(err) };
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_import_without_a_path_says_so_instead_of_crashing() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let format = CString::new("csv").unwrap();
+    let table = CString::new("t").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            handle,
+            format.as_ptr(),
+            ptr::null_mut(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    unsafe { db_string_free(err) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_import_without_a_table_name_says_so_instead_of_crashing() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let format = CString::new("csv").unwrap();
+    let path = std::env::temp_dir().join("dbffi-import-null-table.csv");
+    std::fs::write(&path, "id\n1\n").expect("write csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            ptr::null_mut(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    unsafe { db_string_free(err) };
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_import_of_a_format_nothing_reads_names_the_format() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join("dbffi-import-unknown.fmt");
+    std::fs::write(&path, "id\n1\n").expect("write file");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let format = CString::new("xyzzy").unwrap();
+    let table = CString::new("t").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    let message = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        message.contains("xyzzy"),
+        "error should mention the format, got: {message}"
+    );
+    unsafe { db_string_free(err) };
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_import_of_a_file_that_is_not_there_says_so_before_touching_the_server() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let format = CString::new("csv").unwrap();
+    let path = std::env::temp_dir().join("dbffi-import-nonexistent.csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let table = CString::new("t").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    unsafe { db_string_free(err) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_import_into_a_table_that_is_not_there_reports_the_servers_refusal() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join("dbffi-import-no-table.csv");
+    std::fs::write(&path, "id\n1\n").expect("write csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let format = CString::new("csv").unwrap();
+    let table = CString::new("ghost_table").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_import(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_import must say why it failed");
+    let message = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        message.contains("ghost_table")
+            || message.contains("not exist")
+            || message.contains("relation"),
+        "error should mention the missing table, got: {message}"
+    );
+    unsafe { db_string_free(err) };
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
 }
