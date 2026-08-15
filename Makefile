@@ -58,6 +58,15 @@ CASSANDRA_CONTAINER := cassandra-test
 CASSANDRA_PORT      := 59042
 CASSANDRA_IMAGE     := cassandra:5
 
+# Trino, the one database of the REST set that can be run at all without a cloud
+# account. It needs no seeding: the `tpch` catalog generates its data on demand,
+# so `tpch.sf1.orders` is a million and a half rows that exist because they were
+# asked for — which also makes it the only server here whose fixture cannot
+# drift.
+TRINO_CONTAINER := trino-test
+TRINO_PORT      := 58080
+TRINO_IMAGE     := trinodb/trino:latest
+
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
 # waits for someone to type into it, which no script can do. Derived from
@@ -333,6 +342,31 @@ db-check-cassandra: ## Fail unless the Cassandra test container is reachable
 	@docker exec $(CASSANDRA_CONTAINER) cqlsh -e "describe keyspaces" \
 		>/dev/null 2>&1 \
 		|| { echo "cassandra not running; run 'make db-up-cassandra'"; exit 1; }
+
+# Readiness is asked over HTTP rather than through a client in the image,
+# because the thing being waited for is the coordinator answering requests —
+# which is what the driver does and what `/v1/info` reports with `starting`.
+.PHONY: db-up-trino
+db-up-trino: ## Start the Trino test container
+	@docker start $(TRINO_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(TRINO_CONTAINER) \
+			-p $(TRINO_PORT):8080 $(TRINO_IMAGE)
+	@echo "waiting for trino..."
+	@for i in $$(seq 1 120); do \
+		curl -sf http://127.0.0.1:$(TRINO_PORT)/v1/info \
+			| grep -q '"starting":false' && break; \
+		sleep 2; \
+	done
+	@curl -sf http://127.0.0.1:$(TRINO_PORT)/v1/info
+
+.PHONY: db-down-trino
+db-down-trino: ## Stop and remove the Trino test container
+	-docker rm -f $(TRINO_CONTAINER)
+
+.PHONY: db-check-trino
+db-check-trino: ## Fail unless the Trino test container is reachable
+	@curl -sf http://127.0.0.1:$(TRINO_PORT)/v1/info | grep -q '"starting":false' \
+		|| { echo "trino not running; run 'make db-up-trino'"; exit 1; }
 
 # The two databases that exist to prove protocol compatibility rather than to
 # be supported: they are read by the PostgreSQL driver and no code of their own,
