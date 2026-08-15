@@ -11,6 +11,7 @@
 
 use arrow::array::{Array, BinaryArray, Float64Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::DataType;
+use dbconn::TxStep;
 use driver_sqlite::{SqliteError, SqliteSource};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -397,6 +398,122 @@ async fn a_cursor_stops_the_page_it_is_fetching() {
         .expect("the fetch was still running 20s after being cancelled")
         .expect_err("the fetch should have been interrupted");
     assert!(err.is_cancelled(), "expected a cancellation, got: {err}");
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+/// How many rows `sql` returns, read to the end so the session is free after.
+async fn count(src: &SqliteSource, sql: &str) -> usize {
+    let mut stream = src.query(sql, 100).await.unwrap();
+    let mut seen = 0;
+    while let Some(batch) = stream.next_batch().await.unwrap() {
+        seen += batch.num_rows();
+    }
+    seen
+}
+
+#[tokio::test]
+async fn a_transaction_holds_a_change_back_from_everything_outside_it() {
+    // The property the session connection exists for, checked from the one place
+    // that cannot be fooled: another connection. Reading the row back through
+    // `query` alone would pass just as well on a driver that committed each
+    // statement on its own.
+    let fixture = Fixture::new("CREATE TABLE t (n INTEGER);");
+    let src = fixture.connect().await;
+
+    src.transaction(&TxStep::Begin).await.unwrap();
+    count(&src, "INSERT INTO t VALUES (1)").await;
+    assert_eq!(count(&src, "SELECT n FROM t").await, 1, "its own change");
+
+    // A cursor is outside the transaction, because it runs on a connection of
+    // its own — the trait says so, and this is the driver making it true.
+    let mut outside = src.cursor("SELECT n FROM t", 10).await.unwrap();
+    assert!(
+        outside.fetch().await.unwrap().is_none(),
+        "a cursor should not see what the session has not committed"
+    );
+    outside.close().await.unwrap();
+
+    // And a catalog read answers rather than queueing behind the open
+    // transaction, which is what a navigator needs while somebody edits.
+    assert!(
+        src.relations("main")
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.name == "t")
+    );
+
+    src.transaction(&TxStep::Commit).await.unwrap();
+    let mut after = src.cursor("SELECT n FROM t", 10).await.unwrap();
+    assert_eq!(
+        after.fetch().await.unwrap().expect("a row").num_rows(),
+        1,
+        "and there it is once it is committed"
+    );
+}
+
+#[tokio::test]
+async fn a_savepoint_undoes_part_of_a_transaction_without_ending_it() {
+    // SQLite spells all three the standard way. Worth pinning here rather than
+    // only in the shared contract check, because the neighbouring DuckDB driver
+    // has no savepoints at all and refuses these — so "which of the six a
+    // database has" is a per-driver fact, and this is where it is recorded.
+    let fixture = Fixture::new("CREATE TABLE t (n INTEGER);");
+    let src = fixture.connect().await;
+
+    src.transaction(&TxStep::Begin).await.unwrap();
+    count(&src, "INSERT INTO t VALUES (1)").await;
+    src.transaction(&TxStep::Savepoint("halfway".into()))
+        .await
+        .unwrap();
+    count(&src, "INSERT INTO t VALUES (2)").await;
+    src.transaction(&TxStep::RollbackTo("halfway".into()))
+        .await
+        .unwrap();
+    assert_eq!(count(&src, "SELECT n FROM t").await, 1);
+
+    src.transaction(&TxStep::Release("halfway".into()))
+        .await
+        .unwrap();
+    src.transaction(&TxStep::Rollback).await.unwrap();
+    assert_eq!(
+        count(&src, "SELECT n FROM t").await,
+        0,
+        "releasing a savepoint keeps the work, and the transaction still went"
+    );
+}
+
+#[tokio::test]
+async fn a_cancel_reaches_the_statement_the_session_is_running_and_stops_there() {
+    // The trade the session connection makes. Statements now share a connection,
+    // so an interrupt raised on it could in principle spill onto the next one —
+    // SQLite clears the flag once the running statement count reaches zero, and
+    // this is the check that the driver leaves nothing running to keep it set.
+    let fixture = Fixture::new("CREATE TABLE t (n INTEGER);");
+    let src = Arc::new(fixture.connect().await);
+    src.transaction(&TxStep::Begin).await.unwrap();
+    count(&src, "INSERT INTO t VALUES (1)").await;
+
+    let canceller = Arc::clone(&src);
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        canceller.cancel();
+    });
+    let sql = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 100000000)
+               SELECT count(*) FROM c";
+    let err = tokio::time::timeout(Duration::from_secs(20), query_error(&src, sql))
+        .await
+        .expect("the statement was still running 20s after being cancelled");
+    assert!(err.is_cancelled(), "got: {err}");
+
+    // The transaction is still there to commit, and the statement after the
+    // cancelled one is not itself cancelled.
+    assert_eq!(count(&src, "SELECT n FROM t").await, 1);
+    src.transaction(&TxStep::Commit).await.unwrap();
+    assert_eq!(count(&src, "SELECT n FROM t").await, 1);
 }
 
 #[tokio::test]

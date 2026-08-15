@@ -142,9 +142,7 @@ async fn sqlite() -> Subject {
         missing_is_a_failure: true,
         cursors: true,
         positions: true,
-        // Each statement opens a connection of its own here, so a transaction
-        // could not span two of them.
-        scratch: None,
+        scratch: Some(Scratch::sql("contract_tx")),
         _fixture: Some(dir),
     }
 }
