@@ -53,7 +53,7 @@ enum SchemaMetadataChecks {
         let blob = packed([
             ("duckdb.rendered_from", "List(Field { name: \"item\" })"),
             ("something.else", ""),
-            (ArrowTable.declaredNotNullKey, "1"),
+            (ArrowTable.declaredNotNullKey, "1")
         ])
         expect(read(blob), true, "the declaration reached after two other entries")
     }
@@ -74,7 +74,7 @@ enum SchemaMetadataChecks {
     private static func checkAKeyHoldingANulByteIsStillMatchedWhole() {
         let blob = packed([
             ("dbclient.declared_not_null\0extra", "1"),
-            (ArrowTable.declaredNotNullKey, "1"),
+            (ArrowTable.declaredNotNullKey, "1")
         ])
         expect(read(blob), true, "a key that only starts like the declaration")
     }
