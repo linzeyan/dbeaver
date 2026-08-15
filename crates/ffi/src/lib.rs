@@ -29,6 +29,19 @@ fn runtime() -> &'static Runtime {
     RT.get_or_init(|| Runtime::new().expect("failed to start tokio runtime"))
 }
 
+/// How many suggestions cross the ABI before the rest are dropped.
+///
+/// A schema with two thousand tables answers `FROM wide.` with two thousand
+/// names, and the popup shows ten of them. Serialising the other one thousand
+/// nine hundred and ninety is a cost paid on every keystroke for a list nobody
+/// reaches the end of — a caret keeps moving, and one more letter is a cheaper
+/// way to find a name than scrolling past a thousand of them.
+///
+/// The price is that names past the cap are absent without saying so. That is
+/// the reason for a number this far above what fits on screen: it is high
+/// enough that reaching it means the query was never specific enough to answer.
+const SUGGESTION_CAP: usize = 1000;
+
 /// Writes `msg` into `*err` as a freshly allocated C string, if `err` is non-null.
 /// Caller releases it with `db_string_free`.
 unsafe fn set_err(err: *mut *mut c_char, msg: impl std::fmt::Display) {
@@ -445,7 +458,10 @@ pub unsafe extern "C" fn db_complete_json(
     };
 
     let question = dbsql::complete(text, caret, h.names.dialect());
-    let suggestions = runtime().block_on(h.names.suggest(&question));
+    let mut suggestions = runtime().block_on(h.names.suggest(&question));
+    // Cut here rather than in the catalog: the catalog's ranking is what decides
+    // which thousand survive, so it has to have ranked all of them first.
+    suggestions.truncate(SUGGESTION_CAP);
     let offers = Offers {
         start: question.span.start,
         end: question.span.end,

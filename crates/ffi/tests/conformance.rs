@@ -1277,6 +1277,37 @@ fn forgetting_the_names_of_no_connection_is_not_a_crash() {
     unsafe { db_names_forget(ptr::null_mut()) };
 }
 
+#[test]
+fn a_completion_stops_at_the_cap_however_many_names_the_schema_has() {
+    // DuckDB in memory rather than the benchmark database: the cap is a property
+    // of this layer, not of any server, and a schema with more names than the cap
+    // is something to build rather than something to find.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null(), "duckdb in memory must open");
+
+    for i in 0..1_100 {
+        let sql = CString::new(format!("CREATE TABLE cap_{i:04}(id INTEGER)")).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let mut err_position: c_int = 0;
+        let query = unsafe { db_query(handle, sql.as_ptr(), 1000, &mut err, &mut err_position) };
+        assert!(!query.is_null(), "CREATE TABLE {i} must be accepted");
+        unsafe { db_query_free(query) };
+    }
+    // The catalog is cached, and it was read before any of those existed.
+    unsafe { db_names_forget(handle) };
+
+    let json = complete(handle, "SELECT * FROM ", 14);
+    let offered = json.matches(r#""label":"#).count();
+    assert_eq!(
+        offered, 1000,
+        "1100 tables exist and the cap is 1000, so exactly the cap crosses: got {offered}"
+    );
+
+    unsafe { db_free(handle) };
+}
+
 #[ignore = "requires the benchmark database"]
 #[test]
 fn a_completion_offers_the_columns_of_what_the_statement_selects_from() {
