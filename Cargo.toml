@@ -19,6 +19,11 @@ members = [
     "crates/ffi",
     "crates/sql",
 ]
+# The vendored tiberius is built as a dependency, never as one of ours. Excluding
+# it keeps `--workspace` meaning "code this repository wrote": upstream's source
+# is not ours to hold to this workspace's fmt and clippy settings, and its own
+# test suite wants a live SQL Server configured its way.
+exclude = ["third_party/tiberius"]
 
 [workspace.package]
 edition = "2024"
@@ -32,6 +37,19 @@ tokio-postgres = "0.7"
 futures-util = "0.3"
 thiserror = "2"
 async-trait = "0.1"
+
+# tiberius is read from `third_party/tiberius`, not from crates.io. The published
+# 0.12.3 walks into `todo!()` when it decodes `geometry`, `geography`,
+# `hierarchyid` and `sql_variant`, and this workspace builds release with
+# `panic = "abort"` — so browsing an ordinary table with one of those columns
+# killed the process outright. The copy there decodes them instead. See
+# `third_party/README.md` for what was changed and what it was taken from.
+#
+# A `[patch]` rather than a path dependency in the driver's own manifest, so that
+# there is one place saying which tiberius this workspace builds against, and so
+# that nothing can end up linking two of them.
+[patch.crates-io]
+tiberius = { path = "third_party/tiberius" }
 
 [profile.release]
 opt-level = 3

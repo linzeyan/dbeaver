@@ -18,15 +18,16 @@
 //! with a user-typed identifier pasted into them. `USE <db>` per call is worse
 //! still: it mutates the connection for whoever borrows it next.
 //!
-//! **Four SQL Server types crash the decoder, so a statement is inspected before
-//! it is sent.** `geometry`, `geography` and `hierarchyid` travel as TDS type
-//! `Udt` and `sql_variant` as `SSVariant`, and tiberius' `TypeInfo::decode` ends
-//! in `todo!()` for both. That panic happens while parsing `COLMETADATA`, before
-//! any row, and this workspace builds release with `panic = "abort"` — so an
-//! ordinary `SELECT *` over a table with a `geography` column would take the
-//! whole application down with no message. Every statement is therefore
-//! described by the server first, and one naming those types is refused. See
-//! `describe_statement` for what that covers and what it does not.
+//! **Four SQL Server types are read through a patched client.** `geometry`,
+//! `geography` and `hierarchyid` travel as TDS type `Udt` and `sql_variant` as
+//! `SSVariant`, and published tiberius 0.12.3 ends in `todo!()` for both — while
+//! parsing `COLMETADATA`, before any row, so there was no point at which this
+//! driver could have looked at the column and backed out. Release builds here
+//! set `panic = "abort"`, so an ordinary `SELECT *` over a table with a
+//! `geography` column took the whole application down without a message. The
+//! copy in `third_party/tiberius` decodes them instead; `crate::udt` decides
+//! what the three CLR types show, and `arrow_map::variant_text` what a
+//! `sql_variant` shows.
 //!
 //! **Cancelling ends the session.** TDS has an Attention packet that stops one
 //! statement and leaves the connection usable, and tiberius declares the packet
@@ -45,6 +46,7 @@
 mod arrow_map;
 mod driver;
 mod metadata;
+mod udt;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
@@ -88,6 +90,15 @@ pub enum MsSqlError {
         "column {column:?} has type {sql_type}, which this driver cannot read — cast it to text"
     )]
     UnsupportedType { column: String, sql_type: String },
+    /// A value whose type this driver reads, but whose contents it could not
+    /// make sense of. Distinct from `UnsupportedType`, which is about the
+    /// column: this one is about one cell, and it names the type so that a
+    /// reader knows which decoder to look at.
+    #[error("a {sql_type} value could not be read: {reason}")]
+    UndecodableValue {
+        sql_type: &'static str,
+        reason: String,
+    },
     #[error("decimal value {value} does not fit a column of scale {scale}")]
     NumericOverflow { value: String, scale: i8 },
     #[error("a {expected} column sent {found}")]
@@ -1026,9 +1037,8 @@ impl MsSqlSource {
 
 /// What the server said about a statement before it ran.
 ///
-/// Three questions in one round trip: does it name a type that would crash the
-/// decoder, what precision does each decimal column have, and does it produce a
-/// result set at all.
+/// Two questions in one round trip: what precision does each decimal column
+/// have, and does the statement produce a result set at all.
 enum Described {
     Columns(Vec<DescribedColumn>),
     /// The server would not analyse the statement. That is ordinary — a batch
@@ -1038,53 +1048,38 @@ enum Described {
     Unknown,
 }
 
+/// One column of a described statement. Only the decimal layout is kept — every
+/// other question about a column is answered by `COLMETADATA`, which describes
+/// the result that actually arrived rather than the one the server predicted.
 struct DescribedColumn {
-    name: String,
-    type_name: String,
-    /// The TDS type byte the server will send this column under.
-    system_type_id: i32,
     decimal: Option<(u8, i8)>,
 }
 
-/// TDS type bytes tiberius cannot decode: `UDTTYPE` covers `geometry`,
-/// `geography`, `hierarchyid` and any CLR type somebody registered themselves,
-/// and `SSVARIANTTYPE` covers `sql_variant`. Matched on the byte rather than on
-/// the type's name so a user-defined CLR type is caught too.
-const TDS_UDT: i32 = 0xF0;
-const TDS_SQL_VARIANT: i32 = 0x62;
-
 /// Asks the server to describe a statement without running it.
 ///
-/// This exists because reading a `geography`, `geometry`, `hierarchyid` or
-/// `sql_variant` column panics inside tiberius while it parses the column
-/// metadata — before any row, so there is no point at which the driver could
-/// inspect the column and back out — and a panic in a release build of this
-/// workspace aborts the process. Describing first turns that crash into a
-/// message.
+/// The declared precision and scale of a decimal column do not survive
+/// tiberius' `Column`, and Arrow needs the pair to name a `Decimal128` column
+/// before the first row arrives. This is where they come from. It also answers
+/// whether the statement returns rows at all, which decides whether the count
+/// reported afterwards is rows changed or rows produced.
 ///
-/// What it does not cover, stated plainly because it is the residual risk:
+/// A statement the server declines to analyse — a batch that builds a temp table
+/// and selects from it is the common case — answers `Unknown`, and so does a
+/// server or a login where this call is unavailable. Both mean the decimal
+/// columns fall back to a normalized layout, which is the same thing the
+/// PostgreSQL driver does for a `numeric` with no declared precision.
 ///
-/// - `sys.dm_exec_describe_first_result_set` describes the **first** result set
-///   only. A batch of several statements whose *second* result set has one of
-///   these columns is still fatal.
-/// - A batch the server declines to analyse — a temp table is the common case —
-///   is not described at all, and is allowed through rather than refused,
-///   because refusing every undescribable batch would break far more than it
-///   protects.
-///
-/// - If the describe query itself fails — an older server, or a login without
-///   the permission — nothing is known and the statement goes ahead.
-///
-/// Closing all three means patching tiberius to return an error where it
-/// currently panics: four `todo!()` arms and one `unimplemented!()`. That needs
-/// a `[patch.crates-io]` entry in the workspace root, which is a file this crate
-/// may not touch, so it is a recommendation rather than a change.
+/// This used to also be a guard: `geography`, `hierarchyid` and `sql_variant`
+/// were refused here, because reading one panicked inside tiberius and a panic
+/// in this workspace's release profile aborts the process. The patched client in
+/// `third_party/tiberius` decodes them, so there is nothing left to refuse — and
+/// the guard was never sound anyway, since it saw only the first result set of a
+/// batch and nothing at all of a statement the server would not describe.
 async fn describe_statement(client: &mut Tds, sql: &str) -> Described {
     // No `is_hidden` filter: browse information is off, so the server adds no
     // hidden columns, and a `WHERE` here would also drop the rows that carry the
     // error number this has to see.
-    let query = "SELECT r.name, r.system_type_name, r.system_type_id, \
-                        r.precision, r.scale, r.error_number \
+    let query = "SELECT r.precision, r.scale, r.error_number \
                  FROM sys.dm_exec_describe_first_result_set(@P1, NULL, 0) AS r \
                  ORDER BY r.column_ordinal";
     let Ok(stream) = client.query(query, &[&sql]).await else {
@@ -1105,15 +1100,12 @@ async fn describe_statement(client: &mut Tds, sql: &str) -> Described {
         // the statement out, which includes the ordinary case of it being
         // syntactically wrong. Executing it will say so far better than this
         // could.
-        if row.get::<i32, _>(5).is_some() {
+        if row.get::<i32, _>(2).is_some() {
             return Described::Unknown;
         }
-        let precision: Option<u8> = row.get(3);
-        let scale: Option<u8> = row.get(4);
+        let precision: Option<u8> = row.get(0);
+        let scale: Option<u8> = row.get(1);
         columns.push(DescribedColumn {
-            name: row.get::<&str, _>(0).unwrap_or_default().to_string(),
-            type_name: row.get::<&str, _>(1).unwrap_or_default().to_string(),
-            system_type_id: row.get(2).unwrap_or(0),
             decimal: decimal_layout(precision, scale),
         });
     }
@@ -1132,17 +1124,6 @@ fn decimal_layout(precision: Option<u8>, scale: Option<u8>) -> Option<(u8, i8)> 
 }
 
 impl Described {
-    /// The first column whose type would crash the decoder.
-    fn unreadable(&self) -> Option<(&str, &str)> {
-        let Described::Columns(columns) = self else {
-            return None;
-        };
-        columns
-            .iter()
-            .find(|c| matches!(c.system_type_id, TDS_UDT | TDS_SQL_VARIANT))
-            .map(|c| (c.name.as_str(), c.type_name.as_str()))
-    }
-
     /// Whether the server is sure this statement returns no result set.
     ///
     /// Only `Some(true)` when the server described the statement and found no
@@ -1230,12 +1211,6 @@ async fn read(
     rows_affected: &AtomicI64,
 ) -> Result<(), MsSqlError> {
     let described = describe_statement(&mut session.client, sql).await;
-    if let Some((column, sql_type)) = described.unreadable() {
-        return Err(MsSqlError::UnsupportedType {
-            column: column.to_string(),
-            sql_type: sql_type.to_string(),
-        });
-    }
 
     if described.produces_no_rows() == Some(true) {
         // A statement that writes says what it did in its DONE token, and
@@ -1269,6 +1244,11 @@ async fn read(
                 ColumnType::Decimaln | ColumnType::Numericn => decimals.get(i).copied().flatten(),
                 _ => None,
             },
+            // Which CLR type a `Udt` column holds. It comes from `COLMETADATA`
+            // rather than from the describe above, because it is the only thing
+            // separating a geography from a hierarchyid and it has to be right
+            // for the column that is actually about to arrive.
+            udt: c.udt_type_name().map(str::to_string),
         })
         .collect();
     let fields = columns
@@ -1290,8 +1270,9 @@ async fn read(
     loop {
         let mut builders: Vec<ColBuilder> = layouts
             .iter()
-            .map(|l| ColBuilder::new(l, batch_rows))
-            .collect();
+            .zip(&columns)
+            .map(|(l, c)| ColBuilder::new(l, c.name(), batch_rows))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut n = 0usize;
         let mut done = false;
         while n < batch_rows {
