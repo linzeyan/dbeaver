@@ -69,6 +69,7 @@ use mysql_async::consts::{ColumnFlags, ColumnType as WireType};
 use std::sync::Arc;
 
 use crate::MySqlError;
+use dbconn::DECLARED_NOT_NULL;
 
 /// The `binary` character set. The documented way to tell `BINARY` from `CHAR`,
 /// `VARBINARY` from `VARCHAR` and the `BLOB` family from the `TEXT` family,
@@ -233,11 +234,17 @@ pub fn arrow_field(name: &str, column: &ColumnType) -> Result<Field, MySqlError>
             });
         }
     };
-    // Every field is nullable. `NOT_NULL_FLAG` is right here on the column and
-    // is still not used: an outer join produces NULLs in a column the server
-    // declared NOT NULL, and a validity buffer that claims otherwise is
-    // corrupt rather than merely optimistic.
-    Ok(Field::new(name, dt, true))
+    // Nullable whatever the server declared, because this driver is itself a
+    // source of NULLs here: `append_null` substitutes one for a zero date, and a
+    // field promising no NULLs over a validity buffer holding them is corrupt
+    // rather than merely optimistic. The declaration still has to reach the
+    // grid, which draws a substituted NULL differently from a real one, so it
+    // travels beside the buffer instead of in it.
+    let field = Field::new(name, dt, true);
+    if column.flags.contains(ColumnFlags::NOT_NULL_FLAG) {
+        return Ok(field.with_metadata([(DECLARED_NOT_NULL.to_string(), "1".to_string())].into()));
+    }
+    Ok(field)
 }
 
 fn int(column: &ColumnType, signed: DataType, unsigned: DataType) -> DataType {
@@ -893,10 +900,30 @@ mod tests {
 
     #[test]
     fn every_column_is_nullable() {
-        // NOT_NULL_FLAG is right there and still not used: an outer join
-        // produces NULLs in a column the server declared NOT NULL.
+        // A NOT NULL column is the one that has to be checked, because it is the
+        // one where being wrong is expensive: the zero-date substitution puts a
+        // NULL in it, so a field that promised none would describe a buffer it
+        // does not have.
         let notnull = column(WireType::MYSQL_TYPE_LONG, 1, 63, 11, 0);
         assert!(arrow_field("c", &notnull).unwrap().is_nullable());
+    }
+
+    #[test]
+    fn a_not_null_column_says_so_in_its_metadata_and_a_nullable_one_says_nothing() {
+        // What the grid reads to tell a substituted NULL from a real one. Absence
+        // is the signal for a nullable column rather than a "0", so a reader that
+        // has never heard of the key behaves the same as one that has.
+        let notnull = column(WireType::MYSQL_TYPE_LONG, 1, 63, 11, 0);
+        assert_eq!(
+            arrow_field("c", &notnull)
+                .unwrap()
+                .metadata()
+                .get(DECLARED_NOT_NULL),
+            Some(&"1".to_string())
+        );
+
+        let nullable = column(WireType::MYSQL_TYPE_LONG, 0, 63, 11, 0);
+        assert!(arrow_field("c", &nullable).unwrap().metadata().is_empty());
     }
 
     #[test]

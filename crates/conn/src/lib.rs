@@ -56,6 +56,19 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use std::fmt;
 
+/// Field metadata marking a column the server declared NOT NULL.
+///
+/// Beside the validity buffer rather than in it. A driver may substitute NULL
+/// for a value it cannot represent — MySQL's `'0000-00-00'` is the case this
+/// exists for — so the field has to stay nullable however the column was
+/// declared, and a validity buffer contradicting its own field is corrupt
+/// rather than merely surprising.
+///
+/// Not namespaced per driver, unlike `duckdb.rendered_from`, because the reader
+/// is the grid: a shared consumer keying off one driver's name would have to
+/// learn a new spelling for each database that reports the same fact.
+pub const DECLARED_NOT_NULL: &str = "dbclient.declared_not_null";
+
 /// A failure, reduced to what a front end acts on.
 ///
 /// Three fields, because there are three questions: what to show, where to put
