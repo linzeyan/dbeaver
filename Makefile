@@ -189,6 +189,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-completion
 	./$(APP_BIN) --verify-transaction
 	./$(APP_BIN) --verify-editing
+	./$(APP_BIN) --verify-metadata
 
 .PHONY: test-all
 test-all: test test-integration test-swift ## Every test

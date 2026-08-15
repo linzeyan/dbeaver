@@ -161,19 +161,46 @@ struct ConstraintInfo: Decodable, Hashable, Identifiable {
     var id: String { name }
 }
 
+/// A trigger, in as much detail as the database records.
+///
+/// Three of these are optional and every one of them arrives null from some
+/// database the build can open: PostgreSQL keeps the timing, the events, the
+/// level and the function in columns of `pg_trigger`, while MySQL keeps the
+/// statement the trigger was created from and none of the four. Declaring them
+/// non-optional is what made a MySQL table with a trigger impossible to browse —
+/// the decode threw, and the failure took the browse that was in flight with it.
 struct TriggerInfo: Decodable, Hashable, Identifiable {
     let name: String
-    let timing: String
+    /// BEFORE, AFTER, or INSTEAD OF.
+    let timing: String?
     let events: [String]
-    let level: String
-    let function: String
+    /// ROW or STATEMENT.
+    let level: String?
+    /// The function it calls, where it calls one rather than carrying a body.
+    let function: String?
     let enabled: Bool
+    /// The statement it was created from. Every driver fills this, which is what
+    /// makes it the thing to show where the descriptors above are missing.
+    let definition: String?
 
     var id: String { name }
 
-    /// "BEFORE INSERT, UPDATE · ROW".
+    /// "BEFORE INSERT, UPDATE · ROW", with whatever of it the database knows.
     var whenLabel: String {
-        "\(timing) \(events.joined(separator: ", ")) · \(level)"
+        [timing, events.isEmpty ? nil : events.joined(separator: ", ")]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            + (level.map { " · \($0)" } ?? "")
+    }
+
+    /// What the trigger runs: the function it names, or the body it carries.
+    ///
+    /// One column rather than two, because no database fills both and a column
+    /// that is empty for every row of every MySQL table is a column that costs
+    /// width to say nothing.
+    var runsLabel: String {
+        if let function { return "\(function)()" }
+        return definition?.split(separator: "\n").joined(separator: " ") ?? "—"
     }
 }
 

@@ -58,9 +58,9 @@ let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
-// `--verify-transaction` and `--verify-editing` run the checks for the pieces of
-// pure logic in the front-end and exit with their verdict. None needs a window
-// or a database, so they run before either exists.
+// `--verify-transaction`, `--verify-editing` and `--verify-metadata` run the
+// checks for the pieces of pure logic in the front-end and exit with their
+// verdict. None needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
@@ -75,6 +75,9 @@ if CommandLine.arguments.contains("--verify-transaction") {
 }
 if CommandLine.arguments.contains("--verify-editing") {
     exit(EditingChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-metadata") {
+    exit(MetadataChecks.run() ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -861,6 +864,36 @@ func loadMoreWhenReady(model: AppModel, pages: Int) {
         func poll() {
             if CFAbsoluteTimeGetCurrent() > deadline {
                 fputs("load-more probe timed out waiting for the pane to settle\n", stderr)
+                exit(1)
+            }
+            // A failure with no browse behind it. The window shows this in its
+            // error banner and goes quiet, so waiting out the deadline reports
+            // "did not settle" for something that settled immediately and
+            // badly. Found the hard way: a trigger the front end could not
+            // decode took the browse down with it, and this probe spent three
+            // minutes not saying so.
+            if let failure = model.errorMessage, !model.browseResult.hasRun, !model.isBusy {
+                fputs("nothing to browse: \(failure)\n", stderr)
+                exit(1)
+            }
+            // The navigator has loaded and landed on nothing: no browse is
+            // coming, and the three-minute deadline would only report that very
+            // slowly. `connectionState` is what says the loading is over —
+            // without it this fires in the moment between launch and the first
+            // metadata call, when nothing is selected because nothing has
+            // happened yet. Which of the two ways it happened is worth saying,
+            // because they are fixed differently: a database with no tables in
+            // it is the connection, a `--relation` that matched nothing is the
+            // argument.
+            if model.connectionState == .connected, model.selected == nil, !model.isBusy,
+                !model.browseResult.isLoading
+            {
+                let empty = model.relations.values.allSatisfy(\.isEmpty)
+                fputs(
+                    empty
+                        ? "nothing to browse: this connection reports no relations\n"
+                        : "nothing to browse: no relation is selected — check --relation\n",
+                    stderr)
                 exit(1)
             }
             guard model.browseResult.hasRun, !model.isBusy, !model.browseResult.isLoading

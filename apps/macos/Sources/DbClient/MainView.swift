@@ -756,11 +756,11 @@ struct StructurePane: View {
             }
 
             TableColumn("Runs") { trigger in
-                Text("\(trigger.function)()")
+                Text(trigger.runsLabel)
                     .font(Theme.Typography.mono)
                     .foregroundStyle(Theme.textTertiary.color)
                     .lineLimit(1)
-                    .help(trigger.function)
+                    .help(trigger.definition ?? trigger.runsLabel)
             }
         }
         .tableStyle(.inset(alternatesRowBackgrounds: false))
