@@ -21,8 +21,8 @@
 use crate::{Renderer, Script};
 use async_trait::async_trait;
 use dbconn::{
-    ColumnInfo, ConstraintKind, DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo,
+    ColumnInfo, Computed, ConstraintKind, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo,
 };
 
 pub(crate) static POSTGRES: Postgres = Postgres;
@@ -200,11 +200,20 @@ async fn view(driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String> 
 /// `PostgreServerExtensionBase.supportsColumnsRequiring` is true and so the
 /// modifier chosen is `NullNotNullModifier` rather than `NotNullModifier`.
 ///
-/// The three modifiers between default and nullability — identity, collation and
-/// generated-always — are not written: nothing in `ColumnInfo` carries them, so
-/// a column that has one comes out short. Upstream reads them from
-/// `pg_attribute.attidentity`, `pg_collation` and `pg_attrdef`.
+/// Two of the three modifiers between default and nullability — identity and
+/// collation — are not written: nothing in `ColumnInfo` carries them, so a column
+/// that has one comes out short. Upstream reads them from
+/// `pg_attribute.attidentity` and `pg_collation`. The third, generated-always, is
+/// written, and `generated_column` explains what it costs to get wrong.
 fn column(column: &ColumnInfo) -> String {
+    // The flag and the expression are read from one catalog row and mean
+    // something only together, so a column marked generated with nothing to
+    // generate from falls through to the ordinary declaration rather than to an
+    // invented expression.
+    if let (Some(computed), Some(expression)) = (column.computed, &column.default_value) {
+        return generated_column(column, computed, expression);
+    }
+
     let mut declaration = format!(
         "{} {}",
         quote(&column.name),
@@ -224,6 +233,41 @@ fn column(column: &ColumnInfo) -> String {
         " NOT NULL"
     });
     declaration
+}
+
+/// A generated column, which keeps its type where SQL Server's loses one.
+///
+/// The two databases disagree about the shape and each is written its own way:
+/// `qty int4 GENERATED ALWAYS AS ((a * 2)) STORED NOT NULL` here,
+/// `qty AS ([a]*(2)) PERSISTED` there. What they agree on is that neither takes
+/// `DEFAULT`, and PostgreSQL says so at the point it matters — it refuses a
+/// default that references another column, so the script this replaces did not
+/// run at all.
+///
+/// The expression arrives from `pg_get_expr` already parenthesised and is
+/// wrapped again rather than unwrapped, because the parentheses `pg_get_expr`
+/// adds are not a promise: a generation expression that is a bare literal comes
+/// back bare, and stripping a pair that is sometimes absent is how a renderer
+/// starts editing SQL it did not write.
+fn generated_column(column: &ColumnInfo, computed: Computed, expression: &str) -> String {
+    let kind = match computed {
+        Computed::Stored => "STORED",
+        // PostgreSQL 18's addition. Written rather than refused because the
+        // catalog only ever reports it on a server that already accepts it back.
+        Computed::Virtual => "VIRTUAL",
+    };
+    format!(
+        "{} {} GENERATED ALWAYS AS ({}) {}{}",
+        quote(&column.name),
+        catalog_type(&column.data_type),
+        expression,
+        kind,
+        if column.nullable {
+            " NULL"
+        } else {
+            " NOT NULL"
+        }
+    )
 }
 
 /// One foreign key, as `SQLForeignKeyManager.getNestedDeclaration` writes it.

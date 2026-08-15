@@ -13,8 +13,9 @@
 //! the constant it shows up in, with the reason.
 
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep,
+    Browse, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver,
+    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo,
+    TxStep,
 };
 use driver_postgres::PgSource;
 
@@ -458,6 +459,100 @@ async fn an_index_that_only_exists_to_enforce_a_constraint_is_not_created_again(
         ddl.contains("CREATE UNIQUE INDEX bench_child_sku_key"),
         "a unique index nothing declared as a constraint was dropped:\n{ddl}"
     );
+}
+
+/// A generated column is a computation, not a default.
+///
+/// `pg_get_expr` hands back a generation expression in the same shape it hands
+/// back a default, so before `attgenerated` was read this rendered as
+/// `total numeric DEFAULT ((qty * price))` — which PostgreSQL refuses outright,
+/// because a default may not reference another column. Wrong in the way that is
+/// hardest to notice: it reads as a table somebody could have written.
+#[tokio::test]
+async fn a_generated_column_is_written_as_a_generation() {
+    let mut spec = columns(&[
+        ("qty", "integer", false, None),
+        ("price", "numeric(12,2)", false, None),
+        // As `pg_get_expr` renders it, parentheses and all.
+        ("total", "numeric(12,2)", true, Some("(qty * price)")),
+    ]);
+    spec[2].computed = Some(Computed::Stored);
+    let fixture = Fixture {
+        columns: spec,
+        ..Fixture::default()
+    };
+
+    let ddl = rendered(&fixture, &relation("public", "t", RelationKind::Table)).await;
+    assert!(
+        ddl.contains("total numeric(12, 2) GENERATED ALWAYS AS ((qty * price)) STORED NULL"),
+        "got:\n{ddl}"
+    );
+    assert!(
+        !ddl.contains("DEFAULT"),
+        "the expression came out as a default:\n{ddl}"
+    );
+}
+
+/// And the server takes back what was written for it.
+///
+/// The strongest statement available about generated columns, and the reason it
+/// is worth a scratch schema: rendering `GENERATED ALWAYS AS` proves the words
+/// were chosen, and executing it proves they were the right ones. The old
+/// `DEFAULT` form failed this at the server rather than at an assertion.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_generated_column_renders_into_a_table_the_server_accepts() {
+    let source = bench().await;
+    // Its own schema rather than a table in `public`: the benchmark database is
+    // shared with every other suite, and a fixture left behind is a fixture the
+    // next reader has to explain.
+    run(&source, "DROP SCHEMA IF EXISTS ddl_generated CASCADE").await;
+    run(&source, "CREATE SCHEMA ddl_generated").await;
+    run(
+        &source,
+        "CREATE TABLE ddl_generated.invoice (
+             id integer NOT NULL,
+             qty integer NOT NULL,
+             price numeric(12,2) NOT NULL,
+             total numeric(12,2) GENERATED ALWAYS AS (qty * price) STORED
+         )",
+    )
+    .await;
+
+    let script = from_server(&source, "ddl_generated", "invoice").await;
+    assert!(
+        script.contains("GENERATED ALWAYS AS") && !script.contains("DEFAULT"),
+        "the catalog's own generated column did not come back as one:\n{script}"
+    );
+
+    run(&source, "CREATE SCHEMA ddl_generated_replay").await;
+    run(
+        &source,
+        &script.replace("ddl_generated.", "ddl_generated_replay."),
+    )
+    .await;
+    let copy = from_server(&source, "ddl_generated_replay", "invoice").await;
+    assert_eq!(
+        copy,
+        script.replace("ddl_generated.", "ddl_generated_replay."),
+        "the table built from the script does not render as the script"
+    );
+
+    run(&source, "DROP SCHEMA ddl_generated CASCADE").await;
+    run(&source, "DROP SCHEMA ddl_generated_replay CASCADE").await;
+}
+
+async fn run(source: &PgSource, sql: &str) {
+    let mut stream = source
+        .query(sql, 1)
+        .await
+        .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
+    while stream
+        .next_batch()
+        .await
+        .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"))
+        .is_some()
+    {}
 }
 
 /// A type keeps its meaning while it changes its spelling.

@@ -10,7 +10,7 @@
 //! side trivial.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
     RelationshipInfo, SchemaInfo, TriggerInfo,
 };
 use tokio_postgres::Client;
@@ -175,7 +175,8 @@ pub(crate) async fn columns(
                     NOT a.attnotnull, \
                     a.attnum::int4, \
                     COALESCE(pk.indisprimary, false), \
-                    pg_catalog.pg_get_expr(d.adbin, d.adrelid) \
+                    pg_catalog.pg_get_expr(d.adbin, d.adrelid), \
+                    a.attgenerated \
              FROM pg_catalog.pg_attribute a \
              JOIN pg_catalog.pg_class c ON c.oid = a.attrelid \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
@@ -200,14 +201,22 @@ pub(crate) async fn columns(
             position: r.get(3),
             is_primary_key: r.get(4),
             default_value: r.get(5),
-            // Not read here, and the field above is the poorer for it: a
-            // `GENERATED ALWAYS AS (…) STORED` column keeps its expression in
-            // `pg_attrdef` like any default, and only `pg_attribute.attgenerated`
-            // tells the two apart — a column this query does not ask for. So a
-            // generated column arrives looking like a column with a default,
-            // which is the same confusion SQL Server's driver just stopped
-            // making.
-            computed: None,
+            // `pg_get_expr` hands back a `GENERATED ALWAYS AS (…)` expression in
+            // exactly the shape it hands back a default, so this column is the
+            // only thing that tells them apart. Without it the renderer wrote
+            // `b int4 DEFAULT (a * 2)`, which PostgreSQL refuses outright — a
+            // default may not reference another column.
+            //
+            // `"char"` rather than `text`: an empty string for an ordinary
+            // column, `s` for one PostgreSQL stores, `v` for one it evaluates on
+            // read. Anything else is a version of PostgreSQL that has learned a
+            // third arrangement, and calling it a default would be the same
+            // mistake in a new form.
+            computed: match r.get::<_, i8>(6) as u8 {
+                b's' => Some(Computed::Stored),
+                b'v' => Some(Computed::Virtual),
+                _ => None,
+            },
         })
         .collect())
 }
