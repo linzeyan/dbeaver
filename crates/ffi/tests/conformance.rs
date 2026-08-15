@@ -45,7 +45,7 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
-    db_ddl_text, db_definition_json, db_edit_sql_json, db_foreign_keys_json, db_free,
+    db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_foreign_keys_json, db_free,
     db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
     db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
     db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
@@ -2030,5 +2030,170 @@ fn one_of_several_unique_keys_is_chosen_and_the_choice_does_not_move() {
     );
 
     ran(handle, "DROP TABLE ffi_several");
+    unsafe { db_free(handle) };
+}
+
+/// Where an export test writes. Named for the test rather than randomised,
+/// because a leftover from a previous run must be overwritten rather than
+/// accumulated — and because a failure that leaves the file behind is one
+/// somebody can go and read.
+fn export_path(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("dbffi-export-{name}"))
+}
+
+fn export(cursor: *mut dbffi::DbCursor, format: &str, path: &std::path::Path) -> i64 {
+    let format = CString::new(format).unwrap();
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), &mut err) };
+    if rows < 0 {
+        let message = unsafe { CStr::from_ptr(err) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { db_string_free(err) };
+        panic!("db_export returned {rows}: {message}");
+    }
+    rows
+}
+
+#[test]
+fn an_export_writes_every_row_the_cursor_had_not_only_the_first_page() {
+    // The reason this exists at all. The front end exported what the grid had
+    // loaded, so a result longer than one page came out truncated. The batch
+    // size here is smaller than the row count on purpose: an exporter that
+    // wrote one batch and stopped would pass a single-page test and fail every
+    // real export.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null(), "duckdb in memory must open");
+
+    let sql = CString::new("SELECT i AS n FROM range(2500) t(i)").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 100, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null(), "cursor must open");
+
+    let path = export_path("every-row.csv");
+    let rows = export(cursor, "csv", &path);
+    assert_eq!(rows, 2500, "every row, not the first batch");
+
+    let text = std::fs::read_to_string(&path).expect("the file must be there");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2501, "one header and every row");
+    assert_eq!(lines[0], "n");
+    assert_eq!(lines[1], "0");
+    assert_eq!(lines[2500], "2499");
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_export_names_a_format_it_cannot_write_rather_than_writing_something_else() {
+    // Guessing here would produce a file with the name the user asked for and
+    // the contents of some other format, which is the one failure they cannot
+    // see until whatever they feed it refuses to open it.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let sql = CString::new("SELECT 1 AS n").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 100, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let path = export_path("unknown-format.xlsx");
+    let format = CString::new("xlsx").unwrap();
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), &mut err) };
+    assert_eq!(rows, -1);
+    let message = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    assert!(
+        message.contains("xlsx"),
+        "must name the format asked for: {message}"
+    );
+    assert!(
+        !path.exists(),
+        "a refused format must not leave a file behind"
+    );
+
+    unsafe { db_string_free(err) };
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_export_to_a_location_it_cannot_open_fails_before_it_runs_the_query() {
+    // Reported from the create rather than from the first write, so a bad
+    // destination costs nothing: the alternative is streaming a large result
+    // out of the server to discover at the end that it had nowhere to go.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let sql = CString::new("SELECT 1 AS n").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 100, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let format = CString::new("csv").unwrap();
+    let path_c = CString::new("/nonexistent-directory-for-a-test/out.csv").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), &mut err) };
+    assert_eq!(rows, -1);
+    assert!(!err.is_null(), "db_export must say why it failed");
+
+    unsafe { db_string_free(err) };
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn an_export_with_a_null_cursor_says_so_instead_of_reading_one() {
+    let format = CString::new("csv").unwrap();
+    let path = export_path("null-cursor.csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows = unsafe { db_export(ptr::null_mut(), format.as_ptr(), path_c.as_ptr(), &mut err) };
+    assert_eq!(rows, -1);
+    assert!(!err.is_null(), "db_export must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+#[test]
+fn a_parquet_export_is_a_parquet_file_and_not_merely_a_file() {
+    // A direct Arrow write is this phase's exit criterion, and every wrong
+    // implementation of it still produces a file of a plausible size. The magic
+    // is what a reader checks first, at both ends, so it is what this checks.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let sql = CString::new("SELECT i AS n FROM range(300) t(i)").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let path = export_path("direct.parquet");
+    let rows = export(cursor, "parquet", &path);
+    assert_eq!(rows, 300);
+
+    let bytes = std::fs::read(&path).expect("the file must be there");
+    assert_eq!(&bytes[..4], b"PAR1", "a parquet file starts with its magic");
+    assert_eq!(
+        &bytes[bytes.len() - 4..],
+        b"PAR1",
+        "and ends with it — a footer that was never written is the failure this catches"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle) };
 }

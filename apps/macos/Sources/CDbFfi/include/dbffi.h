@@ -436,6 +436,19 @@ int db_cursor_close(DbCursor* cursor, char** err);
 
 void db_cursor_free(DbCursor* cursor);
 
+// Drains the cursor into the file at `path`, written as `format` — one of
+// "csv", "tsv", "jsonl" or "parquet". Returns the rows written, -1 on error,
+// -2 when the statement was cancelled.
+//
+// Batches are written and dropped as they arrive, so the result's size bounds
+// the file and not the memory. Exporting from the front end instead means
+// exporting only what it has already loaded.
+//
+// Stopping one goes through db_cursor_cancel, like any other fetch. A failure
+// part way through removes the file: it was truncated on open, so there is no
+// earlier version to keep, and a half-written result opens like a whole one.
+int64_t db_export(DbCursor* cursor, const char* format, const char* path, char** err);
+
 #ifdef __cplusplus
 }
 #endif
