@@ -4,6 +4,7 @@ members = [
     "crates/catalog",
     "crates/conn",
     "crates/ddl",
+    "crates/drivers/athena",
     "crates/drivers/bigquery",
     "crates/drivers/cassandra",
     "crates/drivers/clickhouse",

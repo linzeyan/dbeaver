@@ -1,0 +1,43 @@
+[package]
+name = "driver-athena"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+# For the one dialect this driver writes statements in. Athena has no row of its
+# own in `dbsql`; `driver.rs` says which it borrows and why.
+dbsql = { path = "../../sql" }
+async-trait.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+thiserror.workspace = true
+# The whole Athena API is one POST with a JSON body and an `X-Amz-Target`
+# header, so hyper is enough — the same client the Trino and ClickHouse drivers
+# use, with rustls because there is no plaintext form of this endpoint.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "tls12",
+    "ring",
+    "webpki-tokio",
+] }
+http-body-util = "0.1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# SHA-256 and HMAC-SHA256, which is the whole of SigV4's arithmetic. `ring` is
+# already in this tree under rustls, so the signer costs no new dependency.
+ring = "0.17"
+# A signature is scoped to a UTC date and stamped with a UTC instant, both in
+# fixed formats. Already in the lock behind the MongoDB and Cassandra drivers;
+# the alternative is hand-rolled calendar arithmetic.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

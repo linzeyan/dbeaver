@@ -1143,6 +1143,7 @@ dependencies = [
  "dbddl",
  "dbedit",
  "dbsql",
+ "driver-athena",
  "driver-bigquery",
  "driver-cassandra",
  "driver-clickhouse",
@@ -1259,6 +1260,29 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "driver-athena"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dbconn",
+ "dbsql",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "percent-encoding",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
 ]
 
 [[package]]

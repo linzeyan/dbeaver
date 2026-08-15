@@ -16,6 +16,7 @@ dbconn = { path = "../conn" }
 dbddl = { path = "../ddl" }
 dbedit = { path = "../edit" }
 dbsql = { path = "../sql" }
+driver-athena = { path = "../drivers/athena" }
 driver-bigquery = { path = "../drivers/bigquery" }
 driver-cassandra = { path = "../drivers/cassandra" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
