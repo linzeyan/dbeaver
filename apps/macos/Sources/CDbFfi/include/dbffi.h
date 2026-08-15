@@ -449,6 +449,20 @@ void db_cursor_free(DbCursor* cursor);
 // earlier version to keep, and a half-written result opens like a whole one.
 int64_t db_export(DbCursor* cursor, const char* format, const char* path, char** err);
 
+// Drains the cursor into the file at `path` as INSERT statements for `table`.
+//
+// Its own entry point rather than a fifth Format for db_export, because INSERT
+// needs a table to name and a dialect to spell it in — four of the other five
+// formats would get two arguments that mean nothing to them.
+//
+// Returns the rows written, -1 on error, -2 when the statement was cancelled.
+// Fails if this build has no dialect for the database.
+//
+// Batches are written and dropped as they arrive, so the result's size bounds
+// the file and not the memory. A failure part way through removes the file.
+int64_t db_export_sql(DbHandle* handle, DbCursor* cursor, const char* table,
+                      const char* path, char** err);
+
 #ifdef __cplusplus
 }
 #endif
