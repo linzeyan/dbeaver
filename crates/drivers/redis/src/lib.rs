@@ -273,10 +273,10 @@ fn split_args(line: &str) -> Option<Vec<String>> {
                     closed = true;
                     break;
                 }
-                Some(_) if c == '\\' => match chars.next() {
-                    Some(escaped) => arg.push(escaped),
-                    None => return None,
-                },
+                // A trailing backslash escapes nothing, which makes the quote it
+                // is inside unterminated — the same answer as running off the
+                // end of the line.
+                Some(_) if c == '\\' => arg.push(chars.next()?),
                 None if c.is_whitespace() => break,
                 _ => arg.push(c),
             }

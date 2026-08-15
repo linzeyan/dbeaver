@@ -1,0 +1,12 @@
+# The version both the local gate and CI use.
+#
+# Pinned because a runner that quietly upgrades is a runner that disagrees with
+# the machine the work was checked on. A clippy lint added in 1.97 failed CI on
+# code that `cargo clippy -D warnings` had just passed locally against 1.95 —
+# and the whole value of the local gate is that passing it means CI will pass.
+#
+# New lints now arrive when this line changes, which is a decision with a commit
+# behind it rather than whatever GitHub's image happened to ship that week.
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
