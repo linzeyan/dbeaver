@@ -41,6 +41,12 @@ tokio-postgres = "0.7"
 futures-util = "0.3"
 thiserror = "2"
 async-trait = "0.1"
+lax-sql = "0.3"
+# Here only to name the `NewLineKind` that lax-sql's config requires and does not
+# re-export. Its major has to stay on whichever lax-sql depends on: with 0.68 in
+# the tree the compiler reports `expected NewLineKind, found NewLineKind`, two
+# different crates wearing the same type name.
+dprint-core = "0.67"
 
 # tiberius is read from `third_party/tiberius`, not from crates.io. The published
 # 0.12.3 walks into `todo!()` when it decodes `geometry`, `geography`,
