@@ -495,10 +495,17 @@ final class AppModel {
         // rather than an empty pane. Opening to nothing makes every session
         // start with the same two clicks. `--relation` overrides both, and
         // may name a schema of its own.
-        let requested = appliedLaunchOptions ? nil : initialRelation.flatMap(findRelation)
+        let asked = appliedLaunchOptions ? nil : initialRelation
+        let requested = asked.flatMap(findRelation)
+        // A `--relation` that named nothing selects nothing, rather than falling
+        // through to the first table of the default schema. A capture switch
+        // that quietly substitutes its subject makes every screenshot and every
+        // row count taken with it a claim about a table nobody asked for — and
+        // the probes read an empty selection as the failure it is.
         let opening =
             requested.map(\.schema)
-            ?? (schemas.first(where: { $0.name == "public" }) ?? schemas.first)?.name
+            ?? (asked == nil
+                ? (schemas.first(where: { $0.name == "public" }) ?? schemas.first)?.name : nil)
         if let opening {
             expanded.insert(opening)
             selected = requested ?? relations[opening]?.first
@@ -667,12 +674,19 @@ final class AppModel {
     /// Resolves `--relation`, which is either a bare name or `schema.name`.
     /// Unqualified searches every schema so a capture does not have to know
     /// where a table lives, but prefers the one that opens by default.
+    ///
+    /// The qualified form cannot be split at a dot, in either direction. A
+    /// schema name may contain one — DuckDB's is `database.schema` and Trino's
+    /// is `catalog.schema` — so the first dot is wrong, and a relation name may
+    /// contain one too, so the last dot is wrong as well. The schemas that
+    /// actually exist are what settles it, which is a lookup this side has and
+    /// a parser would only be guessing at.
     private func findRelation(named requested: String) -> RelationInfo? {
-        if let dot = requested.firstIndex(of: ".") {
-            let schema = String(requested[..<dot])
-            let name = String(requested[requested.index(after: dot)...])
-            return relations[schema]?.first { $0.name == name }
+        for schema in relations.keys where requested.hasPrefix("\(schema).") {
+            let name = String(requested.dropFirst(schema.count + 1))
+            if let found = relations[schema]?.first(where: { $0.name == name }) { return found }
         }
+        if requested.contains(".") { return nil }
         let preferred = relations["public"]?.first { $0.name == requested }
         return preferred
             ?? relations.values.lazy.compactMap { list in
