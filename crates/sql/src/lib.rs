@@ -11,6 +11,7 @@
 
 mod complete;
 mod dialect;
+mod format;
 mod keywords;
 mod lex;
 mod parse;
@@ -21,6 +22,7 @@ pub use dialect::{
     ALL, CLICKHOUSE, DUCKDB, Dialect, DoubleQuote, MSSQL, MYSQL, POSTGRES, Parameter, RowLimit,
     SQLITE, for_scheme, of_scheme,
 };
+pub use format::format;
 pub use lex::{Token, TokenKind, tokens};
 pub use parse::{Scope, Source, Statement, statement};
 pub use script::{Origin, Scan, Span, Target, error_offset, scan, statements, target};
