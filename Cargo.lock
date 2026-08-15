@@ -1183,8 +1183,12 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "bytes",
+ "dbconn",
  "dbsql",
+ "driver-duckdb",
+ "driver-postgres",
  "parquet",
+ "tokio",
 ]
 
 [[package]]
