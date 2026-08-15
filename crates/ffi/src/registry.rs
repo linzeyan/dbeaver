@@ -21,6 +21,7 @@ use driver_mysql::MySqlSource;
 use driver_postgres::PgSource;
 use driver_redis::RedisSource;
 use driver_sqlite::SqliteSource;
+use driver_trino::TrinoSource;
 use serde::Serialize;
 
 /// What a connection to this kind of database is made of.
@@ -120,6 +121,12 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::Server,
         default_port: Some(6379),
     },
+    Catalogued {
+        scheme: "trino",
+        label: "Trino",
+        shape: Shape::Server,
+        default_port: Some(8080),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -204,6 +211,15 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // parser reads — and because the path after the host is the database
         // number rather than a name, so `redis://host:6379/3` opens on db3.
         "redis" => Ok(Box::new(RedisSource::connect(url).await?)),
+        // Rewritten to `http://` for ClickHouse's reason — the client protocol is
+        // HTTP and the scheme names the database rather than the transport — with
+        // one difference worth stating: the path here is `catalog/schema` and not
+        // a database, because Trino has a level above the schema. Both parts are
+        // optional and both become session defaults, so `trino://host:8080/tpch`
+        // opens on a catalog with no schema chosen.
+        "trino" => Ok(Box::new(
+            TrinoSource::connect(&format!("http://{rest}")).await?,
+        )),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
             known()

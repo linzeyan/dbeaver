@@ -993,6 +993,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "bson",
+ "bytes",
  "dbsql",
  "driver-cassandra",
  "driver-clickhouse",
@@ -1003,12 +1004,17 @@ dependencies = [
  "driver-postgres",
  "driver-redis",
  "driver-sqlite",
+ "driver-trino",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "mongodb",
  "mysql_async",
  "redis",
  "rusqlite",
  "scylla",
  "serde",
+ "serde_json",
  "tempfile",
  "tiberius",
  "tokio",
@@ -1068,6 +1074,7 @@ dependencies = [
  "driver-postgres",
  "driver-redis",
  "driver-sqlite",
+ "driver-trino",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1310,6 +1317,27 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "driver-trino"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "dbconn",
+ "dbsql",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "url",
 ]
 
 [[package]]

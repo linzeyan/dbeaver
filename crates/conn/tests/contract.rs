@@ -524,6 +524,121 @@ async fn cassandra() -> Subject {
     }
 }
 
+const TRINO_ORIGIN: &str = "http://127.0.0.1:58080";
+
+/// Trino, which stores nothing and is therefore the first subject here whose
+/// fixture has to name the system the data is in.
+///
+/// Its schema is `memory.dbclient_contract` — a catalog and a schema, flattened
+/// into the one string the trait has, which is DuckDB's arrangement arrived at
+/// for a different reason: DuckDB can attach two databases with a schema called
+/// `main`, and every Trino name has a catalog in it because a catalog is which
+/// connector the rows come from.
+///
+/// `memory` because it is the only catalog on a stock coordinator that takes a
+/// write at all; `tpch` and `system` are both read-only. Its own schema rather
+/// than the driver suite's, for the reason `mysql()` gives.
+///
+/// Seeded over the client protocol directly rather than through the driver, so
+/// the fixture does not depend on the code under test being right. Trino has no
+/// vendor crate on crates.io to reach for — the client protocol is HTTP and JSON,
+/// and `trino_seed` below is the whole of it.
+async fn trino() -> Subject {
+    for statement in [
+        "CREATE SCHEMA IF NOT EXISTS memory.dbclient_contract",
+        "DROP TABLE IF EXISTS memory.dbclient_contract.nums",
+        "CREATE TABLE memory.dbclient_contract.nums AS \
+         SELECT id, 'row-' || CAST(id AS varchar) AS label \
+         FROM UNNEST(sequence(1, 500)) AS t(id)",
+    ] {
+        trino_seed(statement).await;
+    }
+
+    let driver =
+        driver_trino::TrinoSource::connect(&format!("{TRINO_ORIGIN}/memory/dbclient_contract"))
+            .await
+            .expect("Trino unreachable; run `make db-up-trino`");
+    Subject {
+        driver: Box::new(driver),
+        schema: "memory.dbclient_contract".to_string(),
+        relation: "nums".to_string(),
+        key: "id".to_string(),
+        read: "SELECT id FROM nums ORDER BY id".to_string(),
+        broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
+        missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
+        missing_is_a_failure: true,
+        // A query and a cursor are the same call here. The chain of `nextUri`s a
+        // statement answers with is one execution read forward, so both of the
+        // properties the trait asks a cursor for hold without a second mechanism.
+        cursors: true,
+        // `line 1:45`, counted in code points rather than bytes or UTF-16 code
+        // units — the one thing this driver got for free that the two before it
+        // had to reconstruct.
+        positions: true,
+        // Nothing to write to, and the reason is the interesting part: Trino's
+        // protocol does have interactive transactions, and they work. What does
+        // not work is writing inside one. A Trino transaction belongs to the
+        // coordinator and each connector decides whether it will take a write in
+        // it; `memory`, the only writable catalog here, refuses every one with
+        // `AUTOCOMMIT_WRITE_CONFLICT` and the refusal aborts the transaction. So
+        // there is no fixture to give this — `Scratch::insert` inside `BEGIN`
+        // cannot succeed on any catalog a stock coordinator has — which is the
+        // same conclusion `Driver::transactional` reaches from the other side.
+        // The driver's own suite pins the measurement.
+        scratch: None,
+        _fixture: None,
+    }
+}
+
+/// One statement over Trino's client protocol, read to the end.
+///
+/// `POST /v1/statement`, then follow `nextUri` until there is none. Everything
+/// this needs from the answer is whether an `error` appeared, so the body is read
+/// as a `serde_json::Value` rather than given a shape.
+async fn trino_seed(sql: &str) {
+    use http_body_util::{BodyExt, Full};
+    use hyper::{Method, Request};
+
+    let client: hyper_util::client::legacy::Client<_, Full<bytes::Bytes>> =
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build_http();
+    let mut method = Method::POST;
+    // The coordinator refuses a request with no user even with authentication
+    // switched off, so this is not optional.
+    let mut uri = format!("{TRINO_ORIGIN}/v1/statement");
+    let mut body = Full::new(bytes::Bytes::from(sql.to_string()));
+    loop {
+        let request = Request::builder()
+            .method(method)
+            .uri(&uri)
+            .header("X-Trino-User", "contract")
+            .body(body)
+            .expect("a request");
+        let response = client
+            .request(request)
+            .await
+            .expect("Trino unreachable; run `make db-up-trino`");
+        let answer: serde_json::Value = serde_json::from_slice(
+            &response
+                .into_body()
+                .collect()
+                .await
+                .expect("a body")
+                .to_bytes(),
+        )
+        .expect("Trino answers JSON");
+        if let Some(failure) = answer.get("error") {
+            panic!("seeding failed on {sql}: {failure}");
+        }
+        let Some(next) = answer.get("nextUri").and_then(|next| next.as_str()) else {
+            return;
+        };
+        method = Method::GET;
+        uri = next.to_string();
+        body = Full::default();
+    }
+}
+
 const MYSQL_ROOT: &str = "mysql://root:test@127.0.0.1:53306/";
 
 /// MySQL, in a database of this file's own rather than the driver's `bench`.
@@ -1359,6 +1474,12 @@ async fn redis_satisfies_the_contract() {
 #[ignore = "requires a Cassandra server"]
 async fn cassandra_satisfies_the_contract() {
     every_check(&cassandra().await).await;
+}
+
+#[tokio::test]
+#[ignore = "requires a Trino coordinator"]
+async fn trino_satisfies_the_contract() {
+    every_check(&trino().await).await;
 }
 
 // ---------------------------------------------------------------------------

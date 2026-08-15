@@ -27,6 +27,7 @@ driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-redis = { path = "../drivers/redis" }
 driver-sqlite = { path = "../drivers/sqlite" }
+driver-trino = { path = "../drivers/trino" }
 tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -47,3 +48,12 @@ tiberius = { version = "0.12.3", default-features = false, features = [
 # tiberius wants a futures-io stream and a tokio TcpStream is not one; this is
 # the adapter, and seeding a SQL Server fixture is the only thing it is for.
 tokio-util = { version = "0.7", features = ["compat"] }
+# Seeds the Trino fixture. There is no Trino crate to name here as the others
+# name theirs: the client protocol is HTTP and JSON, so an HTTP client and a JSON
+# parser are the vendor library. All five are already in the lock behind the
+# ClickHouse and Trino drivers.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+serde_json = "1"
