@@ -138,16 +138,16 @@ test: ## Unit tests (no database required)
 # under a minute to become ready, and about as much memory as MySQL. Its image is
 # five gigabytes, which is a download to do once rather than a cost per run.
 .PHONY: test-integration
-test-integration: db-check db-check-compatible db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks db-check-redis ## Tests requiring a database server
+test-integration: db-check db-check-compatible db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks db-check-redis db-check-cassandra ## Tests requiring a database server
 	cargo test --workspace -- --ignored
 
 # The same suite, split by which server has to be up. CI runs these as separate
-# jobs rather than running the target above: ten servers on one runner is about
+# jobs rather than running the target above: eleven servers on one runner is about
 # fourteen gigabytes of images and more memory than StarRocks and SQL Server will
 # share, and a runner that dies of that reports a failure that names nothing.
 #
 # `test-integration` stays the definition of what integration coverage is, and
-# these six are a partition of it — a new crate with `#[ignore]`d tests is
+# these seven are a partition of it — a new crate with `#[ignore]`d tests is
 # picked up by `--workspace` above and has to be added to one of these by hand.
 #
 # Two crates hold tests for more than one database and are split further. `dbddl`
@@ -198,6 +198,13 @@ test-mongodb: db-check-mongo ## Integration tests behind MongoDB
 test-redis: db-check-redis ## Integration tests behind Redis
 	cargo test -p driver-redis -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact redis_satisfies_the_contract
+
+# Slowest container of the lot to become ready — a minute or so before it will
+# answer — which is why it is its own job rather than a passenger on another.
+.PHONY: test-cassandra
+test-cassandra: db-check-cassandra ## Integration tests behind Cassandra
+	cargo test -p driver-cassandra -- --ignored
+	cargo test -p dbconn --test contract -- --ignored --exact cassandra_satisfies_the_contract
 
 # The SQL statement splitter's checks live behind a flag on the app binary
 # rather than in a test target: Package.swift declares one executable target and
