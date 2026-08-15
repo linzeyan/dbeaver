@@ -608,8 +608,12 @@ CLICKHOUSE_CONTAINER := clickhouse-test
 CLICKHOUSE_PORT      := 58123
 CLICKHOUSE_IMAGE     := clickhouse/clickhouse-server:24
 
+# Alone among these targets this one only starts a server, because ClickHouse's
+# HTTP interface refuses a body holding more than one statement. seed.sql can
+# only be applied a statement per request, which is what the integration test
+# already does with it.
 .PHONY: db-up-clickhouse
-db-up-clickhouse: ## Start the ClickHouse test container and seed it
+db-up-clickhouse: ## Start the ClickHouse test container
 	@docker start $(CLICKHOUSE_CONTAINER) 2>/dev/null \
 		|| docker run -d --name $(CLICKHOUSE_CONTAINER) \
 			-p $(CLICKHOUSE_PORT):8123 -p 59000:9000 -e CLICKHOUSE_PASSWORD=test \
@@ -620,9 +624,8 @@ db-up-clickhouse: ## Start the ClickHouse test container and seed it
 			>/dev/null 2>&1 && break; \
 		sleep 1; \
 	done
-	@curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/" \
-		--data-binary @crates/drivers/clickhouse/tests/seed.sql >/dev/null \
-		&& echo "clickhouse seeded"
+	@curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/?query=SELECT+1" \
+		|| { echo "$(CLICKHOUSE_CONTAINER) never answered; see 'docker logs $(CLICKHOUSE_CONTAINER)'"; exit 1; }
 
 .PHONY: db-down-clickhouse
 db-down-clickhouse: ## Stop and remove the ClickHouse test container
