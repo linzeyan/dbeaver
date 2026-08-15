@@ -47,7 +47,7 @@ jobs:
         run: make test
 
   # One job per server family rather than one `make test-integration`, which is
-  # what this job used to be. That target now wants eleven servers up at once, and
+  # what this job used to be. That target now wants twelve servers up at once, and
   # a runner has neither the memory for StarRocks beside SQL Server nor the disk
   # for every image — so the suite is split the way the Makefile splits it, one
   # container set per job, and a failure names the database it belongs to.
@@ -86,6 +86,9 @@ jobs:
           - name: Cassandra
             up: db-up-cassandra
             test: test-cassandra
+          - name: Trino
+            up: db-up-trino
+            test: test-trino
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
