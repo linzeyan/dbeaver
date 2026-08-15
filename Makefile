@@ -305,12 +305,19 @@ db-up: ## Start the benchmark PostgreSQL container
 			-e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench -e POSTGRES_USER=bench \
 			-p $(PG_PORT):5432 $(PG_IMAGE) \
 			-c shared_buffers=2GB -c work_mem=256MB -c max_wal_size=8GB -c fsync=off
+# Three minutes, and the container's own log if it runs out. A minute is enough
+# on a warm laptop and is not enough on a cold CI runner doing initdb against a
+# shared disk — and when it ran out, all that reached the log was `pg_isready`'s
+# exit code 2 under a `make` that said "exit code 2". The timeout has to name
+# itself, because the alternative is reading tea leaves from a number.
 	@echo "waiting for postgres..."
-	@for i in $$(seq 1 60); do \
-		docker exec $(PG_CONTAINER) pg_isready -U bench -d bench >/dev/null 2>&1 && break; \
+	@for i in $$(seq 1 180); do \
+		if docker exec $(PG_CONTAINER) pg_isready -U bench -d bench 2>/dev/null; then exit 0; fi; \
 		sleep 1; \
-	done
-	@docker exec $(PG_CONTAINER) pg_isready -U bench -d bench
+	done; \
+	echo "postgres never accepted connections; its last words were:" >&2; \
+	docker logs --tail 30 $(PG_CONTAINER) >&2; \
+	exit 1
 
 .PHONY: db-down
 db-down: ## Stop and remove the benchmark container
@@ -457,12 +464,19 @@ db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, Gre
 		|| docker run -d --name $(GREPTIME_CONTAINER) \
 			-p $(GREPTIME_PORT):4003 greptime/greptimedb:latest standalone start \
 			--postgres-addr 0.0.0.0:4003 --rpc-bind-addr 0.0.0.0:4001 --http-addr 0.0.0.0:4000
+# `break` where the other targets fail: running out of patience here left the
+# recipe returning success with nothing listening, so the miss surfaced later as
+# `db-check-compatible` telling someone to run the target they had just run.
 	@echo "waiting for the compatible databases..."
-	@for i in $$(seq 1 60); do \
-		nc -z 127.0.0.1 $(COCKROACH_PORT) >/dev/null 2>&1 \
-			&& nc -z 127.0.0.1 $(GREPTIME_PORT) >/dev/null 2>&1 && break; \
+	@for i in $$(seq 1 180); do \
+		if nc -z 127.0.0.1 $(COCKROACH_PORT) >/dev/null 2>&1 \
+			&& nc -z 127.0.0.1 $(GREPTIME_PORT) >/dev/null 2>&1; then exit 0; fi; \
 		sleep 1; \
-	done
+	done; \
+	echo "cockroachdb or greptimedb never opened its port; their last words were:" >&2; \
+	docker logs --tail 30 $(COCKROACH_CONTAINER) >&2; \
+	docker logs --tail 30 $(GREPTIME_CONTAINER) >&2; \
+	exit 1
 
 .PHONY: db-down-compatible
 db-down-compatible: ## Stop and remove the PostgreSQL-compatible containers
