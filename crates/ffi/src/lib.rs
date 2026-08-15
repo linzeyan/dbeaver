@@ -1549,3 +1549,105 @@ pub unsafe extern "C" fn db_export(
         }
     }
 }
+
+/// Drains `cursor` into the file at `path` as `INSERT` statements for `table`.
+///
+/// Its own entry point rather than a fifth `Format` for `db_export`, because
+/// `INSERT` needs a table to name and a dialect to spell it in — four of the
+/// other five formats would get two arguments that mean nothing to them.
+///
+/// Fails when this build has no dialect for the database, because a script in
+/// the wrong spelling is not a lesser version of the right one — it is one that
+/// runs somewhere it should not.
+///
+/// Everything else — the return convention, taking a cursor, holding nothing —
+/// is as `db_export` documents it.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `cursor` must
+/// come from `db_cursor` and not have been freed, and no other call may be in
+/// flight on it. `table` and `path` must be valid NUL-terminated C strings.
+/// `err` must be null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_export_sql(
+    handle: *mut DbHandle,
+    cursor: *mut DbCursor,
+    table: *const c_char,
+    path: *const c_char,
+    err: *mut *mut c_char,
+) -> i64 {
+    if handle.is_null() || cursor.is_null() || table.is_null() || path.is_null() {
+        unsafe { set_err(err, "null handle, cursor, table, or path") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let Some(dialect) = h.dialect else {
+        unsafe { set_err(err, "this build has no dialect for this database") };
+        return -1;
+    };
+    // Created before a row is fetched, so an unwritable location is reported
+    // instead of a query being run for a file that was never going to open.
+    let file = match std::fs::File::create(path_str) {
+        Ok(f) => f,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    let writer = std::io::BufWriter::new(file);
+    let c = unsafe { &mut (*cursor).cursor };
+    // The driver's error is kept whole rather than folded into the ArrowError
+    // that stops the writer: `ArrowError` has nowhere to put `cancelled`, and
+    // the difference between "the server refused this" and "you pressed Stop"
+    // is the difference between an error banner and none.
+    let mut failure = None;
+    let rows = {
+        // One `block_on` per batch, as `db_cursor_next` does — this call owns
+        // the thread for the length of the export, and the front end runs it
+        // off its own.
+        let batches = std::iter::from_fn(|| match runtime().block_on(c.fetch()) {
+            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(None) => None,
+            Err(e) => {
+                let message = e.to_string();
+                failure = Some(e);
+                Some(Err(arrow::error::ArrowError::ComputeError(message)))
+            }
+        });
+        dbtransfer::export_sql(batches, dialect, table_str.to_string(), writer)
+    };
+    match rows {
+        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+        Err(e) => {
+            // The partial file goes: it was truncated on create, so there is no
+            // earlier version to preserve, and one that stops mid-result looks
+            // exactly like a complete one to whoever opens it next.
+            let _ = std::fs::remove_file(path_str);
+            match failure {
+                Some(f) => {
+                    let cancelled = f.is_cancelled();
+                    unsafe { set_err(err, f) };
+                    if cancelled { -2 } else { -1 }
+                }
+                None => {
+                    unsafe { set_err(err, e) };
+                    -1
+                }
+            }
+        }
+    }
+}
