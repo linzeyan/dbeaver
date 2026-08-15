@@ -45,12 +45,12 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
-    db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_foreign_keys_json, db_free,
-    db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
-    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
-    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
+    db_foreign_keys_json, db_free, db_indexes_json, db_names_forget, db_query, db_query_free,
+    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_relations_json, db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format,
+    db_sql_scan_json, db_string_free, db_triggers_json, db_tx_autocommit, db_tx_commit,
+    db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -2042,10 +2042,27 @@ fn export_path(name: &str) -> std::path::PathBuf {
 }
 
 fn export(cursor: *mut dbffi::DbCursor, format: &str, path: &std::path::Path) -> i64 {
+    export_limited(cursor, format, path, 0)
+}
+
+fn export_limited(
+    cursor: *mut dbffi::DbCursor,
+    format: &str,
+    path: &std::path::Path,
+    row_limit: i64,
+) -> i64 {
     let format = CString::new(format).unwrap();
     let path_c = CString::new(path.to_str().unwrap()).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), &mut err) };
+    let rows = unsafe {
+        db_export(
+            cursor,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            row_limit,
+            &mut err,
+        )
+    };
     if rows < 0 {
         let message = unsafe { CStr::from_ptr(err) }
             .to_string_lossy()
@@ -2108,7 +2125,7 @@ fn an_export_names_a_format_it_cannot_write_rather_than_writing_something_else()
     let format = CString::new("xlsx").unwrap();
     let path_c = CString::new(path.to_str().unwrap()).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), &mut err) };
+    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), 0, &mut err) };
     assert_eq!(rows, -1);
     let message = unsafe { CStr::from_ptr(err) }
         .to_string_lossy()
@@ -2145,7 +2162,7 @@ fn an_export_to_a_location_it_cannot_open_fails_before_it_runs_the_query() {
     let format = CString::new("csv").unwrap();
     let path_c = CString::new("/nonexistent-directory-for-a-test/out.csv").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), &mut err) };
+    let rows = unsafe { db_export(cursor, format.as_ptr(), path_c.as_ptr(), 0, &mut err) };
     assert_eq!(rows, -1);
     assert!(!err.is_null(), "db_export must say why it failed");
 
@@ -2160,7 +2177,15 @@ fn an_export_with_a_null_cursor_says_so_instead_of_reading_one() {
     let path = export_path("null-cursor.csv");
     let path_c = CString::new(path.to_str().unwrap()).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let rows = unsafe { db_export(ptr::null_mut(), format.as_ptr(), path_c.as_ptr(), &mut err) };
+    let rows = unsafe {
+        db_export(
+            ptr::null_mut(),
+            format.as_ptr(),
+            path_c.as_ptr(),
+            0,
+            &mut err,
+        )
+    };
     assert_eq!(rows, -1);
     assert!(!err.is_null(), "db_export must say why it failed");
     unsafe { db_string_free(err) };
@@ -2191,6 +2216,93 @@ fn a_parquet_export_is_a_parquet_file_and_not_merely_a_file() {
         &bytes[bytes.len() - 4..],
         b"PAR1",
         "and ends with it — a footer that was never written is the failure this catches"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn a_row_limit_stops_the_export_where_it_was_told_to_and_not_at_a_batch_edge() {
+    // The limit is what the save panel showed the user — "the 250 rows here" —
+    // so rounding it to the batch size writes a file whose row count is not the
+    // one they agreed to. A batch size that does not divide the limit is the
+    // only arrangement that catches that, which is why 64 and 250.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let sql = CString::new("SELECT i AS n FROM range(5000) t(i)").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let path = export_path("limited.csv");
+    let rows = export_limited(cursor, "csv", &path, 250);
+    assert_eq!(rows, 250, "exactly the limit, not 256 and not 5000");
+
+    let text = std::fs::read_to_string(&path).expect("the file must be there");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 251, "header plus the limit");
+    assert_eq!(lines[250], "249", "and they are the first rows, in order");
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn a_limit_larger_than_the_result_is_not_an_error() {
+    // The count the panel offers comes from the grid, and a result can end
+    // before it — a browse that stopped early, a table that shrank. Refusing
+    // there would fail an export that had already written everything there was.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let sql = CString::new("SELECT i AS n FROM range(10) t(i)").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let path = export_path("over-limit.csv");
+    assert_eq!(export_limited(cursor, "csv", &path, 9_000), 10);
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_cursor_free(cursor) };
+    unsafe { db_free(handle) };
+}
+
+#[test]
+fn a_sql_export_writes_statements_the_source_database_would_accept() {
+    // The dialect comes from the connection and not from a guess, so this also
+    // proves the handle is being read: DuckDB quotes with double quotes, and a
+    // build that reached for a default would still produce a plausible file.
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), &mut err) };
+    assert!(!handle.is_null());
+
+    let sql = CString::new("SELECT 1 AS id, 'O''Brien' AS name").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle, sql.as_ptr(), 100, &mut err, ptr::null_mut()) };
+    assert!(!cursor.is_null());
+
+    let path = export_path("people.sql");
+    let table = CString::new("main.people").unwrap();
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let rows =
+        unsafe { db_export_sql(handle, cursor, table.as_ptr(), path_c.as_ptr(), 0, &mut err) };
+    assert_eq!(rows, 1, "db_export_sql must write the row");
+
+    let text = std::fs::read_to_string(&path).expect("the file must be there");
+    assert_eq!(
+        text,
+        "INSERT INTO main.people (id, name) VALUES\n(1, 'O''Brien');\n"
     );
 
     let _ = std::fs::remove_file(&path);

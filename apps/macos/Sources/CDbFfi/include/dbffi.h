@@ -447,7 +447,12 @@ void db_cursor_free(DbCursor* cursor);
 // Stopping one goes through db_cursor_cancel, like any other fetch. A failure
 // part way through removes the file: it was truncated on open, so there is no
 // earlier version to keep, and a half-written result opens like a whole one.
-int64_t db_export(DbCursor* cursor, const char* format, const char* path, char** err);
+//
+// `row_limit` of 0 writes every row. A limit is how "only the rows already on
+// screen" is offered without a second writer elsewhere to keep saying the same
+// thing as this one — it is this call, stopping early.
+int64_t db_export(DbCursor* cursor, const char* format, const char* path, int64_t row_limit,
+                  char** err);
 
 // Drains the cursor into the file at `path` as INSERT statements for `table`.
 //
@@ -460,8 +465,8 @@ int64_t db_export(DbCursor* cursor, const char* format, const char* path, char**
 //
 // Batches are written and dropped as they arrive, so the result's size bounds
 // the file and not the memory. A failure part way through removes the file.
-int64_t db_export_sql(DbHandle* handle, DbCursor* cursor, const char* table,
-                      const char* path, char** err);
+int64_t db_export_sql(DbHandle* handle, DbCursor* cursor, const char* table, const char* path,
+                      int64_t row_limit, char** err);
 
 #ifdef __cplusplus
 }

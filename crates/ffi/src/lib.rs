@@ -1445,6 +1445,41 @@ pub unsafe extern "C" fn db_cursor_free(cursor: *mut DbCursor) {
     }
 }
 
+/// How many rows an export may still write, from what the caller asked for.
+///
+/// Anything at or below zero is no limit: 0 is how a caller says "all of it"
+/// across a boundary that has no `Option`, and a negative count is a caller
+/// that computed one — refusing there would turn an arithmetic slip into a
+/// failed export rather than a complete one.
+fn row_limit_of(row_limit: i64) -> Option<u64> {
+    (row_limit > 0).then_some(row_limit as u64)
+}
+
+/// Trims `batch` to what `remaining` still allows, or ends the export.
+///
+/// Returns `None` once the limit is spent, which is what stops the iterator —
+/// and stops it without another round trip to the server, since the batch that
+/// would have overshot is the last one fetched.
+fn take_up_to(
+    batch: arrow::array::RecordBatch,
+    remaining: &mut Option<u64>,
+) -> Option<arrow::array::RecordBatch> {
+    let Some(left) = remaining else {
+        return Some(batch);
+    };
+    if *left == 0 {
+        return None;
+    }
+    let rows = batch.num_rows() as u64;
+    if rows <= *left {
+        *left -= rows;
+        return Some(batch);
+    }
+    let wanted = *left as usize;
+    *left = 0;
+    Some(batch.slice(0, wanted))
+}
+
 /// Drains `cursor` into the file at `path`, written as `format` — one of the
 /// extensions `Format::from_extension` knows.
 ///
@@ -1460,6 +1495,13 @@ pub unsafe extern "C" fn db_cursor_free(cursor: *mut DbCursor) {
 /// size of the result bounds the file and not the memory. This is the whole
 /// reason the front end does not do this itself.
 ///
+/// `row_limit` of 0 writes every row. A limit exists so that "only the rows
+/// already on screen" can be offered without a second writer somewhere else
+/// that has to be kept saying the same thing as this one — it is this path,
+/// stopping early. The batch that crosses the limit is sliced rather than
+/// dropped, because a limit that rounds down to the batch size is not the
+/// number the caller was shown.
+///
 /// # Safety
 /// `cursor` must come from `db_cursor` and not have been freed, and no other
 /// call may be in flight on it. `format` and `path` must be valid
@@ -1470,6 +1512,7 @@ pub unsafe extern "C" fn db_export(
     cursor: *mut DbCursor,
     format: *const c_char,
     path: *const c_char,
+    row_limit: i64,
     err: *mut *mut c_char,
 ) -> i64 {
     if cursor.is_null() || format.is_null() || path.is_null() {
@@ -1513,12 +1556,13 @@ pub unsafe extern "C" fn db_export(
     // the difference between "the server refused this" and "you pressed Stop"
     // is the difference between an error banner and none.
     let mut failure = None;
+    let mut remaining = row_limit_of(row_limit);
     let rows = {
         // One `block_on` per batch, as `db_cursor_next` does — this call owns
         // the thread for the length of the export, and the front end runs it
         // off its own.
         let batches = std::iter::from_fn(|| match runtime().block_on(c.fetch()) {
-            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(Some(batch)) => Some(Ok(take_up_to(batch, &mut remaining)?)),
             Ok(None) => None,
             Err(e) => {
                 let message = e.to_string();
@@ -1574,6 +1618,7 @@ pub unsafe extern "C" fn db_export_sql(
     cursor: *mut DbCursor,
     table: *const c_char,
     path: *const c_char,
+    row_limit: i64,
     err: *mut *mut c_char,
 ) -> i64 {
     if handle.is_null() || cursor.is_null() || table.is_null() || path.is_null() {
@@ -1615,12 +1660,13 @@ pub unsafe extern "C" fn db_export_sql(
     // the difference between "the server refused this" and "you pressed Stop"
     // is the difference between an error banner and none.
     let mut failure = None;
+    let mut remaining = row_limit_of(row_limit);
     let rows = {
         // One `block_on` per batch, as `db_cursor_next` does — this call owns
         // the thread for the length of the export, and the front end runs it
         // off its own.
         let batches = std::iter::from_fn(|| match runtime().block_on(c.fetch()) {
-            Ok(Some(batch)) => Some(Ok(batch)),
+            Ok(Some(batch)) => Some(Ok(take_up_to(batch, &mut remaining)?)),
             Ok(None) => None,
             Err(e) => {
                 let message = e.to_string();

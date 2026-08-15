@@ -379,6 +379,30 @@ final class Cursor: @unchecked Sendable {
         return out
     }
 
+    /// Drains this cursor into `url` and answers how many rows that was.
+    ///
+    /// Every row is formatted and written in the core. Doing it here would mean
+    /// pulling the whole result into the app first, which is the limit this
+    /// replaced: export used to write what the grid had loaded, so a table
+    /// longer than the scrollback could not be written out at all.
+    ///
+    /// `rowLimit` of zero means all of them. A limit is how "only the rows
+    /// shown here" is offered without a second writer to keep in step with this
+    /// one — it is this code path, stopping early.
+    ///
+    /// Blocks for the length of the export. Stopping one is `cancel()`, the
+    /// same call that stops any other fetch.
+    func export(to url: URL, format: ExportFormat, rowLimit: Int64) throws -> Int64 {
+        var err: UnsafeMutablePointer<CChar>?
+        let rows = db_export(handle, format.wireName, url.path, rowLimit, &err)
+        guard rows >= 0 else {
+            throw DbError(
+                description: Database.take(&err) ?? "export failed",
+                cancelled: rows == -2)
+        }
+        return rows
+    }
+
     /// Asks the server to abandon the page this cursor is fetching.
     ///
     /// `Database.cancel()` does not reach here: it cancels the session
