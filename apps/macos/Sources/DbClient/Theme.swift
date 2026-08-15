@@ -111,6 +111,10 @@ enum Theme {
         /// accent: it means the same thing as the amber in the toolbar, which is
         /// that the database does not know about this yet.
         static let pendingCell = Theme.warning.opacity(0.30)
+        /// A row marked to be deleted. Red rather than the amber a changed cell
+        /// gets: both are unsent, but one of them takes the row away, and that
+        /// is worth being able to tell apart at a glance across a long result.
+        static let deletedRow = Theme.danger.opacity(0.26)
         static let cursor = Theme.accent
         /// The scrollbar sits over the data rather than beside it, so the track
         /// is barely there and the thumb carries the whole signal.

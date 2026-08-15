@@ -841,7 +841,8 @@ struct ContentPane: View {
                     selection: $result.selection,
                     claimsInitialFocus: true,
                     sort: model.gridSort,
-                    pending: Set(model.pendingEdits.keys),
+                    pending: model.pendingCells,
+                    deleted: model.deletedRows,
                     onSortColumn: { model.toggleSort(column: $0) }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
@@ -895,12 +896,17 @@ private struct CellEditorRow: View {
                     .help("Hold this value for the selected cell")
                 Button("NULL") { model.stageEdit(nil) }
                     .help("Hold NULL for the selected cell, which is not an empty string")
+                if let title = model.deleteRowsTitle {
+                    Button(title) { model.toggleDeleteSelectedRows() }
+                        .disabled(model.isBusy)
+                        .help("Mark the selected rows to be deleted when Save is pressed")
+                }
             }
 
             Spacer()
 
             if model.hasPendingEdits {
-                Text(AppModel.pluralized(model.pendingEdits.count, "change"))
+                Text(AppModel.pluralized(model.staged.count, "change"))
                     .font(Theme.Typography.micro)
                     .foregroundStyle(Theme.warning.color)
                 Button("Revert") { model.revertEdits() }

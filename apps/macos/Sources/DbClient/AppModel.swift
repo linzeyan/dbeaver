@@ -544,7 +544,7 @@ final class AppModel {
         querySelection = nil
         isValueViewerOpen = false
         errorMessage = nil
-        pendingEdits.removeAll()
+        staged = StagedChanges()
         // The mode belonged to the connection being dropped, not to the window.
         transaction = .none
     }
@@ -866,12 +866,18 @@ final class AppModel {
 
     // MARK: - Editing the browse result
 
-    /// Cells changed and not yet sent, by where they sit in the browse result.
+    /// Changes made to the browse result and not yet sent.
     ///
     /// Held here rather than in the grid because they outlive the view and are
     /// what Save reads. Cleared whenever the result is re-read, which is the same
     /// moment the database's own answer replaces what was typed.
-    private(set) var pendingEdits: [GridCell: PendingValue] = [:]
+    private(set) var staged = StagedChanges()
+
+    /// The cells the grid should mark as changed.
+    var pendingCells: Set<GridCell> { Set(staged.updates.keys) }
+
+    /// The rows the grid should mark as going.
+    var deletedRows: Set<Int> { staged.deletes }
 
     /// Whether the selected cell can be changed at all.
     ///
@@ -903,11 +909,47 @@ final class AppModel {
         return nil
     }
 
-    var hasPendingEdits: Bool { !pendingEdits.isEmpty }
+    var hasPendingEdits: Bool { !staged.isEmpty }
 
     /// Whether a cell is holding a change that has not been sent.
     func isPending(row: Int, column: Int) -> Bool {
-        pendingEdits[GridCell(row: row, column: column)] != nil
+        staged.updates[GridCell(row: row, column: column)] != nil
+    }
+
+    /// What the button that marks rows for deletion should say, or nil where
+    /// there is no row to mark.
+    ///
+    /// It says both what pressing it does and what state the selection is in: a
+    /// marked row is undone by the same button, and a control that read "Delete"
+    /// over a row already crossed out would be offering to do it twice.
+    var deleteRowsTitle: String? {
+        guard canEditCell, let rows = selectedRows else { return nil }
+        let marked = rows.allSatisfy { staged.deletes.contains($0) }
+        let noun = rows.count > 1 ? "\(Self.formatted(rows.count)) Rows" : "Row"
+        return marked ? "Keep \(noun)" : "Delete \(noun)"
+    }
+
+    /// Marks the selected rows for deletion, or unmarks them if they are already
+    /// marked.
+    ///
+    /// Marked rather than deleted: nothing has been sent, and the row stays on
+    /// screen crossed out until Save or Revert says which way it goes. That is
+    /// the same bargain the cell editor makes, and for the same reason — a
+    /// person deleting rows from a grid picks several and then decides.
+    func toggleDeleteSelectedRows() {
+        guard canEditCell, let rows = selectedRows else { return }
+        if rows.allSatisfy({ staged.deletes.contains($0) }) {
+            staged.deletes.subtract(rows)
+        } else {
+            staged.deletes.formUnion(rows)
+        }
+    }
+
+    /// The browse rows the selection covers, bounds-checked against the result.
+    private var selectedRows: ClosedRange<Int>? {
+        guard let s = browseResult.selection, s.rows.upperBound < browseResult.table.rowCount
+        else { return nil }
+        return s.rows
     }
 
     /// Records a change to the selected cell. `nil` is NULL.
@@ -926,16 +968,16 @@ final class AppModel {
             grid.isNull(row: s.row, column: s.column)
             ? nil : grid.text(row: s.row, column: s.column)
         if before == value {
-            pendingEdits.removeValue(forKey: cell)
+            staged.updates.removeValue(forKey: cell)
         } else {
-            pendingEdits[cell] = PendingValue(text: value)
+            staged.updates[cell] = PendingValue(text: value)
         }
     }
 
     /// Throws the pending changes away. The rows on screen are already the
     /// database's, so nothing has to be re-read to undo them.
     func revertEdits() {
-        pendingEdits.removeAll()
+        staged = StagedChanges()
     }
 
     /// Sends the pending changes and re-reads the rows they touched.
@@ -961,7 +1003,7 @@ final class AppModel {
             }
             return statements.count
         } then: { [self] count in
-            pendingEdits.removeAll()
+            staged = StagedChanges()
             isBusy = false
             status = Self.pluralized(count, "statement") + " sent"
             // Whatever the transaction is doing now, a write is what moved it.
@@ -972,38 +1014,15 @@ final class AppModel {
 
     /// The pending changes as one request, or nil where a row cannot be named.
     ///
-    /// The key values come out of the grid rather than out of the edit: they are
-    /// what the database said when the row was read, which is what identifies it.
-    /// A key column the result does not carry cannot happen through a browse —
-    /// it is `SELECT *` — and is refused here rather than sent as a shorter key
-    /// that would name more rows than one.
+    /// The rules are `StagedChanges`'s, so that they can be checked without a
+    /// database; what this supplies is the two things only a connected window
+    /// knows — which relation is being browsed, and which of its columns the
+    /// catalogue says identify a row.
     private func editRequest(for relation: RelationInfo) -> EditRequest? {
-        let grid = browseResult.table
-        let keyColumns = columns.filter(\.isPrimaryKey)
-        guard !keyColumns.isEmpty else { return nil }
-        var request = EditRequest(schema: relation.schema, relation: relation.name)
-        // Grouped by row, so one row with three changed cells is one UPDATE.
-        let byRow = Dictionary(grouping: pendingEdits.keys, by: \.row)
-        for (row, cells) in byRow.sorted(by: { $0.key < $1.key }) {
-            var key: [EditRequest.Cell] = []
-            for column in keyColumns {
-                guard let at = grid.columns.firstIndex(where: { $0.name == column.name }) else {
-                    return nil
-                }
-                key.append(
-                    EditRequest.Cell(
-                        column: column.name,
-                        value: grid.isNull(row: row, column: at)
-                            ? nil : grid.text(row: row, column: at)))
-            }
-            let set = cells.sorted(by: { $0.column < $1.column }).map { cell in
-                EditRequest.Cell(
-                    column: grid.columns[cell.column].name,
-                    value: pendingEdits[cell]?.text)
-            }
-            request.updates.append(EditRequest.Update(key: key, set: set))
-        }
-        return request
+        staged.request(
+            schema: relation.schema, relation: relation.name,
+            keyColumns: columns.filter(\.isPrimaryKey).map(\.name),
+            rows: browseResult.table)
     }
 
     /// Which rendering a cell gets, from the two type sources this has.
@@ -1245,7 +1264,7 @@ final class AppModel {
         // being replaced is the moment it stops meaning anything. Dropped here
         // rather than warned about: every path into this one is either the user
         // asking for the rows again or the rows already having been written.
-        pendingEdits.removeAll()
+        staged = StagedChanges()
         // The old cursor goes before the new one opens. Two cursors would mean
         // two connections and two open transactions for one pane showing one
         // result, and the second would outlive every reference to it.

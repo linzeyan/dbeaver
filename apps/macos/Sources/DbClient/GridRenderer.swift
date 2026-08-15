@@ -100,6 +100,10 @@ final class GridRenderer {
     /// Cells changed and not yet sent, marked so the change is visible from
     /// across the grid rather than only in the field that made it.
     var pending: Set<GridCell> = []
+    /// Rows marked to be deleted when the changes are sent, tinted whole: the
+    /// change is to the row rather than to anything in it, so there is no cell
+    /// for the pending mark to sit on.
+    var deleted: Set<Int> = []
     /// Whether the grid holds keyboard focus. Drawn as an inset border: the
     /// selection alone does not say which surface the arrow keys will move.
     var isFocused = false
@@ -570,6 +574,17 @@ final class GridRenderer {
             let y = rowY(i)
             guard y + rowHeight > headerHeight, y < viewH else { continue }
             fill(x: 0, y: y, w: viewW, h: rowHeight, color: Theme.Grid.banding.simd)
+        }
+
+        // Rows on their way out, under the selection: the row somebody just
+        // marked is the row they are standing on, and a selection band that hid
+        // the mark would make the button they pressed look like it did nothing.
+        if !deleted.isEmpty {
+            for (i, r) in rows.enumerated() where deleted.contains(r) {
+                let y = rowY(i)
+                guard y + rowHeight > headerHeight, y < viewH else { continue }
+                fill(x: 0, y: y, w: viewW, h: rowHeight, color: Theme.Grid.deletedRow.simd)
+            }
         }
 
         // Selection, between the banding and the separators so that the band

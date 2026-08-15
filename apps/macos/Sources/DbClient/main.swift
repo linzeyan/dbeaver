@@ -57,10 +57,10 @@ let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 /// session, which is the one state a capture cannot otherwise reach.
 let reconnectTo = argument("--reconnect")
 
-// `--verify-splitter`, `--verify-connection`, `--verify-completion` and
-// `--verify-transaction` run the checks for the pieces of pure logic in the
-// front-end and exit with their verdict. None needs a window or a database, so
-// they run before either exists.
+// `--verify-splitter`, `--verify-connection`, `--verify-completion`,
+// `--verify-transaction` and `--verify-editing` run the checks for the pieces of
+// pure logic in the front-end and exit with their verdict. None needs a window
+// or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
@@ -72,6 +72,9 @@ if CommandLine.arguments.contains("--verify-completion") {
 }
 if CommandLine.arguments.contains("--verify-transaction") {
     exit(TransactionChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-editing") {
+    exit(EditingChecks.run() ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -185,8 +188,11 @@ if CommandLine.arguments.contains("--edit") {
         }
         _ = try ran("DROP TABLE IF EXISTS edit_probe")
         _ = try ran("CREATE TABLE edit_probe (id int PRIMARY KEY, label text, qty numeric(9,2))")
-        _ = try ran("INSERT INTO edit_probe VALUES (1, 'before', 1.00)")
+        _ = try ran("INSERT INTO edit_probe VALUES (1, 'before', 1.00), (2, 'doomed', 2.00)")
 
+        // One request with both arms, because that is what one press of Save
+        // sends: a change and a deletion staged together cross as one document,
+        // and a field only the second arm carries would go missing there.
         let request = EditRequest(
             schema: "public", relation: "edit_probe",
             updates: [
@@ -196,16 +202,19 @@ if CommandLine.arguments.contains("--edit") {
                         EditRequest.Cell(column: "label", value: "after"),
                         EditRequest.Cell(column: "qty", value: "3.25")
                     ])
-            ])
+            ],
+            deletes: [EditRequest.Delete(key: [EditRequest.Cell(column: "id", value: "2")])])
         let statements = try db.editStatements(request)
         for sql in statements { print(sql) }
         for sql in statements { _ = try ran(sql) }
         // Read back rather than trusted: a statement that ran is not the same
         // claim as a row that holds what was typed.
         let kept = try ran("SELECT id FROM edit_probe WHERE label = 'after' AND qty = 3.25")
+        let gone = try ran("SELECT id FROM edit_probe WHERE id = 2")
         print("rows matching the edit: \(kept)")
+        print("rows left of the deleted one: \(gone)")
         _ = try ran("DROP TABLE edit_probe")
-        exit(kept == 1 ? 0 : 1)
+        exit(kept == 1 && gone == 0 ? 0 : 1)
     } catch {
         fputs("edit: \(error)\n", stderr)
         exit(1)
@@ -374,6 +383,17 @@ let initialSection = argument("--section").flatMap { requested in
 /// the viewer, a screenshot of the viewer, cannot be taken.
 let initialCell = argument("--cell")
 
+/// `--delete-row 2` marks that 1-based row of the browse to be deleted, and
+/// `--delete-row 2-4` marks a span of them. Nothing is sent: the rows are left
+/// crossed out with Save waiting, which is the state this exists to photograph.
+///
+/// Exists for the reason `--cell` does. The rows are marked by selecting them
+/// and pressing a button, and a capture can do neither — synthetic events need
+/// accessibility permission this environment does not grant. Without it the one
+/// thing that catches a mark drawn in the wrong place, or in a colour that
+/// disappears under the selection band, is a screenshot of a marked row.
+let deleteRowSpec = argument("--delete-row")
+
 /// `--history-store dev.dbclient.capture` keeps the query history in a named
 /// defaults suite, emptied at launch, instead of the user's own.
 ///
@@ -516,6 +536,54 @@ func openValueViewer(model: AppModel, on spec: String) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
         }
+    }
+    poll()
+}
+
+/// Drives `--delete-row`. Polls for the reason `openValueViewer` does: the rows
+/// arrive through the model's own background pipeline and there is no completion
+/// hook to hang this on.
+///
+/// Like that one it does not exit — the window has to stay up for the shutter —
+/// so a span that names rows the result does not have has to be loud, or a
+/// capture of an unmarked grid would read as the mark failing to draw.
+@MainActor
+func markRowsForDeletion(model: AppModel, spec: String) {
+    let ends = spec.split(separator: "-", maxSplits: 1).compactMap { Int($0) }
+    guard let first = ends.first, first >= 1 else {
+        fputs("--delete-row counts from 1, and takes 2 or 2-4\n", stderr)
+        exit(1)
+    }
+    let last = ends.count > 1 ? ends[1] : first
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+
+    func poll() {
+        let result = model.browseResult
+        guard result.hasRun, !result.isLoading, !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("delete probe timed out waiting for the rows\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        guard last <= result.rowCount else {
+            fputs(
+                "--delete-row \(spec) names rows this result does not have "
+                    + "(\(result.rowCount) fetched)\n", stderr)
+            exit(1)
+        }
+        // Selected the way a user selects a span — cursor at one end, anchor at
+        // the other — because that is what the command reads.
+        result.selection = GridSelection(row: last - 1, column: 0, anchor: first - 1)
+        model.toggleDeleteSelectedRows()
+        guard model.hasPendingEdits else {
+            fputs("the rows were selected and the mark did not take\n", stderr)
+            exit(1)
+        }
+        fputs("rows marked     \(first)…\(last) · \(model.deleteRowsTitle ?? "(no button)")\n", stderr)
     }
     poll()
 }
@@ -1191,6 +1259,7 @@ if benchMode {
         }
 
         if let initialCell { openValueViewer(model: model, on: initialCell) }
+        if let deleteRowSpec { markRowsForDeletion(model: model, spec: deleteRowSpec) }
         if let reconnectTo { reconnectWhenReady(model: model, to: reconnectTo) }
         if let stopAfter { stopWhenRunning(model: model, after: stopAfter) }
         if let loadMorePages { loadMoreWhenReady(model: model, pages: loadMorePages) }

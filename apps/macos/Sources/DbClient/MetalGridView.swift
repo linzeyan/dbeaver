@@ -62,6 +62,9 @@ struct MetalGridView: NSViewRepresentable {
     /// `declaredTypes` is: this view draws whatever it is handed and knows
     /// nothing about connections.
     var pending: Set<GridCell> = []
+    /// Rows marked to be deleted when the changes are sent. Empty for the Query
+    /// pane, for the reason `pending` is.
+    var deleted: Set<Int> = []
     /// Called with a column index when its header is clicked. Nil means this
     /// grid does not sort — the Query pane shows the result of a statement the
     /// user wrote, and appending an ORDER BY to arbitrary SQL is not something
@@ -118,6 +121,7 @@ struct MetalGridView: NSViewRepresentable {
         view.sortsOnHeaderClick = onSortColumn != nil
         renderer.sort = sort
         renderer.pending = pending
+        renderer.deleted = deleted
 
         if context.coordinator.lastGeneration != generation {
             context.coordinator.lastGeneration = generation
