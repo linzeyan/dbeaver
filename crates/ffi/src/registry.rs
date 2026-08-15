@@ -14,6 +14,7 @@
 use dbconn::{DbError, Driver};
 use driver_cassandra::CassandraSource;
 use driver_clickhouse::ChSource;
+use driver_databricks::DatabricksSource;
 use driver_duckdb::DuckSource;
 use driver_flightsql::FlightSqlSource;
 use driver_mongodb::MongoSource;
@@ -148,6 +149,14 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::Server,
         default_port: Some(443),
     },
+    // 443 again, and for the same reason: a workspace is an HTTPS host and the
+    // warehouse is named by a query parameter rather than by a port.
+    Catalogued {
+        scheme: "databricks",
+        label: "Databricks",
+        shape: Shape::Server,
+        default_port: Some(443),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -253,6 +262,14 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // path, `token=` for an OAuth access token.
         "snowflake" => Ok(Box::new(
             SnowflakeSource::connect(&format!("https://{rest}")).await?,
+        )),
+        // Rewritten to `https://` for Snowflake's reason — a workspace has no
+        // plaintext endpoint — with one difference worth stating: the path here
+        // is `catalog/schema`, and the thing that actually runs the statement is
+        // named by `warehouse_id=` in the query rather than by anything in the
+        // authority. A connection string without it is refused by the driver.
+        "databricks" => Ok(Box::new(
+            DatabricksSource::connect(&format!("https://{rest}")).await?,
         )),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",

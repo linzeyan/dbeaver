@@ -18,6 +18,7 @@ dbedit = { path = "../edit" }
 dbsql = { path = "../sql" }
 driver-cassandra = { path = "../drivers/cassandra" }
 driver-clickhouse = { path = "../drivers/clickhouse" }
+driver-databricks = { path = "../drivers/databricks" }
 driver-duckdb = { path = "../drivers/duckdb" }
 driver-flightsql = { path = "../drivers/flightsql" }
 driver-mongodb = { path = "../drivers/mongodb" }

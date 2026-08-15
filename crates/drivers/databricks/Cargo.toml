@@ -1,0 +1,51 @@
+[package]
+name = "driver-databricks"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+arrow.workspace = true
+dbconn = { path = "../../conn" }
+# For the one dialect this driver writes statements in. Databricks has no row of
+# its own in `dbsql`; `driver.rs` says which it borrows and why.
+dbsql = { path = "../../sql" }
+async-trait.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+# hyper for the reason the Trino and Snowflake drivers give, plus TLS, which is
+# not optional: a workspace is reached at `https://…cloud.databricks.com` and the
+# result chunks are fetched from presigned cloud-storage URLs that are HTTPS too.
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+# `ring` and not `aws-lc-rs`, the choice the ClickHouse driver argued: aws-lc-rs
+# wants cmake and a C toolchain at build time. The provider is named explicitly
+# rather than left to `ClientConfig::builder`'s default, which panics when the
+# workspace has enabled both or neither.
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "tls12",
+    "ring",
+    "webpki-roots",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+http-body-util = "0.1"
+# The IPC bodies arrive as `Bytes` and are handed to `Buffer::from` unchanged;
+# naming the crate is what makes that conversion the free one. This is the whole
+# reason this driver exists in this phase.
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The one thing encoded here: `Authorization: Basic` for the OAuth token
+# request, which is a client id and a secret joined by a colon.
+base64 = "0.22"
+url = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
