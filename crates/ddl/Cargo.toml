@@ -18,8 +18,15 @@ async-trait.workspace = true
 # reaches one. Only the tests need it: nothing in the crate knows or cares which
 # driver produced the metadata it is handed.
 driver-clickhouse = { path = "../drivers/clickhouse" }
+driver-mysql = { path = "../drivers/mysql" }
 driver-postgres = { path = "../drivers/postgres" }
 driver-sqlite = { path = "../drivers/sqlite" }
+# MySQL's live fixture is seeded through the client library rather than through
+# the driver, for the reason the driver's own tests give: a fixture built by the
+# code under test proves nothing about it.
+mysql_async = { version = "0.37", default-features = false, features = [
+    "default-rustls-ring",
+] }
 tokio = { workspace = true, features = ["full"] }
 # SQLite needs no server, so its fixture is a file in a temporary directory and
 # its live tests run under plain `cargo test`. Built with the library directly,

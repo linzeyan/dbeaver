@@ -29,6 +29,7 @@
 //! honest answer to that is a refusal rather than a guess.
 
 mod clickhouse;
+mod mysql;
 mod postgres;
 mod sqlite;
 
@@ -85,6 +86,7 @@ pub fn for_dialect(dialect: &'static Dialect) -> Option<&'static dyn Renderer> {
 const RENDERERS: &[(&Dialect, &dyn Renderer)] = &[
     (&dbsql::POSTGRES, &postgres::POSTGRES),
     (&dbsql::SQLITE, &sqlite::SQLITE),
+    (&dbsql::MYSQL, &mysql::MYSQL),
     (&dbsql::CLICKHOUSE, &clickhouse::CLICKHOUSE),
 ];
 
