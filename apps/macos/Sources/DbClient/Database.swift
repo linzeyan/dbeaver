@@ -322,6 +322,23 @@ final class Database: @unchecked Sendable {
         return Cursor(handle: c)
     }
 
+    /// Reads `url` into `table`, and answers how many rows arrived.
+    ///
+    /// On the connection rather than on a `Cursor`, because there is no result
+    /// to read from: the rows are coming the other way. The core reads a batch,
+    /// sends it and drops it, so the size of the file is the disk's problem.
+    ///
+    /// The table has to exist. Nothing infers a type from the file — the columns
+    /// being read into already have types, and the core asks this connection for
+    /// them before it parses a line.
+    ///
+    /// Blocks for the length of the import.
+    func importFile(from url: URL, format: ExportFormat, table: String) throws -> Int64 {
+        var err: UnsafeMutablePointer<CChar>?
+        let rows = db_import(handle, format.wireName, url.path, table, &err)
+        return try Cursor.written(rows, &err, or: "import failed")
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }
@@ -415,12 +432,13 @@ final class Cursor: @unchecked Sendable {
         return try Cursor.written(rows, &err)
     }
 
-    private static func written(
-        _ rows: Int64, _ err: inout UnsafeMutablePointer<CChar>?
+    static func written(
+        _ rows: Int64, _ err: inout UnsafeMutablePointer<CChar>?,
+        or fallback: String = "export failed"
     ) throws -> Int64 {
         guard rows >= 0 else {
             throw DbError(
-                description: Database.take(&err) ?? "export failed",
+                description: Database.take(&err) ?? fallback,
                 cancelled: rows == -2)
         }
         return rows

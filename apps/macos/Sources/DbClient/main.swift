@@ -59,9 +59,9 @@ let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
 // `--verify-transaction`, `--verify-editing`, `--verify-metadata`,
-// `--verify-schema-metadata` and `--verify-preferences` run the checks for the
-// pieces of pure logic in the front-end and exit with their verdict. None needs
-// a window or a database, so they run before either exists.
+// `--verify-schema-metadata`, `--verify-import` and `--verify-preferences` run
+// the checks for the pieces of pure logic in the front-end and exit with their
+// verdict. None needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
@@ -82,6 +82,9 @@ if CommandLine.arguments.contains("--verify-metadata") {
 }
 if CommandLine.arguments.contains("--verify-schema-metadata") {
     exit(SchemaMetadataChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-import") {
+    exit(ImportChecks.run() ? 0 : 1)
 }
 // The only one of these that has to state its isolation. `Preferences` is
 // main-actor isolated because the window reads it, and top-level code runs on
@@ -519,6 +522,10 @@ let historyPick = argument("--history-pick").flatMap(Int.init)
 /// a file. The format follows the extension.
 let exportPath = argument("--export")
 
+/// `--import <file>` reads a file into the relation `--relation` opened, then
+/// exits. The format follows the extension, as it does through the menu.
+let importPath = argument("--import")
+
 /// `--refresh-after 4` reloads the navigator that many seconds in, printing its
 /// contents before and after, then exits.
 ///
@@ -569,6 +576,48 @@ func exportWhenReady(model: AppModel, to path: String) {
             fputs("export name     \(model.exportFilename(format, scope: scope))\n", stderr)
             fputs("export message  \(model.exportMessage)\n", stderr)
             model.exportCurrentResult(to: url, format: format, scope: scope)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// Drives `--import` once the opened relation has landed, then exits.
+///
+/// Exists for the reason `--export` does: the import is otherwise reachable only
+/// through an open panel, and a script cannot click one. Without it there is no
+/// way to check that what the panel would have started actually reaches the
+/// table — the layer between the menu and `db_import` is the one part of this
+/// path no Rust test can see.
+@MainActor
+func importWhenReady(model: AppModel, from path: String) {
+    let url = URL(fileURLWithPath: path)
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var started = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("import failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("import timed out waiting for a table\n", stderr)
+            exit(1)
+        }
+        if started {
+            // `isImporting` and not `isBusy`: the refresh that follows a
+            // successful import sets `isBusy` itself, so waiting on that would
+            // report whatever sentence the reload had reached.
+            if !model.isImporting {
+                fputs("import result   \(model.importStatus)\n", stderr)
+                exit(0)
+            }
+        } else if let table = model.importTableName {
+            started = true
+            fputs("import table    \(table)\n", stderr)
+            model.importFile(from: url)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -1674,6 +1723,7 @@ if benchMode {
         }
         if preferencesProbe { probePreferences(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
+        if let importPath { importWhenReady(model: model, from: importPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
 }

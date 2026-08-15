@@ -51,6 +51,22 @@ enum ExportFormat: String, CaseIterable {
         guard let match = Self(rawValue: pathExtension.lowercased()) else { return nil }
         self = match
     }
+
+    /// Whether a file of this format can be read back into a table.
+    ///
+    /// Four of the five. A `.sql` file is a script, and what a script wants is
+    /// to be run — which this application already does, in an editor that shows
+    /// the statements first. Reading one as data would be a worse version of
+    /// something that is already here.
+    var canImport: Bool { self != .sql }
+
+    /// The format a file to import is in, or nil if nothing reads it.
+    init?(importPathExtension: String) {
+        guard let match = Self(pathExtension: importPathExtension), match.canImport else {
+            return nil
+        }
+        self = match
+    }
 }
 
 /// How much of a result to write.

@@ -273,6 +273,12 @@ final class AppModel {
     /// one with "Running…" and never puts it back — the export would end up
     /// described by a sentence about something else.
     private(set) var exportStatus = ""
+    /// Set while a file is being read into a table, for the reason above and one
+    /// more: an import ends by refreshing the table it wrote to, and the refresh
+    /// puts its own sentence in `status` immediately. Without a flag of its own,
+    /// "1,000 rows read into orders" is overwritten before it is legible.
+    private(set) var isImporting = false
+    private(set) var importStatus = ""
     var errorMessage: String?
 
     /// What the connection's transaction is doing, as of the last thing that
@@ -1721,6 +1727,7 @@ final class AppModel {
         // doing so the moment it finishes: nothing has to remember to clear it,
         // and no stale "Exported…" can outlive the thing it described.
         if isExporting { return exportStatus }
+        if isImporting { return importStatus }
         switch activeTab {
         case .structure:
             guard !columns.isEmpty else { return status }
@@ -2210,6 +2217,60 @@ final class AppModel {
         exportCursor?.cancel()
     }
 
+    // MARK: - Import
+
+    /// Whether a file has a table to go into.
+    ///
+    /// Rows go into a relation, and the Query tab is not showing one — a result
+    /// is not a table, however much it looks like one on screen.
+    var canImport: Bool {
+        activeTab != .query && selected != nil && !isBusy && !isExporting && !isImporting
+    }
+
+    /// The table a file is read into.
+    ///
+    /// Nil rather than a placeholder, which is where this parts company with
+    /// `exportTableName` above. A placeholder in a file name is a bad name; a
+    /// placeholder here is rows written into a table nobody chose.
+    var importTableName: String? {
+        guard canImport, let selected else { return nil }
+        guard !selected.schema.isEmpty else { return selected.name }
+        return "\(selected.schema).\(selected.name)"
+    }
+
+    /// Reads `url` into the relation being browsed.
+    ///
+    /// The format comes from the extension rather than from a menu, because the
+    /// file already says what it is and a picker would only offer a way to
+    /// disagree with it.
+    func importFile(from url: URL) {
+        guard let table = importTableName else { return }
+        guard let format = ExportFormat(importPathExtension: url.pathExtension) else {
+            let named =
+                url.pathExtension.isEmpty ? "a file with no extension" : ".\(url.pathExtension)"
+            errorMessage =
+                "Nothing here reads \(named). Import reads CSV, TSV, JSON Lines and Parquet."
+            return
+        }
+        isImporting = true
+        importStatus = "Reading \(url.lastPathComponent) into \(table)…"
+        // A new import supersedes the previous failure, as a new query does.
+        errorMessage = nil
+        run { db -> Int64 in
+            try db.importFile(from: url, format: format, table: table)
+        } then: { [self] rows in
+            isImporting = false
+            // Left in `importStatus` and not in `status`, because `refresh` sets
+            // `status` on the next line and the count would be gone before it
+            // could be read. What tells the user the rows arrived is the table
+            // itself reloading under them, which is better evidence anyway.
+            importStatus = "\(Self.pluralized(Int(rows), "row")) read into \(table)"
+            // The grid is showing the table as it was a moment ago. Nothing else
+            // will notice the rows arrived, because nothing else knows they did.
+            refresh()
+        }
+    }
+
     // MARK: - Query execution
 
     private func browseSummary(
@@ -2373,6 +2434,7 @@ final class AppModel {
         let message = String(describing: statement?.error ?? error)
         isBusy = false
         isExporting = false
+        isImporting = false
         // The core queue is serial, so at most one of these was running; clearing
         // both saves threading the target through the generic dispatch helper.
         browseResult.abandonLoading()
