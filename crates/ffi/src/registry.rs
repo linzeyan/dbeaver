@@ -12,6 +12,7 @@
 //! discover its own drivers at startup.
 
 use dbconn::{DbError, Driver};
+use driver_bigquery::BigQuerySource;
 use driver_cassandra::CassandraSource;
 use driver_clickhouse::ChSource;
 use driver_duckdb::DuckSource;
@@ -137,6 +138,28 @@ pub const CATALOG: &[Catalogued] = &[
         shape: Shape::Server,
         default_port: Some(31337),
     },
+    // The first cloud database in this table, and the entry it fits worst.
+    //
+    // `Shape` has `Server` and `File`, and BigQuery is neither. There is no host
+    // to name — the endpoints are global — so the field the form calls Host holds
+    // a project id, which is stated in `BigQuerySource::connect` and is the one
+    // place a two-shape connection form does not reach a cloud service. The port
+    // is 443 because that is what the endpoint listens on, and it is offered so
+    // the form has something true to put in the box; the driver never reads it,
+    // because it has nowhere else to go.
+    //
+    // The credential does not fit either, and that is worth writing down rather
+    // than leaving to be discovered: it is a *file*, named by `?credentials=`,
+    // and the form has no box for a file. A third `Shape` is what that asks for,
+    // and it is not added here, because it is a change to the connection form and
+    // to the Swift that reads this table — and this driver has not yet been run
+    // against anything.
+    Catalogued {
+        scheme: "bigquery",
+        label: "BigQuery",
+        shape: Shape::Server,
+        default_port: Some(443),
+    },
 ];
 
 /// The schemes this build answers to, for the message a wrong one gets.
@@ -234,6 +257,12 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
         // is restricted to rather than a database to open — Flight SQL has no way
         // to switch to another, so it is a filter and not a target.
         "flightsql" => Ok(Box::new(FlightSqlSource::connect(url).await?)),
+        // Passed on whole, and the first driver here whose rest is not a host:
+        // `bigquery://<project>/<dataset>` names a project and a dataset, and the
+        // credential is a query parameter rather than a password because it is a
+        // file on disk. No server has answered this driver — its crate comment
+        // says so in the first sentence.
+        "bigquery" => Ok(Box::new(BigQuerySource::connect(url).await?)),
         other => Err(DbError::new(format!(
             "no driver for {other}://. This build has: {}",
             known()
