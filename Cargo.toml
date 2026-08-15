@@ -10,6 +10,7 @@ members = [
     "crates/drivers/mssql",
     "crates/drivers/mysql",
     "crates/drivers/postgres",
+    "crates/drivers/redis",
     "crates/drivers/sqlite",
     "crates/edit",
     "crates/ffi",
