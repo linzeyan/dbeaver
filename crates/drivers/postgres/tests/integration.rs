@@ -11,7 +11,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::{ConstraintKind, RelationKind};
+use dbconn::{ConstraintKind, RelationKind, TxStep};
 use driver_postgres::{PgError, PgSource};
 use std::sync::Arc;
 
@@ -1306,4 +1306,69 @@ async fn a_running_statement_stops_when_asked_and_says_that_is_why() {
     // front end labels real faults as something the user did on purpose.
     let ordinary = error_from(&src, "SELECT 1/0").await;
     assert!(!ordinary.is_cancelled(), "got: {ordinary}");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn two_sessions_do_not_see_each_others_uncommitted_work() {
+    // Transaction isolation is the property a transaction is FOR, and nothing in
+    // this repository demonstrates it. Every existing transaction test drives one
+    // session and infers the rest. This test opens two separate connections —
+    // two windows on the same database — and proves that a transaction on one
+    // does not leak to the other until it commits.
+    let src_a = connect().await;
+    let src_b = connect().await;
+
+    run(&src_a, "DROP SCHEMA IF EXISTS isolation_test CASCADE").await;
+    run(&src_a, "CREATE SCHEMA isolation_test").await;
+    run(&src_a, "CREATE TABLE isolation_test.t (id int, val text)").await;
+
+    // Session A: begin a transaction, insert a row, but do not commit.
+    src_a
+        .transaction(&TxStep::Begin)
+        .await
+        .expect("BEGIN on session A");
+    run(&src_a, "INSERT INTO isolation_test.t VALUES (42, 'secret')").await;
+
+    // Session B: the row must not be visible yet.
+    let mut stream_b = src_b
+        .query("SELECT count(*) FROM isolation_test.t", 8192)
+        .await
+        .expect("query on session B");
+    let batch = stream_b
+        .next_batch()
+        .await
+        .expect("batch error on session B")
+        .expect("expected a batch on session B");
+    let count = col::<Int64Array>(&batch, "count");
+    assert_eq!(
+        count.value(0),
+        0,
+        "session B must not see session A's uncommitted insert"
+    );
+
+    // Session A: commit the transaction.
+    src_a
+        .transaction(&TxStep::Commit)
+        .await
+        .expect("COMMIT on session A");
+
+    // Session B: now the row must be visible.
+    let mut stream_b2 = src_b
+        .query("SELECT count(*) FROM isolation_test.t", 8192)
+        .await
+        .expect("query on session B after commit");
+    let batch2 = stream_b2
+        .next_batch()
+        .await
+        .expect("batch error on session B after commit")
+        .expect("expected a batch on session B after commit");
+    let count2 = col::<Int64Array>(&batch2, "count");
+    assert_eq!(
+        count2.value(0),
+        1,
+        "session B must see session A's committed insert"
+    );
+
+    run(&src_a, "DROP SCHEMA isolation_test CASCADE").await;
 }
