@@ -856,6 +856,14 @@ impl ArrowStream {
 mod tests {
     use super::*;
 
+    const CONN: &str = "host=127.0.0.1 port=55432 user=bench password=bench dbname=bench";
+
+    async fn connect() -> PgSource {
+        PgSource::connect(CONN)
+            .await
+            .expect("benchmark database unreachable; run `make db-seed`")
+    }
+
     /// Needs no database — it needs the absence of one, which is why it can run
     /// in the unit suite. Port 1 is reserved and nothing on a developer machine
     /// or a CI runner listens there.
@@ -876,6 +884,62 @@ mod tests {
         assert!(
             message.to_lowercase().contains("refused"),
             "expected the refusal to survive into the message, got: {message}"
+        );
+    }
+
+    /// A cancelled pooled connection is discarded, not returned.
+    ///
+    /// `PgSource::cancel` sends a cancel request to every busy connection, and
+    /// a connection that was cancelled while checked out must be dropped rather
+    /// than handed to the next caller — otherwise a late-arriving cancel signal
+    /// lands on somebody else's statement. The code does this by comparing a
+    /// cancellation counter taken at checkout with the counter at drop (see
+    /// `cancellations_at_checkout` and the `Drop` impl). Nothing proves it.
+    #[tokio::test]
+    #[ignore = "requires the benchmark database"]
+    async fn a_cancelled_pooled_connection_is_discarded_not_returned() {
+        let src = connect().await;
+
+        // Control: acquire a connection, drop it without cancelling. The pool
+        // must gain it back.
+        let guard_control = src.acquire_connection().await.expect("acquire");
+        let pool_before = src.pool.lock().await.len();
+        drop(guard_control);
+        // Drop returns the connection on a spawned task, so we need to wait
+        // for it to land. Bounded retry rather than a blind sleep.
+        let mut found = false;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let pool_after = src.pool.lock().await.len();
+            if pool_after > pool_before {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "pool should have gained the connection back after normal drop"
+        );
+
+        // Now the real test: acquire, cancel, drop. The pool must NOT gain it
+        // back because the Drop impl sees the counter changed and drops the
+        // connection instead.
+        let guard_cancel = src.acquire_connection().await.expect("acquire");
+        let pool_before_cancel = src.pool.lock().await.len();
+        src.cancel().await.expect("cancel");
+        drop(guard_cancel);
+        let mut not_found = true;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let pool_after_cancel = src.pool.lock().await.len();
+            if pool_after_cancel > pool_before_cancel {
+                not_found = false;
+                break;
+            }
+        }
+        assert!(
+            not_found,
+            "pool must not have gained the cancelled connection back"
         );
     }
 }
