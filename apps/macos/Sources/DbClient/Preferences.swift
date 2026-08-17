@@ -76,12 +76,26 @@ final class Preferences {
         didSet { store.set(usesTranslucentSidebar, forKey: Key.usesTranslucentSidebar) }
     }
 
+    /// Where the connection this window remembers is kept.
+    ///
+    /// On this Mac. The fields are already local and the password is already in
+    /// the login Keychain, so this is the setting that does not move anything;
+    /// the other one puts a database password into the user's iCloud Keychain,
+    /// which is a decision about their credentials rather than about their
+    /// convenience and is not one to make on their behalf. See
+    /// `ConnectionStorage`, and `ConnectionKeychain.iCloudRefusal` for what a
+    /// build that cannot sync does instead.
+    var connectionStorage: ConnectionStorage {
+        didSet { store.set(connectionStorage.rawValue, forKey: Key.connectionStorage) }
+    }
+
     /// What a fresh installation does. The only statement of these values.
     private static let registered: [String: Any] = [
         Key.hidesEmptyColumns: false,
         Key.confirmsDeletions: true,
         Key.insertsRowOfDefaults: false,
-        Key.usesTranslucentSidebar: false
+        Key.usesTranslucentSidebar: false,
+        Key.connectionStorage: ConnectionStorage.thisMac.rawValue
     ]
 
     private enum Key {
@@ -89,6 +103,22 @@ final class Preferences {
         static let confirmsDeletions = "dev.dbclient.confirmsDeletions"
         static let insertsRowOfDefaults = "dev.dbclient.insertsRowOfDefaults"
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
+        static let connectionStorage = "dev.dbclient.connectionStorage"
+    }
+
+    /// Where the remembered connection is kept, read straight out of a store.
+    ///
+    /// For a caller with no window and therefore no `Preferences` to ask:
+    /// `--bench` looks up the remembered connection before anything is on the
+    /// main actor, which is why this is `nonisolated` — reading one default is
+    /// not window state. An unset or unrecognised value is the local one, which
+    /// is also what `registered` says, so a plist edited by hand or written by a
+    /// later version offering a third place reads back as this Mac rather than
+    /// as a crash.
+    nonisolated static func connectionStorage(in store: UserDefaults = .standard)
+        -> ConnectionStorage
+    {
+        ConnectionStorage(rawValue: store.string(forKey: Key.connectionStorage) ?? "") ?? .thisMac
     }
 
     @ObservationIgnored private let store: UserDefaults
@@ -104,5 +134,6 @@ final class Preferences {
         confirmsDeletions = store.bool(forKey: Key.confirmsDeletions)
         insertsRowOfDefaults = store.bool(forKey: Key.insertsRowOfDefaults)
         usesTranslucentSidebar = store.bool(forKey: Key.usesTranslucentSidebar)
+        connectionStorage = Self.connectionStorage(in: store)
     }
 }

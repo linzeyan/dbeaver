@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 
 /// Executable checks for the settings, run by `--verify-preferences`.
 ///
@@ -28,6 +30,9 @@ enum PreferencesChecks {
         failures = 0
         checkTheDefaultsAreTheOnesThatWereDecided()
         checkASettingSurvivesBeingWrittenAndReadBack()
+        checkAConnectionKeptOnThisMacComesBack()
+        checkAConnectionSurvivesAnICloudThatIsNotAvailable()
+        checkTheSettingsPanelHasRoomForTheICloudCaveat()
         checkAnEmptyColumnIsOnlyHiddenWhenTheSettingSaysSo()
         checkAColumnThatFillsUpLaterComesBackWhileTheEvidenceIsOpen()
         checkAColumnStaysDecidedOnceTheEvidenceIsIn()
@@ -44,15 +49,17 @@ enum PreferencesChecks {
 
     // MARK: - The store
 
-    /// What a fresh installation does. Written out as the three sentences the
-    /// decisions were recorded as, because that is the thing being checked —
-    /// not that the store round-trips, but that it starts on the answer given.
+    /// What a fresh installation does. Written out as the sentences the decisions
+    /// were recorded as, because that is the thing being checked — not that the
+    /// store round-trips, but that it starts on the answer given.
     private static func checkTheDefaultsAreTheOnesThatWereDecided() {
         let fresh = scratch()
         expect(fresh.hidesEmptyColumns, false, "an all-null column is shown, not hidden")
         expect(fresh.confirmsDeletions, true, "Save asks before it sends deletions")
         expect(fresh.insertsRowOfDefaults, false, "an empty new row is refused here, by name")
         expect(fresh.usesTranslucentSidebar, false, "the sidebar is opaque, showing only itself")
+        expect(
+            fresh.connectionStorage, .thisMac, "the remembered connection does not leave the Mac")
     }
 
     /// A setting has to outlive the window, or the Settings window is a switch
@@ -70,6 +77,7 @@ enum PreferencesChecks {
         first.confirmsDeletions = false
         first.insertsRowOfDefaults = true
         first.usesTranslucentSidebar = true
+        first.connectionStorage = .iCloud
 
         // A second reader over the same store, which is what the next launch is.
         let second = Preferences(store: store)
@@ -77,6 +85,90 @@ enum PreferencesChecks {
         expect(second.confirmsDeletions, false, "the confirmation being off was kept")
         expect(second.insertsRowOfDefaults, true, "sending a row of defaults was kept")
         expect(second.usesTranslucentSidebar, true, "the translucent sidebar was kept")
+        expect(second.connectionStorage, .iCloud, "keeping connections in iCloud was kept")
+    }
+
+    // MARK: - Where the connection is kept
+
+    /// A connection kept on this Mac comes back field for field.
+    ///
+    /// Through a scratch suite, and with an empty password, which is what keeps
+    /// this check out of the developer's login Keychain: an empty password is
+    /// nothing to remember and `ConnectionKeychain.save` returns without writing.
+    /// The fields are the whole of what this half stores, so they are the whole
+    /// of what is asserted.
+    ///
+    /// The iCloud half is not checked here, and not because it does not matter.
+    /// Synchronised Keychain items need an entitlement that no ad-hoc signature
+    /// carries — this binary included — so a check would be asserting what this
+    /// build was signed with rather than what the code does. What is checked is
+    /// the consequence of that refusal, below.
+    private static func checkAConnectionKeptOnThisMacComesBack() {
+        let name = suiteName()
+        guard let store = UserDefaults(suiteName: name) else {
+            fail("a scratch defaults suite could be made")
+            return
+        }
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+
+        let settings = ConnectionSettings(
+            scheme: "postgres", host: "db.example", port: "5432", database: "sales", user: "ana")
+        ConnectionStore.save(settings, password: "", to: .thisMac, store: store)
+        expect(
+            ConnectionStore.load(from: .thisMac, store: store), settings,
+            "every field of the connection came back")
+    }
+
+    /// A build that cannot sync still remembers the connection.
+    ///
+    /// The one behaviour of the iCloud setting that can be checked from here, and
+    /// the one worth checking: chosen on a build macOS refuses synchronised items
+    /// to, the write falls through to this Mac rather than going nowhere. A
+    /// setting that silently forgot the connection would look identical at the
+    /// moment it was switched on and only fail at the next launch.
+    private static func checkAConnectionSurvivesAnICloudThatIsNotAvailable() {
+        guard ConnectionKeychain.iCloudRefusal() != nil else {
+            // A signed build with the entitlement: the write goes to iCloud, and
+            // asserting the fallback here would file a fixture in the user's own
+            // iCloud Keychain to prove something that is not true of them.
+            return
+        }
+        let name = suiteName()
+        guard let store = UserDefaults(suiteName: name) else {
+            fail("a scratch defaults suite could be made")
+            return
+        }
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+
+        let settings = ConnectionSettings(
+            scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana")
+        ConnectionStore.save(settings, password: "", to: .iCloud, store: store)
+        expect(
+            ConnectionStore.load(from: .thisMac, store: store), settings,
+            "a refused iCloud write left the connection on this Mac")
+    }
+
+    /// The panel is tall enough for the sentence about iCloud being unavailable.
+    ///
+    /// `SettingsWindow` measures this view once and sizes the panel to what it
+    /// measured, so anything that can appear in the view has to be in it while it
+    /// is being measured. The first version of the caveat arrived from a `.task`
+    /// and only under one of the two answers, which meant it was laid out below
+    /// the bottom edge of a window that had already been sized — a warning
+    /// nobody could read. Asserted as a height rather than by eye because the
+    /// panel is 460pt wide and the capture tool only photographs the main window.
+    private static func checkTheSettingsPanelHasRoomForTheICloudCaveat() {
+        let preferences = scratch()
+        let quiet = NSHostingView(
+            rootView: SettingsView(preferences: preferences, iCloudRefusal: nil))
+        let warned = NSHostingView(
+            rootView: SettingsView(
+                preferences: preferences,
+                iCloudRefusal: ConnectionKeychain.iCloudRefusal() ?? "Two lines of explanation "
+                    + "about why this build cannot reach the iCloud Keychain at all."))
+        expect(
+            warned.fittingSize.height > quiet.fittingSize.height, true,
+            "the caveat is inside the height the panel is sized to")
     }
 
     // MARK: - Hiding a column that is null in every row

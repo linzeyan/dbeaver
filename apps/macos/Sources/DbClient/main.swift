@@ -1634,7 +1634,11 @@ if benchMode {
     // report the number as if it meant something.
     guard
         let connString = connArgument
-            ?? ConnectionStore.remembered().map({
+            // Read straight from the defaults rather than through a
+            // `Preferences`: this path builds no window and is not on the main
+            // actor, and where the connection was remembered is a question about
+            // the user's defaults rather than about anything on screen.
+            ?? ConnectionStore.remembered(from: Preferences.connectionStorage()).map({
                 $0.settings.connectionString(password: $0.password)
             })
     else {
@@ -1725,7 +1729,9 @@ if benchMode {
         // connection replaces it, so the last branch is simply not connecting.
         if let connArgument {
             model.connect(using: connArgument)
-        } else if !forceConnectForm, let remembered = ConnectionStore.remembered() {
+        } else if !forceConnectForm,
+            let remembered = ConnectionStore.remembered(from: model.preferences.connectionStorage)
+        {
             model.connect(to: remembered.settings, password: remembered.password)
         }
 

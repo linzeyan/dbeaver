@@ -29,7 +29,12 @@ final class SettingsWindow {
         panel.title = "Settings"
         panel.isReleasedWhenClosed = false
         panel.backgroundColor = NSColor(Theme.background.color)
-        let view = NSHostingView(rootView: SettingsView(preferences: preferences))
+        // Asked here, once per window rather than once per draw: finding out
+        // whether this build may sync means writing a throwaway Keychain item,
+        // and the answer cannot change while the panel is open.
+        let view = NSHostingView(
+            rootView: SettingsView(
+                preferences: preferences, iCloudRefusal: ConnectionKeychain.iCloudRefusal()))
         // The window takes its height from the rows rather than a number written
         // here, so an explanation that wraps to a third line is not clipped.
         panel.setContentSize(view.fittingSize)
@@ -49,6 +54,15 @@ final class SettingsWindow {
 /// beside it leaves the reader to find that out by switching it on.
 struct SettingsView: View {
     @Bindable var preferences: Preferences
+    /// Why the iCloud Keychain is unavailable to this build, if it is.
+    ///
+    /// Handed in rather than asked for here, and that is about the window's
+    /// height. `SettingsWindow` measures this view once and sizes the panel to
+    /// it, so a sentence that appeared later — from a `.task`, or on selecting
+    /// the option it is about — would be a sentence drawn past the bottom edge.
+    /// Standing under both answers rather than only under iCloud, for the same
+    /// reason: it is a fact about the choice, not about the current pick.
+    let iCloudRefusal: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
@@ -85,10 +99,81 @@ struct SettingsView: View {
                     + "so full-width bands on the right — the Structure tab's section strip — "
                     + "show through the object tree as a stripe at their own height.",
                 isOn: $preferences.usesTranslucentSidebar)
+
+            SettingsChoice(
+                title: "Keep connections",
+                explanation:
+                    "The last connection that opened is remembered so the next launch does not "
+                    + "ask again. On this Mac, the fields are in this application's preferences "
+                    + "and the password is in your login Keychain. In iCloud, both are one item "
+                    + "in your iCloud Keychain, so another Mac signed in to the same Apple "
+                    + "Account opens the same database — and your database password is wherever "
+                    + "that account reaches.",
+                caveat: iCloudRefusal,
+                selection: $preferences.connectionStorage)
         }
         .padding(Theme.Space.xl)
         .frame(width: 460, alignment: .leading)
         .background(Theme.background.color)
+    }
+}
+
+/// One setting with more than two answers: its name, what each answer costs, and
+/// the radio group.
+///
+/// A radio group rather than a checkbox, because "somewhere else" is not the
+/// negation of "here" — a box labelled "Sync with iCloud" leaves the reader to
+/// infer where the connection goes when it is clear, and both answers here are
+/// places worth naming.
+///
+/// The caveat is a sentence under the control for the case where the answer
+/// chosen cannot be honoured. It is drawn in the warning tone and only when there
+/// is one: a control that quietly does something other than what it says is the
+/// failure this exists to prevent.
+private struct SettingsChoice: View {
+    let title: String
+    let explanation: String
+    let caveat: String?
+    @Binding var selection: ConnectionStorage
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text(title)
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(Theme.text.color)
+            Text(explanation)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .fixedSize(horizontal: false, vertical: true)
+            Picker("", selection: $selection) {
+                ForEach(ConnectionStorage.allCases) { place in
+                    Text(place.label).tag(place)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            // The two labels keep the system control font, which is a point
+            // larger than the titles above them. Tried and abandoned: a
+            // `.radioGroup` draws its own labels, so neither `.font` on the
+            // option's `Text` nor on the picker reaches them, and the only way
+            // to that point would be hand-drawing two radio buttons.
+            .accessibilityLabel(title)
+            .accessibilityHint(explanation)
+
+            if let caveat {
+                HStack(alignment: .top, spacing: Theme.Space.xs) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.warning.color)
+                        .padding(.top, 1)
+                    Text(caveat)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.warning.color)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
     }
 }
 

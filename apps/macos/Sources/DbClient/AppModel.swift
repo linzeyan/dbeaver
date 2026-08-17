@@ -420,6 +420,12 @@ final class AppModel {
         self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
+        // Seeded from the last connection that worked, so reaching a
+        // neighbouring database on the same server is one field rather than
+        // five. After `preferences`, which is what says where to look for it.
+        if let remembered = ConnectionStore.load(from: preferences.connectionStorage) {
+            connectionDraft = remembered
+        }
         if let initialSQL { queryText = initialSQL }
         // `--caret` is the only way to put the caret anywhere but the start
         // without a click, and clicking is what a capture cannot do. It defaults
@@ -439,9 +445,11 @@ final class AppModel {
     ///
     /// Seeded from the last connection that worked, so that reaching a
     /// neighbouring database on the same server is one field rather than five.
+    /// An empty form until `init` has the settings that say where the remembered
+    /// one is kept. A property default cannot read `preferences`, and where to
+    /// look is now a preference.
     var connectionDraft =
-        ConnectionStore.load()
-        ?? DriverCatalog.first.map(ConnectionSettings.suggested(for:))
+        DriverCatalog.first.map(ConnectionSettings.suggested(for:))
         ?? ConnectionSettings(scheme: "")
 
     /// The form's password field. Nothing persists it from here: a connection
@@ -542,8 +550,9 @@ final class AppModel {
             self.connString = connString
             adopt(result.0, inventory: result.1)
             if let remembering {
-                ConnectionStore.save(remembering.0)
-                ConnectionKeychain.save(remembering.1, for: remembering.0)
+                ConnectionStore.save(
+                    remembering.0, password: remembering.1,
+                    to: preferences.connectionStorage)
             }
         }
     }
