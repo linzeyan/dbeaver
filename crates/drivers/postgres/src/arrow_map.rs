@@ -22,6 +22,50 @@ use uuid::Uuid;
 
 use crate::PgError;
 
+/// A `json`/`jsonb` value taken as the text the server sent, without parsing it.
+///
+/// The obvious `try_get::<serde_json::Value>` builds a whole tree — an `IndexMap`
+/// per object, a `String` per key — and this column's Arrow type is `Utf8`, so
+/// every one of those allocations exists only to be rendered straight back to
+/// text. Sampling a one-million-row export put a fifth of its CPU inside
+/// `serde_json`'s deserializer and the hash maps under it, for a column nobody
+/// asked to have parsed.
+///
+/// It is also more faithful for `json`, which PostgreSQL defines as preserving
+/// the text it was given: key order, duplicate keys and insignificant
+/// whitespace all survive here, where a parse-and-render round trip quietly
+/// rewrote them. `jsonb` is stored decomposed, so what comes back is the
+/// server's own normal form either way.
+struct JsonText<'a>(&'a str);
+
+impl<'a> tokio_postgres::types::FromSql<'a> for JsonText<'a> {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        // jsonb's binary form is a one-byte version prefix in front of the text
+        // (PostgreSQL has only ever sent 1). Refusing an unknown version rather
+        // than skipping the byte anyway means a future format change surfaces as
+        // an error, not as a column whose first character has gone missing.
+        let text = if *ty == Type::JSONB {
+            match raw.split_first() {
+                Some((1, rest)) => rest,
+                Some((version, _)) => {
+                    return Err(format!("unsupported jsonb version {version}").into());
+                }
+                None => return Err("empty jsonb value".into()),
+            }
+        } else {
+            raw
+        };
+        Ok(JsonText(std::str::from_utf8(text)?))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        matches!(*ty, Type::JSON | Type::JSONB)
+    }
+}
+
 /// Layout for a NUMERIC column whose scale is not declared. PostgreSQL's wire
 /// format carries a per-value scale but Arrow requires one per column, so an
 /// undeclared column is normalized: 10 leaves room for currency and scientific
@@ -189,8 +233,7 @@ impl ColBuilder {
             }
             Self::Utf8(b) => b.append_option(row.try_get::<_, Option<&str>>(idx)?),
             Self::Json(b) => {
-                let v = row.try_get::<_, Option<serde_json::Value>>(idx)?;
-                b.append_option(v.map(|j| j.to_string()));
+                b.append_option(row.try_get::<_, Option<JsonText<'_>>>(idx)?.map(|j| j.0))
             }
             Self::Uuid(b) => {
                 let v = row.try_get::<_, Option<Uuid>>(idx)?;
