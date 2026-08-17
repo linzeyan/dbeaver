@@ -215,12 +215,21 @@ enum ConnectionURL {
 /// Where the connection this window remembers is kept, as the Settings window
 /// offers it.
 ///
-/// Two answers because they differ in what they risk rather than in how much
-/// typing they save. On this Mac, the fields are a plist in the user's Library
-/// and the password is an item in their login Keychain, and neither leaves the
-/// machine. In iCloud, both travel: a second Mac opens the same database
-/// without being told about it, and the password is in the user's iCloud
-/// Keychain, where it is worth as much as their Apple Account is protected.
+/// Two answers, and they differ in where one file goes. The fields are a JSON
+/// file: on this Mac it sits under `$XDG_CONFIG_HOME` — `~/.config` when that is
+/// unset — where a developer can read it, edit it, copy it to another machine or
+/// keep it in their own dotfiles, which is what a connection to a database is to
+/// the people who use one. In iCloud the same file is written into iCloud Drive
+/// instead, so a second Mac signed in to the same Apple Account opens the same
+/// database without being told about it.
+///
+/// The password is in neither copy. It stays in the login Keychain under both
+/// answers — see `ConnectionKeychain` — because a config file a developer can
+/// read is also a config file every process running as them can read, and that
+/// is not where a database password goes. Only the Keychain's own synchronised
+/// item can carry it off the machine, and only for a build macOS will give one
+/// to; where it will not, the other Mac gets the fields and asks for the
+/// password once.
 enum ConnectionStorage: String, CaseIterable, Identifiable {
     case thisMac
     case iCloud
@@ -235,81 +244,184 @@ enum ConnectionStorage: String, CaseIterable, Identifiable {
     }
 }
 
+/// The two directories the remembered connection can be written to.
+///
+/// A value rather than two functions, so the checks can hand in a scratch pair:
+/// exercising this against the real answer would leave a fixture in the
+/// developer's own `~/.config` and — worse, because it would then travel — in
+/// their iCloud Drive.
+struct ConnectionDirectories {
+    let local: URL
+    /// Nil when iCloud Drive is not set up on this Mac. The folder is created by
+    /// the system when the user turns iCloud Drive on, so its absence is the
+    /// answer rather than something to ask an API about.
+    let cloud: URL?
+
+    static var system: ConnectionDirectories {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return ConnectionDirectories(
+            local: localDirectory(
+                xdgConfigHome: ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"], home: home),
+            cloud: cloudDirectory(home: home))
+    }
+
+    /// `$XDG_CONFIG_HOME`, or `~/.config` when it is unset.
+    ///
+    /// A relative value is ignored, which is the specification's own rule and not
+    /// an invention here: `XDG_CONFIG_HOME=.config` in a shell profile would
+    /// otherwise put the file wherever the application happened to be launched
+    /// from, and a remembered connection that moves with the working directory is
+    /// one nobody can find twice.
+    static func localDirectory(xdgConfigHome: String?, home: URL) -> URL {
+        guard let xdgConfigHome, xdgConfigHome.hasPrefix("/") else {
+            return home.appending(path: ".config")
+        }
+        return URL(filePath: xdgConfigHome)
+    }
+
+    static func cloudDirectory(home: URL) -> URL? {
+        let drive = home.appending(path: "Library/Mobile Documents/com~apple~CloudDocs")
+        return FileManager.default.fileExists(atPath: drive.path) ? drive : nil
+    }
+
+    func directory(for storage: ConnectionStorage) -> URL? {
+        storage == .iCloud ? cloud : local
+    }
+}
+
 /// The last connection that worked, remembered so the next launch does not ask
 /// again.
 ///
-/// Two places it can be, chosen by a setting. On this Mac, UserDefaults holds
-/// everything except the password — it is a plist in the user's Library that
-/// anything running as them can read, which is exactly the place a database
-/// password must not be — and that half goes to `ConnectionKeychain`. In iCloud
-/// it is one synchronised Keychain item holding both, because fields that stayed
-/// behind would leave the other Mac with a password for a host it has never
-/// heard of.
+/// One JSON file, in the directory the setting names, holding everything except
+/// the password. The password goes to `ConnectionKeychain` under both answers,
+/// for the reason `ConnectionStorage` gives.
+///
+/// Exactly one copy of the file exists. Choosing "on this Mac" deletes the one in
+/// iCloud Drive and choosing iCloud deletes the local one, because the answer to
+/// "where is this kept" is also a statement about where it is *not*, and a stale
+/// copy naming a host and a user would outlive the decision to stop keeping it
+/// there.
 enum ConnectionStore {
-    private static let key = "lastConnection"
+    private static let folder = "dbclient"
+    private static let file = "connection.json"
 
-    /// The defaults the local half lives in, injectable for the reason
-    /// `Preferences`' store is: a check has to be able to write and read one back
-    /// without changing what a developer's own window opens.
-    static func load(from storage: ConnectionStorage, store: UserDefaults = .standard)
-        -> ConnectionSettings?
-    {
-        if storage == .iCloud, let synced = ConnectionKeychain.syncedConnection() {
-            return synced.settings
+    static func load(
+        from storage: ConnectionStorage, in directories: ConnectionDirectories = .system
+    ) -> ConnectionSettings? {
+        if storage == .iCloud, let cloud = url(for: .iCloud, in: directories),
+            let settings = read(cloud)
+        {
+            return settings
         }
-        guard let stored = store.dictionary(forKey: key) as? [String: String]
-        else { return nil }
-        // The scheme is read with a fallback because a settings dictionary
-        // written before there was more than one database has no scheme in it,
-        // and the connection it describes is a PostgreSQL one.
-        let scheme = stored["scheme"] ?? DriverCatalog.first?.scheme ?? ""
-        return ConnectionSettings(
-            scheme: scheme,
-            host: stored["host"] ?? "", port: stored["port"] ?? "",
-            database: stored["database"] ?? "", user: stored["user"] ?? "",
-            path: stored["path"] ?? "")
+        // The local file, and not only as the answer for "on this Mac": a Mac
+        // whose iCloud Drive is off wrote its fields here while the setting still
+        // said iCloud, and reading nothing would ask that user for a connection
+        // this file already describes.
+        guard let local = url(for: .thisMac, in: directories) else { return nil }
+        return read(local)
     }
 
     /// Writes the connection and its password to wherever the setting says.
     ///
     /// One call for both halves, because there is no state in which remembering
-    /// one without the other is right, and because which halves there are depends
-    /// on where it goes: iCloud is a single item, this Mac is a pair.
+    /// one without the other is right.
     ///
-    /// An iCloud write that macOS refuses falls through to the local pair rather
-    /// than being dropped. A build without the entitlement for synchronised
-    /// Keychain items — which is every ad-hoc one, `make package` included —
-    /// cannot sync, and the choice between "remembered here" and "forgotten
-    /// entirely" is not close. The Settings window says so where the setting is,
+    /// An iCloud that is not there falls through to the local file rather than
+    /// dropping the write, and so does a synchronised Keychain item macOS refuses:
+    /// the choice between "remembered here" and "forgotten entirely" is not close.
+    /// The Settings window says which of those happened, where the setting is,
     /// which is the only place the answer is of any use.
     static func save(
         _ settings: ConnectionSettings, password: String, to storage: ConnectionStorage,
-        store: UserDefaults = .standard
+        in directories: ConnectionDirectories = .system
     ) {
-        if storage == .iCloud, ConnectionKeychain.saveSynced(settings, password: password) {
-            return
+        if storage == .iCloud {
+            if !ConnectionKeychain.save(password, for: settings, synchronised: true) {
+                ConnectionKeychain.save(password, for: settings)
+            }
+        } else {
+            ConnectionKeychain.save(password, for: settings)
         }
-        store.set(
-            [
-                "scheme": settings.scheme,
-                "host": settings.host, "port": settings.port,
-                "database": settings.database, "user": settings.user,
-                "path": settings.path
-            ], forKey: key)
-        ConnectionKeychain.save(password, for: settings)
+
+        let destination = directories.directory(for: storage) ?? directories.local
+        guard let target = url(in: destination) else { return }
+        write(settings, to: target)
+        for other in [directories.local, directories.cloud].compactMap({ $0 })
+        where other != destination {
+            if let stale = url(in: other) { try? FileManager.default.removeItem(at: stale) }
+        }
     }
 
     /// The connection to open without asking, if there is one. The password is
     /// empty rather than absent when the Keychain will not give it up — see
     /// `ConnectionKeychain` for when that happens and why it is survivable.
-    static func remembered(from storage: ConnectionStorage)
-        -> (settings: ConnectionSettings, password: String)?
-    {
-        if storage == .iCloud, let synced = ConnectionKeychain.syncedConnection() {
-            return synced
+    static func remembered(
+        from storage: ConnectionStorage, in directories: ConnectionDirectories = .system
+    ) -> (settings: ConnectionSettings, password: String)? {
+        guard let settings = load(from: storage, in: directories) else { return nil }
+        // The synchronised item first when the setting asks for it, then the local
+        // one: this Mac may be the machine that typed the password rather than the
+        // one that synced it.
+        let synced =
+            storage == .iCloud
+            ? ConnectionKeychain.password(for: settings, synchronised: true) : nil
+        return (settings, synced ?? ConnectionKeychain.password(for: settings) ?? "")
+    }
+
+    /// What is not going to happen, for the answer the user picked, or nil when
+    /// both halves of it work.
+    ///
+    /// Two separate limitations, and they are not the same size. Without iCloud
+    /// Drive nothing syncs at all; with it, the fields travel and only the password
+    /// stays behind. A control that silently did something other than what it says
+    /// is the failure this exists to prevent, so the sentence names which one it
+    /// is.
+    static func syncCaveat(in directories: ConnectionDirectories = .system) -> String? {
+        guard directories.cloud != nil else {
+            return
+                "iCloud Drive is not set up on this Mac, so there is nowhere to sync to and the "
+                + "connection is being kept in \(directories.local.path)/\(folder) instead."
         }
-        guard let settings = load(from: .thisMac) else { return nil }
-        return (settings, ConnectionKeychain.password(for: settings) ?? "")
+        return ConnectionKeychain.synchronisedRefusal()
+    }
+
+    private static func url(for storage: ConnectionStorage, in directories: ConnectionDirectories)
+        -> URL?
+    {
+        directories.directory(for: storage).flatMap(url(in:))
+    }
+
+    private static func url(in directory: URL) -> URL? {
+        directory.appending(path: folder).appending(path: file)
+    }
+
+    private static func read(_ url: URL) -> ConnectionSettings? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(ConnectionSettings.self, from: data)
+    }
+
+    /// Written whole, sorted, indented and newline-terminated, and readable only
+    /// by its owner.
+    ///
+    /// Formatted for a person because a file under `~/.config` is one somebody is
+    /// going to open, diff and put in a dotfiles repository. Written atomically
+    /// because a crash halfway through must not leave the next launch parsing half
+    /// a JSON object and asking for a connection it already has. And 0600 even
+    /// though it holds no secret: it names a host, a database and a user, which is
+    /// a list of what to attack and who to attack it as, and restricting it costs
+    /// nothing.
+    private static func write(_ settings: ConnectionSettings, to url: URL) {
+        let manager = FileManager.default
+        try? manager.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard var data = try? encoder.encode(settings) else { return }
+        data.append(0x0A)
+        try? data.write(to: url, options: [.atomic])
+        // After the write: an atomic write is a rename over the target, so
+        // permissions set before it belong to a file that is already gone.
+        try? manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
 
@@ -330,8 +442,11 @@ enum ConnectionStore {
 enum ConnectionKeychain {
     private static let service = "dev.dbclient.connection"
 
-    static func password(for settings: ConnectionSettings) -> String? {
-        var query = item(for: settings)
+    /// `synchronised` picks which item is being asked about, and it has to be
+    /// stated: a Keychain query with no opinion matches local items only, so the
+    /// synchronised one is invisible unless it is asked for by name.
+    static func password(for settings: ConnectionSettings, synchronised: Bool = false) -> String? {
+        var query = item(for: settings, synchronised: synchronised)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var found: CFTypeRef?
@@ -346,74 +461,30 @@ enum ConnectionKeychain {
     /// deleting one does not, and the add that follows leaves the item readable
     /// by the build that wrote it.
     ///
-    /// A failed write is not reported: it costs the convenience of not typing
-    /// the password again, and there is nothing the user could do about it from
-    /// the form that they are not already doing.
-    static func save(_ password: String, for settings: ConnectionSettings) {
-        let query = item(for: settings)
+    /// A failed local write is not reported: it costs the convenience of not
+    /// typing the password again, and there is nothing the user could do about it
+    /// from the form that they are not already doing. The answer is returned all
+    /// the same, because a *synchronised* write that fails is a different matter —
+    /// `ConnectionStore.save` has to fall through to the local item, and this is
+    /// the only side that knows the difference between "macOS will not sync for
+    /// this build" and "written".
+    @discardableResult
+    static func save(
+        _ password: String, for settings: ConnectionSettings, synchronised: Bool = false
+    ) -> Bool {
+        let query = item(for: settings, synchronised: synchronised)
         _ = SecItemDelete(query as CFDictionary)
         // An empty password is a trust or peer connection. Storing nothing for
         // it is not a gap: there is nothing to remember.
-        guard !password.isEmpty else { return }
+        guard !password.isEmpty else { return true }
         var add = query
         add[kSecValueData as String] = Data(password.utf8)
-        _ = SecItemAdd(add as CFDictionary, nil)
-    }
-
-    // MARK: - The iCloud half
-
-    /// The one item the iCloud setting keeps, holding the fields as well as the
-    /// password.
-    ///
-    /// Not the local pair with a flag on the password: fields left in this Mac's
-    /// UserDefaults would reach the other Mac as nothing at all, and a password
-    /// for a host that machine has never heard of is a password for nothing. The
-    /// fields are not secret, and putting them inside the item that already
-    /// carries the secret does not widen what is exposed — it narrows it, since
-    /// the plist copy stops being written.
-    ///
-    /// A fixed account rather than the identity the local items are keyed by:
-    /// the question this answers is "which connection was last open", and a
-    /// launch cannot look that up under a key it would have to already know.
-    private static let syncedAccount = "lastConnection"
-
-    /// The remembered connection, as it goes into and comes out of one item.
-    private struct SyncedConnection: Codable {
-        let settings: ConnectionSettings
-        let password: String
-    }
-
-    static func syncedConnection() -> (settings: ConnectionSettings, password: String)? {
-        var query = syncedItem()
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var found: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess,
-            let data = found as? Data,
-            let synced = try? JSONDecoder().decode(SyncedConnection.self, from: data)
-        else { return nil }
-        return (synced.settings, synced.password)
-    }
-
-    /// Writes it, and says whether it landed.
-    ///
-    /// The answer is what `ConnectionStore.save` needs: a refused write has to
-    /// fall through to the local pair, and this is the only side that knows the
-    /// difference between "macOS will not sync for this build" and "written".
-    /// Deletes first for the reason the local write does.
-    static func saveSynced(_ settings: ConnectionSettings, password: String) -> Bool {
-        let query = syncedItem()
-        _ = SecItemDelete(query as CFDictionary)
-        guard
-            let data = try? JSONEncoder().encode(
-                SyncedConnection(settings: settings, password: password))
-        else { return false }
-        var add = query
-        add[kSecValueData as String] = data
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
     }
 
-    /// Why this build cannot sync through the iCloud Keychain, or nil when it
+    // MARK: - The half that can leave the machine
+
+    /// Why the password cannot travel even though the fields can, or nil when it
     /// can.
     ///
     /// Asked by writing a throwaway item, because there is no API that answers
@@ -423,11 +494,11 @@ enum ConnectionKeychain {
     /// code rather than as a silent no-op, and the Settings window can say what
     /// is happening instead of leaving the user to discover it on another Mac.
     ///
-    /// `NSUbiquitousKeyValueStore` was the other candidate for the fields and
-    /// this is why it is not used: without its entitlement it accepts a write,
-    /// answers false to `synchronize()`, and reads back nil. A store that
-    /// swallows what it is given is worse than one that refuses it.
-    static func iCloudRefusal() -> String? {
+    /// This is only about the password. The fields go through iCloud Drive, which
+    /// an application that is not sandboxed writes to as an ordinary folder and
+    /// needs no entitlement for — which is why they sync from this build and the
+    /// password does not.
+    static func synchronisedRefusal() -> String? {
         var probe = syncedItem()
         probe[kSecAttrAccount as String] = "icloud-probe"
         _ = SecItemDelete(probe as CFDictionary)
@@ -440,21 +511,23 @@ enum ConnectionKeychain {
             return nil
         case errSecMissingEntitlement:
             return
-                "This build cannot reach the iCloud Keychain: macOS gives synchronised items "
-                + "only to an application signed with a Developer ID and the entitlement for "
-                + "them, and this one is signed ad-hoc. Connections are being kept on this Mac."
+                "The fields sync through iCloud Drive, but the password cannot: macOS gives "
+                + "synchronised Keychain items only to an application signed with a Developer ID "
+                + "and the entitlement for them, and this one is signed ad-hoc. Another Mac opens "
+                + "the same database and asks for the password once."
         default:
             return
-                "macOS refused a synchronised Keychain item (OSStatus \(status)). Connections "
-                + "are being kept on this Mac."
+                "The fields sync through iCloud Drive, but macOS refused a synchronised Keychain "
+                + "item for the password (OSStatus \(status)). Another Mac asks for it once."
         }
     }
 
+    /// The probe's shape: any synchronised item of this service will do, so it
+    /// borrows the real item's dictionary and overrides the account.
     private static func syncedItem() -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: syncedAccount,
             kSecAttrSynchronizable as String: true
         ]
     }
@@ -462,8 +535,15 @@ enum ConnectionKeychain {
     /// One item per user, host, port and database, so that keeping two
     /// databases on one server does not have each login overwrite the other's
     /// password.
-    private static func item(for settings: ConnectionSettings) -> [String: Any] {
-        [
+    ///
+    /// The synchronised item is the same identity with the flag set, rather than a
+    /// fixed account holding the whole connection: the fields arrive on the other
+    /// Mac in the file, so that machine knows which identity to ask for and the
+    /// two copies of a password cannot describe different connections.
+    private static func item(for settings: ConnectionSettings, synchronised: Bool)
+        -> [String: Any]
+    {
+        var item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             // The scheme is part of the identity because the same host and port
@@ -474,5 +554,7 @@ enum ConnectionKeychain {
                 "\(settings.scheme)://\(settings.user)@\(settings.host):\(settings.port)"
                 + "/\(settings.database)\(settings.path)"
         ]
+        if synchronised { item[kSecAttrSynchronizable as String] = true }
+        return item
     }
 }

@@ -78,13 +78,13 @@ final class Preferences {
 
     /// Where the connection this window remembers is kept.
     ///
-    /// On this Mac. The fields are already local and the password is already in
-    /// the login Keychain, so this is the setting that does not move anything;
-    /// the other one puts a database password into the user's iCloud Keychain,
-    /// which is a decision about their credentials rather than about their
-    /// convenience and is not one to make on their behalf. See
-    /// `ConnectionStorage`, and `ConnectionKeychain.iCloudRefusal` for what a
-    /// build that cannot sync does instead.
+    /// On this Mac: the connection stays in `~/.config` and nothing about it
+    /// leaves the machine. The other answer copies the fields into the user's
+    /// iCloud Drive and their database password into their iCloud Keychain, which
+    /// is a decision about their credentials rather than about their convenience
+    /// and is not one to make on their behalf. See `ConnectionStorage`, and
+    /// `ConnectionStore.syncCaveat` for what a Mac that cannot do one half of it
+    /// does instead.
     var connectionStorage: ConnectionStorage {
         didSet { store.set(connectionStorage.rawValue, forKey: Key.connectionStorage) }
     }

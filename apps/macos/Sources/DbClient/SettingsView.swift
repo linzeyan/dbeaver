@@ -30,11 +30,12 @@ final class SettingsWindow {
         panel.isReleasedWhenClosed = false
         panel.backgroundColor = NSColor(Theme.background.color)
         // Asked here, once per window rather than once per draw: finding out
-        // whether this build may sync means writing a throwaway Keychain item,
-        // and the answer cannot change while the panel is open.
+        // whether this build may sync means looking for iCloud Drive and writing a
+        // throwaway Keychain item, and neither answer changes while the panel is
+        // open.
         let view = NSHostingView(
             rootView: SettingsView(
-                preferences: preferences, iCloudRefusal: ConnectionKeychain.iCloudRefusal()))
+                preferences: preferences, syncCaveat: ConnectionStore.syncCaveat()))
         // The window takes its height from the rows rather than a number written
         // here, so an explanation that wraps to a third line is not clipped.
         panel.setContentSize(view.fittingSize)
@@ -54,7 +55,7 @@ final class SettingsWindow {
 /// beside it leaves the reader to find that out by switching it on.
 struct SettingsView: View {
     @Bindable var preferences: Preferences
-    /// Why the iCloud Keychain is unavailable to this build, if it is.
+    /// Which half of syncing is unavailable here, if either is.
     ///
     /// Handed in rather than asked for here, and that is about the window's
     /// height. `SettingsWindow` measures this view once and sizes the panel to
@@ -62,7 +63,7 @@ struct SettingsView: View {
     /// the option it is about — would be a sentence drawn past the bottom edge.
     /// Standing under both answers rather than only under iCloud, for the same
     /// reason: it is a fact about the choice, not about the current pick.
-    let iCloudRefusal: String?
+    let syncCaveat: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
@@ -104,12 +105,12 @@ struct SettingsView: View {
                 title: "Keep connections",
                 explanation:
                     "The last connection that opened is remembered so the next launch does not "
-                    + "ask again. On this Mac, the fields are in this application's preferences "
-                    + "and the password is in your login Keychain. In iCloud, both are one item "
-                    + "in your iCloud Keychain, so another Mac signed in to the same Apple "
-                    + "Account opens the same database — and your database password is wherever "
-                    + "that account reaches.",
-                caveat: iCloudRefusal,
+                    + "ask again. On this Mac, the fields are a JSON file under XDG_CONFIG_HOME — "
+                    + "~/.config/dbclient/connection.json — which you can read, edit and keep in "
+                    + "your dotfiles. In iCloud, that same file goes to iCloud Drive instead, so "
+                    + "another Mac signed in to the same Apple Account opens the same database. "
+                    + "The password is in your login Keychain either way, never in the file.",
+                caveat: syncCaveat,
                 selection: $preferences.connectionStorage)
         }
         .padding(Theme.Space.xl)

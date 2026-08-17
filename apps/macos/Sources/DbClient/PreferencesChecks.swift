@@ -31,7 +31,9 @@ enum PreferencesChecks {
         checkTheDefaultsAreTheOnesThatWereDecided()
         checkASettingSurvivesBeingWrittenAndReadBack()
         checkAConnectionKeptOnThisMacComesBack()
+        checkAConnectionKeptInICloudGoesToTheDrive()
         checkAConnectionSurvivesAnICloudThatIsNotAvailable()
+        checkTheFileGoesWhereXDGSaysItDoes()
         checkTheSettingsPanelHasRoomForTheICloudCaveat()
         checkAnEmptyColumnIsOnlyHiddenWhenTheSettingSaysSo()
         checkAColumnThatFillsUpLaterComesBackWhileTheEvidenceIsOpen()
@@ -90,62 +92,112 @@ enum PreferencesChecks {
 
     // MARK: - Where the connection is kept
 
-    /// A connection kept on this Mac comes back field for field.
+    /// A connection kept on this Mac comes back field for field, out of a file
+    /// only its owner can read.
     ///
-    /// Through a scratch suite, and with an empty password, which is what keeps
-    /// this check out of the developer's login Keychain: an empty password is
-    /// nothing to remember and `ConnectionKeychain.save` returns without writing.
-    /// The fields are the whole of what this half stores, so they are the whole
-    /// of what is asserted.
-    ///
-    /// The iCloud half is not checked here, and not because it does not matter.
-    /// Synchronised Keychain items need an entitlement that no ad-hoc signature
-    /// carries — this binary included — so a check would be asserting what this
-    /// build was signed with rather than what the code does. What is checked is
-    /// the consequence of that refusal, below.
+    /// Against a scratch pair of directories, and with an empty password, which is
+    /// what keeps this check out of the developer's login Keychain: an empty
+    /// password is nothing to remember and `ConnectionKeychain.save` writes
+    /// nothing for it. The permissions are asserted as well as the fields, because
+    /// the file names a host, a database and a user.
     private static func checkAConnectionKeptOnThisMacComesBack() {
-        let name = suiteName()
-        guard let store = UserDefaults(suiteName: name) else {
-            fail("a scratch defaults suite could be made")
-            return
-        }
-        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        guard let root = scratchDirectory() else { return }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = ConnectionDirectories(
+            local: root.appending(path: "config"), cloud: root.appending(path: "drive"))
 
         let settings = ConnectionSettings(
             scheme: "postgres", host: "db.example", port: "5432", database: "sales", user: "ana")
-        ConnectionStore.save(settings, password: "", to: .thisMac, store: store)
+        ConnectionStore.save(settings, password: "", to: .thisMac, in: directories)
         expect(
-            ConnectionStore.load(from: .thisMac, store: store), settings,
+            ConnectionStore.load(from: .thisMac, in: directories), settings,
             "every field of the connection came back")
+
+        let file = directories.local.appending(path: "dbclient/connection.json")
+        let mode =
+            (try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions]
+            as? Int
+        expect(mode, 0o600, "and the file is readable only by its owner")
+        // Nothing was left in iCloud Drive: "on this Mac" is also a statement
+        // about where the connection is not.
+        expect(
+            FileManager.default.fileExists(
+                atPath: directories.cloud!.appending(path: "dbclient/connection.json").path),
+            false, "and no copy was left in iCloud Drive")
     }
 
-    /// A build that cannot sync still remembers the connection.
-    ///
-    /// The one behaviour of the iCloud setting that can be checked from here, and
-    /// the one worth checking: chosen on a build macOS refuses synchronised items
-    /// to, the write falls through to this Mac rather than going nowhere. A
-    /// setting that silently forgot the connection would look identical at the
-    /// moment it was switched on and only fail at the next launch.
-    private static func checkAConnectionSurvivesAnICloudThatIsNotAvailable() {
-        guard ConnectionKeychain.iCloudRefusal() != nil else {
-            // A signed build with the entitlement: the write goes to iCloud, and
-            // asserting the fallback here would file a fixture in the user's own
-            // iCloud Keychain to prove something that is not true of them.
-            return
-        }
-        let name = suiteName()
-        guard let store = UserDefaults(suiteName: name) else {
-            fail("a scratch defaults suite could be made")
-            return
-        }
-        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+    /// Choosing iCloud writes the file to iCloud Drive and leaves no local copy.
+    private static func checkAConnectionKeptInICloudGoesToTheDrive() {
+        guard let root = scratchDirectory() else { return }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = ConnectionDirectories(
+            local: root.appending(path: "config"), cloud: root.appending(path: "drive"))
 
         let settings = ConnectionSettings(
             scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana")
-        ConnectionStore.save(settings, password: "", to: .iCloud, store: store)
+        ConnectionStore.save(settings, password: "", to: .thisMac, in: directories)
+        ConnectionStore.save(settings, password: "", to: .iCloud, in: directories)
         expect(
-            ConnectionStore.load(from: .thisMac, store: store), settings,
-            "a refused iCloud write left the connection on this Mac")
+            FileManager.default.fileExists(
+                atPath: directories.cloud!.appending(path: "dbclient/connection.json").path),
+            true, "the file is in iCloud Drive")
+        expect(
+            FileManager.default.fileExists(
+                atPath: directories.local.appending(path: "dbclient/connection.json").path),
+            false, "and the copy it used to have on this Mac is gone")
+        expect(
+            ConnectionStore.load(from: .iCloud, in: directories), settings,
+            "and it reads back from there")
+    }
+
+    /// A Mac with no iCloud Drive still remembers the connection.
+    ///
+    /// The setting says iCloud and there is nowhere to sync to, so the write falls
+    /// through to the local file rather than going nowhere — and the next launch,
+    /// still set to iCloud, has to find it there. A setting that silently forgot
+    /// the connection would look identical at the moment it was switched on and
+    /// only fail at the next launch.
+    private static func checkAConnectionSurvivesAnICloudThatIsNotAvailable() {
+        guard let root = scratchDirectory() else { return }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = ConnectionDirectories(
+            local: root.appending(path: "config"), cloud: nil)
+
+        let settings = ConnectionSettings(
+            scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana")
+        ConnectionStore.save(settings, password: "", to: .iCloud, in: directories)
+        expect(
+            ConnectionStore.load(from: .thisMac, in: directories), settings,
+            "the connection is on this Mac")
+        expect(
+            ConnectionStore.load(from: .iCloud, in: directories), settings,
+            "and the launch that still asks for iCloud finds it")
+        expect(
+            ConnectionStore.syncCaveat(in: directories) != nil, true,
+            "and the Settings panel has something to say about it")
+    }
+
+    /// The file goes where XDG says, and a relative `XDG_CONFIG_HOME` is ignored.
+    ///
+    /// The fallback is the specification's own — `~/.config` when the variable is
+    /// unset — and ignoring a relative value is too. Without that rule an
+    /// `XDG_CONFIG_HOME=.config` in a shell profile would put the connection
+    /// wherever the application was launched from, which is a different file every
+    /// time and none of them the one the last launch wrote.
+    private static func checkTheFileGoesWhereXDGSaysItDoes() {
+        let home = URL(filePath: "/Users/someone")
+        expect(
+            ConnectionDirectories.localDirectory(xdgConfigHome: nil, home: home).path,
+            "/Users/someone/.config", "unset means ~/.config")
+        expect(
+            ConnectionDirectories.localDirectory(xdgConfigHome: "/tmp/xdg", home: home).path,
+            "/tmp/xdg", "an absolute value is honoured")
+        expect(
+            ConnectionDirectories.localDirectory(xdgConfigHome: ".config", home: home).path,
+            "/Users/someone/.config", "a relative one is ignored")
+        expect(
+            ConnectionDirectories.localDirectory(xdgConfigHome: "", home: home).path,
+            "/Users/someone/.config", "and so is an empty one")
     }
 
     /// The panel is tall enough for the sentence about iCloud being unavailable.
@@ -160,12 +212,12 @@ enum PreferencesChecks {
     private static func checkTheSettingsPanelHasRoomForTheICloudCaveat() {
         let preferences = scratch()
         let quiet = NSHostingView(
-            rootView: SettingsView(preferences: preferences, iCloudRefusal: nil))
+            rootView: SettingsView(preferences: preferences, syncCaveat: nil))
         let warned = NSHostingView(
             rootView: SettingsView(
                 preferences: preferences,
-                iCloudRefusal: ConnectionKeychain.iCloudRefusal() ?? "Two lines of explanation "
-                    + "about why this build cannot reach the iCloud Keychain at all."))
+                syncCaveat: ConnectionStore.syncCaveat() ?? "Two lines of explanation about "
+                    + "which half of syncing this build cannot do and what happens instead."))
         expect(
             warned.fittingSize.height > quiet.fittingSize.height, true,
             "the caveat is inside the height the panel is sized to")
@@ -321,6 +373,20 @@ enum PreferencesChecks {
 
     private static func suiteName() -> String {
         "dev.dbclient.verify.\(UUID().uuidString)"
+    }
+
+    /// A directory nothing else can see, for the checks that write files. Removed
+    /// by the caller, so a failing check leaves nothing behind either.
+    private static func scratchDirectory() -> URL? {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "dbclient-verify-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            fail("a scratch directory could be made: \(error)")
+            return nil
+        }
+        return root
     }
 
     /// A page in which exactly `columns` are null, for every row of it.
