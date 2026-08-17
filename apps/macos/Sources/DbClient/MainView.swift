@@ -432,10 +432,26 @@ struct StructurePane: View {
 
     var body: some View {
         if model.columns.isEmpty {
-            EmptyState(
-                symbol: "list.bullet.rectangle",
-                title: "No structure to show",
-                hint: "Choose a table or view in the sidebar.")
+            // Three states rather than one. The sentence below was shown for
+            // all three, including the wait between picking a relation and its
+            // columns arriving — a pane instructing the user to do the thing
+            // they have just done. That window is a blink against the benchmark
+            // server and is not a blink over a slow link.
+            if model.isLoadingStructure {
+                RunningPane()
+            } else if model.selected == nil {
+                EmptyState(
+                    symbol: "list.bullet.rectangle",
+                    title: "No structure to show",
+                    hint: "Choose a table or view in the sidebar.")
+            } else {
+                // Reached when the read failed: the banner above says why, and
+                // repeating "choose a table" here would blame the user for it.
+                EmptyState(
+                    symbol: "list.bullet.rectangle",
+                    title: "No structure to show",
+                    hint: "The columns of \(model.selected?.name ?? "this relation") did not load.")
+            }
         } else {
             VSplitView {
                 columnsTable

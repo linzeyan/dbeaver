@@ -1329,17 +1329,35 @@ final class AppModel {
     /// draw for an editing control it cannot yet answer for.
     private func loadColumns(for relation: RelationInfo, then next: @escaping @MainActor () -> Void)
     {
+        // Busy for the duration, which the browse queued behind it sets again.
+        // `canCancel`'s note says this flag covers metadata reads; that was true
+        // of the refresh and not of this read, so a columns query that hung was
+        // the one piece of work with no way to stop it. It is also what lets the
+        // Structure pane tell "no relation chosen" from "the columns of the
+        // chosen one have not arrived", which are the same empty list.
+        isBusy = true
         run { db in
             (
                 try db.columns(schema: relation.schema, relation: relation.name),
                 try db.rowIdentity(schema: relation.schema, relation: relation.name)
             )
         } then: { [self] catalog in
+            isBusy = false
             columns = catalog.0
             rowIdentity = catalog.1
             next()
         }
     }
+
+    /// Whether the Structure pane is waiting for the columns of the relation
+    /// that has just been picked.
+    ///
+    /// An empty `columns` is three situations — nothing selected, a read in
+    /// flight, a read that failed — and the pane draws each differently. Here
+    /// rather than in the view because it is a statement about the connection,
+    /// and because the view would have to know that `isBusy` is what covers the
+    /// read.
+    var isLoadingStructure: Bool { selected != nil && columns.isEmpty && isBusy }
 
     /// Empties every Structure section at once, so a section added later cannot
     /// be forgotten at one of the two places that has to drop the old one.
