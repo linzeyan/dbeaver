@@ -1218,7 +1218,16 @@ private struct QueryHistoryPanel: View {
                 list
             }
         }
-        .background(Theme.surface.color)
+        // `background`, not `surface`, and that is the seam rather than a
+        // preference. `Grid.header` is also `surface`, so the panel's last row
+        // and the result's column headers met as one continuous field: the 1pt
+        // `separator` between them is white at 0.08 alpha over two identical mid
+        // tones, which at that size is below anything an eye resolves. Nothing
+        // said where the list of statements ended and the rows began. Taking the
+        // body down a step also puts the panel behind its own `surfaceRaised`
+        // header, which is the direction that pair is drawn everywhere else in
+        // this window.
+        .background(Theme.background.color)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Query history")
     }
