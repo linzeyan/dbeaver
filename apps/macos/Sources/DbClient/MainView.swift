@@ -495,29 +495,39 @@ struct StructurePane: View {
 
     @ViewBuilder
     private var detailTable: some View {
-        switch section {
-        case .indexes:
-            table(model.indexes, empty: "No indexes") { indexesTable }
-        case .foreignKeys:
-            table(model.foreignKeys, empty: "No foreign keys") { foreignKeysTable }
-        case .referencedBy:
-            table(model.referencedBy, empty: "Nothing references this table") {
-                referencedByTable
-            }
-        case .constraints:
-            table(model.constraints, empty: "No check or unique constraints") {
-                constraintsTable
-            }
-        case .triggers:
-            table(model.triggers, empty: "No triggers") { triggersTable }
-        case .ddl:
-            // `section` only names this where there is a statement, so the
-            // fallback is unreachable — it exists because the switch must be
-            // total, not because a blank DDL section is a state.
-            if let sql = model.ddl {
-                ddlText(sql)
-            } else {
-                emptyLine("No DDL")
+        // The same question the pane above asks, one read later. The sections
+        // arrive after the columns, so the split opens with all of them empty
+        // and "No indexes" is a statement about a table nobody has asked yet —
+        // the one reading of an empty section that is not an answer. Asked once
+        // here rather than in each case below, because the six come back
+        // together.
+        if model.isLoadingRelationDetail {
+            RunningPane()
+        } else {
+            switch section {
+            case .indexes:
+                table(model.indexes, empty: "No indexes") { indexesTable }
+            case .foreignKeys:
+                table(model.foreignKeys, empty: "No foreign keys") { foreignKeysTable }
+            case .referencedBy:
+                table(model.referencedBy, empty: "Nothing references this table") {
+                    referencedByTable
+                }
+            case .constraints:
+                table(model.constraints, empty: "No check or unique constraints") {
+                    constraintsTable
+                }
+            case .triggers:
+                table(model.triggers, empty: "No triggers") { triggersTable }
+            case .ddl:
+                // `section` only names this where there is a statement, so the
+                // fallback is unreachable — it exists because the switch must be
+                // total, not because a blank DDL section is a state.
+                if let sql = model.ddl {
+                    ddlText(sql)
+                } else {
+                    emptyLine("No DDL")
+                }
             }
         }
     }
