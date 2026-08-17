@@ -113,18 +113,15 @@ struct ConnectView: View {
             Image(systemName: "cylinder.split.1x2")
                 .font(.system(size: 18, weight: .light))
                 .foregroundStyle(Theme.accent.color)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Connect to a database")
-                    .font(Theme.Typography.title)
-                    .foregroundStyle(Theme.text.color)
-                // The subtitle used to name the one dialect the core spoke.
-                // There are several now, so which one is a choice rather than a
-                // fact, and it belongs in the picker below where it can be
-                // changed.
-                Text("\(DriverCatalog.all.count) databases")
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
-            }
+            // No subtitle. It used to name the one dialect the core spoke, then
+            // counted them — and "15 databases", sitting directly above a form
+            // whose next row asks which database to open, reads as fifteen
+            // databases available to connect to. How many kinds this build
+            // supports is answered by the picker below, where it is a choice
+            // rather than a boast.
+            Text("Connect to a database")
+                .font(Theme.Typography.title)
+                .foregroundStyle(Theme.text.color)
         }
         .accessibilityElement(children: .combine)
     }
