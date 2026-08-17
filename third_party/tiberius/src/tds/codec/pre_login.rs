@@ -62,17 +62,19 @@ impl PreloginMessage {
         feature = "native-tls",
         feature = "vendored-openssl"
     ))]
-    pub fn negotiated_encryption(&self, expected: EncryptionLevel) -> EncryptionLevel {
+    pub fn negotiated_encryption(&self, expected: EncryptionLevel) -> crate::Result<EncryptionLevel> {
         match (expected, self.encryption) {
             (EncryptionLevel::NotSupported, EncryptionLevel::NotSupported) => {
-                EncryptionLevel::NotSupported
+                Ok(EncryptionLevel::NotSupported)
             }
-            (EncryptionLevel::Off, EncryptionLevel::Off) => EncryptionLevel::Off,
+            (EncryptionLevel::Off, EncryptionLevel::Off) => Ok(EncryptionLevel::Off),
             (EncryptionLevel::On, EncryptionLevel::Off)
             | (EncryptionLevel::On, EncryptionLevel::NotSupported) => {
-                panic!("Server does not allow the requested encryption level.")
+                Err(crate::Error::Protocol(
+                    "Server does not allow the requested encryption level".into(),
+                ))
             }
-            (_, _) => EncryptionLevel::On,
+            (_, _) => Ok(EncryptionLevel::On),
         }
     }
 
@@ -81,8 +83,8 @@ impl PreloginMessage {
         feature = "native-tls",
         feature = "vendored-openssl"
     )))]
-    pub fn negotiated_encryption(&self, _: EncryptionLevel) -> EncryptionLevel {
-        EncryptionLevel::NotSupported
+    pub fn negotiated_encryption(&self, _: EncryptionLevel) -> crate::Result<EncryptionLevel> {
+        Ok(EncryptionLevel::NotSupported)
     }
 }
 
@@ -205,7 +207,9 @@ impl Decode<BytesMut> for PreloginMessage {
                     } else if length == 4 {
                         cursor.read_u32::<BigEndian>()?
                     } else {
-                        panic!("should never happen")
+                        return Err(crate::Error::Protocol(
+                            format!("PRELOGIN_THREADID with unexpected length {}", length).into(),
+                        ))
                     }
                 }
                 // mars
@@ -240,7 +244,11 @@ impl Decode<BytesMut> for PreloginMessage {
 
                     ret.nonce = Some(data);
                 }
-                _ => panic!("unsupported prelogin token: {}", token),
+                _ => {
+                    return Err(crate::Error::Protocol(
+                        format!("unsupported prelogin token: {}", token).into(),
+                    ))
+                }
             }
 
             cursor.set_position(old_pos);

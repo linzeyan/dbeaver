@@ -129,15 +129,17 @@ impl Config {
     /// On production setting, the certificate should be added to the local key
     /// storage (or use `trust_cert_ca` instead), using this setting is potentially dangerous.
     ///
-    /// # Panics
-    /// Will panic in case `trust_cert_ca` was called before.
+    /// Returns an error if `trust_cert_ca` was called before.
     ///
     /// - Defaults to `default`, meaning server certificate is validated against system-truststore.
-    pub fn trust_cert(&mut self) {
+    pub fn trust_cert(&mut self) -> crate::Result<()> {
         if let TrustConfig::CaCertificateLocation(_) = &self.trust {
-            panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
+            return Err(crate::Error::Protocol(
+                "'trust_cert' and 'trust_cert_ca' are mutually exclusive".into(),
+            ))
         }
         self.trust = TrustConfig::TrustAll;
+        Ok(())
     }
 
     /// If set, the server certificate will be validated against the given CA certificate in
@@ -145,16 +147,18 @@ impl Config {
     /// Useful when using self-signed certificates on the server without having to disable the
     /// trust-chain.
     ///
-    /// # Panics
-    /// Will panic in case `trust_cert` was called before.
+    /// Returns an error if `trust_cert` was called before.
     ///
     /// - Defaults to validating the server certificate is validated against system's certificate storage.
-    pub fn trust_cert_ca(&mut self, path: impl ToString) {
+    pub fn trust_cert_ca(&mut self, path: impl ToString) -> crate::Result<()> {
         if let TrustConfig::TrustAll = &self.trust {
-            panic!("'trust_cert' and 'trust_cert_ca' are mutual exclusive! Only use one.")
+            return Err(crate::Error::Protocol(
+                "'trust_cert' and 'trust_cert_ca' are mutually exclusive".into(),
+            ))
         } else {
             self.trust = TrustConfig::CaCertificateLocation(PathBuf::from(path.to_string()))
         }
+        Ok(())
     }
 
     /// Sets the authentication method.
@@ -258,11 +262,11 @@ impl Config {
         }
 
         if s.trust_cert()? {
-            builder.trust_cert();
+            builder.trust_cert()?;
         }
 
         if let Some(ca) = s.trust_cert_ca() {
-            builder.trust_cert_ca(ca);
+            builder.trust_cert_ca(ca)?;
         }
 
         builder.encryption(s.encrypt()?);

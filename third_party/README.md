@@ -97,24 +97,33 @@ On the read path, and so the ones that matter:
   is **worse than any of the four fixed above**: `COLMETADATA` at least needed a
   particular column type to reach it, whereas this is every token of every
   response, and a token a future server version adds takes the process with it.
+  **Fixed in this patch**: now returns a `Protocol` error.
 - `src/tds/codec/column_data/int.rs:18` — `unimplemented!()` for an `Intn` whose
   received length is not 0, 1, 2, 4 or 8.
+  **Fixed in this patch**: now returns a `Protocol` error.
 
 During connect, where a failure at least has an obvious cause:
 
 - `src/tds/codec/pre_login.rs:73, 208, 243` — the server refusing the requested
   encryption level, and unrecognised pre-login tokens.
+  **Fixed in this patch**: `negotiated_encryption` now returns `Result`; the
+  other two panics in `Decode` now return `Protocol` errors.
 - `src/tds/codec/login.rs:526, 540, 550` and
   `src/tds/codec/token/token_feature_ext_ack.rs:43, 48` — unrecognised login
   feature extensions.
+  **Fixed in this patch**: all now return `Protocol` errors.
 - `src/client/config.rs:138, 154` — `trust_cert` and `trust_cert_ca` together.
+  **Fixed in this patch**: both methods now return `Result<()>` instead of
+  panicking; callers updated.
 
 Writing, which this driver does not do through these paths:
 
 - `src/tds/codec/column_data.rs:683` — `todo!()` when a `Numeric` parameter's
   scale disagrees with the server's.
+  **Fixed in this patch**: now returns a `Protocol` error.
 - `src/tds/codec/rpc_request.rs:109` — `todo!()` for calling a procedure by name
   rather than by id.
+  **Fixed in this patch**: now returns a `Protocol` error.
 
 And `src/sql_read_bytes.rs:387, 391, 395` are three `todo!()`s inside
 `#[cfg(test)]` helpers, which nothing outside upstream's own tests compiles.
