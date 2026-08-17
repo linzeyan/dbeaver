@@ -12,7 +12,7 @@ mod parquet_file;
 mod sql_script;
 mod target;
 
-pub use delimited::DelimitedWriter;
+pub use delimited::{DelimitedReader, DelimitedWriter};
 pub use import::import;
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;

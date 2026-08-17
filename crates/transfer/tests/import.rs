@@ -224,26 +224,33 @@ async fn parquet_brings_back_what_it_took_away() {
 }
 
 #[tokio::test]
-async fn a_csv_round_trip_loses_the_empty_string_and_this_is_known() {
-    // This one is pinned as it is, not as it should be.
-    //
-    // The exporter goes out of its way to write a NULL as nothing and an empty
-    // string as `""` — that is why this crate has its own CSV writer instead of
-    // `arrow-csv`'s. `arrow-csv`'s READER throws the difference away again: the
-    // `csv` crate resolves quoting while parsing, so by the time Arrow sees the
-    // field, `` and `""` are the same empty string, and it calls both NULL.
-    //
-    // So a CSV that leaves this application and comes back has had its empty
-    // strings turned into NULLs, silently. Fixing it means reading CSV by hand
-    // the way it is already written by hand, which is a piece of work and a
-    // decision, not a patch. Until then this test is the record: if someone
-    // fixes the reader, this fails and points at the paragraph above.
+async fn a_csv_round_trip_keeps_the_empty_string() {
+    // This test used to pin the opposite, on purpose: with `arrow-csv` doing
+    // the reading, `` and `""` reached Arrow as the same empty string and both
+    // came back NULL, because the `csv` crate resolves quoting while it
+    // parses. The distinction the writer spends effort preserving was being
+    // thrown away on the way back in, silently. `DelimitedReader` is the fix —
+    // reading by hand the way the file is written by hand — and this test is
+    // now the proof that the round trip keeps its promise.
     let db = database().await;
     three_cases(&db).await;
 
     let (nulls, empties) = round_trip(&db, Format::Csv, "csv").await;
-    assert_eq!(nulls, 2, "the empty string was read back as a second NULL");
-    assert_eq!(empties, 0, "and so no empty string survived");
+    assert_eq!(nulls, 1, "the NULL came back a NULL");
+    assert_eq!(empties, 1, "the empty string came back an empty string");
+}
+
+#[tokio::test]
+async fn a_tsv_round_trip_keeps_it_too() {
+    // TSV shares the writer, the reader and therefore the promise; only the
+    // delimiter differs. Pinned separately because it used to share the CSV
+    // defect too, through the same shared path.
+    let db = database().await;
+    three_cases(&db).await;
+
+    let (nulls, empties) = round_trip(&db, Format::Tsv, "tsv").await;
+    assert_eq!(nulls, 1, "the NULL came back a NULL");
+    assert_eq!(empties, 1, "the empty string came back an empty string");
 }
 
 #[tokio::test]
