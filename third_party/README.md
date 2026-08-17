@@ -84,52 +84,84 @@ No arm added or touched here can abort the process.
   parameter now returns an error. There is no wire form for it and there never
   was; the `todo!()` there simply took the process down.
 
-### Known panics still in this copy
+**Every other panic upstream left behind**
 
-Left alone deliberately — they are upstream's, they are not on any path this
-patch touches, and each one changed makes the diff harder to re-apply. They are
-listed because the four that were fixed were not the only ones, and somebody
-looking for the next abort should not have to find this out by suffering it.
+The four types above are what made this copy necessary. A second pass went
+after the rest, on the principle that under `panic = "abort"` the failure mode
+is the same whatever the cause: the window disappears, the user's unsaved work
+goes with it, and nothing on screen or in a log says why. A returned error
+costs one failed query.
 
-On the read path, and so the ones that matter:
+On the read path:
 
-- `src/tds/stream/token.rs:250` — an unrecognised token type is `panic!`. This
-  is **worse than any of the four fixed above**: `COLMETADATA` at least needed a
-  particular column type to reach it, whereas this is every token of every
-  response, and a token a future server version adds takes the process with it.
-  **Fixed in this patch**: now returns a `Protocol` error.
-- `src/tds/codec/column_data/int.rs:18` — `unimplemented!()` for an `Intn` whose
-  received length is not 0, 1, 2, 4 or 8.
-  **Fixed in this patch**: now returns a `Protocol` error.
+- `src/tds/stream/token.rs` — an unrecognised token type was `panic!`, on the
+  one path every token of every response goes through. It is worth being exact
+  about what could reach it, because "some future server version" makes it
+  sound remote and it is not: `TokenType::try_from` already rejects a byte that
+  names no token, so the arm is reached only by a token this crate has a name
+  for and no handler for, and there is **exactly one** — `ColInfo` (`0xA5`),
+  which SQL Server sends in browse mode. Now a `Protocol` error naming the
+  token.
+- `src/tds/codec/column_data/int.rs` — `unimplemented!()` for an `Intn` whose
+  received length is not 0, 1, 2, 4 or 8. Now a `Protocol` error naming both
+  lengths, with a unit test that builds the bytes by hand. That is the only
+  proof available, since no real server sends this.
+- `src/tds/codec/token/token_col_metadata.rs` — four `unreachable!()`s in the
+  `Display` impl, matching on lengths and type bytes that come straight off
+  `COLMETADATA`. `Display::fmt` cannot return a `Protocol` error, so these
+  print the unexpected value instead, the way the `Xml`/`Udt` arm beside them
+  already did. Without this, the decoder returned a clean error for an
+  oversized `Intn` while merely naming that column's type still aborted.
 
 During connect, where a failure at least has an obvious cause:
 
-- `src/tds/codec/pre_login.rs:73, 208, 243` — the server refusing the requested
-  encryption level, and unrecognised pre-login tokens.
-  **Fixed in this patch**: `negotiated_encryption` now returns `Result`; the
-  other two panics in `Decode` now return `Protocol` errors.
-- `src/tds/codec/login.rs:526, 540, 550` and
-  `src/tds/codec/token/token_feature_ext_ack.rs:43, 48` — unrecognised login
-  feature extensions.
-  **Fixed in this patch**: all now return `Protocol` errors.
-- `src/client/config.rs:138, 154` — `trust_cert` and `trust_cert_ca` together.
-  **Fixed in this patch**: both methods now return `Result<()>` instead of
-  panicking; callers updated.
+- `src/tds/codec/pre_login.rs` — the server refusing the requested encryption
+  level, and unrecognised pre-login tokens. `negotiated_encryption` returns
+  `Result` now, which is why `client/connection.rs` grew a `?`.
+- `src/tds/codec/login.rs` and `src/tds/codec/token/token_feature_ext_ack.rs` —
+  unrecognised login feature extensions.
+- `src/client/config.rs` — `trust_cert` and `trust_cert_ca` used together. Both
+  return `crate::Result<()>` now. This changes the vendored crate's **public
+  API**, deliberately: the pair is not only a programmer error, it is reachable
+  from `Config::from_ado_string`, so a connection string a user typed could
+  abort the process. Nothing in this workspace calls either method, so the only
+  callers updated were inside the crate and its examples.
 
-Writing, which this driver does not do through these paths:
+Writing, which this driver does not do through these paths, fixed anyway
+because the argument does not depend on who walks the path:
 
-- `src/tds/codec/column_data.rs:683` — `todo!()` when a `Numeric` parameter's
-  scale disagrees with the server's.
-  **Fixed in this patch**: now returns a `Protocol` error.
-- `src/tds/codec/rpc_request.rs:109` — `todo!()` for calling a procedure by name
+- `src/tds/codec/column_data.rs` — `todo!()` when a `Numeric` parameter's scale
+  disagrees with the server's.
+- `src/tds/codec/rpc_request.rs` — `todo!()` for calling a procedure by name
   rather than by id.
-  **Fixed in this patch**: now returns a `Protocol` error.
 
-And `src/sql_read_bytes.rs:387, 391, 395` are three `todo!()`s inside
-`#[cfg(test)]` helpers, which nothing outside upstream's own tests compiles.
+### What still panics, and why each one stays
 
-There are also a dozen `unreachable!()`s, mostly in `Encode` and `Display`
-impls; the same argument applies to all of them.
+Nothing below can be reached by anything a server sends. Each was checked
+rather than assumed: "unreachable" is a claim about the whole call graph, and
+the compiler does not check it for you.
+
+- `src/tds/numeric.rs` — `decode_d128` matches on `buf.len()`. Its two callers
+  pass a local `[0u8; 12]` and `[0u8; 16]`; the server-supplied length was
+  already validated by the arm above them, which returns a `Protocol` error.
+- `src/tds/codec/token/token_done.rs` — matches on `done_row_count_bytes()`, a
+  function that returns literally 4 or 8.
+- `src/error.rs` — `From<Infallible>`. Unreachable by the type system: there is
+  no value to convert.
+- `src/client/connection.rs`, three sites — two are an auth library returning
+  `None` where its own contract says `Some`; one is `transport.into_inner()`
+  being anything but `Raw` before the handshake that creates the other variant.
+- `src/tds/time.rs` — an encode path matching on `Time::len()`, which returns
+  3, 4 or 5 and a `Protocol` error for anything else.
+
+`src/sql_read_bytes.rs` has three `todo!()`s in the `SqlReadBytes` methods of a
+`#[cfg(test)]` helper reader. Those are compiled by our own build now, because
+the `int.rs` test above uses that helper — but `debug_buffer`, `context` and
+`context_mut` are not called by the decode paths a test drives, and a test
+binary that panics is a failed test rather than a lost session.
+
+There is also a `panic!` inside a `#[cfg(test)]` assertion in
+`column_data.rs`, which is what a failing test is supposed to do.
 
 ### Upgrading
 

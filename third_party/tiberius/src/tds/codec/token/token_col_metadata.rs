@@ -40,11 +40,13 @@ impl<'a> Display for MetaDataColumn<'a> {
                 FixedLenType::Float8 => write!(f, "float")?,
                 FixedLenType::Money4 => write!(f, "smallmoney")?,
                 FixedLenType::Int8 => write!(f, "bigint")?,
-                // These arms used to be `unreachable!()`, but the values come
-                // straight from the server's COLMETADATA token. A formatter
-                // that panics kills the process; a formatter that prints
-                // something ugly lets the caller see what the server sent.
-                FixedLenType::Null => write!(f, "null({:?})", fixed)?,
+                // This arm and the three below it — the two unexpected lengths
+                // and the unexpected precision type — used to be
+                // `unreachable!()`, but every value they match on comes
+                // straight off the server's COLMETADATA token. A formatter
+                // that panics kills the process; one that prints something
+                // ugly lets the reader see what the server actually sent.
+                FixedLenType::Null => write!(f, "null")?,
             },
             TypeInfo::VarLenSized(ctx) => match ctx.r#type() {
                 VarLenType::Bitn => write!(f, "bit")?,
@@ -112,7 +114,7 @@ impl<'a> Display for MetaDataColumn<'a> {
             } => match ty {
                 VarLenType::Decimaln => write!(f, "decimal({},{})", precision, scale)?,
                 VarLenType::Numericn => write!(f, "numeric({},{})", precision, scale)?,
-                _other => write!(f, "{:?}({},{})", ty, precision, scale)?,
+                _ => write!(f, "{:?}({},{})", ty, precision, scale)?,
             },
             TypeInfo::Xml { .. } => write!(f, "xml")?,
             TypeInfo::Udt(info) => write!(f, "{}", info.type_name)?,
@@ -389,7 +391,11 @@ mod tests {
             col_name: "x".into(),
         };
         let s = format!("{}", col);
-        assert!(s.contains("null("), "expected output to name the type, got: {}", s);
+        assert!(
+            s.contains("null"),
+            "expected output to name the type, got: {}",
+            s
+        );
     }
 
     #[test]
