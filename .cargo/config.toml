@@ -1,0 +1,14 @@
+# The macOS front-end is built for macOS 15 (see apps/macos/Package.swift), but
+# the C and C++ inside the vendored -sys crates is compiled by cc-rs, which —
+# with no deployment target in the environment — stamps each object with the
+# host SDK's version. On a 26.x toolchain that is a third of libdbffi.a
+# claiming macOS 26.5 and getting linked into a binary that says it runs on 15:
+# a few hundred lines of `ld: warning: object file ... was built for newer
+# macOS version` per build, and underneath the noise, C++ runtime symbols
+# chosen for an OS the app promises to run without.
+#
+# Here rather than in the Makefile so that a bare `cargo build` in this
+# workspace agrees with `make release`. Not `force`d, so an override from the
+# environment still wins.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "15.0"
