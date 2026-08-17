@@ -126,37 +126,60 @@ struct ConnectView: View {
         .accessibilityElement(children: .combine)
     }
 
-    /// Buttons right-aligned, which is where a Mac dialog keeps them — and it
-    /// has to be here for a second reason. AppKit reads a secure field as a
-    /// website login and hangs an AutoFill "Passwords…" button underneath it,
-    /// aligned to the field's leading edge; there is no supported way to refuse
-    /// one. Leaving that half of the row empty is what keeps it from drawing
-    /// over Cancel.
+    /// A band, a hairline, then the buttons.
+    ///
+    /// The band is not generous padding. A focused secure field is given an
+    /// AutoFill affordance by macOS: an `SPRoundedWindow` out of
+    /// SafariPlatformSupport, hosting a remote view, 104×37pt, laid flush under
+    /// the field and aligned to its leading edge. It belongs to another process
+    /// — its size, its tone and its corner radius are not this card's to set —
+    /// and nothing on the field refuses it: a hand-built `NSSecureTextField`
+    /// with a nil `contentType` and `isAutomaticTextCompletionEnabled` off gets
+    /// one too, as does a bare `SecureField` in an otherwise empty window of
+    /// this application. Dropping `SecureField` would refuse it and would also
+    /// give up secure text entry, which is not a trade a password field makes.
+    ///
+    /// So the one thing left to decide is where it lands, and this decides it.
+    /// The 16pt the card puts between its sections plus this 24 is 40 — the 37
+    /// the affordance occupies, plus a hair — which is why the hairline is far
+    /// enough down that it cannot be reached, and why the buttons below it are
+    /// right-aligned for no reason other than that being where a Mac dialog
+    /// keeps them. The row used to keep its leading half empty to stay out of
+    /// the affordance's way.
     private var footer: some View {
-        HStack(spacing: Theme.Space.sm) {
-            Spacer(minLength: 0)
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(Theme.separator.color)
+                .frame(height: 1)
+                .padding(.top, Theme.Space.xl)
+                .padding(.bottom, Theme.Space.md)
 
-            // No word beside it: the spinner sits next to a Connect button that
-            // is disabled for exactly as long, and the two together already say
-            // what is happening.
-            if model.isConnecting { ProgressView().controlSize(.small) }
+            HStack(spacing: Theme.Space.sm) {
+                Spacer(minLength: 0)
 
-            // Cancel is offered only once there is a session to go back to. At
-            // launch there is nothing behind this form, and a Cancel that leads
-            // to an empty window is a button that breaks the application.
-            if model.canCancelConnection {
-                Button("Cancel") { model.cancelConnection() }
-                    .keyboardShortcut(.cancelAction)
+                // No word beside it: the spinner sits next to a Connect button
+                // that is disabled for exactly as long, and the two together
+                // already say what is happening.
+                if model.isConnecting { ProgressView().controlSize(.small) }
+
+                // Cancel is offered only once there is a session to go back to.
+                // At launch there is nothing behind this form, and a Cancel that
+                // leads to an empty window is a button that breaks the
+                // application.
+                if model.canCancelConnection {
+                    Button("Cancel") { model.cancelConnection() }
+                        .keyboardShortcut(.cancelAction)
+                }
+
+                Button("Connect") { model.connectFromForm() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
+                    // The window's own accent rather than the system's, which is
+                    // whatever the user picked in Settings and need not belong
+                    // beside this palette.
+                    .tint(Theme.accent.color)
+                    .disabled(!model.canConnect)
             }
-
-            Button("Connect") { model.connectFromForm() }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                // The window's own accent rather than the system's, which is
-                // whatever the user picked in Settings and need not belong
-                // beside this palette.
-                .tint(Theme.accent.color)
-                .disabled(!model.canConnect)
         }
     }
 
