@@ -17,16 +17,19 @@ struct TabBar: View {
 
     var body: some View {
         HStack(spacing: Theme.Space.xs) {
-            ForEach(Array(DetailTab.allCases.enumerated()), id: \.element) { index, tab in
+            // ⌘1/⌘2/⌘3 are declared in the View menu, not here. They used to be
+            // `keyboardShortcut` modifiers on these buttons, which worked and
+            // was findable only by resting the pointer on a tab and reading the
+            // tooltip — while the place a Mac user looks to learn what a window
+            // can do listed nothing. Declared once, in the menu, for the reason
+            // `AppMenu`'s Run note gives: one key equivalent claimed by both
+            // AppKit's menu and SwiftUI's modifier is a race.
+            ForEach(DetailTab.allCases) { tab in
                 TabButton(tab: tab, isSelected: selection == tab) {
                     withAnimation(Theme.Motion.ease(reduceMotion, Theme.Motion.quick)) {
                         selection = tab
                     }
                 }
-                // ⌘1/⌘2/⌘3 — the shortcut users of every other tabbed Mac app
-                // reach for first.
-                .keyboardShortcut(
-                    KeyEquivalent(Character("\(index + 1)")), modifiers: .command)
             }
             Spacer()
         }

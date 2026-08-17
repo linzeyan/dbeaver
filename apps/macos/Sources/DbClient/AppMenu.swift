@@ -23,6 +23,8 @@ enum AppMenu {
     private static var valueViewerCommand: ValueViewerCommand?
     /// Target of the View menu's object-filter item, held for the same reason.
     private static var navigatorCommand: NavigatorCommand?
+    /// Target of the View menu's three pane items, held for the same reason.
+    private static var tabCommand: TabCommand?
     /// Target of the Query menu's items, held for the same reason.
     private static var queryCommands: QueryCommands?
     /// Target of the Query menu's Stop item, held for the same reason.
@@ -53,6 +55,8 @@ enum AppMenu {
         valueViewerCommand = valueViewer
         let navigator = NavigatorCommand(model: model)
         navigatorCommand = navigator
+        let tabs = TabCommand(model: model)
+        tabCommand = tabs
         let query = QueryCommands(model: model)
         queryCommands = query
         let stop = StopCommand(model: model)
@@ -67,7 +71,9 @@ enum AppMenu {
         main.addItem(appMenu(named: name, settings: settings))
         main.addItem(fileMenu(connection: connection, export: commands))
         main.addItem(editMenu())
-        main.addItem(viewMenu(target: refresh, valueViewer: valueViewer, navigator: navigator))
+        main.addItem(
+            viewMenu(
+                target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs))
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
@@ -269,11 +275,35 @@ enum AppMenu {
     /// want for the obvious thing later, and teach the wrong reflex until then.
     /// ⌥⌘F is also where Sequel Ace, which this window's layout follows, keeps
     /// its own table filter.
+    ///
+    /// The three panes lead it, because which one the window is showing is the
+    /// largest thing View decides. ⌘1/⌘2/⌘3 were declared on the tab buttons
+    /// themselves until now: they worked, and the only way to find out they
+    /// existed was to hover a tab and read its tooltip, while the menu a Mac user
+    /// opens to learn what a window can do said nothing about them. They are
+    /// declared here and nowhere else — see the Run note in `queryMenu` for why
+    /// two declarations of one key equivalent is not an option — and the
+    /// checkmark is what makes the menu say which pane is open, which is the
+    /// second thing a menu item can do that a bare shortcut cannot.
     private static func viewMenu(
-        target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand
+        target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand,
+        tabs: TabCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
+
+        // In the tab bar's own order, so the numbers on screen and the numbers
+        // in the menu are the same numbers.
+        for (index, tab) in DetailTab.allCases.enumerated() {
+            let pane = menu.addItem(
+                withTitle: tab.rawValue,
+                action: #selector(TabCommand.selectTab(_:)), keyEquivalent: "\(index + 1)")
+            pane.keyEquivalentModifierMask = .command
+            pane.tag = index
+            pane.target = tabs
+        }
+        menu.addItem(.separator())
+
         let refresh = menu.addItem(
             withTitle: "Refresh",
             action: #selector(RefreshCommand.refresh(_:)), keyEquivalent: "r")
@@ -513,6 +543,42 @@ final class NavigatorCommand: NSObject, NSMenuItemValidation {
     /// Greyed out until the tree has something in it. Focusing a field that can
     /// only ever filter nothing is a command that does nothing.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFilterObjects }
+}
+
+/// The View menu's three pane items, as something a menu can send to.
+///
+/// One target for the three, unlike the rest of this file: they are one choice
+/// with three values, their `validateMenuItem` answer is the same sentence, and
+/// splitting them would let two panes show a checkmark at once. Which item is
+/// which is carried in `tag` rather than in three selectors, so adding a pane to
+/// `DetailTab` adds it here without touching this class.
+@MainActor
+final class TabCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func selectTab(_ sender: NSMenuItem) {
+        guard let tab = Self.tab(for: sender) else { return }
+        model.activeTab = tab
+    }
+
+    /// Checkmarked for the pane on screen, and greyed out while the connection
+    /// form has replaced the shell: there are no panes to switch between then,
+    /// and ⌘1 landing on a hidden tab bar would leave the form showing over a
+    /// window that had silently changed underneath it.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.state = Self.tab(for: item) == model.activeTab ? .on : .off
+        return !model.isPresentingConnection
+    }
+
+    private static func tab(for item: NSMenuItem) -> DetailTab? {
+        let tabs = DetailTab.allCases
+        return tabs.indices.contains(item.tag) ? tabs[item.tag] : nil
+    }
 }
 
 /// The Query menu's items, as something a menu can send to.
