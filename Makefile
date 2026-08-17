@@ -256,6 +256,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-schema-metadata
 	./$(APP_BIN) --verify-import
 	./$(APP_BIN) --verify-preferences
+	./$(APP_BIN) --verify-accessibility
 
 # The settings checked against a live window rather than as rules on their own.
 # Separate from `test-swift`, which is the set of checks that need no server:

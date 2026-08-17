@@ -898,7 +898,6 @@ struct ContentPane: View {
                     onSortColumn: { model.toggleSort(column: $0) }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
-                .accessibilityLabel("Result grid")
 
                 CellInspector(cell: model.inspectedCell(in: model.browseResult), editing: model)
             }
@@ -1152,10 +1151,10 @@ struct QueryPane: View {
                             table: model.queryResult.table,
                             generation: model.queryResult.generation,
                             rowCount: model.queryResult.rowCount,
-                            selection: $result.selection
+                            selection: $result.selection,
+                            name: "Query result grid"
                         )
                         .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
-                        .accessibilityLabel("Query result grid")
 
                         CellInspector(cell: model.inspectedCell(in: model.queryResult))
                     } else if model.queryResult.isLoading {

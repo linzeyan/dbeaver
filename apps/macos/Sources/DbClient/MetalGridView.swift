@@ -61,6 +61,11 @@ struct MetalGridView: NSViewRepresentable {
     @Binding var selection: GridSelection?
     /// See `GridView.claimsInitialFocus`.
     var claimsInitialFocus = false
+    /// What a screen reader calls this grid. Handed to the AppKit view rather
+    /// than applied here with `.accessibilityLabel`: that modifier makes SwiftUI
+    /// wrap the representable in an element of its own, which would hide the rows
+    /// and cells underneath it — a label on a table with nothing in it.
+    var name = "Result grid"
     var sort: GridSort?
     /// Cells holding a change that has not been sent, so the grid can mark them.
     ///
@@ -84,6 +89,7 @@ struct MetalGridView: NSViewRepresentable {
     final class Coordinator {
         var renderer: GridRenderer?
         var lastGeneration = -1
+        var lastRowCount = -1
         var onSelect: ((GridSelection) -> Void)?
         var onSortColumn: ((Int) -> Void)?
     }
@@ -103,6 +109,7 @@ struct MetalGridView: NSViewRepresentable {
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         view.claimsInitialFocus = claimsInitialFocus
+        view.accessibilityName = name
         view.onSelect = { [weak coordinator = context.coordinator] hit in
             coordinator?.onSelect?(hit)
         }
@@ -142,6 +149,13 @@ struct MetalGridView: NSViewRepresentable {
             // an arbitrary window of unrelated data.
             renderer.scrollRow = 0
             renderer.scrollX = 0
+        }
+        // A page arriving changes how many rows there are without replacing the
+        // result, and that is exactly the case a screen reader cannot see: it
+        // asked for the count once.
+        if context.coordinator.lastRowCount != rowCount + drafts.count {
+            context.coordinator.lastRowCount = rowCount + drafts.count
+            view.resultDidChange()
         }
         // The model owns the selection, including the one it sets when a result
         // arrives, so the renderer follows the binding rather than being reset

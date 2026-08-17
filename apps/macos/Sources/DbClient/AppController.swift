@@ -213,6 +213,17 @@ final class GridView: MTKView {
     /// that grabs it on every tab switch is worse than one that never does.
     var claimsInitialFocus = false
 
+    /// What this grid is called out loud. Set from SwiftUI rather than fixed
+    /// here: the window has two of these, and "Query result grid" is how a
+    /// screen reader tells them apart.
+    var accessibilityName = "Result grid"
+
+    /// The rows and cells a screen reader walks. Lazy because it holds this view
+    /// as its source, and `self` cannot be handed out from a property
+    /// initialiser; nothing but the accessibility system touches it, so a grid
+    /// nobody inspects never builds one.
+    lazy var accessibilityTree = GridAccessibilityTree(source: self, container: self)
+
     /// Column being resized by a header drag, with the geometry the drag started
     /// from — widths follow the pointer's total travel rather than accumulating
     /// per-event deltas, which drift.
@@ -451,10 +462,95 @@ final class GridView: MTKView {
         renderer.scrollToVisible(next, viewSize: bounds.size)
     }
 
-    private func apply(_ selection: GridSelection) {
+    /// Moves the cursor and tells everyone who follows it. Not private: the
+    /// accessibility tree moves the same cursor, and a second way to set it would
+    /// be a second cursor.
+    func apply(_ selection: GridSelection) {
         renderer?.selection = selection
         needsDisplay = true
         onSelect?(selection)
+        // The drawn cursor is the only thing that moves on its own; a screen
+        // reader has to be told, or it goes on reading the cell the user has
+        // already arrowed away from.
+        if let cell = accessibilityTree.focusedCell() {
+            NSAccessibility.post(element: cell, notification: .focusedUIElementChanged)
+        }
+        NSAccessibility.post(element: self, notification: .selectedRowsChanged)
+    }
+
+    /// Called when the result is replaced or grows. The elements read their
+    /// values live, so nothing has to be rebuilt to be correct — but a screen
+    /// reader caches the row count, and a table that has just gained 200 rows or
+    /// become a different table has to say so.
+    func resultDidChange() {
+        accessibilityTree.invalidate()
+        NSAccessibility.post(element: self, notification: .rowCountChanged)
+        NSAccessibility.post(element: self, notification: .selectedRowsChanged)
+    }
+
+    // MARK: - Accessibility
+
+    // The grid is drawn, so there is nothing here for the accessibility system to
+    // discover on its own: every row and cell it can reach is one of these
+    // answers. `GridAccessibilityTree` holds the elements; this is the table they
+    // hang from.
+
+    override func isAccessibilityElement() -> Bool { true }
+
+    override func accessibilityRole() -> NSAccessibility.Role? { .table }
+
+    override func accessibilityLabel() -> String? { accessibilityName }
+
+    override func accessibilityRowCount() -> Int { accessibilityTree.rowCount }
+
+    override func accessibilityColumnCount() -> Int { accessibilityTree.columns.count }
+
+    override func accessibilityRows() -> [Any]? { accessibilityTree.boundedRows() }
+
+    override func accessibilityChildren() -> [Any]? { accessibilityTree.boundedRows() }
+
+    override func accessibilitySelectedRows() -> [Any]? {
+        accessibilityTree.boundedSelectedRows()
+    }
+
+    override func accessibilityVisibleRows() -> [Any]? { accessibilityTree.visibleRows() }
+
+    override func accessibilitySelectedCells() -> [Any]? {
+        accessibilityTree.focusedCell().map { [$0] } ?? []
+    }
+
+    /// The cell the cursor is on, so focusing the grid reads that cell rather
+    /// than announcing a table and stopping there. Not an override: `NSView`
+    /// leaves this one to the accessibility protocol rather than implementing it.
+    func accessibilityFocusedUIElement() -> Any? {
+        accessibilityTree.focusedCell() ?? self
+    }
+
+    /// Both halves of AppKit's own answer to a table too large to hand over
+    /// whole. A browse holds up to a million rows; this is what lets a screen
+    /// reader ask for the forty it is about to read instead of all of them.
+    override func accessibilityArrayAttributeCount(_ attribute: NSAccessibility.Attribute) -> Int {
+        switch attribute {
+        case .rows, .children: return accessibilityTree.rowCount
+        case .visibleRows: return accessibilityTree.visibleRows().count
+        case .selectedRows: return accessibilityTree.selectedRowCount
+        default: return super.accessibilityArrayAttributeCount(attribute)
+        }
+    }
+
+    override func accessibilityArrayAttributeValues(
+        _ attribute: NSAccessibility.Attribute, index: Int, maxCount: Int
+    ) -> [Any] {
+        switch attribute {
+        case .rows, .children: return accessibilityTree.rows(from: index, maxCount: maxCount)
+        case .visibleRows:
+            return Array(accessibilityTree.visibleRows().dropFirst(index).prefix(maxCount))
+        case .selectedRows:
+            return accessibilityTree.selectedRows(from: index, maxCount: maxCount)
+        default:
+            return super.accessibilityArrayAttributeValues(
+                attribute, index: index, maxCount: maxCount)
+        }
     }
 
     private func copySelection() {

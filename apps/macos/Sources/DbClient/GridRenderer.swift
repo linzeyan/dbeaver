@@ -750,34 +750,14 @@ final class GridRenderer {
             for (i, r) in rows.enumerated() {
                 let y = rowY(i)
                 guard y < viewH, y + rowHeight > headerHeight else { continue }
-                if r >= table.rowCount {
-                    let (text, colour) = draftText(row: r - table.rowCount, column: c)
-                    emitCell(
-                        text, x: x, width: w, maxChars: maxChars, y: y + 3,
-                        color: colour, alignRight: alignRight && colour == Theme.Grid.text.simd)
-                    continue
-                }
-                // NULL is drawn as the word, dimmed. `text` returns "" for both
-                // NULL and an empty string, and rendering them the same way
-                // hides a distinction the user is querying on.
-                //
-                // Unless the server declared the column NOT NULL, where the word
-                // would be the lie instead: the only NULL that can reach such a
-                // column is one a driver substituted for a value Arrow has no
-                // shape for. Measured on MySQL 8.4 — the server clears its NOT
-                // NULL flag on the nullable side of an outer join, so a result
-                // column that still carries it cannot hold a NULL from the data.
-                if table.isNull(row: r, column: c) {
-                    emitCell(
-                        table.columns[c].declaredNotNull ? "" : "NULL",
-                        x: x, width: w, maxChars: maxChars, y: y + 3,
-                        color: Theme.Grid.nullText.simd, alignRight: false)
-                } else {
-                    emitCell(
-                        table.text(row: r, column: c), x: x, width: w,
-                        maxChars: maxChars, y: y + 3,
-                        color: Theme.Grid.text.simd, alignRight: alignRight)
-                }
+                let (text, colour) = cellText(row: r, column: c)
+                emitCell(
+                    text, x: x, width: w, maxChars: maxChars, y: y + 3,
+                    // Only a plain value is right-aligned. The words — NULL,
+                    // DEFAULT, and the empty cell of a NOT NULL column — read as
+                    // labels rather than as data, and each comes back in its own
+                    // colour, which is what identifies them here.
+                    color: colour, alignRight: alignRight && colour == Theme.Grid.text.simd)
             }
         }
 
@@ -792,6 +772,35 @@ final class GridRenderer {
             fill(x: 0, y: 0, w: 1, h: viewH, color: ring)
             fill(x: viewW - 1, y: 0, w: 1, h: viewH, color: ring)
         }
+    }
+
+    /// What a cell says, and in which colour.
+    ///
+    /// The one place the rules live, because two readers need the same answer:
+    /// the draw path above, and the accessibility tree that tells a screen reader
+    /// what is on screen. A cell described differently from the way it is drawn
+    /// would be a second, invisible version of the result.
+    func cellText(row: Int, column: Int) -> (String, SIMD4<Float>) {
+        guard let table, column < table.columns.count else { return ("", Theme.Grid.text.simd) }
+        if row >= table.rowCount {
+            let draft = row - table.rowCount
+            guard draft < drafts.count else { return ("", Theme.Grid.text.simd) }
+            return draftText(row: draft, column: column)
+        }
+        // NULL is spelled as the word, dimmed. `text` returns "" for both NULL
+        // and an empty string, and presenting them the same way hides a
+        // distinction the user is querying on.
+        //
+        // Unless the server declared the column NOT NULL, where the word would be
+        // the lie instead: the only NULL that can reach such a column is one a
+        // driver substituted for a value Arrow has no shape for. Measured on
+        // MySQL 8.4 — the server clears its NOT NULL flag on the nullable side of
+        // an outer join, so a result column that still carries it cannot hold a
+        // NULL from the data.
+        if table.isNull(row: row, column: column) {
+            return (table.columns[column].declaredNotNull ? "" : "NULL", Theme.Grid.nullText.simd)
+        }
+        return (table.text(row: row, column: column), Theme.Grid.text.simd)
     }
 
     /// What a draft's cell says, and in which colour.
