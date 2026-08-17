@@ -1307,3 +1307,94 @@ async fn a_running_statement_stops_when_asked_and_says_that_is_why() {
     let ordinary = error_from(&src, "SELECT 1/0").await;
     assert!(!ordinary.is_cancelled(), "got: {ordinary}");
 }
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_json_column_arrives_as_the_server_wrote_it() {
+    // `json` is defined to preserve the text it was given, and this is the test
+    // that says so: duplicate keys, key order and insignificant whitespace all
+    // survive. They did not when the driver parsed each value into a
+    // `serde_json::Value` and rendered it back — the parse silently rewrote the
+    // document, and the column's Arrow type is text either way, so the whole
+    // round trip was cost with a correctness price attached.
+    let src = connect().await;
+    let sql = r#"SELECT '{"b": 1,  "a": 2, "b": 3}'::json AS doc"#;
+    let mut stream = src.query(sql, 8).await.expect("query failed");
+    let batch = stream
+        .next_batch()
+        .await
+        .expect("batch error")
+        .expect("expected a row");
+
+    let doc = col::<StringArray>(&batch, "doc");
+    assert_eq!(doc.value(0), r#"{"b": 1,  "a": 2, "b": 3}"#);
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_jsonb_column_arrives_as_the_servers_own_normal_form() {
+    // jsonb is stored decomposed, so the server — not this driver — decides how
+    // it reads back: keys sorted, duplicates resolved, whitespace gone. Pinned
+    // against `::text` on the server rather than against a literal written here,
+    // because the claim is "whatever PostgreSQL says", and a literal would be
+    // this test's opinion of that.
+    let src = connect().await;
+    let sql = r#"SELECT '{"b": 1,  "a": 2, "b": 3}'::jsonb AS doc,
+                        '{"b": 1,  "a": 2, "b": 3}'::jsonb::text AS server_text"#;
+    let mut stream = src.query(sql, 8).await.expect("query failed");
+    let batch = stream
+        .next_batch()
+        .await
+        .expect("batch error")
+        .expect("expected a row");
+
+    let doc = col::<StringArray>(&batch, "doc");
+    let server_text = col::<StringArray>(&batch, "server_text");
+    assert_eq!(doc.value(0), server_text.value(0));
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_null_json_value_and_a_json_null_stay_different() {
+    // Two things spelled almost the same: SQL NULL (no document at all) and the
+    // JSON document `null`. Collapsing them would be the silent kind of data
+    // loss, and the decoder now takes bytes rather than a parsed value, so this
+    // is where that distinction is checked.
+    let src = connect().await;
+    let sql = "SELECT NULL::jsonb AS a, 'null'::jsonb AS b";
+    let mut stream = src.query(sql, 8).await.expect("query failed");
+    let batch = stream
+        .next_batch()
+        .await
+        .expect("batch error")
+        .expect("expected a row");
+
+    let a = col::<StringArray>(&batch, "a");
+    let b = col::<StringArray>(&batch, "b");
+    assert!(a.is_null(0), "SQL NULL must stay a NULL");
+    assert_eq!(b.value(0), "null", "the JSON document null is a value");
+}
+
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn json_text_survives_a_multi_byte_character() {
+    // The decoder now hands back a &str borrowed from the wire buffer, so this
+    // is where the UTF-8 boundary handling is checked: jsonb's version prefix is
+    // stripped by byte, and getting that wrong on a multi-byte document would
+    // fail here rather than in somebody's data.
+    let src = connect().await;
+    let sql = r#"SELECT '{"k": "日本語テキスト"}'::jsonb AS doc"#;
+    let mut stream = src.query(sql, 8).await.expect("query failed");
+    let batch = stream
+        .next_batch()
+        .await
+        .expect("batch error")
+        .expect("expected a row");
+
+    let doc = col::<StringArray>(&batch, "doc");
+    assert!(
+        doc.value(0).contains("日本語テキスト"),
+        "got: {}",
+        doc.value(0)
+    );
+}
