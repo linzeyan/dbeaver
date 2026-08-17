@@ -170,7 +170,15 @@ struct ConnectView: View {
     /// matters.
     private var driverRow: some View {
         HStack(spacing: Theme.Space.sm) {
-            label("Database")
+            // "Kind", not "Database". This row and the one three below it were
+            // both labelled DATABASE, meaning two different things — which kind
+            // of server to speak to, and which database on it to open — so the
+            // form read top to bottom as DATABASE, HOST, PORT, DATABASE. The
+            // accessibility label already said "Database kind" and was the only
+            // place the distinction was drawn; "Kind" is what fits the 62pt
+            // label column, and it is the word this window already uses for
+            // what an object is (`RelationKind`).
+            label("Kind")
             Picker("", selection: driverBinding) {
                 ForEach(DriverCatalog.all) { driver in
                     Text(driver.label).tag(driver.scheme)

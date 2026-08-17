@@ -263,6 +263,20 @@ final class AppModel {
     private(set) var connectionLabel = "Not connected"
     private(set) var connectionState: StatusDot.State = .connecting
     private(set) var status = "Connecting…"
+
+    /// What `status` says when the connection is not doing anything.
+    ///
+    /// Named because it is now written from four places and every one of them
+    /// has to agree: two that arrive at rest (a connection landing, a refresh
+    /// settling) and two that are putting "Running…" back after the work it
+    /// described has finished. It used not to be put back at all, and the
+    /// omission was visible — the Query tab before anything has run has no
+    /// result to describe, falls through to `status`, and so sat reading
+    /// "Running…" for the rest of the session over a window where nothing was.
+    /// The `exportStatus` note below is the same bug worked around rather than
+    /// fixed.
+    private var settledStatus: String { Self.pluralized(schemas.count, "schema") }
+
     private(set) var isBusy = false
     /// Set while a result is being written to a file. The write happens off the
     /// main thread, so without this the window would sit looking idle for
@@ -568,7 +582,7 @@ final class AppModel {
             expanded.insert(opening)
             selected = requested ?? relations[opening]?.first
         }
-        status = Self.pluralized(schemas.count, "schema")
+        status = settledStatus
         isBusy = false
         // Whether this database has a transaction to control is the first thing
         // the toolbar needs, and it is a property of the connection just made
@@ -724,7 +738,7 @@ final class AppModel {
     /// Ends a refresh that has no relation left to reload. The path through
     /// `runBrowse` clears `isBusy` itself when the rows land.
     private func settleRefresh() {
-        status = Self.pluralized(schemas.count, "schema")
+        status = settledStatus
         isBusy = false
         browseResult.abandonLoading()
     }
@@ -1485,9 +1499,19 @@ final class AppModel {
     /// Example filters, written against the selected relation. A fixed `id > 100`
     /// hint names a column most tables do not have, which reads as the field
     /// having been prefilled with something that will not run.
+    ///
+    /// Naming the relation's own first column fixed half of that and left the
+    /// other half: `> 100` against a `text` column is a comparison no server
+    /// accepts, so browsing anything whose first column is a name produced a
+    /// hint spelling out a statement that errors. `IS NOT NULL` is the one
+    /// predicate that is valid over every column of every type in every dialect
+    /// this build speaks, which is what a hint that cannot be run against the
+    /// table in front of it has to be. It teaches the same thing — that this
+    /// field takes an expression over a column of this relation — without
+    /// teaching an idiom that fails.
     var filterHint: (where: String, order: String) {
         guard let first = columns.first?.name else { return ("", "") }
-        return ("\(first) > 100", "\(first) desc")
+        return ("\(first) IS NOT NULL", "\(first) desc")
     }
 
     /// Reads the relation from the top, through a cursor of its own.
@@ -1640,6 +1664,10 @@ final class AppModel {
                 statement: browseStatementText, capped: capped,
                 milliseconds: fetched.milliseconds, summary: summary)
         }
+        // The rows describe themselves from here on, so `status` goes back to
+        // describing the connection. Not putting it back is what left "Running…"
+        // under a Query tab that had run nothing.
+        status = settledStatus
         isBusy = false
     }
 
@@ -2029,6 +2057,12 @@ final class AppModel {
             stopped
             ?? steps.lastIndex { $0.outcome.hasGrid }
             ?? max(steps.count - 1, 0)
+        // The steps describe the run from here on, so `status` goes back to
+        // describing the connection. Set before the failure branch below rather
+        // than instead of it: `fail` writes "Failed" over this, which is the
+        // right word for a run that stopped and the wrong one for a status line
+        // still saying "Running…" about a run that ended either way.
+        status = settledStatus
         isBusy = false
         // A statement in manual-commit mode opens the transaction it belongs to,
         // so this is where "uncommitted work" starts being true. A statement

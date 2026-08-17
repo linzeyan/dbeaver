@@ -13,6 +13,11 @@ enum FocusArea: Hashable {
     case whereField
     case orderField
     case editor
+    /// The cell editor's value field. Named here rather than left anonymous
+    /// because `CompactField` draws its own focus ring from a `FocusArea`, and
+    /// the ring is most of the point of putting the cell editor in one: it is
+    /// the field that writes to the database.
+    case cellValue
     // The connection form's fields. In the same enum as the panes' because the
     // form is the same window: it replaces the shell rather than floating over
     // it, so focus is only ever in one of these places at a time.
@@ -211,6 +216,22 @@ struct NavigatorView: View {
                 .listStyle(.sidebar)
             }
         }
+        // Opaque, which costs the sidebar its system translucency and buys back
+        // a navigator that is showing only the navigator. `NavigationSplitView`
+        // lets the detail column's backgrounds run under the sidebar and the
+        // sidebar's vibrancy samples them, so every full-width band on the right
+        // was smeared across the tree at its own height — the Structure tab's
+        // section strip drew a visible lighter stripe through the middle of the
+        // object list, at the exact y of a control in a different pane.
+        //
+        // This is the leak `ScriptOutcomeList` documents further down, where it
+        // was answered by choosing a tone that did not show through. A strip
+        // cannot take that answer, since being a band is what it is, so the
+        // sampling has to stop instead. Nothing this window was using is lost:
+        // it overrides the system appearance and takes every other surface from
+        // `Theme`, so the sidebar was the one place a colour nobody chose could
+        // still appear.
+        .background(Theme.background.color)
         .safeAreaInset(edge: .bottom) {
             // Object count belongs where the objects are, not in the main status
             // bar, which describes the result set.
@@ -808,6 +829,11 @@ private struct StructureDetailStrip: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(count.map { "\(section.rawValue), \($0)" } ?? section.rawValue)
+                // Which section is open is carried only by a fill, so without
+                // this the strip reads to VoiceOver as six identical buttons
+                // and there is no way to hear which one you are looking at.
+                // The tab bar above and the outcome list below both say it.
+                .accessibilityAddTraits(selected == section ? [.isSelected] : [])
             }
             Spacer(minLength: 0)
         }
@@ -878,6 +904,12 @@ private struct CellEditorRow: View {
     @Bindable var model: AppModel
     let cell: AppModel.InspectedCell?
     @State private var typed = ""
+    /// Owned here rather than threaded down from the pane, unlike every other
+    /// field in this window. Nothing outside this row ever hands focus to the
+    /// value field — there is no menu item and no shortcut that puts the caret
+    /// in it — so a binding passed through two views would exist only to be
+    /// read back by the field that wrote it.
+    @FocusState private var focus: FocusArea?
 
     var body: some View {
         HStack(spacing: Theme.Space.sm) {
@@ -885,19 +917,31 @@ private struct CellEditorRow: View {
                 // Said rather than hidden. An absent field reads as a feature
                 // this build does not have, and one of the two reasons is
                 // something the user can do something about.
+                // Secondary rather than the tertiary label tone: this is a
+                // sentence explaining why the controls beside it are missing,
+                // which is something the reader has to read rather than glance
+                // at — and tertiary does not clear 4.5:1 on this bar.
                 Text(obstacle)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.textSecondary.color)
                     .lineLimit(1)
             } else {
                 if let cell {
                     FieldLabel(text: cell.column)
-                    TextField("", text: $typed)
-                        .textFieldStyle(.plain)
-                        .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.text.color)
-                        .onSubmit { model.stageEdit(typed) }
-                        .help("Return stages the change; nothing is sent until Save")
+                    // The window's own field rather than a bare `TextField`.
+                    // This is the one control in the application that writes to
+                    // the database and it was drawn with no border, no fill and
+                    // no focus ring — indistinguishable from the static label
+                    // beside it, and from the value the inspector strip prints
+                    // directly above. The WHERE box two rows below it, which
+                    // only builds a query, looked more like something you could
+                    // type into than this did.
+                    CompactField(
+                        placeholder: "", text: $typed, area: .cellValue, focus: $focus,
+                        onSubmit: { model.stageEdit(typed) }
+                    )
+                    .help("Return stages the change; nothing is sent until Save")
+                    .accessibilityLabel("Value of \(cell.column)")
                     Button("Set") { model.stageEdit(typed) }
                         .help("Hold this value for the selected cell")
                     Button("NULL") { model.stageEdit(nil) }
@@ -1594,9 +1638,13 @@ struct CellInspector: View {
                 .help("Copy value (⌘C)")
                 .accessibilityLabel("Copy cell value")
             } else {
+                // Secondary rather than tertiary: this strip is the only thing
+                // telling a reader what the row under the grid is for, and it
+                // sits on `surfaceRaised`, the lightest surface in the window
+                // and the one tertiary has the least contrast against.
                 Text("Select a cell to inspect its value")
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.textSecondary.color)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }

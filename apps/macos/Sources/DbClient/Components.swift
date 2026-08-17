@@ -114,6 +114,15 @@ struct InlineBanner: View {
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Three lines is a bound on how much of the window an error may
+                // take, not a claim that errors are three lines long. A server
+                // that answers with a hint and a context stack loses the end of
+                // it here, and the banner is the only place a browse or a
+                // connection failure is ever shown — the Query pane has
+                // `StatementNote` and nothing else does. The tooltip is what
+                // makes the rest reachable, the same way it does for every
+                // truncated name in the Structure tab.
+                .help(message)
 
             Button(action: onDismiss) {
                 Image(systemName: "xmark")

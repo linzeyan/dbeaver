@@ -1595,8 +1595,27 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
     }
 }
 
+/// Ends the process when the last window goes.
+///
+/// This application has exactly one window and no command that makes another:
+/// no New Window, no document to reopen, and nothing that answers a click on the
+/// Dock icon. Closing it therefore left a process running with a menu bar, no
+/// window, and no way back to one — every item greyed out, ⌘Q the only thing
+/// that still did anything. A single-window application quits when its window
+/// closes, which is what Calculator and System Settings have always done and
+/// what the close button on a window with nothing behind it promises.
+///
+/// Declared here rather than beside the menu targets because it is about the
+/// process rather than about a command. `NSApplication.delegate` is a weak
+/// reference, so the top-level `let` below is what keeps this alive.
+final class AppLifecycle: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)
+let lifecycle = AppLifecycle()
+app.delegate = lifecycle
 
 guard let device = MTLCreateSystemDefaultDevice() else {
     print("no metal device")

@@ -148,6 +148,20 @@ enum AppMenu {
             action: #selector(ConnectionCommand.presentConnection(_:)), keyEquivalent: "k")
         connect.keyEquivalentModifierMask = .command
         connect.target = connection
+
+        // ⌘W, which was bound to nothing at all. That is not only a missing
+        // convenience: the Settings panel is a second window with a close
+        // button and no other way out, so without this item there is no
+        // keyboard dismissal for it — on a platform where every window on
+        // screen has closed with ⌘W for forty years.
+        //
+        // No target, so it walks the responder chain to whichever window is
+        // key, which is what makes one item serve both windows. Grouped with
+        // Connect… above rather than put in its own block, because Connect… is
+        // this application's Open and Close belongs beside it.
+        let close = menu.addItem(
+            withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        close.keyEquivalentModifierMask = .command
         menu.addItem(.separator())
 
         let csv = menu.addItem(

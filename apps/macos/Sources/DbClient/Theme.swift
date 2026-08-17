@@ -61,14 +61,24 @@ enum Theme {
 
     // MARK: - Text
     //
-    // Contrast is against `background`, checked rather than assumed: primary
-    // 17:1, secondary 6.3:1, tertiary 3.4:1. Tertiary is deliberately kept for
-    // non-essential labels only, since it clears the 3:1 bar for incidental text
-    // but not the 4.5:1 bar for anything a user has to read.
+    // Contrast is checked rather than assumed, and against the *lightest*
+    // surface each tone is drawn on rather than against `background`. That
+    // distinction is not pedantry: it is where the previous tertiary went wrong.
+    // Measured against `background` alone it read 3.8:1 and was documented as
+    // clearing the 3:1 bar — but the chrome draws it on `surface` (the status
+    // bar, the filter bar, the sidebar footer) and on `surfaceRaised` (the cell
+    // inspector strip, the history and outcome headers), where the same tone
+    // fell to 3.1:1 and 2.7:1. A number measured against the one surface a tone
+    // is rarely used on is not a check.
+    //
+    // So, against `surfaceRaised`: primary 12.1:1, secondary 4.9:1, tertiary
+    // 3.3:1. Tertiary is still for non-essential labels only — it clears 3:1
+    // everywhere it appears and 4.5:1 nowhere but `background` — and anything a
+    // user has to read rather than glance at belongs on secondary.
 
     static let text = Tone(0xF8FA_FC)
     static let textSecondary = Tone(0x94A3_B8)
-    static let textTertiary = Tone(0x6475_8B)
+    static let textTertiary = Tone(0x7483_9A)
 
     // MARK: - Semantics
     //
