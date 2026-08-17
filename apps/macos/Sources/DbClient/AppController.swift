@@ -303,8 +303,29 @@ final class GridView: MTKView {
 
     // MARK: - Pointer
 
+    /// Where an event landed, in the coordinates the renderer draws in: y measured
+    /// down from the top of the view.
+    ///
+    /// The renderer puts y = 0 at the top — that is where it fills the header band,
+    /// with the first row below it — while an `MTKView` is not flipped, so a mouse
+    /// event's y arrives measured up from the bottom. Handing that straight to the
+    /// renderer mirrored every pointer answer it gave: a click on the first row
+    /// selected one counted from the other end, a click on a header did nothing
+    /// while the bottom 32pt sorted, and both scrollbar gutters were on the wrong
+    /// edge. Converted once here rather than inside each of `cell(at:)`,
+    /// `isInHeader` and the scrollbar geometry, because it is one fact about the
+    /// view and not three.
+    static func rendererPoint(of viewPoint: CGPoint, viewHeight: CGFloat) -> CGPoint {
+        CGPoint(x: viewPoint.x, y: viewHeight - viewPoint.y)
+    }
+
+    private func rendererPoint(of event: NSEvent) -> CGPoint {
+        Self.rendererPoint(
+            of: convert(event.locationInWindow, from: nil), viewHeight: bounds.height)
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
+        let point = rendererPoint(of: event)
         if resizeTarget(at: point) != nil {
             NSCursor.resizeLeftRight.set()
         } else if sortsOnHeaderClick, isInHeader(point) {
@@ -321,7 +342,7 @@ final class GridView: MTKView {
     override func mouseDown(with event: NSEvent) {
         guard let renderer, let table = renderer.table else { return }
         window?.makeFirstResponder(self)
-        let point = convert(event.locationInWindow, from: nil)
+        let point = rendererPoint(of: event)
 
         // Before anything else: the gutters sit over the data, so a click there
         // must not also land on the cell underneath.
@@ -356,7 +377,7 @@ final class GridView: MTKView {
             return
         }
 
-        guard var hit = renderer.cell(at: point, viewHeight: bounds.height, table: table)
+        guard var hit = renderer.cell(at: point, table: table)
         else { return }
         // Shift-click extends from wherever the range already starts, so a
         // second shift-click re-aims the same range instead of chaining a new
@@ -369,7 +390,7 @@ final class GridView: MTKView {
 
     override func mouseDragged(with event: NSEvent) {
         guard let renderer else { return }
-        let point = convert(event.locationInWindow, from: nil)
+        let point = rendererPoint(of: event)
 
         if let scrollDrag {
             renderer.scrollTo(

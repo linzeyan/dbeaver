@@ -37,6 +37,7 @@ enum AccessibilityChecks {
         checkWalkingAWholeResultDoesNotGrowWithoutBound()
         checkADifferentSetOfColumnsThrowsAwayTheOldRows()
         checkTheGridIsNotFlippedSoAFrameHasToTurnOver()
+        checkAClickNearTheTopOfTheViewLandsNearTheTopOfTheGrid()
         if failures == 0 {
             fputs("accessibility: all checks passed\n", stderr)
         } else {
@@ -277,6 +278,40 @@ enum AccessibilityChecks {
     }
 
     // MARK: - Coordinates
+
+    /// A click near the top of the view is near the top of the grid.
+    ///
+    /// The other direction of the same contract the frames rely on, and it lives
+    /// here because it is one fact about the view rather than two: the renderer
+    /// measures y down from the top, so a pointer y measured up from the bottom
+    /// has to be turned over before the renderer is asked anything about it. It
+    /// was not, and every pointer answer was mirrored — a click on the first row
+    /// selected one counted from the other end, which is the defect this check
+    /// exists to keep from coming back.
+    private static func checkAClickNearTheTopOfTheViewLandsNearTheTopOfTheGrid() {
+        let height: CGFloat = 300
+        let atTop = GridView.rendererPoint(
+            of: CGPoint(x: 40, y: height - 5), viewHeight: height)
+        expect(atTop.y, 5, "five points below the top edge is five points into the header")
+        expect(atTop.x, 40, "and x is left alone")
+
+        let atBottom = GridView.rendererPoint(of: CGPoint(x: 40, y: 2), viewHeight: height)
+        expect(atBottom.y, height - 2, "two points above the bottom edge is the far end")
+
+        // And the consequence, worked out the way `GridRenderer.cell(at:)` works it
+        // out. A renderer needs a Metal device, so this states its two constants
+        // rather than reading them; if they move, the arithmetic here stops
+        // matching the grid and this comment is the reason why.
+        let headerHeight: CGFloat = 32
+        let rowHeight: CGFloat = 20
+        func row(clickedAt viewY: CGFloat) -> Int {
+            let y = GridView.rendererPoint(of: CGPoint(x: 40, y: viewY), viewHeight: height).y
+            return Int((y - headerHeight) / rowHeight)
+        }
+        expect(row(clickedAt: height - headerHeight - 5), 0, "the first row is the top one")
+        expect(row(clickedAt: height - headerHeight - 25), 1, "and the second is below it")
+        expect(row(clickedAt: 5), 13, "while the bottom of the view is the far end of the page")
+    }
 
     /// The contract `accessibleFrame` turns a rectangle over for.
     ///

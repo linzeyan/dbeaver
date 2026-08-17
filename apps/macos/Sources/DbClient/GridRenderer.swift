@@ -820,9 +820,15 @@ final class GridRenderer {
 
     // MARK: - Hit testing
 
-    /// The cell at a point in view coordinates, or `nil` for the header and the
-    /// empty area past the last row or column.
-    func cell(at point: CGPoint, viewHeight: CGFloat, table: ArrowTable) -> GridSelection? {
+    /// The cell at a point in the coordinates this renderer draws in — y down from
+    /// the top, which is what `GridView.rendererPoint` produces — or `nil` for the
+    /// header and the empty area past the last row or column.
+    ///
+    /// It used to take the view's height as well and never read it. That unused
+    /// parameter was the shape of a bug: the caller was passing a y measured from
+    /// the bottom, and something here looked like it was accounting for the
+    /// difference.
+    func cell(at point: CGPoint, table: ArrowTable) -> GridSelection? {
         let y = Float(point.y)
         guard y >= headerHeight else { return nil }
         let row = Int(scrollRow + Double((y - headerHeight) / rowHeight))
