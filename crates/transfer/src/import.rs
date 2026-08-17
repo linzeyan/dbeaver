@@ -12,7 +12,7 @@
 //! inference this avoids, and a statement that guessed a column's type is one
 //! somebody should read before it runs.
 
-use crate::{Format, TargetWriter};
+use crate::{DelimitedReader, Format, TargetWriter};
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow::error::ArrowError;
@@ -78,19 +78,15 @@ type Batches = Box<dyn Iterator<Item = Result<RecordBatch, ArrowError>>>;
 
 fn reader(file: File, format: Format, schema: SchemaRef) -> DbResult<Batches> {
     let batches: Batches = match format {
+        // This crate's own reader, not `arrow::csv`, for the same reason the
+        // writer is this crate's own: `arrow::csv` cannot tell an unquoted
+        // blank from `""`, so the NULL-versus-empty distinction the writer
+        // preserves would be lost on the way back in.
         Format::Csv => Box::new(
-            arrow::csv::ReaderBuilder::new(schema)
-                .with_header(true)
-                .with_delimiter(b',')
-                .build(file)
-                .map_err(|e| DbError::new(e.to_string()))?,
+            DelimitedReader::new(file, b',', schema).map_err(|e| DbError::new(e.to_string()))?,
         ),
         Format::Tsv => Box::new(
-            arrow::csv::ReaderBuilder::new(schema)
-                .with_header(true)
-                .with_delimiter(b'\t')
-                .build(file)
-                .map_err(|e| DbError::new(e.to_string()))?,
+            DelimitedReader::new(file, b'\t', schema).map_err(|e| DbError::new(e.to_string()))?,
         ),
         Format::JsonLines => Box::new(
             arrow::json::ReaderBuilder::new(schema)
