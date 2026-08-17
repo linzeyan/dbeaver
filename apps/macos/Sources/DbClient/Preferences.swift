@@ -4,11 +4,12 @@ import Observation
 /// The settings this application has, and the one place their defaults are
 /// stated.
 ///
-/// Each of these exists because a question in the phase notes was answered with
-/// "make it a setting", and the answer named the default alongside it. There are
-/// three of them, and this is three preferences rather than a framework for
-/// preferences: a fourth would be another line here and another row in the
-/// window, which is cheaper than the machinery that would have anticipated it.
+/// Each of these exists because a question in the notes was answered with "make
+/// it a setting", and the answer named the default alongside it. This is a list
+/// of preferences rather than a framework for preferences: each new one is a
+/// property here, a line in `registered`, a line in `init` and a row in the
+/// window, which has stayed cheaper than the machinery that would have
+/// anticipated it — the fourth and fifth arrived that way.
 ///
 /// The defaults live in `UserDefaults`' registration domain, which is the
 /// platform's own answer to the problem of a default stated twice. Nothing is
@@ -60,17 +61,34 @@ final class Preferences {
         didSet { store.set(insertsRowOfDefaults, forKey: Key.insertsRowOfDefaults) }
     }
 
-    /// What a fresh installation does. The only statement of these three values.
+    /// Whether the sidebar keeps the system's translucency.
+    ///
+    /// Off, which is the opaque sidebar. `NavigationSplitView` lets the detail
+    /// column's backgrounds run under the sidebar and the sidebar's vibrancy
+    /// samples them, so with this on, every full-width band on the right — the
+    /// Structure tab's section strip most visibly — is smeared across the object
+    /// tree at its own height. That is a defect this window was shipped with and
+    /// a platform signal some people would rather have than not, which is what
+    /// makes it a setting; off by default because a stripe through the tree at
+    /// the y of a control in a different pane reads as a rendering fault, and
+    /// nothing on screen would explain it.
+    var usesTranslucentSidebar: Bool {
+        didSet { store.set(usesTranslucentSidebar, forKey: Key.usesTranslucentSidebar) }
+    }
+
+    /// What a fresh installation does. The only statement of these values.
     private static let registered: [String: Any] = [
         Key.hidesEmptyColumns: false,
         Key.confirmsDeletions: true,
-        Key.insertsRowOfDefaults: false
+        Key.insertsRowOfDefaults: false,
+        Key.usesTranslucentSidebar: false
     ]
 
     private enum Key {
         static let hidesEmptyColumns = "dev.dbclient.hidesEmptyColumns"
         static let confirmsDeletions = "dev.dbclient.confirmsDeletions"
         static let insertsRowOfDefaults = "dev.dbclient.insertsRowOfDefaults"
+        static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
     }
 
     @ObservationIgnored private let store: UserDefaults
@@ -85,5 +103,6 @@ final class Preferences {
         hidesEmptyColumns = store.bool(forKey: Key.hidesEmptyColumns)
         confirmsDeletions = store.bool(forKey: Key.confirmsDeletions)
         insertsRowOfDefaults = store.bool(forKey: Key.insertsRowOfDefaults)
+        usesTranslucentSidebar = store.bool(forKey: Key.usesTranslucentSidebar)
     }
 }

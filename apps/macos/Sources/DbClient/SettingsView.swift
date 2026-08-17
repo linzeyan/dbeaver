@@ -3,10 +3,10 @@ import SwiftUI
 
 /// The Settings window, and the one object that owns it.
 ///
-/// A panel of its own rather than a sheet on the session window: two of these
-/// three settings change what the window in front of them is already showing —
-/// a hidden column comes back, a refusal stops being one — and a sheet covers
-/// the thing the reader is checking against.
+/// A panel of its own rather than a sheet on the session window: most of these
+/// settings change what the window in front of them is already showing — a
+/// hidden column comes back, a refusal stops being one, the sidebar changes
+/// material — and a sheet covers the thing the reader is checking against.
 ///
 /// Held here rather than made on each press, so the second ⌘, raises the window
 /// that is already open instead of stacking a second one. `NSWindow` releases
@@ -40,14 +40,13 @@ final class SettingsWindow {
     }
 }
 
-/// The three settings, each with the sentence that says what turning it on
-/// costs.
+/// The settings, each with the sentence that says what turning it on costs.
 ///
-/// Every one of them is a trade rather than a taste — a hidden column is data
-/// off screen, a skipped confirmation is a delete with nothing between it and
-/// the server, a row of defaults is an INSERT the database may not accept — and
-/// a checkbox with only its own name beside it leaves the reader to find that
-/// out by switching it on.
+/// Every one of them costs something — a hidden column is data off screen, a
+/// skipped confirmation is a delete with nothing between it and the server, a
+/// row of defaults is an INSERT the database may not accept, a translucent
+/// sidebar samples the pane beside it — and a checkbox with only its own name
+/// beside it leaves the reader to find that out by switching it on.
 struct SettingsView: View {
     @Bindable var preferences: Preferences
 
@@ -77,6 +76,15 @@ struct SettingsView: View {
                     + "whichever way this database spells that. Off, it is refused here and "
                     + "the row is named. Databases with no spelling for it refuse either way.",
                 isOn: $preferences.insertsRowOfDefaults)
+
+            SettingsToggle(
+                title: "Translucent sidebar",
+                explanation:
+                    "The sidebar takes the system's translucency, which is what a Mac sidebar "
+                    + "usually looks like. It samples whatever the detail pane draws behind it, "
+                    + "so full-width bands on the right — the Structure tab's section strip — "
+                    + "show through the object tree as a stripe at their own height.",
+                isOn: $preferences.usesTranslucentSidebar)
         }
         .padding(Theme.Space.xl)
         .frame(width: 460, alignment: .leading)

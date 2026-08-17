@@ -216,22 +216,31 @@ struct NavigatorView: View {
                 .listStyle(.sidebar)
             }
         }
-        // Opaque, which costs the sidebar its system translucency and buys back
-        // a navigator that is showing only the navigator. `NavigationSplitView`
-        // lets the detail column's backgrounds run under the sidebar and the
-        // sidebar's vibrancy samples them, so every full-width band on the right
-        // was smeared across the tree at its own height — the Structure tab's
-        // section strip drew a visible lighter stripe through the middle of the
-        // object list, at the exact y of a control in a different pane.
+        // Opaque by default, which costs the sidebar its system translucency and
+        // buys back a navigator that is showing only the navigator.
+        // `NavigationSplitView` lets the detail column's backgrounds run under
+        // the sidebar and the sidebar's vibrancy samples them, so every
+        // full-width band on the right is smeared across the tree at its own
+        // height — the Structure tab's section strip drew a visible lighter
+        // stripe through the middle of the object list, at the exact y of a
+        // control in a different pane.
         //
         // This is the leak `ScriptOutcomeList` documents further down, where it
         // was answered by choosing a tone that did not show through. A strip
         // cannot take that answer, since being a band is what it is, so the
-        // sampling has to stop instead. Nothing this window was using is lost:
-        // it overrides the system appearance and takes every other surface from
-        // `Theme`, so the sidebar was the one place a colour nobody chose could
+        // sampling has to stop instead. Nothing this window needs is lost: it
+        // overrides the system appearance and takes every other surface from
+        // `Theme`, so the sidebar is the one place a colour nobody chose could
         // still appear.
-        .background(Theme.background.color)
+        //
+        // A setting, because a translucent sidebar is a strong Mac signal and
+        // wanting it back is a defensible taste — with the smear as its stated
+        // price. `Color.clear` rather than no modifier at all so both branches
+        // are one expression: what changes is whether anything is drawn over the
+        // material, and that reads better than a conditional modifier.
+        .background(
+            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.background.color
+        )
         .safeAreaInset(edge: .bottom) {
             // Object count belongs where the objects are, not in the main status
             // bar, which describes the result set.

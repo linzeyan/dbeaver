@@ -1,6 +1,6 @@
 import Foundation
 
-/// Executable checks for the three settings, run by `--verify-preferences`.
+/// Executable checks for the settings, run by `--verify-preferences`.
 ///
 /// Each of these settings exists because a design question was answered with
 /// "make it a setting", and each answer named a default. Two things can be wrong
@@ -52,6 +52,7 @@ enum PreferencesChecks {
         expect(fresh.hidesEmptyColumns, false, "an all-null column is shown, not hidden")
         expect(fresh.confirmsDeletions, true, "Save asks before it sends deletions")
         expect(fresh.insertsRowOfDefaults, false, "an empty new row is refused here, by name")
+        expect(fresh.usesTranslucentSidebar, false, "the sidebar is opaque, showing only itself")
     }
 
     /// A setting has to outlive the window, or the Settings window is a switch
@@ -68,12 +69,14 @@ enum PreferencesChecks {
         first.hidesEmptyColumns = true
         first.confirmsDeletions = false
         first.insertsRowOfDefaults = true
+        first.usesTranslucentSidebar = true
 
         // A second reader over the same store, which is what the next launch is.
         let second = Preferences(store: store)
         expect(second.hidesEmptyColumns, true, "hiding empty columns was kept")
         expect(second.confirmsDeletions, false, "the confirmation being off was kept")
         expect(second.insertsRowOfDefaults, true, "sending a row of defaults was kept")
+        expect(second.usesTranslucentSidebar, true, "the translucent sidebar was kept")
     }
 
     // MARK: - Hiding a column that is null in every row
