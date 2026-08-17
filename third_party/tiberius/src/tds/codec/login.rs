@@ -523,7 +523,9 @@ mod tests {
                         let fed_auth_echo = (options & 1) == 1;
                         options >>= 1;
                         if options != FED_AUTH_LIBRARYSECURITYTOKEN {
-                            unimplemented!("unsupported FedAuthLibrary {:?}", options);
+                            return Err(crate::Error::Protocol(
+                                format!("unsupported FedAuthLibrary {:?}", options).into(),
+                            ));
                         }
                         let token_len = cursor.read_u32::<LittleEndian>()? as usize;
                         let mut token = vec![0u16; token_len / 2];
@@ -537,7 +539,9 @@ mod tests {
                         } else if remaining == 0 {
                             None
                         } else {
-                            panic!("read feature ext fail: {}", remaining);
+                            return Err(crate::Error::Protocol(
+                                format!("read feature ext fail: {}", remaining).into(),
+                            ));
                         };
 
                         let fed_auth_ext = FedAuthExt {
@@ -547,7 +551,9 @@ mod tests {
                         };
                         ret.fed_auth_ext = Some(fed_auth_ext);
                     } else {
-                        unimplemented!("unsupported feature ext {:?}", fe);
+                        return Err(crate::Error::Protocol(
+                            format!("unsupported feature ext {:?}", fe).into(),
+                        ));
                     }
                 }
             }

@@ -680,7 +680,9 @@ impl<'a> Encode<BytesMutWithTypeInfo<'a>> for ColumnData<'a> {
             {
                 if let Some(num) = opt {
                     if scale != &num.scale() {
-                        todo!("this still need some work, if client scale not aligned with server, we need to do conversion but will lose precision")
+                        return Err(crate::Error::Protocol(
+                            "client scale does not match server scale for Numericn/Decimaln".into(),
+                        ))
                     }
                     num.encode(&mut *dst)?;
                 } else {

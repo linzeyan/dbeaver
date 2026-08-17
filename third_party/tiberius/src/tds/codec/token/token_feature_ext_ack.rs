@@ -40,12 +40,16 @@ impl TokenFeatureExtAck {
                 } else if data_len == 0 {
                     None
                 } else {
-                    panic!("invalid Feature_Ext_Ack token");
+                    return Err(crate::Error::Protocol(
+                        "invalid Feature_Ext_Ack token".into(),
+                    ))
                 };
 
                 features.push(FeatureAck::FedAuth(FedAuthAck::SecurityToken { nonce }))
             } else {
-                unimplemented!("unsupported feature {}", feature_id)
+                return Err(crate::Error::Protocol(
+                    format!("unsupported feature {}", feature_id).into(),
+                ))
             }
         }
 

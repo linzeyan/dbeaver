@@ -104,9 +104,9 @@ impl<'a> Encode<BytesMut> for TokenRpcRequest<'a> {
                 dst.put_u32_le(val);
             }
             RpcProcIdValue::Name(ref _name) => {
-                //let (left_bytes, _) = try!(write_varchar::<u16>(&mut cursor, name, 0));
-                //assert_eq!(left_bytes, 0);
-                todo!()
+                return Err(crate::Error::Protocol(
+                    "calling a procedure by name is not yet supported".into(),
+                ))
             }
         }
 

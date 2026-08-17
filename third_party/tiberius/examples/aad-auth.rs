@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     config.authentication(AuthMethod::AADToken(
         token.access_token().secret().to_string(),
     ));
-    config.trust_cert();
+    config.trust_cert()?;
 
     let tcp = TcpStream::connect(config.get_addr()).await?;
     tcp.set_nodelay(true)?;
