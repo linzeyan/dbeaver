@@ -273,8 +273,11 @@ final class AppModel {
     /// omission was visible — the Query tab before anything has run has no
     /// result to describe, falls through to `status`, and so sat reading
     /// "Running…" for the rest of the session over a window where nothing was.
-    /// The `exportStatus` note below is the same bug worked around rather than
-    /// fixed.
+    ///
+    /// `exportStatus` and `importStatus` below are not that bug worked around,
+    /// which is what this note used to claim: they outrank the tab's own summary
+    /// and survive a query run while a file is being written, and `status` can do
+    /// neither. See the note on `exportStatus`.
     private var settledStatus: String { Self.pluralized(schemas.count, "schema") }
 
     private(set) var isBusy = false
@@ -282,10 +285,27 @@ final class AppModel {
     /// main thread, so without this the window would sit looking idle for
     /// however long a million rows take to reach the disk.
     private(set) var isExporting = false
-    /// What the status bar reads while that write is in progress. Kept apart
-    /// from `status` because a query started during an export overwrites that
-    /// one with "Running…" and never puts it back — the export would end up
-    /// described by a sentence about something else.
+    /// What the status bar reads while that write is in progress.
+    ///
+    /// A property of its own rather than a sentence in `status`, and it was worth
+    /// re-deriving why once `status` stopped being left on "Running…" for the
+    /// rest of a session. Two reasons, both still true, and neither is the one
+    /// that used to be written here:
+    ///
+    /// Precedence. `statusLine` prefers the pane's own `current.summary` and
+    /// falls back to `status`, so a sentence put in `status` would not be read
+    /// out at all over a result that has a summary — which is every result an
+    /// export can be taken from.
+    ///
+    /// Interleaving. `exportQueue` is separate from the core queue on purpose, so
+    /// the window stays usable while a million rows go to disk: `canRun` and the
+    /// navigator are both live, and a query started mid-export writes `status`
+    /// twice — "Running…", then the settled sentence. The export's own line would
+    /// be gone while the export was still running.
+    ///
+    /// Reading it through `isExporting` is what makes it self-clearing: the flag
+    /// going false restores whatever the tab was saying, so no stale "Exported…"
+    /// can outlive the write it described.
     private(set) var exportStatus = ""
     /// Set while a file is being read into a table, for the reason above and one
     /// more: an import ends by refreshing the table it wrote to, and the refresh
