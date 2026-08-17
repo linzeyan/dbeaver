@@ -40,7 +40,11 @@ impl<'a> Display for MetaDataColumn<'a> {
                 FixedLenType::Float8 => write!(f, "float")?,
                 FixedLenType::Money4 => write!(f, "smallmoney")?,
                 FixedLenType::Int8 => write!(f, "bigint")?,
-                FixedLenType::Null => unreachable!(),
+                // These arms used to be `unreachable!()`, but the values come
+                // straight from the server's COLMETADATA token. A formatter
+                // that panics kills the process; a formatter that prints
+                // something ugly lets the caller see what the server sent.
+                FixedLenType::Null => write!(f, "null({:?})", fixed)?,
             },
             TypeInfo::VarLenSized(ctx) => match ctx.r#type() {
                 VarLenType::Bitn => write!(f, "bit")?,
@@ -86,12 +90,12 @@ impl<'a> Display for MetaDataColumn<'a> {
                     2 => write!(f, "smallint")?,
                     4 => write!(f, "int")?,
                     8 => write!(f, "bigint")?,
-                    _ => unreachable!(),
+                    _ => write!(f, "intn({})", ctx.len())?,
                 },
                 VarLenType::Floatn => match ctx.len() {
                     4 => write!(f, "real")?,
                     8 => write!(f, "float")?,
-                    _ => unreachable!(),
+                    _ => write!(f, "floatn({})", ctx.len())?,
                 },
                 VarLenType::SSVariant => write!(f, "sql_variant")?,
                 // Xml and Udt are their own `TypeInfo` variants, so nothing
@@ -108,7 +112,7 @@ impl<'a> Display for MetaDataColumn<'a> {
             } => match ty {
                 VarLenType::Decimaln => write!(f, "decimal({},{})", precision, scale)?,
                 VarLenType::Numericn => write!(f, "numeric({},{})", precision, scale)?,
-                _ => unreachable!(),
+                _other => write!(f, "{:?}({},{})", ty, precision, scale)?,
             },
             TypeInfo::Xml { .. } => write!(f, "xml")?,
             TypeInfo::Udt(info) => write!(f, "{}", info.type_name)?,
@@ -365,5 +369,70 @@ impl BaseMetaDataColumn {
         };
 
         Ok(BaseMetaDataColumn { flags, ty })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tds::codec::VarLenContext;
+
+    // No real SQL Server sends these type/length combinations, so a
+    // constructed value is the only proof available.
+    #[test]
+    fn fixed_len_null_prints() {
+        let col = MetaDataColumn {
+            base: BaseMetaDataColumn {
+                flags: BitFlags::empty(),
+                ty: TypeInfo::FixedLen(FixedLenType::Null),
+            },
+            col_name: "x".into(),
+        };
+        let s = format!("{}", col);
+        assert!(s.contains("null("), "expected output to name the type, got: {}", s);
+    }
+
+    #[test]
+    fn var_len_intn_unusual_length_prints() {
+        let col = MetaDataColumn {
+            base: BaseMetaDataColumn {
+                flags: BitFlags::empty(),
+                ty: TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Intn, 3, None)),
+            },
+            col_name: "x".into(),
+        };
+        let s = format!("{}", col);
+        assert!(s.contains("intn(3)"), "expected output to name the unexpected length, got: {}", s);
+    }
+
+    #[test]
+    fn var_len_floatn_unusual_length_prints() {
+        let col = MetaDataColumn {
+            base: BaseMetaDataColumn {
+                flags: BitFlags::empty(),
+                ty: TypeInfo::VarLenSized(VarLenContext::new(VarLenType::Floatn, 5, None)),
+            },
+            col_name: "x".into(),
+        };
+        let s = format!("{}", col);
+        assert!(s.contains("floatn(5)"), "expected output to name the unexpected length, got: {}", s);
+    }
+
+    #[test]
+    fn var_len_sized_precision_unusual_type_prints() {
+        let col = MetaDataColumn {
+            base: BaseMetaDataColumn {
+                flags: BitFlags::empty(),
+                ty: TypeInfo::VarLenSizedPrecision {
+                    ty: VarLenType::Intn,
+                    size: 10,
+                    precision: 5,
+                    scale: 2,
+                },
+            },
+            col_name: "x".into(),
+        };
+        let s = format!("{}", col);
+        assert!(s.contains("Intn"), "expected output to name the unexpected type, got: {}", s);
     }
 }
