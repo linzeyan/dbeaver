@@ -586,11 +586,9 @@ final class AppModel {
                 var connections = ConnectionStore.load(from: preferences.connectionStorage)
                 var savedConnectionID: UUID
 
-                // Find if we're updating an existing connection
                 if let editingID = editingConnectionID,
                     let index = connections.firstIndex(where: { $0.id == editingID })
                 {
-                    // Update existing connection
                     connections[index] = SavedConnection(
                         id: editingID,
                         name: connections[index].name,
@@ -599,7 +597,6 @@ final class AppModel {
                     )
                     savedConnectionID = editingID
                 } else {
-                    // Add new connection
                     let newConnection = SavedConnection(
                         id: UUID(),
                         name: "",
@@ -612,7 +609,6 @@ final class AppModel {
 
                 ConnectionStore.save(connections, to: preferences.connectionStorage)
 
-                // Save password to Keychain
                 ConnectionKeychain.save(remembering.1, for: savedConnectionID)
             }
         }

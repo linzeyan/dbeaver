@@ -145,14 +145,12 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
 
-            // Decode required fields
             self.scheme = try container.decode(String.self, forKey: .scheme)
             self.host = try container.decode(String.self, forKey: .host)
             self.port = try container.decode(String.self, forKey: .port)
             self.database = try container.decode(String.self, forKey: .database)
             self.user = try container.decode(String.self, forKey: .user)
 
-            // Decode optional fields with defaults
             self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
             self.color = try container.decodeIfPresent(String.self, forKey: .color) ?? "none"
             self.path = try container.decodeIfPresent(String.self, forKey: .path) ?? ""
@@ -234,7 +232,6 @@ extension SavedConnection {
     {
         var changedFields: [String] = []
 
-        // Check each field in form order
         if self.name != draft.name {
             changedFields.append("Name")
         }
@@ -271,7 +268,6 @@ extension SavedConnection {
             changedFields.append("Password")
         }
 
-        // Return nil if no fields changed
         guard !changedFields.isEmpty else {
             return nil
         }
