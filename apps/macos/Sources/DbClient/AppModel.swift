@@ -1429,6 +1429,35 @@ final class AppModel {
         }
     }
 
+    /// Whether the Structure tab's sections below the columns have been asked
+    /// for and not yet arrived.
+    ///
+    /// One question for all six, because they come back as one unit: no section
+    /// can be further along than another, and the strip's counts are as unread
+    /// as the rows under them. It matters that they land after the columns do —
+    /// the pane switches from `isLoadingStructure` to the split, and every
+    /// section is empty across that window, which is a table reported as having
+    /// no indexes before anything has asked the server whether it has any.
+    ///
+    /// Empty here means never read. `selectionChanged` clears the sections for a
+    /// new relation, while a refresh of the same one deliberately leaves the old
+    /// values up, so this stays false there and the sections go on showing what
+    /// they last knew — the answer the browse's stale rows already get. A
+    /// relation that really has none of them holds this true until the browse's
+    /// first page lands, since an empty arrival looks exactly like no arrival;
+    /// that window is one the grid's veil is describing anyway, and it ends.
+    ///
+    /// Derived rather than stored for the reason `isLoadingStructure` gives, with
+    /// one of its own: this read reports failure through `fail`, which puts
+    /// `isBusy` back and touches nothing else, so a flag would leave the section
+    /// spinning over an error the banner has already delivered.
+    var isLoadingRelationDetail: Bool { selected != nil && !hasRelationDetail && isBusy }
+
+    private var hasRelationDetail: Bool {
+        !indexes.isEmpty || !foreignKeys.isEmpty || !referencedBy.isEmpty
+            || !constraints.isEmpty || !triggers.isEmpty || ddl != nil
+    }
+
     /// The sections the strip offers for the selected relation.
     ///
     /// DDL is the only conditional one. The other five are empty on a relation
@@ -1444,6 +1473,14 @@ final class AppModel {
     /// A statement is a single value, and "1" beside it would answer a question
     /// nobody asked — the section being offered at all is what says there is one.
     func structureDetailCount(_ section: StructureDetail) -> Int? {
+        // No count is the honest answer while the sections are on their way: a
+        // zero beside every one of them is the same false claim the section
+        // below is being kept from making, and it is the more emphatic of the
+        // two — the counts exist so that "does this table have triggers" can be
+        // answered without a click. Nothing new appears when they land, the
+        // strip only gains the numbers, and it is already reshaping itself at
+        // that moment because `structureSections` gains DDL along with them.
+        guard !isLoadingRelationDetail else { return nil }
         switch section {
         case .indexes: return indexes.count
         case .foreignKeys: return foreignKeys.count
