@@ -23,6 +23,13 @@ enum ConnectionChecks {
         checkSessionLabels()
         checkDriverCatalog()
         checkFileShapedDatabases()
+        checkListRoundTrip()
+        checkFlatFile()
+        checkMissingKeys()
+        checkNewerBuild()
+        checkTitleAndSubtitle()
+        checkUnsavedEdits()
+        checkStorageClearsOther()
         checkConnectionList()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
@@ -186,7 +193,308 @@ enum ConnectionChecks {
             "127.0.0.1", "moving to a server driver fills in the host it now needs")
     }
 
+    /// The list survives the file.
+    ///
+    /// Order is asserted along with the contents because the file is the only place
+    /// it is kept: the window shows the connections in the order they are read, so a
+    /// store that returned a set would quietly reshuffle somebody's sidebar on every
+    /// launch. Ids are fixed here rather than generated, since an id that changed
+    /// across a save is a password that can no longer be found.
+    private static func checkListRoundTrip() {
+        guard let root = scratchDirectory() else { return }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = ConnectionDirectories(
+            local: root.appending(path: "config"), cloud: root.appending(path: "drive"))
+
+        let connections = [
+            SavedConnection(
+                id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+                name: "sales",
+                color: .red,
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                    user: "ana")),
+            SavedConnection(
+                id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+                name: "inventory",
+                color: .blue,
+                settings: ConnectionSettings(
+                    scheme: "mysql", host: "db.example", port: "3306", database: "inventory",
+                    user: "bob")),
+            SavedConnection(
+                id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+                name: "analytics",
+                color: .green,
+                settings: ConnectionSettings(
+                    scheme: "sqlite", path: "/tmp/data.db"))
+        ]
+
+        ConnectionStore.save(connections, to: .thisMac, in: directories)
+        let loaded = ConnectionStore.load(from: .thisMac, in: directories)
+        expect(loaded.count, connections.count, "the list has the same number of connections")
+        expect(
+            loaded, connections,
+            "the connections are the same in order, id, name, color and settings")
+    }
+
+    /// Each entry is one flat object.
+    ///
+    /// Checked through `JSONSerialization` rather than by decoding back into
+    /// `SavedConnection`, because a round trip through the same `Raw` that wrote it
+    /// would agree with any shape at all. What is being defended is the shape a
+    /// person sees when they open the file: `host` where they can reach it, and no
+    /// `settings` object wrapped around the fields for the program's convenience.
+    private static func checkFlatFile() {
+        let connection = SavedConnection(
+            name: "sales",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        let document = SavedConnections(connections: [connection])
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(document) else {
+            failures += 1
+            fputs("connection FAIL: the document could not be encoded\n", stderr)
+            return
+        }
+
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            failures += 1
+            fputs("connection FAIL: what was written is not a JSON object\n", stderr)
+            return
+        }
+
+        guard let entries = object["connections"] as? [[String: Any]],
+            let entry = entries.first, entries.count == 1
+        else {
+            failures += 1
+            fputs("connection FAIL: the document holds one entry under `connections`\n", stderr)
+            return
+        }
+
+        expect(entry["host"] as? String, "db.example", "the host is a key of the entry itself")
+        // By key rather than by casting the value: a nested `settings` object casts to
+        // nil under any type this check could name, so a test written that way passes
+        // against exactly the shape it exists to forbid.
+        expect(
+            entry.keys.contains("settings"), false,
+            "and the fields are not wrapped in a settings object")
+    }
+
+    /// An entry somebody typed by hand, with the optional keys left out.
+    ///
+    /// From JSON text rather than from a `Raw` built in Swift, because the defect
+    /// this defends against lives in the decoder: a synthesized one throws on the
+    /// missing key, and a throw anywhere in the array fails the whole document — so
+    /// one forgotten `"color"` costs the reader every connection in the file rather
+    /// than one field of one entry.
+    private static func checkMissingKeys() {
+        let jsonText = """
+            {"version": 1, "connections": [{"scheme": "postgres", "host": "db.example",
+             "port": "5432", "database": "sales", "user": "ana"}]}
+            """
+
+        guard
+            let document = try? JSONDecoder().decode(
+                SavedConnections.self, from: Data(jsonText.utf8))
+        else {
+            failures += 1
+            fputs("connection FAIL: an entry with keys left out still loads\n", stderr)
+            return
+        }
+
+        expect(document.connections.count, 1, "an entry with keys left out still loads")
+
+        let connection = document.connections[0]
+        expect(connection.name, "", "the name it does not carry reads as none")
+        expect(connection.color, .none, "and so does the colour")
+        expect(
+            connection.title, "sales@db.example",
+            "and the row falls back to naming it after what it opens")
+    }
+
+    /// A file written by a build this one has never heard of.
+    ///
+    /// It reads as no connections rather than as entries interpreted under a shape
+    /// this build does not know — the file syncs between machines, so the newer
+    /// version of it is the case that actually happens. Being asked for a connection
+    /// is survivable; being shown fields that mean something else is not.
+    private static func checkNewerBuild() {
+        let jsonText = """
+            {"version": 99, "connections": [{"scheme": "postgres", "host": "db.example",
+             "port": "5432", "database": "sales", "user": "ana"}]}
+            """
+
+        guard
+            let document = try? JSONDecoder().decode(
+                SavedConnections.self, from: Data(jsonText.utf8))
+        else {
+            failures += 1
+            fputs("connection FAIL: a document from a newer build is read, not refused\n", stderr)
+            return
+        }
+
+        expect(document.connections.count, 0, "a document from a newer build holds nothing here")
+    }
+
+    /// What a row in the list says.
+    ///
+    /// Two lines are all there is to tell two connections apart with, and both are
+    /// derived rather than stored, so every fallback here is a row somebody has to
+    /// read: an unnamed connection, one that names no database, one that is a file,
+    /// and one with nothing in it at all. The separators are checked with a part
+    /// missing as well as present — punctuation with nothing behind it reads as a
+    /// line that was cut off rather than as a field nobody filled in.
+    private static func checkTitleAndSubtitle() {
+        let named = SavedConnection(
+            name: "sales",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        expect(named.title, "sales", "a named connection uses its name")
+        expect(
+            named.subtitle, "ana@db.example:5432/sales",
+            "subtitle includes user, host, port and database")
+
+        // Unnamed server connection
+        let unnamed = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        expect(unnamed.title, "sales@db.example", "an unnamed server is database@host")
+
+        // Unnamed server with no database
+        let noDatabase = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "",
+                user: "ana"))
+        expect(noDatabase.title, "db.example", "one with no database falls back to the host")
+
+        // File connection
+        let file = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "sqlite", path: "/tmp/data.db"))
+        expect(file.title, "data.db", "a file connection is named by its file")
+        expect(file.subtitle, "/tmp/data.db", "a file connection is subtitled by its path")
+
+        // Untitled connection
+        let empty = SavedConnection(
+            name: "",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        expect(empty.title, "sales@db.example", "an empty one is named database@host")
+
+        // Subtitle with no port
+        let noPort = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "", database: "sales",
+                user: "ana"))
+        expect(
+            noPort.subtitle, "ana@db.example/sales", "one with no port reads ana@db.example/sales")
+    }
+
+    /// What the window has to ask before it throws an edit away.
+    ///
+    /// The order of the fields is asserted, not just their presence: the sentence is
+    /// read once, by somebody deciding whether to lose what they typed, and it walks
+    /// down the form so that it can be checked against the form. The password is
+    /// asserted from the parameter alone, with every field equal — it is not in the
+    /// value, it never leaves the Keychain, and the form is the only thing that knows
+    /// whether the one on screen is the one that was saved.
+    private static func checkUnsavedEdits() {
+        let original = SavedConnection(
+            name: "sales",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+
+        let identical = SavedConnection(
+            name: "sales",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        expect(
+            original.unsavedEdits(against: identical, passwordChanged: false), nil,
+            "a draft nobody has touched has nothing to go back")
+
+        let changedHostPort = SavedConnection(
+            name: "sales",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "new.example", port: "5433", database: "sales",
+                user: "ana"))
+        let moved = original.unsavedEdits(against: changedHostPort, passwordChanged: false)
+        expect(moved?.fields, ["Host", "Port"], "the fields are named in the order the form has")
+        expect(
+            moved?.detail, "Host and Port would go back to what was saved.",
+            "and the sentence names them rather than counting them")
+
+        let retyped = original.unsavedEdits(against: identical, passwordChanged: true)
+        expect(
+            retyped?.fields, ["Password"],
+            "a password that was retyped is an edit even when every field matches")
+    }
+
+    /// Where the connections are kept is also a statement about where they are not.
+    ///
+    /// `PreferencesChecks` asserts the same rule against the files on disk; this one
+    /// asserts it against what `load` returns, which is the half a user notices — a
+    /// copy left behind names a host and an account, and it would go on describing a
+    /// decision that was changed.
+    private static func checkStorageClearsOther() {
+        guard let root = scratchDirectory() else { return }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directories = ConnectionDirectories(
+            local: root.appending(path: "config"), cloud: root.appending(path: "drive"))
+
+        let firstList = [
+            SavedConnection(
+                name: "first",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db1.example", port: "5432", database: "first",
+                    user: "ana"))
+        ]
+        ConnectionStore.save(firstList, to: .thisMac, in: directories)
+
+        let loadedFirst = ConnectionStore.load(from: .thisMac, in: directories)
+        expect(loadedFirst.count, 1, "the list is on this Mac")
+
+        let secondList = [
+            SavedConnection(
+                name: "second",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db2.example", port: "5432", database: "second",
+                    user: "bob"))
+        ]
+        ConnectionStore.save(secondList, to: .iCloud, in: directories)
+
+        let loadedAfter = ConnectionStore.load(from: .thisMac, in: directories)
+        expect(
+            loadedAfter.count, 0,
+            "and choosing iCloud takes it off this Mac")
+
+        let loadedSecond = ConnectionStore.load(from: .iCloud, in: directories)
+        expect(loadedSecond.count, 1, "leaving the one in iCloud Drive")
+        expect(loadedSecond[0].name, "second", "which is the list that was saved there")
+    }
+
     // MARK: - Harness
+
+    /// A directory nothing else can see, for the checks that write files. Removed
+    /// by the caller, so a failing check leaves nothing behind either.
+    private static func scratchDirectory() -> URL? {
+        let root = URL(filePath: NSTemporaryDirectory())
+            .appending(path: "dbclient-verify-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            fputs("connection FAIL: a scratch directory could not be made: \(error)\n", stderr)
+            return nil
+        }
+        return root
+    }
 
     private static func settings(
         _ host: String, _ port: String, _ database: String, _ user: String
