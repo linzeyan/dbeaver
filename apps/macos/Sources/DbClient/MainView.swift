@@ -21,11 +21,15 @@ enum FocusArea: Hashable {
     // The connection form's fields. In the same enum as the panes' because the
     // form is the same window: it replaces the shell rather than floating over
     // it, so focus is only ever in one of these places at a time.
+    case connectName
     case connectHost
     case connectPort
     case connectDatabase
     case connectUser
     case connectPassword
+    /// The chooser's own filter field. Separate from `navigatorFilter` because the
+    /// two are never on screen together and each draws its own ring.
+    case connectionFilter
 }
 
 struct MainView: View {
@@ -53,6 +57,17 @@ struct MainView: View {
     private var toolbarContent: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             HStack(spacing: Theme.Space.xs + 2) {
+                // The mark the chooser was given, where it is of use: leading the
+                // chip that names the connection, at the top of the window holding
+                // the rows it would change. Absent rather than grey when no colour
+                // was picked — a bar in every session would train the eye to stop
+                // seeing the one that means something.
+                if let tone = model.connectionColor.tone {
+                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                        .fill(tone.color)
+                        .frame(width: 3, height: 12)
+                        .accessibilityLabel("\(model.connectionColor.label) connection")
+                }
                 StatusDot(state: model.connectionState)
                 Text(model.connectionLabel)
                     .font(Theme.Typography.bodyEmphasis)

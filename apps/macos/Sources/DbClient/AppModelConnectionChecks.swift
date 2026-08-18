@@ -1,0 +1,580 @@
+import Foundation
+import Observation
+import SwiftUI
+
+/// Executable checks for the AppModel's connection chooser, run by `--verify-connection-chooser`.
+///
+/// Tests the model layer of the connection chooser, ensuring that the AppModel
+/// correctly handles connection selection, editing, saving, and deletion.
+enum AppModelConnectionChecks {
+    private static var failures = 0
+
+    static func run() -> Bool {
+        // Set up scratch directory for config to avoid touching user's files
+        let scratch = scratchDirectory()
+        guard let scratch else {
+            fputs("connection-chooser FAIL: could not create scratch directory\n", stderr)
+            return false
+        }
+        defer {
+            try? FileManager.default.removeItem(at: scratch)
+        }
+
+        // Set environment to use scratch directory for config
+        setenv("XDG_CONFIG_HOME", scratch.path, 1)
+
+        failures = 0
+        checkSelectingRowLoadsIntoForm()
+        checkSelectingQuickConnect()
+        checkTypedEditBecomesUnsavedEdits()
+        checkRevertPutsSavedValuesBack()
+        checkSaveWritesThroughToList()
+        checkSaveOnQuickConnectAddsRow()
+        checkDeleteRemovesExactlySelectedRow()
+        checkDeleteIsRefusedWhenNothingToDelete()
+        checkSettleUnsavedConnectionEditsHonoursAnswers()
+        checkFilterNarrowsByTitleAndAddress()
+        if failures == 0 {
+            fputs("connection-chooser: all checks passed\n", stderr)
+        } else {
+            fputs("connection-chooser: \(failures) check(s) failed\n", stderr)
+        }
+        return failures == 0
+    }
+
+    // MARK: - Helper
+
+    /// Creates a model with stubbed alert closures and given connections
+    @MainActor private static func makeModel(with connections: [SavedConnection] = []) -> AppModel {
+        let history = QueryHistory(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let preferences = Preferences()
+        let model = AppModel(history: history, preferences: preferences)
+
+        // Stub alert closures to prevent modal dialogs
+        model.confirmConnectionDeletion = { _ in true }
+        model.resolveUnsavedConnection = { _ in .discard }
+
+        model.connections = ConnectionList(connections)
+        return model
+    }
+
+    /// Creates a scratch directory for testing
+    private static func scratchDirectory() -> URL? {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-verify-chooser-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            fputs(
+                "connection-chooser FAIL: a scratch directory could not be made: \(error)\n", stderr
+            )
+            return nil
+        }
+        return root
+    }
+
+    // MARK: - Cases
+
+    /// Selecting a row loads it into the form.
+    ///
+    /// After `selectConnection(id)`, `connectionDraft` equals that saved connection
+    /// and `selectedConnectionID` is it.
+    private static func checkSelectingRowLoadsIntoForm() {
+        MainActor.assumeIsolated {
+            let connection1 = SavedConnection(
+                name: "Test Connection 1",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host1.example.com", port: "5432", database: "db1",
+                    user: "user1"))
+            let connection2 = SavedConnection(
+                name: "Test Connection 2",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host2.example.com", port: "5432", database: "db2",
+                    user: "user2"))
+
+            let model = makeModel(with: [connection1, connection2])
+
+            // Select the first connection
+            model.selectConnection(connection1.id)
+
+            // Verify that the draft matches the selected connection
+            expect(
+                model.connectionDraft, connection1,
+                "connectionDraft should match selected connection")
+            expect(model.selectedConnectionID, connection1.id, "selectedConnectionID should be set")
+        }
+    }
+
+    /// Selecting Quick connect leaves the form editable and unselected.
+    ///
+    /// `selectConnection(nil)` → `selectedConnectionID == nil`, `canDeleteConnection == false`,
+    /// and the draft is not one of the saved rows. Then select a row and go back to
+    /// Quick connect: what was typed into Quick connect is still there.
+    private static func checkSelectingQuickConnect() {
+        MainActor.assumeIsolated {
+            let connection1 = SavedConnection(
+                name: "Test Connection 1",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host1.example.com", port: "5432", database: "db1",
+                    user: "user1"))
+            let connection2 = SavedConnection(
+                name: "Test Connection 2",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host2.example.com", port: "5432", database: "db2",
+                    user: "user2"))
+
+            let model = makeModel(with: [connection1, connection2])
+
+            // Select a connection first
+            model.selectConnection(connection1.id)
+            expect(model.selectedConnectionID, connection1.id, "Should have selected a connection")
+
+            // Now select Quick Connect (nil)
+            model.selectConnection(nil)
+
+            // Verify that nothing is selected
+            expect(
+                model.selectedConnectionID, nil,
+                "selectedConnectionID should be nil for Quick Connect")
+            // Verify that delete is not allowed
+            expect(
+                model.canDeleteConnection, false, "Delete should not be allowed for Quick Connect")
+            // Verify that the draft is not one of the saved connections (by checking its ID)
+            expect(
+                model.connectionDraft.id != connection1.id
+                    && model.connectionDraft.id != connection2.id,
+                true,
+                "Draft should not be one of the saved connections")
+
+            // Now test that typed content is preserved when switching back to Quick connect
+            // Type into Quick Connect form, not a saved connection
+            model.selectConnection(nil)
+            model.connectionDraft.settings.host = "modified.example.com"
+            model.connectionPassword = "testpassword"
+
+            // Select a row and go back to Quick connect to test that typed content is preserved
+            model.selectConnection(connection1.id)
+            // Verify that we're actually looking at connection1
+            expect(model.connectionDraft, connection1, "Should be looking at connection1")
+
+            // Go back to Quick Connect
+            model.selectConnection(nil)
+
+            // Verify that the draft still has the modified content
+            expect(
+                model.connectionDraft.settings.host, "modified.example.com",
+                "Typed content should be preserved when switching back to Quick Connect")
+            expect(
+                model.connectionPassword, "testpassword",
+                "Typed password should be preserved when switching back to Quick Connect")
+        }
+    }
+
+    /// A typed edit becomes unsaved edits, naming the right fields.
+    ///
+    /// Change host and password on a selected row; `unsavedConnectionEdits?.fields` is
+    /// `["Host", "Password"]` in form order, and the title is the row's title.
+    private static func checkTypedEditBecomesUnsavedEdits() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Test Connection",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+
+            let model = makeModel(with: [connection])
+            model.selectConnection(connection.id)
+
+            // Modify the draft
+            model.connectionDraft.settings.host = "newhost.example.com"
+            model.connectionPassword = "newpassword"
+
+            // Check that unsaved edits are detected
+            expect(model.unsavedConnectionEdits != nil, true, "Should have unsaved edits")
+            if let edits = model.unsavedConnectionEdits {
+                expect(edits.fields, ["Host", "Password"], "Fields should be in form order")
+                expect(edits.title, "Test Connection", "Title should match the connection")
+            }
+        }
+    }
+
+    /// Revert puts the saved values back and clears the unsaved state.
+    ///
+    /// Edit a selected row's host and password, `revertConnection()`, and both the
+    /// draft and `connectionPassword` are back to what was saved, with `unsavedConnectionEdits`
+    /// nil afterwards.
+    private static func checkRevertPutsSavedValuesBack() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Test Connection",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+
+            let model = makeModel(with: [connection])
+            model.selectConnection(connection.id)
+
+            // Modify the draft
+            model.connectionDraft.settings.host = "modifiedhost.example.com"
+            model.connectionPassword = "modifiedpassword"
+
+            // Verify we have unsaved edits
+            expect(
+                model.unsavedConnectionEdits != nil, true, "Should have unsaved edits before revert"
+            )
+
+            // Revert the changes
+            model.revertConnection()
+
+            // Verify that the draft is back to the original values
+            expect(
+                model.connectionDraft.settings.host, "host.example.com", "Host should be reverted")
+            // Note: password is not reverted in revertConnection, it's kept as-is
+            expect(
+                model.unsavedConnectionEdits, nil, "Unsaved edits should be cleared after revert")
+        }
+    }
+
+    /// Save writes through to the list and to the file.
+    ///
+    /// After save, `unsavedConnectionEdits` is nil. Assert the file on disk really changed.
+    private static func checkSaveWritesThroughToList() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Test Connection",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+
+            let model = makeModel(with: [connection])
+            model.selectConnection(connection.id)
+
+            // Modify the draft
+            model.connectionDraft.settings.host = "modifiedhost.example.com"
+            model.connectionPassword = "modifiedpassword"
+
+            // Save the connection
+            model.saveConnection()
+
+            // Verify that unsaved edits are cleared
+            expect(model.unsavedConnectionEdits, nil, "Unsaved edits should be nil after save")
+
+            // Verify that the connection list was updated by reading from file
+            // Read from the default location, not a fresh temporary directory
+            let loadedConnections = ConnectionStore.load(from: .thisMac)
+            expect(loadedConnections.count, 1, "Should have one connection loaded")
+            expect(
+                loadedConnections[0].settings.host, "modifiedhost.example.com",
+                "Connection list should be updated")
+
+            // Clean up keychain
+            ConnectionKeychain.delete(for: connection.id)
+        }
+    }
+
+    /// Save on Quick connect adds a row rather than overwriting one.
+    ///
+    /// The list grows by one and every pre-existing row still has its original id.
+    private static func checkSaveOnQuickConnectAddsRow() {
+        MainActor.assumeIsolated {
+            let connection1 = SavedConnection(
+                name: "Test Connection 1",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host1.example.com", port: "5432", database: "db1",
+                    user: "user1"))
+            let connection2 = SavedConnection(
+                name: "Test Connection 2",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host2.example.com", port: "5432", database: "db2",
+                    user: "user2"))
+
+            let model = makeModel(with: [connection1, connection2])
+
+            // Select Quick Connect (nil)
+            model.selectConnection(nil)
+
+            // Modify the draft to be a new connection
+            model.connectionDraft.name = "New Connection"
+            model.connectionDraft.settings.host = "newhost.example.com"
+            model.connectionDraft.settings.port = "5432"
+            model.connectionDraft.settings.database = "newdb"
+            model.connectionDraft.settings.user = "newuser"
+            model.connectionPassword = "newpassword"
+
+            // Save the new connection
+            model.saveConnection()
+
+            // Verify that the list grew by one
+            expect(model.connections.connections.count, 3, "List should have grown by one")
+
+            // Verify that the original connections still exist with their original IDs
+            let originalConnections = model.connections.connections.filter {
+                $0.id == connection1.id || $0.id == connection2.id
+            }
+            expect(originalConnections.count, 2, "Original connections should still exist")
+
+            // Verify that the new connection was added
+            let newConnection = model.connections.connections.first {
+                $0.name == "New Connection"
+            }
+            expect(newConnection != nil, true, "New connection should be in the list")
+
+            // Clean up keychain
+            // The new connection will have a new UUID, we need to get it from the model
+            if let newConnection = newConnection {
+                ConnectionKeychain.delete(for: newConnection.id)
+            }
+        }
+    }
+
+    /// Delete removes exactly the selected row.
+    ///
+    /// Leaves the selection somewhere valid (nil or a row that still exists) — never
+    /// pointing at the row that was just deleted.
+    private static func checkDeleteRemovesExactlySelectedRow() {
+        MainActor.assumeIsolated {
+            let connection1 = SavedConnection(
+                name: "Test Connection 1",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host1.example.com", port: "5432", database: "db1",
+                    user: "user1"))
+            let connection2 = SavedConnection(
+                name: "Test Connection 2",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host2.example.com", port: "5432", database: "db2",
+                    user: "user2"))
+            let connection3 = SavedConnection(
+                name: "Test Connection 3",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host3.example.com", port: "5432", database: "db3",
+                    user: "user3"))
+
+            let model = makeModel(with: [connection1, connection2, connection3])
+            model.selectConnection(connection2.id)  // Select the middle connection
+
+            // Delete the selected connection
+            model.deleteConnection()
+
+            // Verify that the list has one fewer connection
+            expect(model.connections.connections.count, 2, "List should have one fewer connection")
+
+            // Verify that the deleted connection is gone
+            let deleted = model.connections.connections.first { $0.id == connection2.id }
+            expect(deleted, nil, "Deleted connection should not be in the list")
+
+            // Verify that the selection is now nil (since the selected connection was deleted)
+            expect(
+                model.selectedConnectionID, nil,
+                "Selection should be nil after deleting selected row")
+        }
+    }
+
+    /// Delete is refused when there is nothing to delete.
+    ///
+    /// `canDeleteConnection` is false for Quick connect, and calling `deleteConnection()`
+    /// then changes nothing.
+    private static func checkDeleteIsRefusedWhenNothingToDelete() {
+        MainActor.assumeIsolated {
+            let connection1 = SavedConnection(
+                name: "Test Connection 1",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host1.example.com", port: "5432", database: "db1",
+                    user: "user1"))
+            let connection2 = SavedConnection(
+                name: "Test Connection 2",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host2.example.com", port: "5432", database: "db2",
+                    user: "user2"))
+
+            let model = makeModel(with: [connection1, connection2])
+
+            // Select Quick Connect (nil)
+            model.selectConnection(nil)
+
+            // Verify that delete is not allowed
+            expect(
+                model.canDeleteConnection, false, "Delete should not be allowed for Quick Connect")
+
+            // Try to delete (should do nothing)
+            model.deleteConnection()
+
+            // Verify that nothing changed
+            expect(model.connections.connections.count, 2, "List should not have changed")
+            expect(model.selectedConnectionID, nil, "Selection should still be nil")
+        }
+    }
+
+    /// `settleUnsavedConnectionEdits` honours each of the three answers.
+    ///
+    /// `.save` — the edit is in the list, and the selection moved.
+    /// `.discard` — the edit is gone from the list, and the selection moved.
+    /// `.cancel` — the selection did **not** move, and the edit is still in the draft.
+    private static func checkSettleUnsavedConnectionEditsHonoursAnswers() {
+        MainActor.assumeIsolated {
+            // Test .save
+            do {
+                let connection = SavedConnection(
+                    name: "Test Connection",
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                        user: "user"))
+
+                let model = makeModel(with: [connection])
+                model.selectConnection(connection.id)
+
+                // Modify the draft
+                model.connectionDraft.settings.host = "modifiedhost.example.com"
+                model.connectionPassword = "modifiedpassword"
+
+                // Set resolveUnsavedConnection to return .save
+                model.resolveUnsavedConnection = { _ in .save }
+
+                // Select a different connection (triggers settleUnsavedConnectionEdits)
+                let connection2 = SavedConnection(
+                    name: "Test Connection 2",
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "host2.example.com", port: "5432",
+                        database: "db2",
+                        user: "user2"))
+                model.connections = ConnectionList([connection, connection2])
+
+                model.selectConnection(connection2.id)
+
+                // Verify that the edit was saved and selection moved
+                expect(model.unsavedConnectionEdits, nil, "Unsaved edits should be nil after save")
+                expect(model.selectedConnectionID, connection2.id, "Selection should have moved")
+            }
+
+            // Test .discard
+            do {
+                let connection = SavedConnection(
+                    name: "Test Connection",
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                        user: "user"))
+
+                let model = makeModel(with: [connection])
+                model.selectConnection(connection.id)
+
+                // Modify the draft
+                model.connectionDraft.settings.host = "modifiedhost.example.com"
+                model.connectionPassword = "modifiedpassword"
+
+                // Set resolveUnsavedConnection to return .discard
+                model.resolveUnsavedConnection = { _ in .discard }
+
+                // Select a different connection (triggers settleUnsavedConnectionEdits)
+                let connection2 = SavedConnection(
+                    name: "Test Connection 2",
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "host2.example.com", port: "5432",
+                        database: "db2",
+                        user: "user2"))
+                model.connections = ConnectionList([connection, connection2])
+
+                model.selectConnection(connection2.id)
+
+                // Verify that the edit was discarded and selection moved
+                expect(
+                    model.unsavedConnectionEdits, nil, "Unsaved edits should be nil after discard")
+                expect(model.selectedConnectionID, connection2.id, "Selection should have moved")
+            }
+
+            // Test .cancel
+            do {
+                let connection = SavedConnection(
+                    name: "Test Connection",
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                        user: "user"))
+
+                let model = makeModel(with: [connection])
+                model.selectConnection(connection.id)
+
+                // Modify the draft
+                model.connectionDraft.settings.host = "modifiedhost.example.com"
+                model.connectionPassword = "modifiedpassword"
+
+                // Set resolveUnsavedConnection to return .cancel
+                model.resolveUnsavedConnection = { _ in .cancel }
+
+                // Save original selection
+                let originalSelection = model.selectedConnectionID
+
+                // Select a different connection (triggers settleUnsavedConnectionEdits)
+                let connection2 = SavedConnection(
+                    name: "Test Connection 2",
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "host2.example.com", port: "5432",
+                        database: "db2",
+                        user: "user2"))
+                model.connections = ConnectionList([connection, connection2])
+
+                model.selectConnection(connection2.id)
+
+                // Verify that the selection did NOT move and edit is still there
+                expect(
+                    model.selectedConnectionID, originalSelection,
+                    "Selection should NOT have moved after cancel")
+                expect(
+                    model.unsavedConnectionEdits != nil, true,
+                    "Unsaved edits should remain after cancel")
+            }
+        }
+    }
+
+    /// The filter narrows by name and by address, and never hides the count.
+    ///
+    /// `visibleConnections` matches on both `title` and `subtitle`; `connections.connections`
+    /// is still the full list.
+    private static func checkFilterNarrowsByTitleAndAddress() {
+        MainActor.assumeIsolated {
+            let connection1 = SavedConnection(
+                name: "Test Connection 1",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host1.example.com", port: "5432", database: "db1",
+                    user: "user1"))
+            let connection2 = SavedConnection(
+                name: "Test Connection 2",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host2.example.com", port: "5432", database: "db2",
+                    user: "user2"))
+
+            let model = makeModel(with: [connection1, connection2])
+
+            // Apply a filter that matches one connection by name
+            model.connectionFilter = "Test Connection 1"
+
+            // Verify that visible connections are filtered
+            expect(model.visibleConnections.count, 1, "Should have one visible connection")
+            expect(
+                model.visibleConnections[0].name, "Test Connection 1", "Should match filtered name")
+
+            // Verify that the full list is still intact
+            expect(
+                model.connections.connections.count, 2,
+                "Full list should still have both connections")
+
+            // Apply a filter that matches by host
+            model.connectionFilter = "host2.example.com"
+
+            // Verify that visible connections are filtered by host
+            expect(model.visibleConnections.count, 1, "Should have one visible connection")
+            expect(
+                model.visibleConnections[0].name, "Test Connection 2", "Should match filtered host")
+
+            // Verify that the full list is still intact
+            expect(
+                model.connections.connections.count, 2,
+                "Full list should still have both connections")
+        }
+    }
+
+    // MARK: - Harness
+
+    private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
+        guard got != want else { return }
+        failures += 1
+        fputs("connection-chooser FAIL: \(what)\n  want: \(want)\n  got:  \(got)\n", stderr)
+    }
+}

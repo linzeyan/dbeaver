@@ -106,14 +106,17 @@ enum PreferencesChecks {
         let directories = ConnectionDirectories(
             local: root.appending(path: "config"), cloud: root.appending(path: "drive"))
 
-        let settings = ConnectionSettings(
-            scheme: "postgres", host: "db.example", port: "5432", database: "sales", user: "ana")
-        ConnectionStore.save(settings, password: "", to: .thisMac, in: directories)
+        let kept = SavedConnection(
+            name: "sales",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        ConnectionStore.save([kept], to: .thisMac, in: directories)
         expect(
-            ConnectionStore.load(from: .thisMac, in: directories), settings,
+            ConnectionStore.load(from: .thisMac, in: directories), [kept],
             "every field of the connection came back")
 
-        let file = directories.local.appending(path: "dbclient/connection.json")
+        let file = directories.local.appending(path: "dbclient/connections.json")
         let mode =
             (try? FileManager.default.attributesOfItem(atPath: file.path))?[.posixPermissions]
             as? Int
@@ -122,7 +125,7 @@ enum PreferencesChecks {
         // about where the connection is not.
         expect(
             FileManager.default.fileExists(
-                atPath: directories.cloud!.appending(path: "dbclient/connection.json").path),
+                atPath: directories.cloud!.appending(path: "dbclient/connections.json").path),
             false, "and no copy was left in iCloud Drive")
     }
 
@@ -133,20 +136,21 @@ enum PreferencesChecks {
         let directories = ConnectionDirectories(
             local: root.appending(path: "config"), cloud: root.appending(path: "drive"))
 
-        let settings = ConnectionSettings(
-            scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana")
-        ConnectionStore.save(settings, password: "", to: .thisMac, in: directories)
-        ConnectionStore.save(settings, password: "", to: .iCloud, in: directories)
+        let kept = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana"))
+        ConnectionStore.save([kept], to: .thisMac, in: directories)
+        ConnectionStore.save([kept], to: .iCloud, in: directories)
         expect(
             FileManager.default.fileExists(
-                atPath: directories.cloud!.appending(path: "dbclient/connection.json").path),
+                atPath: directories.cloud!.appending(path: "dbclient/connections.json").path),
             true, "the file is in iCloud Drive")
         expect(
             FileManager.default.fileExists(
-                atPath: directories.local.appending(path: "dbclient/connection.json").path),
+                atPath: directories.local.appending(path: "dbclient/connections.json").path),
             false, "and the copy it used to have on this Mac is gone")
         expect(
-            ConnectionStore.load(from: .iCloud, in: directories), settings,
+            ConnectionStore.load(from: .iCloud, in: directories), [kept],
             "and it reads back from there")
     }
 
@@ -163,14 +167,15 @@ enum PreferencesChecks {
         let directories = ConnectionDirectories(
             local: root.appending(path: "config"), cloud: nil)
 
-        let settings = ConnectionSettings(
-            scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana")
-        ConnectionStore.save(settings, password: "", to: .iCloud, in: directories)
+        let kept = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "mysql", host: "db.example", port: "3306", database: "ops", user: "ana"))
+        ConnectionStore.save([kept], to: .iCloud, in: directories)
         expect(
-            ConnectionStore.load(from: .thisMac, in: directories), settings,
+            ConnectionStore.load(from: .thisMac, in: directories), [kept],
             "the connection is on this Mac")
         expect(
-            ConnectionStore.load(from: .iCloud, in: directories), settings,
+            ConnectionStore.load(from: .iCloud, in: directories), [kept],
             "and the launch that still asks for iCloud finds it")
         expect(
             ConnectionStore.syncCaveat(in: directories) != nil, true,

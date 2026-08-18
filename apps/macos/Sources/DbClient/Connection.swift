@@ -289,12 +289,61 @@ struct ConnectionDirectories {
     }
 }
 
-/// The last connection that worked, remembered so the next launch does not ask
-/// again.
+/// The file, as a whole.
+///
+/// A wrapper around the array rather than a bare array at the top level, because
+/// the document needs somewhere to say which shape it is in. A file that is only a
+/// list can never gain a field without every older build reading the newer one
+/// wrongly, and this is a file meant to be carried between machines.
+struct SavedConnections: Codable {
+    /// The shape the entries are in. Bumped when an entry stops meaning what it
+    /// used to; a document numbered higher than this build knows about is read as
+    /// no connections at all, which asks the user for one rather than showing them
+    /// fields interpreted under the wrong shape.
+    static let currentVersion = 1
+
+    var version: Int
+    var connections: [SavedConnection]
+
+    init(connections: [SavedConnection], version: Int = SavedConnections.currentVersion) {
+        self.version = version
+        self.connections = connections
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // A file with no version at all is one somebody wrote by hand, not one from
+        // the future, so it is read rather than refused.
+        version = try container.decodeIfPresent(Int.self, forKey: .version) ?? Self.currentVersion
+        guard version <= Self.currentVersion else {
+            connections = []
+            return
+        }
+        let raw =
+            try container.decodeIfPresent([SavedConnection.Raw].self, forKey: .connections) ?? []
+        connections = raw.map { $0.toSavedConnection() }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(connections.map(SavedConnection.Raw.init(from:)), forKey: .connections)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case connections, version
+    }
+}
+
+/// The connections somebody kept, and where the file holding them goes.
 ///
 /// One JSON file, in the directory the setting names, holding everything except
-/// the password. The password goes to `ConnectionKeychain` under both answers,
-/// for the reason `ConnectionStorage` gives.
+/// the passwords. Those go to `ConnectionKeychain`, one per connection, for the
+/// reason `ConnectionStorage` gives.
+///
+/// The older single-connection `connection.json` is not read, not renamed and not
+/// deleted. There is no migration here to go looking for: this project keeps no
+/// compatibility paths, and it is one connection to type again.
 ///
 /// Exactly one copy of the file exists. Choosing "on this Mac" deletes the one in
 /// iCloud Drive and choosing iCloud deletes the local one, because the answer to
@@ -303,69 +352,50 @@ struct ConnectionDirectories {
 /// there.
 enum ConnectionStore {
     private static let folder = "dbclient"
-    private static let file = "connection.json"
+    private static let file = "connections.json"
 
     static func load(
         from storage: ConnectionStorage, in directories: ConnectionDirectories = .system
-    ) -> ConnectionSettings? {
+    ) -> [SavedConnection] {
         if storage == .iCloud, let cloud = url(for: .iCloud, in: directories),
-            let settings = read(cloud)
+            let document = read(cloud)
         {
-            return settings
+            return document.connections
         }
         // The local file, and not only as the answer for "on this Mac": a Mac
         // whose iCloud Drive is off wrote its fields here while the setting still
-        // said iCloud, and reading nothing would ask that user for a connection
+        // said iCloud, and reading nothing would ask that user for connections
         // this file already describes.
-        guard let local = url(for: .thisMac, in: directories) else { return nil }
-        return read(local)
+        guard let local = url(for: .thisMac, in: directories) else { return [] }
+        return read(local)?.connections ?? []
     }
 
-    /// Writes the connection and its password to wherever the setting says.
+    /// Writes the list to wherever the setting says.
     ///
-    /// One call for both halves, because there is no state in which remembering
-    /// one without the other is right.
+    /// The whole list every time rather than the entry that changed: the file is
+    /// small, and a partial write is how two copies of it start disagreeing about
+    /// what is in the list.
+    ///
+    /// No password passes through here. Each one is written by whoever changed it,
+    /// under its own connection's identity — a list handed a password would have to
+    /// be told which entry it belonged to, and that is one more thing to get wrong
+    /// in the one place where getting it wrong overwrites somebody else's.
     ///
     /// An iCloud that is not there falls through to the local file rather than
-    /// dropping the write, and so does a synchronised Keychain item macOS refuses:
-    /// the choice between "remembered here" and "forgotten entirely" is not close.
-    /// The Settings window says which of those happened, where the setting is,
-    /// which is the only place the answer is of any use.
+    /// dropping the write: the choice between "kept here" and "lost entirely" is
+    /// not close. The Settings window says which of those happened, where the
+    /// setting is, which is the only place the answer is of any use.
     static func save(
-        _ settings: ConnectionSettings, password: String, to storage: ConnectionStorage,
+        _ connections: [SavedConnection], to storage: ConnectionStorage,
         in directories: ConnectionDirectories = .system
     ) {
-        if storage == .iCloud {
-            if !ConnectionKeychain.save(password, for: settings, synchronised: true) {
-                ConnectionKeychain.save(password, for: settings)
-            }
-        } else {
-            ConnectionKeychain.save(password, for: settings)
-        }
-
         let destination = directories.directory(for: storage) ?? directories.local
         guard let target = url(in: destination) else { return }
-        write(settings, to: target)
+        write(SavedConnections(connections: connections), to: target)
         for other in [directories.local, directories.cloud].compactMap({ $0 })
         where other != destination {
             if let stale = url(in: other) { try? FileManager.default.removeItem(at: stale) }
         }
-    }
-
-    /// The connection to open without asking, if there is one. The password is
-    /// empty rather than absent when the Keychain will not give it up — see
-    /// `ConnectionKeychain` for when that happens and why it is survivable.
-    static func remembered(
-        from storage: ConnectionStorage, in directories: ConnectionDirectories = .system
-    ) -> (settings: ConnectionSettings, password: String)? {
-        guard let settings = load(from: storage, in: directories) else { return nil }
-        // The synchronised item first when the setting asks for it, then the local
-        // one: this Mac may be the machine that typed the password rather than the
-        // one that synced it.
-        let synced =
-            storage == .iCloud
-            ? ConnectionKeychain.password(for: settings, synchronised: true) : nil
-        return (settings, synced ?? ConnectionKeychain.password(for: settings) ?? "")
     }
 
     /// What is not going to happen, for the answer the user picked, or nil when
@@ -395,9 +425,9 @@ enum ConnectionStore {
         directory.appending(path: folder).appending(path: file)
     }
 
-    private static func read(_ url: URL) -> ConnectionSettings? {
+    private static func read(_ url: URL) -> SavedConnections? {
         guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(ConnectionSettings.self, from: data)
+        return try? JSONDecoder().decode(SavedConnections.self, from: data)
     }
 
     /// Written whole, sorted, indented and newline-terminated, and readable only
@@ -410,13 +440,13 @@ enum ConnectionStore {
     /// though it holds no secret: it names a host, a database and a user, which is
     /// a list of what to attack and who to attack it as, and restricting it costs
     /// nothing.
-    private static func write(_ settings: ConnectionSettings, to url: URL) {
+    private static func write(_ document: SavedConnections, to url: URL) {
         let manager = FileManager.default
         try? manager.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard var data = try? encoder.encode(settings) else { return }
+        guard var data = try? encoder.encode(document) else { return }
         data.append(0x0A)
         try? data.write(to: url, options: [.atomic])
         // After the write: an atomic write is a rename over the target, so
@@ -425,7 +455,7 @@ enum ConnectionStore {
     }
 }
 
-/// The password for a remembered connection.
+/// The password for a saved connection.
 ///
 /// The Keychain rather than UserDefaults, which is the entire reason this file
 /// exists: a plist beside the other settings is readable by anything running as
@@ -445,8 +475,8 @@ enum ConnectionKeychain {
     /// `synchronised` picks which item is being asked about, and it has to be
     /// stated: a Keychain query with no opinion matches local items only, so the
     /// synchronised one is invisible unless it is asked for by name.
-    static func password(for settings: ConnectionSettings, synchronised: Bool = false) -> String? {
-        var query = item(for: settings, synchronised: synchronised)
+    static func password(for id: UUID, synchronised: Bool = false) -> String? {
+        var query = item(for: id, synchronised: synchronised)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var found: CFTypeRef?
@@ -470,9 +500,9 @@ enum ConnectionKeychain {
     /// this build" and "written".
     @discardableResult
     static func save(
-        _ password: String, for settings: ConnectionSettings, synchronised: Bool = false
+        _ password: String, for id: UUID, synchronised: Bool = false
     ) -> Bool {
-        let query = item(for: settings, synchronised: synchronised)
+        let query = item(for: id, synchronised: synchronised)
         _ = SecItemDelete(query as CFDictionary)
         // An empty password is a trust or peer connection. Storing nothing for
         // it is not a gap: there is nothing to remember.
@@ -480,6 +510,21 @@ enum ConnectionKeychain {
         var add = query
         add[kSecValueData as String] = Data(password.utf8)
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+    }
+
+    /// Forgets a connection's password, both copies of it.
+    ///
+    /// Called when a connection is deleted from the list. A password left behind
+    /// for an entry nobody can see any more is a secret with no owner: nothing in
+    /// the application will ever show it, offer to change it, or delete it, and it
+    /// outlives the decision to stop keeping the connection at all.
+    ///
+    /// Both items, because the synchronised one is invisible to a query that does
+    /// not ask for it by name — deleting only the local copy would leave the one
+    /// that can travel.
+    static func delete(for id: UUID) {
+        _ = SecItemDelete(item(for: id, synchronised: false) as CFDictionary)
+        _ = SecItemDelete(item(for: id, synchronised: true) as CFDictionary)
     }
 
     // MARK: - The half that can leave the machine
@@ -532,27 +577,25 @@ enum ConnectionKeychain {
         ]
     }
 
-    /// One item per user, host, port and database, so that keeping two
-    /// databases on one server does not have each login overwrite the other's
-    /// password.
+    /// One item per saved connection, named by the connection's own id.
     ///
-    /// The synchronised item is the same identity with the flag set, rather than a
-    /// fixed account holding the whole connection: the fields arrive on the other
-    /// Mac in the file, so that machine knows which identity to ask for and the
-    /// two copies of a password cannot describe different connections.
-    private static func item(for settings: ConnectionSettings, synchronised: Bool)
-        -> [String: Any]
-    {
+    /// The id rather than `scheme://user@host:port/database`, which is what this
+    /// keyed on while there was only ever one connection to key. With a list, the
+    /// entry is what owns the password: correcting a host in a saved connection
+    /// must not orphan its password, and two entries that happen to name the same
+    /// server and user are two connections a person is keeping apart on purpose —
+    /// under an identity spelled out of the fields they would share one password
+    /// and overwrite each other's.
+    ///
+    /// The synchronised item is the same identity with the flag set. The id arrives
+    /// on the other Mac in the file, so that machine knows which item to ask for,
+    /// and the two copies of a password cannot come to describe different
+    /// connections.
+    private static func item(for id: UUID, synchronised: Bool) -> [String: Any] {
         var item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            // The scheme is part of the identity because the same host and port
-            // can front two databases: 127.0.0.1:5432 is PostgreSQL today and
-            // could be a tunnel to something else tomorrow, and the two logins
-            // must not overwrite each other's password.
-            kSecAttrAccount as String:
-                "\(settings.scheme)://\(settings.user)@\(settings.host):\(settings.port)"
-                + "/\(settings.database)\(settings.path)"
+            kSecAttrAccount as String: id.uuidString
         ]
         if synchronised { item[kSecAttrSynchronizable as String] = true }
         return item
