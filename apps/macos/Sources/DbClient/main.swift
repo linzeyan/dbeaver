@@ -9,11 +9,10 @@ import SwiftUI
 // the data surface rather than the chrome around it, and stay comparable with
 // every earlier measurement.
 //
-// Without it, the full application shell starts — on the connection form, or
-// straight into a session when `--conn` or a remembered connection says which
-// database. There is no built-in one: a default would silently connect to
-// whatever happened to be listening on a port, which is the one thing a
-// database client must never do.
+// Without it, the full application shell starts — on the connection form.
+// There is no built-in one: a default would silently connect to whatever
+// happened to be listening on a port, which is the one thing a database client
+// must never do.
 
 let benchSQL = "SELECT * FROM bench_wide"
 let benchMode = CommandLine.arguments.contains("--bench")
@@ -34,14 +33,6 @@ func argument(_ flag: String) -> String? {
 /// screenshot captures — comes in this way, and nothing it opens is remembered:
 /// a capture run must not change which database the next launch opens.
 let connArgument = argument("--conn")
-
-/// `--connect-form` opens the connection form even when a connection was
-/// remembered.
-///
-/// Exists for the reason `--tab` does: a screenshot is how a layout defect here
-/// gets caught, and a screenshot can neither press Connect… nor know what a
-/// previous run happened to leave in UserDefaults.
-let forceConnectForm = CommandLine.arguments.contains("--connect-form")
 
 /// `--reconnect "postgres://…/other"` opens a second database once the first
 /// connection has landed, through the File menu's own Connect… item, printing
@@ -87,6 +78,7 @@ if CommandLine.arguments.contains("--verify-schema-metadata") {
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
 }
+
 // The three that have to state their isolation. `Preferences`, the grid's
 // accessibility tree and the sentences put to somebody quitting are main-actor
 // isolated because the window reads them, and top-level code runs on the main
@@ -94,6 +86,7 @@ if CommandLine.arguments.contains("--verify-import") {
 if CommandLine.arguments.contains("--verify-preferences") {
     exit(MainActor.assumeIsolated { PreferencesChecks.run() } ? 0 : 1)
 }
+
 if CommandLine.arguments.contains("--verify-accessibility") {
     exit(MainActor.assumeIsolated { AccessibilityChecks.run() } ? 0 : 1)
 }
@@ -1716,8 +1709,10 @@ if benchMode {
             // `Preferences`: this path builds no window and is not on the main
             // actor, and where the connection was remembered is a question about
             // the user's defaults rather than about anything on screen.
-            ?? ConnectionStore.remembered(from: Preferences.connectionStorage()).map({
-                $0.settings.connectionString(password: $0.password)
+            ?? ConnectionStore.load(from: Preferences.connectionStorage()).first.map({
+                let id = $0.id
+                return $0.settings.connectionString(
+                    password: ConnectionKeychain.password(for: id) ?? "")
             })
     else {
         fputs(
@@ -1813,10 +1808,6 @@ if benchMode {
         // connection replaces it, so the last branch is simply not connecting.
         if let connArgument {
             model.connect(using: connArgument)
-        } else if !forceConnectForm,
-            let remembered = ConnectionStore.remembered(from: model.preferences.connectionStorage)
-        {
-            model.connect(to: remembered.settings, password: remembered.password)
         }
 
         if let initialCell { openValueViewer(model: model, on: initialCell) }

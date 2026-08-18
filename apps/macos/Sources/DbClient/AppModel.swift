@@ -423,6 +423,13 @@ final class AppModel {
     /// wiring rather than only of the model behind it.
     private let initialSQLIsScript: Bool
 
+    /// The ID of the saved connection currently being edited in the form.
+    ///
+    /// Set when the draft is seeded from a saved connection, cleared by `--conn`.
+    /// This is the interim path until the connection window lands, so the next
+    /// person does not preserve it by accident.
+    private(set) var editingConnectionID: UUID?
+
     init(
         history: QueryHistory, preferences: Preferences,
         initialTab: DetailTab = .content, initialSQL: String? = nil,
@@ -440,11 +447,12 @@ final class AppModel {
         self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
-        // Seeded from the last connection that worked, so reaching a
+        // Seeded from the first saved connection, so reaching a
         // neighbouring database on the same server is one field rather than
         // five. After `preferences`, which is what says where to look for it.
-        if let remembered = ConnectionStore.load(from: preferences.connectionStorage) {
-            connectionDraft = remembered
+        if let firstConnection = ConnectionStore.load(from: preferences.connectionStorage).first {
+            connectionDraft = firstConnection.settings
+            editingConnectionID = firstConnection.id
         }
         if let initialSQL { queryText = initialSQL }
         // `--caret` is the only way to put the caret anywhere but the start
@@ -570,9 +578,42 @@ final class AppModel {
             self.connString = connString
             adopt(result.0, inventory: result.1)
             if let remembering {
-                ConnectionStore.save(
-                    remembering.0, password: remembering.1,
-                    to: preferences.connectionStorage)
+                // Interim: connecting is not how a connection gets saved. The
+                // connection window is what will offer Save, and this block is meant
+                // to go out with it — until then the form is the only way anything
+                // reaches the file at all, so a connection that opened is written
+                // back to the entry it was seeded from, or appended as a new one.
+                var connections = ConnectionStore.load(from: preferences.connectionStorage)
+                var savedConnectionID: UUID
+
+                // Find if we're updating an existing connection
+                if let editingID = editingConnectionID,
+                    let index = connections.firstIndex(where: { $0.id == editingID })
+                {
+                    // Update existing connection
+                    connections[index] = SavedConnection(
+                        id: editingID,
+                        name: connections[index].name,
+                        color: connections[index].color,
+                        settings: remembering.0
+                    )
+                    savedConnectionID = editingID
+                } else {
+                    // Add new connection
+                    let newConnection = SavedConnection(
+                        id: UUID(),
+                        name: "",
+                        color: .none,
+                        settings: remembering.0
+                    )
+                    connections.append(newConnection)
+                    savedConnectionID = newConnection.id
+                }
+
+                ConnectionStore.save(connections, to: preferences.connectionStorage)
+
+                // Save password to Keychain
+                ConnectionKeychain.save(remembering.1, for: savedConnectionID)
             }
         }
     }
