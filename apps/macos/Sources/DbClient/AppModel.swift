@@ -2493,6 +2493,18 @@ final class AppModel {
     /// Whether Commit and Rollback have anything to act on.
     var hasUncommittedWork: Bool { transaction.open }
 
+    /// What quitting or closing the window would throw away, or nil where it
+    /// would throw away nothing.
+    ///
+    /// Read by the guard in front of ⌘Q and ⌘W, which is the only thing between
+    /// either of them and a process that ends. Derived rather than tracked: a flag
+    /// kept beside the edits would be a second answer to a question the staged
+    /// changes and the transaction already answer, and the day the two disagreed
+    /// the wrong one would be the one nobody was asked about.
+    var unsavedWork: UnsavedWork? {
+        staged.lostOnQuitting(withOpenTransaction: hasUncommittedWork)
+    }
+
     /// Enters or leaves manual-commit mode.
     ///
     /// The core refuses this while work is uncommitted rather than deciding what

@@ -59,8 +59,8 @@ let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
 // `--verify-transaction`, `--verify-editing`, `--verify-metadata`,
-// `--verify-schema-metadata`, `--verify-import`, `--verify-preferences` and
-// `--verify-accessibility` run
+// `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
+// `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
 // verdict. None needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
@@ -87,14 +87,18 @@ if CommandLine.arguments.contains("--verify-schema-metadata") {
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
 }
-// The two that have to state their isolation. `Preferences` and the grid's
-// accessibility tree are main-actor isolated because the window reads them, and
-// top-level code runs on the main thread without being statically known to.
+// The three that have to state their isolation. `Preferences`, the grid's
+// accessibility tree and the sentences put to somebody quitting are main-actor
+// isolated because the window reads them, and top-level code runs on the main
+// thread without being statically known to.
 if CommandLine.arguments.contains("--verify-preferences") {
     exit(MainActor.assumeIsolated { PreferencesChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-accessibility") {
     exit(MainActor.assumeIsolated { AccessibilityChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-quitting") {
+    exit(MainActor.assumeIsolated { QuittingChecks.run() } ? 0 : 1)
 }
 
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
@@ -1599,7 +1603,8 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
     }
 }
 
-/// Ends the process when the last window goes.
+/// Ends the process when the last window goes, and asks first when ending it
+/// would lose work.
 ///
 /// This application has exactly one window and no command that makes another:
 /// no New Window, no document to reopen, and nothing that answers a click on the
@@ -1609,11 +1614,80 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
 /// closes, which is what Calculator and System Settings have always done and
 /// what the close button on a window with nothing behind it promises.
 ///
+/// Which makes both ⌘W and ⌘Q ways to end the process, and neither of them asked
+/// anything: a grid holding twenty rows marked for deletion and a connection
+/// holding an open transaction went the same way as an empty window. Not a new
+/// defect — ⌘Q has always quit on the spot — but giving the window a working ⌘W
+/// put a second one right next to it, one key away from Close in every muscle
+/// memory on the platform.
+///
+/// Both paths are guarded here, with one decision and one dialog behind them:
+/// `windowShouldClose` for ⌘W and the close button, `applicationShouldTerminate`
+/// for ⌘Q, the Quit item, and a logout that asks the application first. Not a
+/// setting — this is the last thing between a person and work that cannot be got
+/// back, and a preference to turn it off is a preference to lose it silently.
+///
 /// Declared here rather than beside the menu targets because it is about the
-/// process rather than about a command. `NSApplication.delegate` is a weak
-/// reference, so the top-level `let` below is what keeps this alive.
-final class AppLifecycle: NSObject, NSApplicationDelegate {
+/// process rather than about a command. `NSApplication.delegate` and
+/// `NSWindow.delegate` are both weak references, so the top-level `let` below is
+/// what keeps this alive.
+final class AppLifecycle: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    /// The session, once there is one to ask about. `--bench` builds a window
+    /// with no model behind it, and there is nothing in that one to lose.
+    var model: AppModel?
+
+    /// Whether the window has already put the question for the gesture that is
+    /// ending the process.
+    ///
+    /// ⌘W arrives here twice: once as the window closing, and again as the
+    /// termination that closing the last window causes. Without this the person
+    /// who has just said "Discard and Quit" is asked the same thing a second time,
+    /// over a window that has already gone.
+    private var askedOnClose = false
+
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        MainActor.assumeIsolated {
+            guard mayDiscardUnsavedWork() else { return false }
+            askedOnClose = true
+            return true
+        }
+    }
+
+    /// Answers synchronously rather than with `.terminateLater`: the question is
+    /// an `NSAlert` this thread runs itself, and there is nothing to save in the
+    /// background — the choice is between sending the staged changes, which is
+    /// Save's job and not a quit's, and losing them.
+    func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
+        MainActor.assumeIsolated {
+            if askedOnClose { return .terminateNow }
+            return mayDiscardUnsavedWork() ? .terminateNow : .terminateCancel
+        }
+    }
+
+    /// Puts the question, and answers whether the process may end.
+    ///
+    /// One dialog for both ways out, worded by `UnsavedWork` so that what it says
+    /// can be checked without anybody at the keyboard — see `--verify-quitting`.
+    /// A modal alert rather than the window's own error banner for the reason
+    /// `AppModel.confirmDeletion` gives: a strip that can be ignored is not a
+    /// question, and this one has to be answered before the process goes.
+    @MainActor
+    private func mayDiscardUnsavedWork() -> Bool {
+        guard let work = model?.unsavedWork else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = work.question
+        alert.informativeText = work.detail
+        // Quitting leads because it is what the keystroke asked for, and it says
+        // what it costs rather than only where it goes. Cancel takes the escape
+        // key, so dismissing the dialog without reading it keeps the work.
+        alert.addButton(withTitle: "Discard and Quit")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
 }
 
 let app = NSApplication.shared
@@ -1724,6 +1798,12 @@ if benchMode {
         // Installed here rather than before the window is built, because the
         // File menu sends to the model and there is no model until now.
         AppMenu.install(into: app, model: model)
+        // The quit guard needs the model for the same reason and gets it here
+        // too. Only this window is given the delegate: the Settings panel closes
+        // with ⌘W and loses nothing, and a question in front of that would be a
+        // question about nothing.
+        lifecycle.model = model
+        window.delegate = lifecycle
         window.contentView = NSHostingView(rootView: RootView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)
