@@ -48,10 +48,25 @@ struct ConnectView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Theme.background.color)
             .task {
-                // The field most likely to be the one that is wrong. A
-                // remembered connection needs only its password; an empty form
-                // starts where reading starts.
-                focus = model.connectionDraft.isComplete ? .connectPassword : .connectHost
+                // Where reading starts, and never the password field — which is
+                // what the form used to do when the other fields were already
+                // filled in.
+                //
+                // That one line was what put AppKit's AutoFill panel on screen.
+                // It is not summoned by having a secure field, it is summoned by
+                // a secure field holding focus: measured four ways against this
+                // window — the panel follows the focus and nothing else, the same
+                // build showing it and not showing it with only this line
+                // changed. So a form that focused the password field was asking
+                // for the panel before the user had asked for anything, which is
+                // the one thing about it nobody chose.
+                //
+                // It costs a remembered connection one Tab. What it buys is a
+                // form that opens as itself, and an AutoFill panel that appears
+                // when somebody puts the caret in the password field — which is
+                // the moment it is worth having. `footer` keeps the band it lands
+                // in for that moment.
+                focus = .connectHost
             }
     }
 
@@ -146,6 +161,12 @@ struct ConnectView: View {
     /// right-aligned for no reason other than that being where a Mac dialog
     /// keeps them. The row used to keep its leading half empty to stay out of
     /// the affordance's way.
+    ///
+    /// The band is empty most of the time, and that is the point rather than a
+    /// waste: the form no longer opens with the password field focused (see
+    /// `body`), so the affordance appears only once somebody puts the caret
+    /// there. Reserving the space is what keeps that moment from shoving a
+    /// system control across the button row.
     private var footer: some View {
         VStack(spacing: 0) {
             Rectangle()
