@@ -23,6 +23,7 @@ enum ConnectionChecks {
         checkSessionLabels()
         checkDriverCatalog()
         checkFileShapedDatabases()
+        checkConnectionList()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -198,5 +199,104 @@ enum ConnectionChecks {
         guard got != want else { return }
         failures += 1
         fputs("connection FAIL: \(what)\n  want: \(want)\n  got:  \(got)\n", stderr)
+    }
+
+    /// What the sidebar asks the list, and the answers the window is drawn from.
+    ///
+    /// Filtering, position and removal are the three of these a person can catch the
+    /// application getting wrong — a row that vanishes, a row that jumps, a row that
+    /// comes back — and none of them needs a window to check.
+    private static func checkConnectionList() {
+        let conn1 = SavedConnection(
+            name: "MyDB",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "localhost", port: "5432", database: "test", user: "user")
+        )
+        let conn2 = SavedConnection(
+            name: "AnotherDB",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "remote", port: "5432", database: "prod", user: "admin"))
+        let list = ConnectionList([conn1, conn2])
+
+        let matches = list.matching("MyDB")
+        expect(matches.count, 1, "a filter matching one connection returns one connection")
+        expect(matches[0].id, conn1.id, "the matching connection is returned")
+
+        let matches2 = list.matching("localhost")
+        expect(matches2.count, 1, "a filter matching subtitle returns one connection")
+        expect(matches2[0].id, conn1.id, "the matching connection is returned")
+
+        let matches3 = list.matching("MYDB")
+        expect(matches3.count, 1, "a filter ignoring case returns one connection")
+
+        let all = list.matching("")
+        expect(all.count, 2, "a blank filter returns all connections")
+
+        let all2 = list.matching("   ")
+        expect(all2.count, 2, "a whitespace filter returns all connections")
+
+        expect(list.index(of: conn1.id), 0, "index of first connection is 0")
+        expect(list.index(of: conn2.id), 1, "index of second connection is 1")
+        expect(list.index(of: UUID()), nil, "index of non-existent connection is nil")
+
+        expect(
+            list.connection(conn1.id)?.id, conn1.id, "connection lookup returns correct connection")
+        expect(list.connection(UUID()), nil, "connection lookup of non-existent returns nil")
+
+        let updatedConn1 = SavedConnection(
+            id: conn1.id, name: "UpdatedDB", settings: conn1.settings)
+        var mutableList = list
+        mutableList.save(updatedConn1)
+        expect(mutableList.connections[0].name, "UpdatedDB", "save replaces connection in place")
+        expect(mutableList.connections[0].id, conn1.id, "save preserves connection id")
+        expect(mutableList.connections.count, 2, "save maintains list count")
+
+        let newConn = SavedConnection(
+            name: "NewDB",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "new", port: "5432", database: "newdb", user: "newuser"))
+        mutableList.save(newConn)
+        expect(mutableList.connections.count, 3, "save appends new connection")
+        expect(mutableList.connections[2].id, newConn.id, "save appends new connection at end")
+
+        let removed = mutableList.remove(conn2.id)
+        expect(removed?.id, conn2.id, "remove returns the removed connection")
+        expect(mutableList.connections.count, 2, "remove decreases list count")
+        expect(mutableList.connections.first?.id, conn1.id, "remove removes correct connection")
+
+        let removedNil = mutableList.remove(UUID())
+        expect(removedNil, nil, "remove of non-existent returns nil")
+        expect(mutableList.connections.count, 2, "remove of non-existent doesn't change list")
+
+        // From `suggested` rather than by writing those values out again: a check that
+        // spelled the defaults itself would go on passing after the form began
+        // offering different ones, which is the day this rule matters.
+        guard let postgres = DriverCatalog.named("postgres") else {
+            failures += 1
+            fputs("connection FAIL: the catalog is missing a driver this check needs\n", stderr)
+            return
+        }
+        let untouched = SavedConnection(settings: .suggested(for: postgres))
+        expect(
+            ConnectionList.isWorthSaving(untouched), false,
+            "a form nobody has typed into is not a connection worth keeping")
+
+        var named = untouched
+        named.settings.database = "sales"
+        expect(
+            ConnectionList.isWorthSaving(named), true,
+            "and one field of it is enough to make it one")
+
+        var titled = untouched
+        titled.name = "Production"
+        expect(
+            ConnectionList.isWorthSaving(titled), true,
+            "as is a name on its own, from somebody part-way through")
+
+        var coloured = untouched
+        coloured.color = .red
+        expect(
+            ConnectionList.isWorthSaving(coloured), true,
+            "and a colour, which nobody picks by accident")
     }
 }
