@@ -139,16 +139,23 @@ enum AppModelConnectionChecks {
             // Verify that delete is not allowed
             expect(
                 model.canDeleteConnection, false, "Delete should not be allowed for Quick Connect")
-            // Verify that the draft is set to the quick connect draft (not one of the saved connections)
+            // Verify that the draft is not one of the saved connections (by checking its ID)
             expect(
-                model.connectionDraft.name, "Quick Connect",
-                "Draft should be Quick Connect for Quick Connect")
+                model.connectionDraft.id != connection1.id
+                    && model.connectionDraft.id != connection2.id,
+                true,
+                "Draft should not be one of the saved connections")
 
-            // Now select a row and go back to Quick connect to test that typed content is preserved
-            model.selectConnection(connection1.id)
-            // Modify the draft to simulate typing
+            // Now test that typed content is preserved when switching back to Quick connect
+            // Type into Quick Connect form, not a saved connection
+            model.selectConnection(nil)
             model.connectionDraft.settings.host = "modified.example.com"
             model.connectionPassword = "testpassword"
+
+            // Select a row and go back to Quick connect to test that typed content is preserved
+            model.selectConnection(connection1.id)
+            // Verify that we're actually looking at connection1
+            expect(model.connectionDraft, connection1, "Should be looking at connection1")
 
             // Go back to Quick Connect
             model.selectConnection(nil)
@@ -157,6 +164,9 @@ enum AppModelConnectionChecks {
             expect(
                 model.connectionDraft.settings.host, "modified.example.com",
                 "Typed content should be preserved when switching back to Quick Connect")
+            expect(
+                model.connectionPassword, "testpassword",
+                "Typed password should be preserved when switching back to Quick Connect")
         }
     }
 
@@ -250,18 +260,15 @@ enum AppModelConnectionChecks {
             expect(model.unsavedConnectionEdits, nil, "Unsaved edits should be nil after save")
 
             // Verify that the connection list was updated by reading from file
-            let loadedConnections = ConnectionStore.load(
-                from: .thisMac,
-                in: ConnectionDirectories(
-                    local: FileManager.default.temporaryDirectory.appending(
-                        path: "dbclient-verify-chooser-\(UUID().uuidString)"),
-                    cloud: FileManager.default.temporaryDirectory.appending(
-                        path: "dbclient-verify-chooser-\(UUID().uuidString)")
-                ))
+            // Read from the default location, not a fresh temporary directory
+            let loadedConnections = ConnectionStore.load(from: .thisMac)
             expect(loadedConnections.count, 1, "Should have one connection loaded")
             expect(
                 loadedConnections[0].settings.host, "modifiedhost.example.com",
                 "Connection list should be updated")
+
+            // Clean up keychain
+            ConnectionKeychain.delete(for: connection.id)
         }
     }
 
@@ -311,6 +318,12 @@ enum AppModelConnectionChecks {
                 $0.name == "New Connection"
             }
             expect(newConnection != nil, true, "New connection should be in the list")
+
+            // Clean up keychain
+            // The new connection will have a new UUID, we need to get it from the model
+            if let newConnection = newConnection {
+                ConnectionKeychain.delete(for: newConnection.id)
+            }
         }
     }
 
