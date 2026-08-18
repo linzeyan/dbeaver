@@ -262,6 +262,15 @@ final class AppModel {
     // Chrome
     private(set) var connectionLabel = "Not connected"
     private(set) var connectionState: StatusDot.State = .connecting
+
+    /// The colour of the connection now open.
+    ///
+    /// Carried out of the chooser into the session, because the colour is not there
+    /// to decorate the sidebar: somebody marks a connection red so that they can
+    /// tell, while looking at a grid of rows, which server they are about to change.
+    /// A mark that stopped at the moment of connecting would be a mark shown only
+    /// when it does not matter yet.
+    private(set) var connectionColor: ConnectionColor = .none
     private(set) var status = "Connecting…"
 
     /// What `status` says when the connection is not doing anything.
@@ -423,13 +432,6 @@ final class AppModel {
     /// wiring rather than only of the model behind it.
     private let initialSQLIsScript: Bool
 
-    /// The ID of the saved connection currently being edited in the form.
-    ///
-    /// Set when the draft is seeded from a saved connection, cleared by `--conn`.
-    /// This is the interim path until the connection window lands, so the next
-    /// person does not preserve it by accident.
-    private(set) var editingConnectionID: UUID?
-
     init(
         history: QueryHistory, preferences: Preferences,
         initialTab: DetailTab = .content, initialSQL: String? = nil,
@@ -447,12 +449,17 @@ final class AppModel {
         self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
-        // Seeded from the first saved connection, so reaching a
-        // neighbouring database on the same server is one field rather than
-        // five. After `preferences`, which is what says where to look for it.
-        if let firstConnection = ConnectionStore.load(from: preferences.connectionStorage).first {
-            connectionDraft = firstConnection.settings
-            editingConnectionID = firstConnection.id
+        // After `preferences`, which is what says where to look for the file.
+        //
+        // The first saved connection is selected rather than left for the user to
+        // pick, so that the commonest launch — one database, opened again — is the
+        // return key and nothing else. It is a selection and not a connection: what
+        // this application must never do is open one nobody named this time.
+        connections = ConnectionList(ConnectionStore.load(from: preferences.connectionStorage))
+        if let first = connections.connections.first {
+            connectionDraft = first
+            savedConnectionPassword = ConnectionKeychain.password(for: first.id) ?? ""
+            connectionPassword = savedConnectionPassword
         }
         if let initialSQL { queryText = initialSQL }
         // `--caret` is the only way to put the caret anywhere but the start
@@ -469,20 +476,55 @@ final class AppModel {
 
     // MARK: - Connection
 
-    /// What the connection form is showing.
+    /// The connections the sidebar lists, as the file has them.
     ///
-    /// Seeded from the last connection that worked, so that reaching a
-    /// neighbouring database on the same server is one field rather than five.
-    /// An empty form until `init` has the settings that say where the remembered
-    /// one is kept. A property default cannot read `preferences`, and where to
-    /// look is now a preference.
-    var connectionDraft =
-        DriverCatalog.first.map(ConnectionSettings.suggested(for:))
-        ?? ConnectionSettings(scheme: "")
+    /// Held rather than read on demand, because the window edits it: a list read
+    /// back from disk on every draw would lose an entry the moment a save failed
+    /// and say nothing about it.
+    var connections = ConnectionList()
 
-    /// The form's password field. Nothing persists it from here: a connection
-    /// that opens hands it to the Keychain, and nothing else keeps a copy.
+    /// What the sidebar's field is filtering the list by.
+    var connectionFilter = ""
+
+    /// What the form is showing.
+    ///
+    /// A whole `SavedConnection` rather than the fields alone: the form edits one
+    /// connection, and that connection now has a name, a colour and — the part that
+    /// matters — an identity. The identity is what says whether this draft is a row
+    /// in the list (its id is in there) or Quick connect (it is not), which is one
+    /// question with one answer rather than a selection kept beside the draft and
+    /// able to disagree with it.
+    ///
+    /// An empty form until `init`, which is where the file is read. A property
+    /// default cannot reach `preferences`, and where to look is a preference.
+    var connectionDraft = AppModel.suggestedConnection()
+
+    /// The form's password field. Nothing persists it from here: Save hands it to
+    /// the Keychain, and nothing else keeps a copy.
     var connectionPassword = ""
+
+    /// What the Keychain had for the connection being edited.
+    ///
+    /// Kept because the password is the one field `unsavedEdits` cannot compare for
+    /// itself — it is not in the value, and it never leaves the Keychain — so this
+    /// is the window's own answer to "is the one on screen the one that was saved".
+    private var savedConnectionPassword = ""
+
+    /// Quick connect's draft, while a saved connection is the one on screen.
+    ///
+    /// Somebody typing a one-off connection, who clicks a saved row to check a port
+    /// and clicks back, has not asked to lose what they typed — and Quick connect is
+    /// the one row with nothing on disk to restore it from.
+    private var quickConnectDraft = AppModel.suggestedConnection()
+    private var quickConnectPassword = ""
+
+    /// A form with nothing in it yet: the first driver the core reports, with its
+    /// own suggestion of a host and a port.
+    static func suggestedConnection() -> SavedConnection {
+        SavedConnection(
+            settings: DriverCatalog.first.map(ConnectionSettings.suggested(for:))
+                ?? ConnectionSettings(scheme: ""))
+    }
 
     /// Whether the window is showing the connection form rather than a session.
     /// True at launch, because there is no database until one is named.
@@ -503,8 +545,193 @@ final class AppModel {
     /// a session behind it to go back to.
     var canCancelConnection: Bool { db != nil }
 
+    /// What the session waiting behind the chooser is connected to, or nil before
+    /// there is one.
+    ///
+    /// Parsed back out of the string the connection was opened with rather than
+    /// kept as a second copy of it: the two would go out of step on the first
+    /// reconnect, and the one the chooser marks as open would be the previous
+    /// database. The password is not part of what comes back, which is what makes
+    /// this comparable to a row in the file — those hold no password either.
+    var openConnectionSettings: ConnectionSettings? {
+        db == nil ? nil : ConnectionSettings(connectionString: connString)
+    }
+
     /// Whether Connect has something to try.
-    var canConnect: Bool { connectionDraft.isComplete && !isConnecting }
+    var canConnect: Bool { connectionDraft.settings.isComplete && !isConnecting }
+
+    /// The saved connection the form is editing, or nil for Quick connect.
+    var editedConnection: SavedConnection? { connections.connection(connectionDraft.id) }
+
+    /// Which row the sidebar draws as selected. Nil is Quick connect, which is a
+    /// row like the others and is where a draft that is not in the file belongs.
+    var selectedConnectionID: UUID? { editedConnection?.id }
+
+    /// What Save would write and Revert would throw away, or nil when the form
+    /// agrees with the file.
+    ///
+    /// Nil for Quick connect too, and not because nothing was typed: there is
+    /// nothing saved for it to differ from, so leaving it loses a draft rather than
+    /// an edit, and a question about that would be a question nobody can answer.
+    var unsavedConnectionEdits: UnsavedConnectionEdits? {
+        guard let saved = editedConnection else { return nil }
+        return saved.unsavedEdits(
+            against: connectionDraft, passwordChanged: connectionPassword != savedConnectionPassword
+        )
+    }
+
+    /// Whether Save has anything to do. A draft nobody has typed into is not a
+    /// connection, and a saved one nobody has edited is already saved.
+    var canSaveConnection: Bool {
+        guard ConnectionList.isWorthSaving(connectionDraft) else { return false }
+        return editedConnection == nil || unsavedConnectionEdits != nil
+    }
+
+    /// Whether there is a saved connection to delete. Quick connect is a control
+    /// rather than an entry, so there is never one to remove.
+    var canDeleteConnection: Bool { editedConnection != nil }
+
+    /// Whether the sidebar is showing fewer connections than there are.
+    var isFilteringConnections: Bool {
+        !connectionFilter.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// The connections the sidebar draws.
+    var visibleConnections: [SavedConnection] { connections.matching(connectionFilter) }
+
+    /// Asks before a connection and its password are forgotten.
+    ///
+    /// Injectable for the reason `confirmDeletion` is: the alert is a modal run
+    /// loop, and the checks have nobody to click it.
+    @ObservationIgnored
+    var confirmConnectionDeletion: @MainActor (SavedConnection) -> Bool = { connection in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete “\(connection.title)”?"
+        alert.informativeText =
+            "This removes the connection and its password from this Mac. It cannot be undone."
+        alert.addButton(withTitle: "Delete")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Asks what to do with edits that would be lost by moving to another
+    /// connection.
+    ///
+    /// Three answers rather than two, in the order macOS puts them: the one that
+    /// keeps the work leads, and Cancel takes the escape key so that dismissing the
+    /// sheet without reading it changes nothing. Injectable for the same reason as
+    /// above.
+    @ObservationIgnored
+    var resolveUnsavedConnection: @MainActor (UnsavedConnectionEdits) -> UnsavedConnectionChoice = {
+        edits in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = edits.question
+        alert.informativeText = edits.detail
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Discard Changes")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .save
+        case .alertSecondButtonReturn: return .discard
+        default: return .cancel
+        }
+    }
+
+    /// Shows another connection in the form, or Quick connect for nil.
+    ///
+    /// Unsaved edits are settled first, and a cancelled question leaves the
+    /// selection where it was — which is why this asks rather than the row that was
+    /// clicked: the sidebar would otherwise move its highlight to a connection the
+    /// form is not showing.
+    func selectConnection(_ id: UUID?) {
+        guard id != selectedConnectionID else { return }
+        guard settleUnsavedConnectionEdits() else { return }
+        if editedConnection == nil {
+            quickConnectDraft = connectionDraft
+            quickConnectPassword = connectionPassword
+        }
+        guard let id, let saved = connections.connection(id) else {
+            connectionDraft = quickConnectDraft
+            connectionPassword = quickConnectPassword
+            savedConnectionPassword = ""
+            return
+        }
+        connectionDraft = saved
+        // An empty field rather than an error when the Keychain refuses — see
+        // `ConnectionKeychain` for when that happens and why it is survivable.
+        savedConnectionPassword = ConnectionKeychain.password(for: id) ?? ""
+        connectionPassword = savedConnectionPassword
+    }
+
+    /// Empties Quick connect and shows it, for the sidebar's `+`.
+    func newConnection() {
+        guard settleUnsavedConnectionEdits() else { return }
+        quickConnectDraft = Self.suggestedConnection()
+        quickConnectPassword = ""
+        connectionDraft = quickConnectDraft
+        connectionPassword = ""
+        savedConnectionPassword = ""
+    }
+
+    /// Writes the form to the file, and its password to the Keychain.
+    ///
+    /// The only path by which anything reaches the file. Connecting does not save:
+    /// a connection somebody tried once is not one they asked to keep, and a client
+    /// that wrote every attempt down would fill the sidebar with typing mistakes.
+    func saveConnection() {
+        guard canSaveConnection else { return }
+        let wasQuickConnect = editedConnection == nil
+        connections.save(connectionDraft)
+        ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
+        ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
+        savedConnectionPassword = connectionPassword
+        // The draft became a row and stays selected, so Quick connect goes back to
+        // being empty rather than a second copy of what was just saved.
+        if wasQuickConnect {
+            quickConnectDraft = Self.suggestedConnection()
+            quickConnectPassword = ""
+        }
+    }
+
+    /// Puts the saved values back in the form.
+    func revertConnection() {
+        guard let saved = editedConnection else { return }
+        connectionDraft = saved
+        connectionPassword = savedConnectionPassword
+    }
+
+    /// Forgets the connection the form is showing, once its owner says so.
+    ///
+    /// The password goes with it. One left behind belongs to an entry nothing will
+    /// ever show, offer to change, or delete.
+    func deleteConnection() {
+        guard let saved = editedConnection, confirmConnectionDeletion(saved) else { return }
+        connections.remove(saved.id)
+        ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
+        ConnectionKeychain.delete(for: saved.id)
+        connectionDraft = quickConnectDraft
+        connectionPassword = quickConnectPassword
+        savedConnectionPassword = ""
+    }
+
+    /// Settles edits before the form shows something else. False when the person
+    /// asked to stay where they are.
+    private func settleUnsavedConnectionEdits() -> Bool {
+        guard let edits = unsavedConnectionEdits else { return true }
+        switch resolveUnsavedConnection(edits) {
+        case .save:
+            saveConnection()
+            return true
+        case .discard:
+            return true
+        case .cancel:
+            return false
+        }
+    }
 
     /// Whether the launch options have been spent.
     ///
@@ -513,35 +740,31 @@ final class AppModel {
     /// did not ask for, written for a schema it has never seen.
     private var appliedLaunchOptions = false
 
-    /// Connects to what the form is showing, and remembers it if it opens.
+    /// Connects to what the form is showing.
+    ///
+    /// Whatever is on screen, saved or not: the fields are there to be connected
+    /// with, and refusing to open an edited connection until it had been written
+    /// down would make every experiment a commitment. The row keeps its unsaved
+    /// mark, which is where that fact belongs.
     func connectFromForm() {
         guard canConnect else { return }
-        let settings = connectionDraft
-        let password = connectionPassword
-        open(
-            settings.connectionString(password: password),
-            remembering: (settings, password))
+        open(connectionDraft.settings.connectionString(password: connectionPassword))
     }
 
     /// Connects to a raw connection URL, from `--conn`.
     ///
-    /// Deliberately not remembered. This is the automation path — the
-    /// benchmarks and the screenshot captures run through it — and writing
-    /// bench credentials over the connection a user last chose would make
-    /// `make screenshot` change what their next launch opens. The form is
+    /// Deliberately not saved. This is the automation path — the benchmarks and the
+    /// screenshot captures run through it — and a run of `make screenshot` must not
+    /// leave bench credentials in somebody's sidebar. It lands in Quick connect
+    /// rather than over a saved connection for the same reason, and the form is
     /// seeded from it so that a string which does not connect can be corrected
     /// rather than retyped.
     func connect(using connString: String) {
-        connectionDraft = ConnectionSettings(connectionString: connString)
+        connectionDraft = SavedConnection(
+            settings: ConnectionSettings(connectionString: connString))
         connectionPassword = ConnectionURL.password(in: connString) ?? ""
-        open(connString, remembering: nil)
-    }
-
-    /// Connects to a connection this window remembered from last time.
-    func connect(to settings: ConnectionSettings, password: String) {
-        connectionDraft = settings
-        connectionPassword = password
-        connectFromForm()
+        savedConnectionPassword = ""
+        open(connString)
     }
 
     /// Opens the connection form over the session, for File ▸ Connect….
@@ -565,7 +788,7 @@ final class AppModel {
         connectionState = .connected
     }
 
-    private func open(_ connString: String, remembering: (ConnectionSettings, String)?) {
+    private func open(_ connString: String) {
         isConnecting = true
         isBusy = true
         connectionError = nil
@@ -577,40 +800,6 @@ final class AppModel {
         } then: { [self] result in
             self.connString = connString
             adopt(result.0, inventory: result.1)
-            if let remembering {
-                // Interim: connecting is not how a connection gets saved. The
-                // connection window is what will offer Save, and this block is meant
-                // to go out with it — until then the form is the only way anything
-                // reaches the file at all, so a connection that opened is written
-                // back to the entry it was seeded from, or appended as a new one.
-                var connections = ConnectionStore.load(from: preferences.connectionStorage)
-                var savedConnectionID: UUID
-
-                if let editingID = editingConnectionID,
-                    let index = connections.firstIndex(where: { $0.id == editingID })
-                {
-                    connections[index] = SavedConnection(
-                        id: editingID,
-                        name: connections[index].name,
-                        color: connections[index].color,
-                        settings: remembering.0
-                    )
-                    savedConnectionID = editingID
-                } else {
-                    let newConnection = SavedConnection(
-                        id: UUID(),
-                        name: "",
-                        color: .none,
-                        settings: remembering.0
-                    )
-                    connections.append(newConnection)
-                    savedConnectionID = newConnection.id
-                }
-
-                ConnectionStore.save(connections, to: preferences.connectionStorage)
-
-                ConnectionKeychain.save(remembering.1, for: savedConnectionID)
-            }
         }
     }
 
@@ -628,6 +817,7 @@ final class AppModel {
         schemas = inventory.schemas
         relations = inventory.relations
         connectionLabel = Self.label(for: connString)
+        connectionColor = connectionDraft.color
         connectionState = .connected
         // Open the schema a user most likely wants, and land on a table
         // rather than an empty pane. Opening to nothing makes every session

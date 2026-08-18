@@ -93,6 +93,33 @@ enum Theme {
     static let danger = Tone(0xEF44_44)
     static let dangerText = Tone(0xF871_71)
 
+    /// The colours a saved connection can be marked with.
+    ///
+    /// Seven and no more. This is not a palette to express anything with — it is a
+    /// way to tell production from staging before running a statement against the
+    /// wrong one, and a list of twenty tones is one where nobody remembers which is
+    /// which. They are spaced around the wheel so that any two differ in hue as well
+    /// as in name, and none of them is the indigo this window already spends on
+    /// "this is the one you are on".
+    ///
+    /// Measured against `background`, which is what a sidebar row is drawn on:
+    /// 6.4:1 for the tightest of them and better for the rest — well past the 3:1 a
+    /// mark that is not text needs, and deliberately so, because a 3pt stripe is
+    /// small enough that a ratio which passes on paper can still be hard to see.
+    ///
+    /// Colour is never the only signal: the row it marks carries the connection's
+    /// name and what it opens, and the swatch that sets it is named for a screen
+    /// reader.
+    enum Connection {
+        static let red = Tone(0xF871_71)
+        static let orange = Tone(0xFB92_3C)
+        static let yellow = Tone(0xFACC_15)
+        static let green = Tone(0x4ADE_80)
+        static let blue = Tone(0x60A5_FA)
+        static let purple = Tone(0xC084_FC)
+        static let grey = Tone(0x94A3_B8)
+    }
+
     /// Colours used by the Metal grid. Separate namespace because the data
     /// surface has its own vocabulary, not because it has its own palette.
     enum Grid {

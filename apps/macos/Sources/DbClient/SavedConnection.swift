@@ -182,12 +182,48 @@ struct SavedConnection: Identifiable, Equatable, Codable {
     }
 }
 
-/// The color a connection can be given.
+/// The colour a connection can be marked with.
 ///
-/// A value rather than a function, so the checks can name the cases.
+/// `none` is a case rather than an optional because it is a choice made in the same
+/// row of swatches as the others, and the way back after picking one by mistake.
 enum ConnectionColor: String, Codable, CaseIterable, Identifiable, Sendable {
     case none, red, orange, yellow, green, blue, purple, grey
+
     var id: String { rawValue }
+
+    /// What it is drawn in, or nil for the one that is not drawn at all.
+    ///
+    /// The tones live in `Theme` rather than here, for the reason that file's own
+    /// comment gives: one source of truth for colour, read by both rendering stacks.
+    var tone: Theme.Tone? {
+        switch self {
+        case .none: return nil
+        case .red: return Theme.Connection.red
+        case .orange: return Theme.Connection.orange
+        case .yellow: return Theme.Connection.yellow
+        case .green: return Theme.Connection.green
+        case .blue: return Theme.Connection.blue
+        case .purple: return Theme.Connection.purple
+        case .grey: return Theme.Connection.grey
+        }
+    }
+
+    /// What a screen reader calls the swatch. "No colour" rather than "none", which
+    /// on its own is read as the answer to a question nobody heard.
+    var label: String {
+        self == .none ? "No colour" : rawValue.capitalized
+    }
+}
+
+/// What somebody decided about edits that are about to be left behind.
+///
+/// Three answers, because two would make one of them a lie: a window that offered
+/// only "discard" and "cancel" would be asking somebody to choose between losing
+/// their work and being stuck on the row they are trying to leave.
+enum UnsavedConnectionChoice {
+    case save
+    case discard
+    case cancel
 }
 
 /// What editing a saved connection has changed and not written back.
