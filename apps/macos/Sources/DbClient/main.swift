@@ -91,6 +91,9 @@ if CommandLine.arguments.contains("--verify-import") {
 if CommandLine.arguments.contains("--verify-connection-chooser") {
     exit(MainActor.assumeIsolated { AppModelConnectionChecks.run() } ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-history") {
+    exit(BrowseHistoryChecks.run() ? 0 : 1)
+}
 
 // The three that have to state their isolation. `Preferences`, the grid's
 // accessibility tree and the sentences put to somebody quitting are main-actor
