@@ -243,6 +243,13 @@ final class GridView: MTKView {
     /// clause — the same reason that pane cannot be edited or sorted.
     var offersFilters = false
 
+    /// Called with the hit rows when *Copy as INSERT* is chosen.
+    var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
+    /// Whether that item is offered. False for the Query pane, for the reason
+    /// above: an INSERT names a table, and a result joining five of them names
+    /// none.
+    var offersInsertCopy = false
+
     /// Whether this grid takes keyboard focus when it appears. Set only for the
     /// browse pane: in the Query tab focus belongs to the editor, and a grid
     /// that grabs it on every tab switch is worse than one that never does.
@@ -464,6 +471,13 @@ final class GridView: MTKView {
         menu.addItem(value)
         menu.addItem(rows)
         menu.addItem(csv)
+        if offersInsertCopy {
+            let insert = NSMenuItem(
+                title: "Copy \(AppModel.pluralized(count, "row")) as INSERT",
+                action: #selector(copyRowsAsInsert), keyEquivalent: "")
+            insert.target = self
+            menu.addItem(insert)
+        }
 
         // A draft row is not offered any of this: it holds what somebody is
         // typing, the database has never seen it, and every cell of it the grid
@@ -520,6 +534,16 @@ final class GridView: MTKView {
     @objc private func applyCellFilter(_ sender: NSMenuItem) {
         guard let request = sender.representedObject as? CellFilterRequest else { return }
         onFilter?(request)
+    }
+
+    /// Hands the selected rows off to be rendered as statements.
+    ///
+    /// Unlike the three copies above it, this one does not put anything on the
+    /// pasteboard itself: the statements are written by the core, which means a
+    /// round trip, which means the answer arrives after this returns.
+    @objc private func copyRowsAsInsert(_ sender: Any?) {
+        guard let selection = renderer?.selection else { return }
+        onCopyAsInsert?(selection.rows)
     }
 
     override func mouseDragged(with event: NSEvent) {

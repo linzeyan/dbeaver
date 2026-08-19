@@ -2072,6 +2072,42 @@ final class AppModel {
         }
     }
 
+    /// Puts the selected rows on the pasteboard as INSERT statements.
+    ///
+    /// Written by the core rather than assembled here, which is the same rule
+    /// the Save button follows and for the same reason: quoting is the
+    /// database's own, and whether a value is written bare or in quotes depends
+    /// on the type its column was declared with. It also means the text copied
+    /// out of this window is the text this window would have sent.
+    ///
+    /// Every column goes in, hidden ones included. A statement that quietly left
+    /// out a column would insert a row that is not the row that was copied.
+    ///
+    /// A relation nothing can name a row of is fine here: an INSERT names no
+    /// existing row, so the key this crate cannot find is one it does not need.
+    func copyRowsAsInsert(_ rows: ClosedRange<Int>) {
+        guard let relation = selected else { return }
+        let grid = browseResult.table
+        let names = grid.columnNames
+        let request = EditRequest(
+            schema: relation.schema, relation: relation.name,
+            inserts: rows.map { row in
+                EditRequest.Insert(
+                    set: names.indices.map {
+                        EditRequest.Cell(column: names[$0], value: grid.value(row: row, column: $0))
+                    })
+            })
+        run { db in
+            try db.editStatements(request)
+        } then: { statements in
+            // Terminated, because these are being pasted somewhere as a script
+            // and the core writes statements to be sent one at a time.
+            let script = statements.map { $0 + ";" }.joined(separator: "\n")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(script, forType: .string)
+        }
+    }
+
     func applyFilters() {
         activeTab = .content
         runBrowse()
