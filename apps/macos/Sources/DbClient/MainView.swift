@@ -1007,6 +1007,12 @@ private struct CellEditorRow: View {
                             "Add a row after the last one; columns left alone take the "
                                 + "table's defaults")
                 }
+                if model.canDuplicateRow {
+                    Button("Duplicate Row") { model.duplicateSelectedRow() }
+                        .help(
+                            "Add a copy of the selected row; key columns are left to the table's "
+                                + "defaults")
+                }
             }
 
             Spacer()

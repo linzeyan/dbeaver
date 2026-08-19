@@ -26,6 +26,7 @@ enum EditingChecks {
         checkOneRowIsOneStatement()
         checkAMarkedRowGoesWholeAndTakesItsEditsWithIt()
         checkANewRowSendsOnlyTheColumnsItWasGiven()
+        checkADuplicatedRowCopiesEverythingButTheKey()
         checkTheCountOnScreenIsTheNumberOfStatements()
         checkARowThatCannotBeNamedIsRefused()
         if failures == 0 {
@@ -134,6 +135,40 @@ enum EditingChecks {
         var empty = StagedChanges()
         empty.drafts = [DraftRow()]
         expect(summary(of: empty), "insert ", "an untouched new row keeps its place in the batch")
+    }
+
+    /// A duplicated row copies what the grid is drawing — a staged edit included —
+    /// with the key columns left out so the table's default supplies a fresh
+    /// key.
+    private static func checkADuplicatedRowCopiesEverythingButTheKey() {
+        var staged = StagedChanges()
+        staged.drafts = [staged.draft(copying: 0, from: table, clearing: ["id"])]
+        expect(
+            summary(of: staged), "insert label=one,qty=1.00",
+            "the key is absent, so the table's default supplies it")
+
+        var nulled = StagedChanges()
+        nulled.drafts = [nulled.draft(copying: 1, from: table, clearing: ["id"])]
+        expect(
+            summary(of: nulled), "insert label=NULL,qty=2.00",
+            "a NULL is copied as NULL, not as an absent column")
+
+        // The copy is of the row on screen, so a staged edit rides along. The
+        // draft is built into a separate `StagedChanges` before the summary,
+        // or the summary would also carry the UPDATE the copy was made from.
+        var edited = StagedChanges()
+        edited.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "changed")
+        var copy = StagedChanges()
+        copy.drafts = [edited.draft(copying: 0, from: table, clearing: ["id"])]
+        expect(
+            summary(of: copy), "insert label=changed,qty=1.00",
+            "the copy is of the row on screen, not of the row the database sent")
+
+        var whole = StagedChanges()
+        whole.drafts = [whole.draft(copying: 0, from: table, clearing: [])]
+        expect(
+            summary(of: whole), "insert id=1,label=one,qty=1.00",
+            "the caller's key list is what removes the key, not this function")
     }
 
     /// The number beside Save is the number of statements Save will send.

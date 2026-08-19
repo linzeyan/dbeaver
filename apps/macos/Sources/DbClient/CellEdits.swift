@@ -182,6 +182,27 @@ extension StagedChanges {
         return request
     }
 
+    /// A draft pre-filled from a row on screen, with the key columns left out
+    /// so the table's default supplies a fresh key.
+    ///
+    /// A key column is absent rather than NULL, for the reason an untouched
+    /// column of a new row is: sending NULL would override the default. A
+    /// staged edit wins over the value the database sent, because the copy is
+    /// of the row on screen — and a NULL staged edit is a value, so it is
+    /// copied as NULL rather than read back from the row.
+    func draft(copying row: Int, from rows: StagedRows, clearing keyColumns: [String]) -> DraftRow {
+        var values: [Int: PendingValue] = [:]
+        for i in rows.columnNames.indices {
+            guard !keyColumns.contains(rows.columnNames[i]) else { continue }
+            if let staged = updates[GridCell(row: row, column: i)] {
+                values[i] = staged
+            } else {
+                values[i] = PendingValue(text: rows.value(row: row, column: i))
+            }
+        }
+        return DraftRow(values: values)
+    }
+
     private func key(of row: Int, keyColumns: [String], rows: StagedRows) -> [EditRequest.Cell]? {
         var key: [EditRequest.Cell] = []
         for name in keyColumns {

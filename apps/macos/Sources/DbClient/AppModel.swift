@@ -1361,6 +1361,36 @@ final class AppModel {
         browseResult.selection = GridSelection(row: browseRowCount - 1, column: 0)
     }
 
+    /// Whether there is a row to copy, which is `canEditCell`'s questions plus
+    /// one: a draft is refused. There is nothing in the database behind it and
+    /// no key of its own to leave out, so the copy would be a second row of the
+    /// same nothing — and the row it was made from is one Add Row away.
+    var canDuplicateRow: Bool {
+        guard canEditCell, let s = selectedCell(in: browseResult) else { return false }
+        return !isDraft(row: s.row)
+    }
+
+    /// Adds a row holding what the selected one holds, minus the columns that
+    /// name it.
+    ///
+    /// The key is left out rather than copied, because copying it asks the
+    /// database for a second row with a key it already has — which is the one
+    /// way this insert is certain to fail. Left out, the table's default
+    /// supplies a fresh one, which is what "another one like this" means.
+    ///
+    /// The row it copies is the row on screen and not the row that was read: a
+    /// cell edited a moment ago is part of what the user is looking at and is
+    /// about to send, and a copy that quietly reverted it would differ from its
+    /// original in a way nothing on screen explains.
+    func duplicateSelectedRow() {
+        guard canDuplicateRow, let s = selectedCell(in: browseResult) else { return }
+        staged.drafts.append(
+            staged.draft(
+                copying: s.row, from: browseResult.table,
+                clearing: rowIdentity?.columns ?? []))
+        browseResult.selection = GridSelection(row: browseRowCount - 1, column: 0)
+    }
+
     /// Whether a row can be added at all.
     ///
     /// `canEditCell`'s questions minus the cell: a table with no rows in it is
