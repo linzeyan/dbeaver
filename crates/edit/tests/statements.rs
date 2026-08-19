@@ -491,3 +491,62 @@ async fn a_name_that_needs_quoting_gets_it() {
         "{statements:?}"
     );
 }
+
+/// A NULL cell is asked about with `IS NULL` rather than with `= NULL`.
+///
+/// The failure this guards against runs: `= NULL` is valid SQL and is never
+/// true, so *Filter to this value* over an empty cell would appear to work and
+/// return an empty grid — which reads as "this table has no such rows" rather
+/// than as a mistake made here.
+#[tokio::test]
+async fn a_null_cell_is_asked_about_with_is_null() {
+    assert_eq!(
+        filtered(r#"{"schema":"public","relation":"lines","column":"note","op":"equals"}"#).await,
+        "note IS NULL"
+    );
+    assert_eq!(
+        filtered(r#"{"schema":"public","relation":"lines","column":"note","op":"not_equals"}"#)
+            .await,
+        "note IS NOT NULL"
+    );
+}
+
+/// A filter writes the value as its column's type reads it and the name as the
+/// dialect quotes it — the two facts the front end does not have.
+#[tokio::test]
+async fn a_cell_filter_is_written_the_way_its_column_reads_it() {
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"qty","op":"equals","value":"2"}"#
+        )
+        .await,
+        "qty = 2"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"note","op":"not_equals",
+                "value":"it's fine"}"#
+        )
+        .await,
+        "note <> 'it''s fine'"
+    );
+    // The same refusal an edit makes: a typing mistake must not become a
+    // predicate that runs against a numeric column.
+    let filter: dbedit::CellFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","column":"qty","op":"equals","value":"abc"}"#,
+    )
+    .unwrap();
+    let why = dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("text that is not a number is not a filter")
+        .to_string();
+    assert!(why.contains("not a number"), "{why}");
+}
+
+/// One clause, from the JSON the front end sends.
+async fn filtered(json: &str) -> String {
+    let filter: dbedit::CellFilter = serde_json::from_str(json).expect("the filter should parse");
+    dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect("the clause should be writable")
+}

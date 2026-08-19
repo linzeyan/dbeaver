@@ -288,6 +288,22 @@ char* db_browse_statement(DbHandle* handle, const char* what, char** err);
 // the wrong row.
 char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
 
+// One cell's value as a predicate for the browse's filter field, as plain text.
+// Released with db_string_free.
+//
+// `filter` is JSON:
+//
+//   {"schema": …, "relation": …, "column": …, "op": …, "value": …}
+//
+// `op` is "equals", "not_equals", "is_null" or "is_not_null". A `value` of JSON
+// null is a NULL cell, and "equals" over one answers `IS NULL` — `= NULL` is
+// never true, so the literal reading would be a filter matching nothing.
+//
+// Written by the core rather than the front end because quoting is the
+// database's own, and whether a value goes in bare or in quotes depends on the
+// type its column was declared with.
+char* db_cell_filter(DbHandle* handle, const char* filter, char** err);
+
 // Which columns name one row of a relation. Released with db_string_free:
 //
 //   {"columns": ["id"], "obstacle": null}
