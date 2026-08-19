@@ -142,6 +142,15 @@ char* db_sql_scan_json(const char* text, const char* scheme, uint32_t selection_
 // not an ugly result but a lost one.
 char* db_sql_format(const char* text, char** err);
 
+// How this database asks for a query plan, written in front of a statement, or
+// NULL where it has no such spelling. Released with db_string_free.
+//
+// NULL is an answer, not a failure: SQL Server asks for a plan with a session
+// setting rather than a prefix, and a scheme this build does not know has no
+// answer at all. A front end that reads NULL should not offer the command, since
+// guessing the word would produce a statement the server refuses.
+char* db_sql_explain_prefix(const char* scheme);
+
 // Where a server error position lands in the buffer, or -1 when the number could
 // not have come from what was sent.
 //
@@ -278,6 +287,22 @@ char* db_browse_statement(DbHandle* handle, const char* what, char** err);
 // they prevent is not an error message, it is an UPDATE that silently changes
 // the wrong row.
 char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
+
+// One cell's value as a predicate for the browse's filter field, as plain text.
+// Released with db_string_free.
+//
+// `filter` is JSON:
+//
+//   {"schema": …, "relation": …, "column": …, "op": …, "value": …}
+//
+// `op` is "equals", "not_equals", "is_null" or "is_not_null". A `value` of JSON
+// null is a NULL cell, and "equals" over one answers `IS NULL` — `= NULL` is
+// never true, so the literal reading would be a filter matching nothing.
+//
+// Written by the core rather than the front end because quoting is the
+// database's own, and whether a value goes in bare or in quotes depends on the
+// type its column was declared with.
+char* db_cell_filter(DbHandle* handle, const char* filter, char** err);
 
 // Which columns name one row of a relation. Released with db_string_free:
 //

@@ -245,6 +245,11 @@ final class AppModel {
         let script: String
         /// Scalar offsets of the statement within `script`.
         let range: Range<Int>
+        /// What was written in front of the statement before it was sent, empty
+        /// where nothing was. It travels with the script and the range because
+        /// the arithmetic that turns the server's number into a place in the
+        /// buffer needs all three of them or none.
+        let prefix: String
     }
 
     /// A Query-pane failure with the statement that produced it.
@@ -1110,6 +1115,47 @@ final class AppModel {
 
     func focusNavigatorFilter() { filterFocusRequests += 1 }
 
+    // MARK: - Go to
+
+    /// Whether the go-to palette is on screen.
+    var isGoToOpen = false
+
+    /// Whether there is anything to go to. Drives the menu item's enabled state,
+    /// so the command is not offered before the tree has been read.
+    ///
+    /// Asks whether any schema holds something rather than whether any schema
+    /// was found: a database of empty schemas reads as answered here but opens a
+    /// palette with nothing in it.
+    var canGoTo: Bool { relations.values.contains { !$0.isEmpty } }
+
+    /// Every relation this window has read, as the palette's targets.
+    ///
+    /// Built from the inventory already here rather than asked of the server:
+    /// the palette is typed into at speed, and anything else would be a round
+    /// trip per keystroke.
+    var goToTargets: [GoToTarget] {
+        relations.values.flatMap { $0 }.map { GoToTarget(schema: $0.schema, name: $0.name) }
+    }
+
+    /// Opens the relation the palette chose and shows its rows.
+    ///
+    /// Looked up here rather than carried by the target, because `GoToTarget` is
+    /// deliberately two strings: the matching rule is checked without a database,
+    /// and a `RelationInfo` inside it would drag the metadata layer into a rule
+    /// that has no business knowing about one.
+    ///
+    /// The palette closes even where the lookup fails. It was opened over a list
+    /// this window had already read, so a name in it that no longer resolves
+    /// means the tree moved underneath — and a palette that stayed open would be
+    /// offering the same stale row again.
+    func goTo(_ target: GoToTarget) {
+        isGoToOpen = false
+        guard let relation = relations[target.schema]?.first(where: { $0.name == target.name })
+        else { return }
+        activeTab = .content
+        selected = relation
+    }
+
     // MARK: - Cell inspection
 
     /// What the selected cell holds, spelled out for the inspector strip.
@@ -1358,6 +1404,36 @@ final class AppModel {
     func addDraftRow() {
         guard canAddRow else { return }
         staged.drafts.append(DraftRow())
+        browseResult.selection = GridSelection(row: browseRowCount - 1, column: 0)
+    }
+
+    /// Whether there is a row to copy, which is `canEditCell`'s questions plus
+    /// one: a draft is refused. There is nothing in the database behind it and
+    /// no key of its own to leave out, so the copy would be a second row of the
+    /// same nothing — and the row it was made from is one Add Row away.
+    var canDuplicateRow: Bool {
+        guard canEditCell, let s = selectedCell(in: browseResult) else { return false }
+        return !isDraft(row: s.row)
+    }
+
+    /// Adds a row holding what the selected one holds, minus the columns that
+    /// name it.
+    ///
+    /// The key is left out rather than copied, because copying it asks the
+    /// database for a second row with a key it already has — which is the one
+    /// way this insert is certain to fail. Left out, the table's default
+    /// supplies a fresh one, which is what "another one like this" means.
+    ///
+    /// The row it copies is the row on screen and not the row that was read: a
+    /// cell edited a moment ago is part of what the user is looking at and is
+    /// about to send, and a copy that quietly reverted it would differ from its
+    /// original in a way nothing on screen explains.
+    func duplicateSelectedRow() {
+        guard canDuplicateRow, let s = selectedCell(in: browseResult) else { return }
+        staged.drafts.append(
+            staged.draft(
+                copying: s.row, from: browseResult.table,
+                clearing: rowIdentity?.columns ?? []))
         browseResult.selection = GridSelection(row: browseRowCount - 1, column: 0)
     }
 
@@ -2005,6 +2081,74 @@ final class AppModel {
         return s
     }
 
+    /// Puts a predicate over one cell into the filter field and runs the browse.
+    ///
+    /// The clause is composed by the core, not here: quoting is the database's
+    /// own, and whether the value goes in bare or in quotes depends on the type
+    /// its column was declared with. This side knows neither.
+    ///
+    /// `extend` ANDs onto what is in the field rather than replacing it, and
+    /// parenthesises neither side. What is already there is the user's own text,
+    /// and wrapping it would edit something they typed; the one case where that
+    /// changes the reading is an `OR` they wrote, which binds looser than the
+    /// `AND` added here — and it is visible in the field, which is where they can
+    /// see it and fix it.
+    func filterByCell(_ request: CellFilterRequest) {
+        guard let relation = selected else { return }
+        let schema = relation.schema
+        let name = relation.name
+        let column = request.column
+        let value = request.value
+        let op = request.op
+        let extend = request.extend
+        run { db in
+            try db.cellFilter(
+                schema: schema, relation: name, column: column, op: op, value: value)
+        } then: { [self] clause in
+            // Read here rather than before the round trip: the field is editable
+            // throughout it, and "add to the filter" means the one on screen now.
+            let existing = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+            whereClause = extend && !existing.isEmpty ? "\(existing) AND \(clause)" : clause
+            applyFilters()
+        }
+    }
+
+    /// Puts the selected rows on the pasteboard as INSERT statements.
+    ///
+    /// Written by the core rather than assembled here, which is the same rule
+    /// the Save button follows and for the same reason: quoting is the
+    /// database's own, and whether a value is written bare or in quotes depends
+    /// on the type its column was declared with. It also means the text copied
+    /// out of this window is the text this window would have sent.
+    ///
+    /// Every column goes in, hidden ones included. A statement that quietly left
+    /// out a column would insert a row that is not the row that was copied.
+    ///
+    /// A relation nothing can name a row of is fine here: an INSERT names no
+    /// existing row, so the key this crate cannot find is one it does not need.
+    func copyRowsAsInsert(_ rows: ClosedRange<Int>) {
+        guard let relation = selected else { return }
+        let grid = browseResult.table
+        let names = grid.columnNames
+        let request = EditRequest(
+            schema: relation.schema, relation: relation.name,
+            inserts: rows.map { row in
+                EditRequest.Insert(
+                    set: names.indices.map {
+                        EditRequest.Cell(column: names[$0], value: grid.value(row: row, column: $0))
+                    })
+            })
+        run { db in
+            try db.editStatements(request)
+        } then: { statements in
+            // Terminated, because these are being pasted somewhere as a script
+            // and the core writes statements to be sent one at a time.
+            let script = statements.map { $0 + ";" }.joined(separator: "\n")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(script, forType: .string)
+        }
+    }
+
     func applyFilters() {
         activeTab = .content
         runBrowse()
@@ -2233,6 +2377,39 @@ final class AppModel {
         runStatements(all, labelled: labels)
     }
 
+    /// The words this database writes in front of a statement to ask for its
+    /// plan, or nothing where it has none.
+    ///
+    /// Asked of the core on every read rather than cached: the answer is a fact
+    /// about the connection's scheme, and this window outlives more than one
+    /// connection. It is a table lookup and a string copy, which is nothing
+    /// beside the menu validation it answers.
+    private var explainPrefix: String? { Database.explainPrefix(for: scheme) }
+
+    /// Whether the database can be asked for a plan of what ⌘R would run.
+    ///
+    /// Refuses while a run is in flight for the reason `canRunScript` does — the
+    /// core queue is serial, so a second statement would only queue behind the
+    /// first and land looking like a command that did nothing — and refuses
+    /// outright where the database has no prefix, which is what the core
+    /// answering nil rather than guessing a word is for.
+    var canExplainStatement: Bool {
+        activeTab == .query && !isBusy && runTarget != nil && explainPrefix != nil
+    }
+
+    /// Asks the database how it would run the statement the caret is in.
+    ///
+    /// Explains what ⌘R would send rather than the whole buffer: a plan is read
+    /// against one statement, and the caret already says which one. The single
+    /// space is joined here rather than kept in the dialect table, because the
+    /// table records how a database spells the request and not how a caller lays
+    /// it out.
+    func explainCurrentStatement() {
+        guard canExplainStatement, let target = runTarget, let prefix = explainPrefix
+        else { return }
+        runStatements([target.range], labelled: ["explain"], prefixedWith: prefix + " ")
+    }
+
     /// Runs `ranges` of the editor buffer in order on the one connection, and
     /// installs an outcome for each.
     ///
@@ -2241,7 +2418,14 @@ final class AppModel {
     /// statements — so hopping back to the main actor between them would buy
     /// nothing but a chance for a browse to interleave into the middle of
     /// somebody's script.
-    private func runStatements(_ ranges: [Range<Int>], labelled labels: [String]) {
+    ///
+    /// A prefix, where there is one, is written in front of every statement in
+    /// the run — which is what an Explain sends. What goes out is what the step
+    /// list and the history then show: a run that asked for a plan reports the
+    /// statement it actually sent rather than the one it was made from.
+    private func runStatements(
+        _ ranges: [Range<Int>], labelled labels: [String], prefixedWith prefix: String = ""
+    ) {
         isBusy = true
         // The step on screen dims for the duration. Blanking the pane would lose
         // the result the user is comparing against, and the veil is the
@@ -2255,7 +2439,7 @@ final class AppModel {
         // The buffer as it is now. An error arrives after a round trip, and the
         // caret may only be moved while the text it indexes still exists.
         let script = queryText
-        let sql = ranges.map { SQLScript.text($0, in: script) }
+        let sql = ranges.map { prefix + SQLScript.text($0, in: script) }
 
         run { db -> ScriptOutput in
             var completed: [StatementOutput] = []
@@ -2291,14 +2475,16 @@ final class AppModel {
             }
             return ScriptOutput(completed: completed, failure: nil)
         } then: { [self] output in
-            install(output, ranges: ranges, statements: sql, labels: labels, script: script)
+            install(
+                output, ranges: ranges, statements: sql, labels: labels, script: script,
+                prefix: prefix)
         }
     }
 
     /// Turns a finished run into the steps the pane shows.
     private func install(
         _ output: ScriptOutput, ranges: [Range<Int>], statements: [String], labels: [String],
-        script: String
+        script: String, prefix: String
     ) {
         var steps: [ScriptStep] = []
         for (i, out) in output.completed.enumerated() {
@@ -2385,7 +2571,9 @@ final class AppModel {
             // the same ones every other failure gets.
             self.fail(
                 with: StatementFailure(
-                    error: failure, sent: SentStatement(script: script, range: ranges[stopped])))
+                    error: failure,
+                    sent: SentStatement(
+                        script: script, range: ranges[stopped], prefix: prefix)))
         }
     }
 
@@ -2845,8 +3033,13 @@ final class AppModel {
     /// buffer is checked against the one the statement was cut from before any
     /// of it is trusted: pointing at the wrong character is worse than not
     /// pointing, so an edited buffer gets the bare position and no caret move.
+    /// A position swallowed by a prefix this application wrote leaves the banner
+    /// as it is rather than falling through to the bare wording below: "at
+    /// position 12 of the statement" would be naming a character in words the
+    /// user never typed.
     private func pointAtSyntaxError(_ statement: StatementFailure) {
-        guard let failure = statement.error as? DbError, let position = failure.position
+        guard let failure = statement.error as? DbError, let reported = failure.position,
+            let position = SQLScript.position(reported, without: statement.sent.prefix)
         else { return }
         let sent = statement.sent
         guard sent.script == queryText,

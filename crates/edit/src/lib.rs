@@ -131,6 +131,88 @@ pub async fn statements(
     Ok(out)
 }
 
+/// One cell's value, as a predicate the browse's filter field can hold.
+///
+/// The front end asks rather than composing it, for the reason `statements`
+/// exists: quoting is the database's own, and a value's spelling depends on the
+/// type its column was declared with. It also has no way to be right about NULL,
+/// which is what `clause` is about.
+#[derive(Debug, Deserialize)]
+pub struct CellFilter {
+    pub schema: String,
+    pub relation: String,
+    pub column: String,
+    pub op: FilterOp,
+    /// The cell's value as the grid holds it, or `None` for a NULL cell.
+    /// Ignored by the two operators that ask about NULL directly.
+    pub value: Option<String>,
+}
+
+/// What a filter offered over one cell can ask.
+///
+/// Four, and deliberately not more: these are the questions whose answer is the
+/// same in every dialect this build speaks. `LIKE`, ranges and dates all differ
+/// between them, and belong to a filter editor rather than to a menu item that
+/// has to be right without being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    Equals,
+    NotEquals,
+    IsNull,
+    IsNotNull,
+}
+
+/// The predicate `filter` asks for, written in this database's own quoting.
+///
+/// Reads the relation's columns for the reason `statements` does: the grid holds
+/// every value as text, and whether this one is written bare or quoted is a fact
+/// about the column rather than about the characters.
+pub async fn cell_filter(
+    driver: &dyn Driver,
+    dialect: &'static Dialect,
+    filter: &CellFilter,
+) -> DbResult<String> {
+    let columns = driver.columns(&filter.schema, &filter.relation).await?;
+    let column = columns
+        .iter()
+        .find(|column| column.name == filter.column)
+        .ok_or_else(|| {
+            DbError::new(format!(
+                "{}.{} has no column {}",
+                filter.schema, filter.relation, filter.column
+            ))
+        })?;
+    clause(dialect, column, filter.op, filter.value.as_deref())
+}
+
+/// One predicate over one column.
+///
+/// Split from `cell_filter` because everything decided here is decided without a
+/// database: how the operators are spelled, and what happens to NULL.
+///
+/// A NULL cell asked to match itself becomes `IS NULL`, and its negation `IS NOT
+/// NULL`. `= NULL` is never true in SQL — not even of a NULL — so the literal
+/// reading of "filter to this cell's value" over an empty cell is a filter that
+/// matches no rows at all, which reads as a broken command rather than as a
+/// lesson in three-valued logic.
+fn clause(
+    dialect: &Dialect,
+    column: &ColumnInfo,
+    op: FilterOp,
+    value: Option<&str>,
+) -> DbResult<String> {
+    let name = dialect.quote(&column.name);
+    Ok(match (op, value) {
+        (FilterOp::IsNull, _) | (FilterOp::Equals, None) => format!("{name} IS NULL"),
+        (FilterOp::IsNotNull, _) | (FilterOp::NotEquals, None) => format!("{name} IS NOT NULL"),
+        (FilterOp::Equals, value) => format!("{name} = {}", literal(dialect, column, value)?),
+        // `<>` rather than `!=`: every database here takes both, and this one is
+        // the standard's.
+        (FilterOp::NotEquals, value) => format!("{name} <> {}", literal(dialect, column, value)?),
+    })
+}
+
 /// What names one row of a relation, for a caller that has to decide whether to
 /// offer editing at all.
 ///
@@ -365,7 +447,7 @@ impl Table<'_> {
         for cell in &insert.set {
             let column = self.column(&cell.column)?;
             names.push(self.dialect.quote(&column.name));
-            values.push(self.literal(column, cell.value.as_deref())?);
+            values.push(literal(self.dialect, column, cell.value.as_deref())?);
         }
         Ok(format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -388,7 +470,7 @@ impl Table<'_> {
         Ok(format!(
             "{} = {}",
             self.dialect.quote(&column.name),
-            self.literal(column, cell.value.as_deref())?
+            literal(self.dialect, column, cell.value.as_deref())?
         ))
     }
 
@@ -423,7 +505,7 @@ impl Table<'_> {
             conditions.push(format!(
                 "{} = {}",
                 self.dialect.quote(&column.name),
-                self.literal(column, Some(value))?
+                literal(self.dialect, column, Some(value))?
             ));
         }
         if key.len() > conditions.len() {
@@ -441,36 +523,39 @@ impl Table<'_> {
             .find(|column| column.name == name)
             .ok_or_else(|| DbError::new(format!("{} has no column {name}", self.qualified)))
     }
+}
 
-    /// One value, written so this database reads it as the type its column is.
-    ///
-    /// Quoted unless the column is a number and the text is one. Quoting is the
-    /// safe default and not a concession: a quoted literal has no type of its
-    /// own, so the server casts it to the column, and dates, uuids, json and
-    /// enums all arrive intact that way. A number is the exception because
-    /// quoting one is not always harmless — a strict database refuses to compare
-    /// `'42'` with an integer column, and this is the value most likely to be in
-    /// a `WHERE` clause.
-    ///
-    /// Text that claims to be a number and is not is refused rather than quoted.
-    /// It is the one case where guessing would turn a typing mistake into a
-    /// statement that runs.
-    fn literal(&self, column: &ColumnInfo, value: Option<&str>) -> DbResult<String> {
-        let Some(value) = value else {
-            return Ok("NULL".to_string());
+/// One value, written so this database reads it as the type its column is.
+///
+/// Quoted unless the column is a number and the text is one. Quoting is the
+/// safe default and not a concession: a quoted literal has no type of its own,
+/// so the server casts it to the column, and dates, uuids, json and enums all
+/// arrive intact that way. A number is the exception because quoting one is not
+/// always harmless — a strict database refuses to compare `'42'` with an integer
+/// column, and this is the value most likely to be in a `WHERE` clause.
+///
+/// Text that claims to be a number and is not is refused rather than quoted. It
+/// is the one case where guessing would turn a typing mistake into a statement
+/// that runs.
+///
+/// Free of `Table` because a caller writing a predicate over a column has this
+/// question and none of the others: a filter names a set of rows, so it needs
+/// neither the key that names one nor the metadata read that resolves it.
+fn literal(dialect: &Dialect, column: &ColumnInfo, value: Option<&str>) -> DbResult<String> {
+    let Some(value) = value else {
+        return Ok("NULL".to_string());
+    };
+    if numeric(&column.data_type) {
+        return if value.trim().parse::<f64>().is_ok() {
+            Ok(value.trim().to_string())
+        } else {
+            Err(DbError::new(format!(
+                "{} is a {} and {value:?} is not a number",
+                column.name, column.data_type
+            )))
         };
-        if numeric(&column.data_type) {
-            return if value.trim().parse::<f64>().is_ok() {
-                Ok(value.trim().to_string())
-            } else {
-                Err(DbError::new(format!(
-                    "{} is a {} and {value:?} is not a number",
-                    column.name, column.data_type
-                )))
-            };
-        }
-        Ok(self.dialect.string_literal(value))
     }
+    Ok(dialect.string_literal(value))
 }
 
 /// Whether a column's declared type holds numbers.

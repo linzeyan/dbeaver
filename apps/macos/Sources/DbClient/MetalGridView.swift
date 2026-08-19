@@ -85,6 +85,12 @@ struct MetalGridView: NSViewRepresentable {
     /// user wrote, and appending an ORDER BY to arbitrary SQL is not something
     /// this can do correctly.
     var onSortColumn: ((Int) -> Void)?
+    /// Called when a filter is chosen from the grid's context menu. Nil means
+    /// this grid does not offer them — see `GridView.offersFilters`.
+    var onFilter: ((CellFilterRequest) -> Void)?
+    /// Called with the selected rows when *Copy as INSERT* is chosen. Nil means
+    /// the item is not offered, for the reason `onFilter` is not.
+    var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
 
     final class Coordinator {
         var renderer: GridRenderer?
@@ -92,6 +98,8 @@ struct MetalGridView: NSViewRepresentable {
         var lastRowCount = -1
         var onSelect: ((GridSelection) -> Void)?
         var onSortColumn: ((Int) -> Void)?
+        var onFilter: ((CellFilterRequest) -> Void)?
+        var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -116,6 +124,12 @@ struct MetalGridView: NSViewRepresentable {
         view.onHeaderClick = { [weak coordinator = context.coordinator] column in
             coordinator?.onSortColumn?(column)
         }
+        view.onFilter = { [weak coordinator = context.coordinator] request in
+            coordinator?.onFilter?(request)
+        }
+        view.onCopyAsInsert = { [weak coordinator = context.coordinator] rows in
+            coordinator?.onCopyAsInsert?(rows)
+        }
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
@@ -138,6 +152,10 @@ struct MetalGridView: NSViewRepresentable {
         context.coordinator.onSelect = { selection = $0 }
         context.coordinator.onSortColumn = onSortColumn
         view.sortsOnHeaderClick = onSortColumn != nil
+        context.coordinator.onFilter = onFilter
+        view.offersFilters = onFilter != nil
+        context.coordinator.onCopyAsInsert = onCopyAsInsert
+        view.offersInsertCopy = onCopyAsInsert != nil
         renderer.sort = sort
         renderer.pending = pending
         renderer.deleted = deleted

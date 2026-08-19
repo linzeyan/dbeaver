@@ -387,6 +387,36 @@ pub unsafe extern "C" fn db_sql_format(text: *const c_char, err: *mut *mut c_cha
     }
 }
 
+/// How `scheme`'s database asks for a query plan, or NULL where it cannot be
+/// asked at all.
+///
+/// NULL is an answer rather than a failure, which is why this takes no `err`. A
+/// scheme this build does not know and a dialect with no prefix mean the same
+/// thing to a caller — do not offer the command — and neither is anything the
+/// user can act on.
+///
+/// Answered through `of_scheme` rather than `for_scheme` for the reason that
+/// function's own comment gives: a caller for whom a wrong guess costs more than
+/// colour wants the honest `None`. This is one, since handing MongoDB the word
+/// `EXPLAIN` would produce a statement that cannot run.
+///
+/// # Safety
+/// `scheme` must be null or a valid NUL-terminated C string. The returned string
+/// is the caller's, released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_explain_prefix(scheme: *const c_char) -> *mut c_char {
+    if scheme.is_null() {
+        return ptr::null_mut();
+    }
+    let Ok(scheme) = (unsafe { CStr::from_ptr(scheme) }).to_str() else {
+        return ptr::null_mut();
+    };
+    let Some(prefix) = dbsql::of_scheme(scheme).and_then(|d| d.explain_prefix) else {
+        return ptr::null_mut();
+    };
+    CString::new(prefix).map_or(ptr::null_mut(), CString::into_raw)
+}
+
 /// Where a server's error position lands in the buffer, or -1 when the number
 /// could not have come from what was sent.
 ///
@@ -880,6 +910,75 @@ pub unsafe extern "C" fn db_edit_sql_json(
     };
     match runtime().block_on(dbedit::statements(h.driver.as_ref(), dialect, &requested)) {
         Ok(statements) => json_result(&statements, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// One cell's value as a predicate for the browse's filter field, as plain text.
+/// Release with `db_string_free`.
+///
+/// ```json
+/// {"schema": …, "relation": …, "column": …, "op": "equals", "value": …}
+/// ```
+///
+/// `op` is `equals`, `not_equals`, `is_null` or `is_not_null`. A `value` of JSON
+/// null is a NULL cell, and `equals` over one answers `IS NULL`: `= NULL` is
+/// never true, so the literal reading would hand back a filter matching nothing.
+///
+/// Written here rather than in the front end for the reason `db_edit_sql_json`
+/// is: quoting is the database's own, and whether a value goes in bare or in
+/// quotes depends on the type its column was declared with.
+///
+/// # Safety
+/// `handle` must be live; `filter` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_cell_filter(
+    handle: *mut DbHandle,
+    filter: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || filter.is_null() {
+        unsafe { set_err(err, "null handle or filter") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let text = match unsafe { CStr::from_ptr(filter) }.to_str() {
+        Ok(text) => text,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    let requested: dbedit::CellFilter = match serde_json::from_str(text) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    // The connection's own dialect and not a guess, for the reason
+    // `db_edit_sql_json` gives: a predicate quoted for the wrong database is a
+    // filter that either fails or, worse, reads a column name as a string.
+    let Some(dialect) = h.dialect else {
+        unsafe {
+            set_err(
+                err,
+                "this build does not write statements for this database",
+            )
+        };
+        return ptr::null_mut();
+    };
+    match runtime().block_on(dbedit::cell_filter(h.driver.as_ref(), dialect, &requested)) {
+        Ok(clause) => match CString::new(clause) {
+            Ok(c) => c.into_raw(),
+            Err(e) => {
+                unsafe { set_err(err, e) };
+                ptr::null_mut()
+            }
+        },
         Err(e) => {
             unsafe { set_err(err, e) };
             ptr::null_mut()

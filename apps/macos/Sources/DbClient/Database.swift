@@ -182,6 +182,22 @@ final class Database: @unchecked Sendable {
         return String(cString: raw)
     }
 
+    /// The words this database writes in front of a statement to ask for its
+    /// plan, or nothing where it has no such spelling.
+    ///
+    /// Static and connection-free for the reason `formatted` is: how a database
+    /// spells this is a property of its dialect rather than of an open session.
+    ///
+    /// Nil is an answer and not a failure. SQL Server asks for a plan with a
+    /// session setting either side of the statement, which no prefix can be, and
+    /// a scheme this build has no dialect for has no answer at all — what a
+    /// caller does with nil is not offer the command.
+    static func explainPrefix(for scheme: String) -> String? {
+        guard let raw = db_sql_explain_prefix(scheme) else { return nil }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The statement that reads a relation's rows.
     ///
     /// Asked of the core rather than assembled here, because a statement is the
@@ -214,6 +230,39 @@ final class Database: @unchecked Sendable {
         let order: String?
         let keys: [String]
         let limit: UInt32?
+
+        var json: String {
+            let data = (try? JSONEncoder().encode(self)) ?? Data()
+            return String(data: data, encoding: .utf8) ?? "{}"
+        }
+    }
+
+    /// A predicate over one cell, written in this database's own quoting.
+    ///
+    /// Asked of the core for the reason `browseStatement` is: quoting is the
+    /// database's own, and whether a value is written bare or in quotes is a fact
+    /// about the type its column was declared with. This side has neither, and a
+    /// guess would write a filter that fails — or, worse, one that runs and means
+    /// something else.
+    func cellFilter(
+        schema: String, relation: String, column: String, op: CellFilterOperator, value: String?
+    ) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        let request = FilterRequest(
+            schema: schema, relation: relation, column: column, op: op, value: value)
+        guard let raw = db_cell_filter(handle, request.json, &err) else {
+            throw DbError(description: Database.take(&err) ?? "filter clause failed")
+        }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    private struct FilterRequest: Encodable {
+        let schema: String
+        let relation: String
+        let column: String
+        let op: CellFilterOperator
+        let value: String?
 
         var json: String {
             let data = (try? JSONEncoder().encode(self)) ?? Data()

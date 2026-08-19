@@ -49,9 +49,9 @@ let connArgument = argument("--conn")
 let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
-// `--verify-transaction`, `--verify-editing`, `--verify-metadata`,
-// `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
-// `--verify-accessibility` and `--verify-quitting` run
+// `--verify-transaction`, `--verify-editing`, `--verify-clipboard`, `--verify-goto`,
+// `--verify-metadata`, `--verify-schema-metadata`, `--verify-import`,
+// `--verify-preferences`, `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
 // verdict. None needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
@@ -68,6 +68,12 @@ if CommandLine.arguments.contains("--verify-transaction") {
 }
 if CommandLine.arguments.contains("--verify-editing") {
     exit(EditingChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-clipboard") {
+    exit(GridClipboardChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-goto") {
+    exit(GoToChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-metadata") {
     exit(MetadataChecks.run() ? 0 : 1)

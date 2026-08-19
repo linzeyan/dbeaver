@@ -195,6 +195,33 @@ final class GridViewController: NSObject, MTKViewDelegate {
 /// clicks, arrow keys, and ⌘C the way every other table on the platform does.
 /// None of that can come from SwiftUI: the content is drawn, not composed of
 /// views, so there is nothing for SwiftUI to hit-test or focus.
+/// What a filter offered over one cell can ask, spelled as the core's JSON.
+///
+/// The raw values are the wire: `db_cell_filter` reads exactly these four words,
+/// and a fifth spelling here would be a request the core rejects at run time
+/// rather than a mistake the compiler catches.
+enum CellFilterOperator: String, Encodable, Sendable {
+    case equals
+    case notEquals = "not_equals"
+    case isNull = "is_null"
+    case isNotNull = "is_not_null"
+}
+
+/// One cell, and what a menu item asks about it.
+///
+/// Carried on the menu item rather than read back off the grid when the item is
+/// chosen: a menu stays open across events, and the cell it was built for is the
+/// cell it must act on.
+struct CellFilterRequest: Sendable {
+    let column: String
+    /// The cell's text, or nil where it holds NULL — which the core turns into
+    /// `IS NULL` rather than into the `= NULL` that is never true.
+    let value: String?
+    let op: CellFilterOperator
+    /// Whether the clause is ANDed onto the filter field or replaces it.
+    let extend: Bool
+}
+
 final class GridView: MTKView {
     weak var renderer: GridRenderer?
 
@@ -207,6 +234,21 @@ final class GridView: MTKView {
     /// Whether headers respond to a click at all. Drives the cursor as well as
     /// the action: a pointing hand over a header that does nothing is a lie.
     var sortsOnHeaderClick = false
+
+    /// Called when a filter is chosen from the context menu.
+    var onFilter: ((CellFilterRequest) -> Void)?
+    /// Whether the menu offers filters at all. False for the Query pane: its
+    /// result can join five tables, and there is no answer to which of them a
+    /// column belongs to that is right often enough to write into a WHERE
+    /// clause — the same reason that pane cannot be edited or sorted.
+    var offersFilters = false
+
+    /// Called with the hit rows when *Copy as INSERT* is chosen.
+    var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
+    /// Whether that item is offered. False for the Query pane, for the reason
+    /// above: an INSERT names a table, and a result joining five of them names
+    /// none.
+    var offersInsertCopy = false
 
     /// Whether this grid takes keyboard focus when it appears. Set only for the
     /// browse pane: in the Query tab focus belongs to the editor, and a grid
@@ -386,6 +428,122 @@ final class GridView: MTKView {
             hit.anchor = current.anchor ?? current.row
         }
         apply(hit)
+    }
+
+    /// The right-click menu. It offers to copy only what the click actually
+    /// hit: a menu offering to copy a cell that was not clicked is worse than
+    /// no menu, so the guards are the ones `mouseDown` applies, in the same
+    /// order.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let renderer, let table = renderer.table else { return nil }
+        let point = rendererPoint(of: event)
+
+        if renderer.scrollbarAxis(at: point, viewSize: bounds.size) != nil { return nil }
+        if resizeTarget(at: point) != nil { return nil }
+        if isInHeader(point) { return nil }
+
+        guard var hit = renderer.cell(at: point, table: table) else { return nil }
+        // Shift-right-click extends from wherever the range already starts, the
+        // way a shift-click does, so the menu can offer to copy more than the
+        // one cell under the pointer.
+        if event.modifierFlags.contains(.shift), let current = renderer.selection {
+            hit.anchor = current.anchor ?? current.row
+        }
+        // AppKit shows the menu after this returns, so the selection is moved
+        // first: the menu and the outline then agree about which cell is being
+        // acted on.
+        apply(hit)
+
+        // Counted from the hit rather than read back off the renderer, so this
+        // does not depend on `apply` having stored what it was given.
+        let count = hit.rows.count
+        let menu = NSMenu()
+        let value = NSMenuItem(title: "Copy Value", action: #selector(copyValue), keyEquivalent: "")
+        value.target = self
+        let rows = NSMenuItem(
+            title: "Copy \(AppModel.pluralized(count, "row"))",
+            action: #selector(copyRows), keyEquivalent: "")
+        rows.target = self
+        let csv = NSMenuItem(
+            title: "Copy \(AppModel.pluralized(count, "row")) as CSV",
+            action: #selector(copyRowsAsCSV), keyEquivalent: "")
+        csv.target = self
+        menu.addItem(value)
+        menu.addItem(rows)
+        menu.addItem(csv)
+        if offersInsertCopy {
+            let insert = NSMenuItem(
+                title: "Copy \(AppModel.pluralized(count, "row")) as INSERT",
+                action: #selector(copyRowsAsInsert), keyEquivalent: "")
+            insert.target = self
+            menu.addItem(insert)
+        }
+
+        // A draft row is not offered any of this: it holds what somebody is
+        // typing, the database has never seen it, and every cell of it the grid
+        // can read back reads as empty.
+        if offersFilters, hit.column < table.columnNames.count, hit.row < table.rowCount {
+            let column = table.columnNames[hit.column]
+            // Read from the table rather than through `GridClipboard.value`,
+            // which renders NULL as an empty string. Here the difference is the
+            // whole question: an empty text cell and an absent value are
+            // different rows, and they filter differently.
+            let cell = table.value(row: hit.row, column: hit.column)
+            menu.addItem(.separator())
+            menu.addItem(
+                filters(titled: "Filter on \(column)", column: column, value: cell, extend: false))
+            menu.addItem(
+                filters(titled: "Add to Filter", column: column, value: cell, extend: true))
+        }
+        return menu
+    }
+
+    /// One submenu of predicates over the clicked cell.
+    ///
+    /// Two submenus rather than eight items in a row: replacing the filter and
+    /// adding to it are the same four questions asked of the same cell, and a
+    /// flat list of eight would leave the reader working out which half they are
+    /// looking at.
+    ///
+    /// The two NULL entries are spelled the way SQL spells them, because that is
+    /// what lands in the filter field — somebody who then edits it by hand is
+    /// reading SQL, not this menu.
+    private func filters(
+        titled title: String, column: String, value: String?, extend: Bool
+    ) -> NSMenuItem {
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: title)
+        let offers: [(String, CellFilterOperator)] = [
+            ("Equals This Value", .equals),
+            ("Does Not Equal This Value", .notEquals),
+            ("IS NULL", .isNull),
+            ("IS NOT NULL", .isNotNull)
+        ]
+        for (name, op) in offers {
+            let item = NSMenuItem(
+                title: name, action: #selector(applyCellFilter), keyEquivalent: "")
+            item.target = self
+            item.representedObject = CellFilterRequest(
+                column: column, value: value, op: op, extend: extend)
+            submenu.addItem(item)
+        }
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func applyCellFilter(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? CellFilterRequest else { return }
+        onFilter?(request)
+    }
+
+    /// Hands the selected rows off to be rendered as statements.
+    ///
+    /// Unlike the three copies above it, this one does not put anything on the
+    /// pasteboard itself: the statements are written by the core, which means a
+    /// round trip, which means the answer arrives after this returns.
+    @objc private func copyRowsAsInsert(_ sender: Any?) {
+        guard let selection = renderer?.selection else { return }
+        onCopyAsInsert?(selection.rows)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -575,50 +733,38 @@ final class GridView: MTKView {
     }
 
     private func copySelection() {
+        copy { table, selection in
+            selection.rows.count > 1
+                ? GridClipboard.tabSeparated(table, rows: selection.rows)
+                : GridClipboard.value(of: table, row: selection.row, column: selection.column)
+        }
+    }
+
+    /// The three items of the right-click menu, which differ from ⌘C and from
+    /// each other only in which rendering they ask for.
+    @objc private func copyValue() {
+        copy { GridClipboard.value(of: $0, row: $1.row, column: $1.column) }
+    }
+
+    @objc private func copyRows() {
+        copy { GridClipboard.tabSeparated($0, rows: $1.rows) }
+    }
+
+    @objc private func copyRowsAsCSV() {
+        copy { GridClipboard.csv($0, rows: $1.rows) }
+    }
+
+    /// Puts one rendering of the selection on the pasteboard, or does nothing
+    /// where there is no selection to render.
+    ///
+    /// The four callers above share this rather than each spelling the two
+    /// pasteboard calls: `clearContents()` is what takes ownership, and a copy
+    /// that set a string without it would leave the previous owner's other
+    /// representations in place for the next paste to find.
+    private func copy(_ render: (ArrowTable, GridSelection) -> String) {
         guard let renderer, let table = renderer.table, let selection = renderer.selection
         else { return }
-        let rows = selection.rows
-        let text =
-            rows.count > 1
-            ? tsv(table, rows: rows)
-            : cellText(table, row: selection.row, column: selection.column)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    /// A cell as it should land on the pasteboard: the value, not the way the
-    /// grid spells it. NULL is empty rather than the word, which would paste
-    /// into the next tool as a literal four-character string.
-    private func cellText(_ table: ArrowTable, row: Int, column: Int) -> String {
-        table.isNull(row: row, column: column) ? "" : table.text(row: row, column: column)
-    }
-
-    /// A multi-row selection copies as TSV with a header line — the one format
-    /// a spreadsheet, a SQL console and a plain text editor all read unchanged.
-    ///
-    /// Built on the calling thread on purpose. A full 100,000-row selection
-    /// takes a visible beat, but the alternative — building it in the
-    /// background and filling the pasteboard when it finishes — means a paste
-    /// issued in that window silently yields the previous clipboard. A slow
-    /// copy is a worse experience than a fast one; a wrong copy is a bug.
-    private func tsv(_ table: ArrowTable, rows: ClosedRange<Int>) -> String {
-        var out = table.columns.map(\.name).joined(separator: "\t")
-        out.reserveCapacity(rows.count * table.columns.count * 12)
-        for r in rows {
-            out.append("\n")
-            for c in table.columns.indices {
-                if c > 0 { out.append("\t") }
-                out.append(sanitized(cellText(table, row: r, column: c)))
-            }
-        }
-        return out
-    }
-
-    /// A tab or newline inside a value would add columns and rows that were
-    /// never selected, so they collapse to spaces. The alternative — quoting —
-    /// is CSV's answer and would stop this being pasteable as plain text.
-    private func sanitized(_ value: String) -> String {
-        guard value.contains(where: { $0.isNewline || $0 == "\t" }) else { return value }
-        return String(value.map { $0.isNewline || $0 == "\t" ? " " : $0 })
+        NSPasteboard.general.setString(render(table, selection), forType: .string)
     }
 }

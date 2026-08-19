@@ -252,6 +252,8 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-completion
 	./$(APP_BIN) --verify-transaction
 	./$(APP_BIN) --verify-editing
+	./$(APP_BIN) --verify-clipboard
+	./$(APP_BIN) --verify-goto
 	./$(APP_BIN) --verify-metadata
 	./$(APP_BIN) --verify-schema-metadata
 	./$(APP_BIN) --verify-import

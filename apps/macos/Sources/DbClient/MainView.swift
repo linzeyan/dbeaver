@@ -48,6 +48,7 @@ struct MainView: View {
         // An `NSMenuItem` action runs outside the view tree and cannot assign
         // to a `@FocusState`; this is the only end of that wire that can.
         .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
+        .sheet(isPresented: $model.isGoToOpen) { GoToPalette(model: model) }
         .navigationTitle(model.selected?.name ?? "DbClient")
         .navigationSubtitle(
             model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? model.connectionLabel)
@@ -920,7 +921,9 @@ struct ContentPane: View {
                     pending: model.pendingCells,
                     deleted: model.deletedRows,
                     drafts: model.draftRows,
-                    onSortColumn: { model.toggleSort(column: $0) }
+                    onSortColumn: { model.toggleSort(column: $0) },
+                    onFilter: { model.filterByCell($0) },
+                    onCopyAsInsert: { model.copyRowsAsInsert($0) }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
 
@@ -1006,6 +1009,12 @@ private struct CellEditorRow: View {
                         .help(
                             "Add a row after the last one; columns left alone take the "
                                 + "table's defaults")
+                }
+                if model.canDuplicateRow {
+                    Button("Duplicate Row") { model.duplicateSelectedRow() }
+                        .help(
+                            "Add a copy of the selected row; key columns are left to the table's "
+                                + "defaults")
                 }
             }
 

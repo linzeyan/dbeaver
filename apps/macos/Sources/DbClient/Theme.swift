@@ -212,6 +212,10 @@ enum Theme {
         /// you are" everywhere else in the window.
         static let caret = Theme.accent
         static let selection = Theme.accent.opacity(0.32)
+        /// The band behind a matched pair of parentheses. The palette's "lifted off
+        /// the page" tone rather than a colour of its own: this mark says where the
+        /// partner is, and a hue would compete with the token colours it sits under.
+        static let bracketMatch = Theme.surfaceRaised
     }
 
     // MARK: - Spacing
