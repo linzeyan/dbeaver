@@ -23,6 +23,7 @@ enum AppMenu {
     private static var valueViewerCommand: ValueViewerCommand?
     /// Target of the View menu's object-filter item, held for the same reason.
     private static var navigatorCommand: NavigatorCommand?
+    private static var goToCommand: GoToCommand?
     /// Target of the View menu's three pane items, held for the same reason.
     private static var tabCommand: TabCommand?
     /// Target of the Query menu's items, held for the same reason.
@@ -56,6 +57,8 @@ enum AppMenu {
         valueViewerCommand = valueViewer
         let navigator = NavigatorCommand(model: model)
         navigatorCommand = navigator
+        let goTo = GoToCommand(model: model)
+        goToCommand = goTo
         let tabs = TabCommand(model: model)
         tabCommand = tabs
         let query = QueryCommands(model: model)
@@ -76,7 +79,8 @@ enum AppMenu {
         main.addItem(editMenu())
         main.addItem(
             viewMenu(
-                target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs))
+                target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs,
+                goTo: goTo))
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
@@ -290,7 +294,7 @@ enum AppMenu {
     /// second thing a menu item can do that a bare shortcut cannot.
     private static func viewMenu(
         target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand,
-        tabs: TabCommand
+        tabs: TabCommand, goTo: GoToCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
@@ -318,6 +322,16 @@ enum AppMenu {
             action: #selector(NavigatorCommand.focusFilter(_:)), keyEquivalent: "f")
         filter.keyEquivalentModifierMask = [.command, .option]
         filter.target = navigator
+
+        // ⇧⌘O, which is what every editor with this command binds it to, and
+        // which nothing else in this window takes. It sits beside Filter Objects
+        // because the two are the same errand at different speeds: one narrows
+        // the tree to look through, the other skips the looking.
+        let goToItem = menu.addItem(
+            withTitle: "Go to Table…",
+            action: #selector(GoToCommand.showGoTo(_:)), keyEquivalent: "o")
+        goToItem.keyEquivalentModifierMask = [.command, .shift]
+        goToItem.target = goTo
 
         menu.addItem(.separator())
         // Titled for the closed state; `validateMenuItem` rewrites it.
@@ -634,6 +648,27 @@ final class FormatCommand: NSObject, NSMenuItemValidation {
     @objc func formatQuery(_ sender: Any?) { model.formatQuery() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFormatQuery }
+}
+
+/// The View menu's Go to Table item, as something a menu can send to.
+///
+/// Its own object for the reason the others are: one target per answer, so
+/// `validateMenuItem` stays a sentence. This one's differs from
+/// `NavigatorCommand`'s in what it asks about — the filter field exists as soon
+/// as there are schemas, and there is nothing to go *to* until relations have
+/// been read.
+@MainActor
+final class GoToCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func showGoTo(_ sender: Any?) { model.isGoToOpen = true }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canGoTo }
 }
 
 /// The Query menu's Explain item, as something a menu can send to.

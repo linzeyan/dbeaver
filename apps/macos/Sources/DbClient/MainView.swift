@@ -48,6 +48,7 @@ struct MainView: View {
         // An `NSMenuItem` action runs outside the view tree and cannot assign
         // to a `@FocusState`; this is the only end of that wire that can.
         .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
+        .sheet(isPresented: $model.isGoToOpen) { GoToPalette(model: model) }
         .navigationTitle(model.selected?.name ?? "DbClient")
         .navigationSubtitle(
             model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? model.connectionLabel)

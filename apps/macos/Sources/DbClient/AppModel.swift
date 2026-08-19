@@ -1115,6 +1115,47 @@ final class AppModel {
 
     func focusNavigatorFilter() { filterFocusRequests += 1 }
 
+    // MARK: - Go to
+
+    /// Whether the go-to palette is on screen.
+    var isGoToOpen = false
+
+    /// Whether there is anything to go to. Drives the menu item's enabled state,
+    /// so the command is not offered before the tree has been read.
+    ///
+    /// Asks whether any schema holds something rather than whether any schema
+    /// was found: a database of empty schemas reads as answered here but opens a
+    /// palette with nothing in it.
+    var canGoTo: Bool { relations.values.contains { !$0.isEmpty } }
+
+    /// Every relation this window has read, as the palette's targets.
+    ///
+    /// Built from the inventory already here rather than asked of the server:
+    /// the palette is typed into at speed, and anything else would be a round
+    /// trip per keystroke.
+    var goToTargets: [GoToTarget] {
+        relations.values.flatMap { $0 }.map { GoToTarget(schema: $0.schema, name: $0.name) }
+    }
+
+    /// Opens the relation the palette chose and shows its rows.
+    ///
+    /// Looked up here rather than carried by the target, because `GoToTarget` is
+    /// deliberately two strings: the matching rule is checked without a database,
+    /// and a `RelationInfo` inside it would drag the metadata layer into a rule
+    /// that has no business knowing about one.
+    ///
+    /// The palette closes even where the lookup fails. It was opened over a list
+    /// this window had already read, so a name in it that no longer resolves
+    /// means the tree moved underneath — and a palette that stayed open would be
+    /// offering the same stale row again.
+    func goTo(_ target: GoToTarget) {
+        isGoToOpen = false
+        guard let relation = relations[target.schema]?.first(where: { $0.name == target.name })
+        else { return }
+        activeTab = .content
+        selected = relation
+    }
+
     // MARK: - Cell inspection
 
     /// What the selected cell holds, spelled out for the inspector strip.
