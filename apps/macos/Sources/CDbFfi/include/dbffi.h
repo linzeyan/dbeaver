@@ -142,6 +142,15 @@ char* db_sql_scan_json(const char* text, const char* scheme, uint32_t selection_
 // not an ugly result but a lost one.
 char* db_sql_format(const char* text, char** err);
 
+// How this database asks for a query plan, written in front of a statement, or
+// NULL where it has no such spelling. Released with db_string_free.
+//
+// NULL is an answer, not a failure: SQL Server asks for a plan with a session
+// setting rather than a prefix, and a scheme this build does not know has no
+// answer at all. A front end that reads NULL should not offer the command, since
+// guessing the word would produce a statement the server refuses.
+char* db_sql_explain_prefix(const char* scheme);
+
 // Where a server error position lands in the buffer, or -1 when the number could
 // not have come from what was sent.
 //

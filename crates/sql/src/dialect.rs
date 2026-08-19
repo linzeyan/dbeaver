@@ -86,6 +86,15 @@ pub struct Dialect {
     /// and has no form meaning "a row of every default". A caller that guessed
     /// there would hand somebody a statement that does not run.
     pub default_row: Option<&'static str>,
+    /// How this database asks for a query plan, written in front of a statement.
+    ///
+    /// A dialect fact for the reason `default_row` is one, and `None` carries the
+    /// same meaning it does: SQL Server has no prefix at all — a plan there is
+    /// asked for by turning a session setting on before the statement and off
+    /// after it, which is not something a word in front of it can express. A
+    /// client that guessed `EXPLAIN` would offer a command that hands somebody a
+    /// statement their database refuses.
+    pub explain_prefix: Option<&'static str>,
     /// What this dialect calls a keyword beyond [`keywords::COMMON`].
     pub(crate) extra_keywords: &'static [&'static str],
 }
@@ -195,6 +204,7 @@ const BASE: Dialect = Dialect {
     identifier_quotes: ("\"", "\""),
     row_limit: RowLimit::Limit,
     default_row: Some("DEFAULT VALUES"),
+    explain_prefix: Some("EXPLAIN"),
     extra_keywords: &[],
 };
 
@@ -238,6 +248,10 @@ pub const MSSQL: Dialect = Dialect {
     parameters: &[Parameter::AtName],
     identifier_quotes: ("[", "]"),
     row_limit: RowLimit::Top,
+    // No prefix exists: `SET SHOWPLAN_ALL ON` before the statement and off after
+    // it is how T-SQL asks, and a pair of session settings is not something a
+    // word written in front of one statement can be.
+    explain_prefix: None,
     extra_keywords: keywords::MSSQL,
     ..BASE
 };
@@ -250,6 +264,10 @@ pub const SQLITE: Dialect = Dialect {
     backtick_identifiers: true,
     bracket_identifiers: true,
     parameters: &[Parameter::Question, Parameter::ColonName, Parameter::AtName],
+    // Bare `EXPLAIN` on SQLite lists VDBE opcodes, which answers a question about
+    // the interpreter rather than about the query. The plan is what this command
+    // means.
+    explain_prefix: Some("EXPLAIN QUERY PLAN"),
     extra_keywords: keywords::SQLITE,
     ..BASE
 };
@@ -350,6 +368,38 @@ mod tests {
     fn an_unknown_scheme_is_read_as_postgresql() {
         assert_eq!(for_scheme("mongodb").name, "postgres");
         assert_eq!(for_scheme("").name, "postgres");
+    }
+
+    /// Every dialect that can be asked for a plan says how it is asked.
+    ///
+    /// The quiet failure is a prefix that is right in the table and wrong on the
+    /// wire: the caller joins it to the statement with exactly one space, so an
+    /// empty string or a padded one produces ` SELECT …` or `EXPLAIN  SELECT …`
+    /// and fails at the server rather than here. SQLite is asserted by value
+    /// because its prefix is the one somebody tidying this table would shorten to
+    /// the word the others use, which would quietly start answering a different
+    /// question.
+    #[test]
+    fn every_dialect_that_explains_says_how() {
+        for dialect in ALL {
+            match dialect.explain_prefix {
+                Some(prefix) => {
+                    assert!(!prefix.is_empty(), "{} has an empty prefix", dialect.name);
+                    assert_eq!(
+                        prefix.trim(),
+                        prefix,
+                        "{} has a padded prefix",
+                        dialect.name
+                    );
+                }
+                None => assert_eq!(
+                    dialect.name, "sqlserver",
+                    "{} has no prefix and is not the one database without one",
+                    dialect.name
+                ),
+            }
+        }
+        assert_eq!(SQLITE.explain_prefix, Some("EXPLAIN QUERY PLAN"));
     }
 
     /// The same two schemes, asked the question that does not guess.

@@ -387,6 +387,36 @@ pub unsafe extern "C" fn db_sql_format(text: *const c_char, err: *mut *mut c_cha
     }
 }
 
+/// How `scheme`'s database asks for a query plan, or NULL where it cannot be
+/// asked at all.
+///
+/// NULL is an answer rather than a failure, which is why this takes no `err`. A
+/// scheme this build does not know and a dialect with no prefix mean the same
+/// thing to a caller — do not offer the command — and neither is anything the
+/// user can act on.
+///
+/// Answered through `of_scheme` rather than `for_scheme` for the reason that
+/// function's own comment gives: a caller for whom a wrong guess costs more than
+/// colour wants the honest `None`. This is one, since handing MongoDB the word
+/// `EXPLAIN` would produce a statement that cannot run.
+///
+/// # Safety
+/// `scheme` must be null or a valid NUL-terminated C string. The returned string
+/// is the caller's, released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_explain_prefix(scheme: *const c_char) -> *mut c_char {
+    if scheme.is_null() {
+        return ptr::null_mut();
+    }
+    let Ok(scheme) = (unsafe { CStr::from_ptr(scheme) }).to_str() else {
+        return ptr::null_mut();
+    };
+    let Some(prefix) = dbsql::of_scheme(scheme).and_then(|d| d.explain_prefix) else {
+        return ptr::null_mut();
+    };
+    CString::new(prefix).map_or(ptr::null_mut(), CString::into_raw)
+}
+
 /// Where a server's error position lands in the buffer, or -1 when the number
 /// could not have come from what was sent.
 ///
