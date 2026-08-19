@@ -129,6 +129,81 @@ enum SQLScript {
             }
             return spans[low]
         }
+
+        /// The pair of parentheses the caret is beside, as scalar offsets in
+        /// `(opening, closing)` order whichever end the caret was at, or nil
+        /// where there is no pair to mark.
+        ///
+        /// The parenthesis considered is the one at the caret, else the one
+        /// just before it: a caret sits between two characters, and typing a
+        /// closing paren leaves it just after the character it wants marked.
+        ///
+        /// A parenthesis inside a string, a comment, a quoted identifier or a
+        /// dollar-quoted body is text, not syntax. `isText` decides that from
+        /// `tokens` — the runs the core's lexer painted — rather than from a
+        /// second lexer written here, which would disagree with the first one
+        /// the day either was corrected.
+        ///
+        /// Nil for an unbalanced buffer, which is the normal state of a query
+        /// halfway through being typed. Guessing a partner would mark the
+        /// wrong character, and a mark that is sometimes wrong is worse than
+        /// no mark.
+        ///
+        /// The scalars are copied into an array because the caret can move on
+        /// any keystroke and `String.Index` arithmetic is O(n) per lookup;
+        /// counting `Character`s instead would put every offset after an emoji
+        /// or a combining accent one place out, which is the trap the file's
+        /// opening comment names.
+        func brackets(atCaret caret: Int, in script: String) -> (Int, Int)? {
+            let scalars = Array(script.unicodeScalars)
+            func isParen(_ i: Int) -> Bool {
+                i >= 0 && i < scalars.count && (scalars[i] == "(" || scalars[i] == ")")
+            }
+            let at: Int
+            if isParen(caret) {
+                at = caret
+            } else if isParen(caret - 1) {
+                at = caret - 1
+            } else {
+                return nil
+            }
+            guard !isText(at) else { return nil }
+            let opening = scalars[at] == "("
+            var depth = 0
+            var i = at
+            while i >= 0, i < scalars.count {
+                if !isText(i) {
+                    if scalars[i] == "(" {
+                        depth += opening ? 1 : -1
+                    } else if scalars[i] == ")" {
+                        depth += opening ? -1 : 1
+                    }
+                    if depth == 0 { return opening ? (at, i) : (i, at) }
+                }
+                i += opening ? 1 : -1
+            }
+            return nil
+        }
+
+        /// Whether the character at `offset` is text rather than syntax, which
+        /// is what a parenthesis inside a string, a comment, a quoted
+        /// identifier or a dollar-quoted body is.
+        ///
+        /// Binary-searches for the reason `tokenRange(at:)` does: the tokens
+        /// are sorted and do not overlap.
+        private func isText(_ offset: Int) -> Bool {
+            var low = 0
+            var high = tokens.count
+            while low < high {
+                let mid = (low + high) / 2
+                if tokens[mid].range.upperBound <= offset { low = mid + 1 } else { high = mid }
+            }
+            guard low < tokens.count, tokens[low].range.contains(offset) else { return false }
+            switch tokens[low].kind {
+            case .string, .comment, .quotedIdentifier, .dollarQuoted: return true
+            case .keyword, .number: return false
+            }
+        }
     }
 
     /// The core's reading of `script`, in the dialect `scheme` names.

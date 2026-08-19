@@ -166,6 +166,10 @@ struct SQLEditor: NSViewRepresentable {
         /// that a caret move need not fetch and re-measure the whole text.
         private var cachedString = ""
 
+        /// The pair of parentheses the caret is beside, in scalar offsets, or
+        /// nothing where there is no pair to mark.
+        private var brackets: (Int, Int)?
+
         /// A caret the model moved that has not been scrolled to yet. See
         /// `reveal()`.
         private var pendingReveal: NSRange?
@@ -306,6 +310,8 @@ struct SQLEditor: NSViewRepresentable {
             // the list on screen describes a place the caret has left.
             popup.hide()
             pushSelection(in: cachedString)
+            markBrackets(in: cachedString)
+            highlight()
         }
 
         func textDidEndEditing(_ notification: Notification) {
@@ -507,6 +513,22 @@ struct SQLEditor: NSViewRepresentable {
 
         // MARK: - Colour
 
+        /// Works out which pair `highlight()` should mark, from where the caret
+        /// is now.
+        ///
+        /// The scan is memoized on its arguments, so asking for it here costs
+        /// nothing on a keystroke that already lexed — which is why this reads
+        /// the selection the same way `relex` does rather than being handed the
+        /// answer.
+        private func markBrackets(in string: String) {
+            guard let textView else { return }
+            let selection = Self.scalarRange(of: textView.selectedRange(), in: string)
+            brackets = SQLScript.scan(
+                string, scheme: parent.scheme,
+                selection: selection
+            ).brackets(atCaret: selection.lowerBound, in: string)
+        }
+
         /// Asks the core to read the buffer again and repaints what is on
         /// screen.
         ///
@@ -537,6 +559,7 @@ struct SQLEditor: NSViewRepresentable {
                 string, scheme: parent.scheme,
                 selection: Self.scalarRange(of: textView.selectedRange(), in: string))
             painted = Self.utf16Ranges(scan.tokens, in: string)
+            markBrackets(in: string)
             highlight()
         }
 
@@ -588,6 +611,21 @@ struct SQLEditor: NSViewRepresentable {
                     Self.colours[painted[i].kind] ?? [:],
                     forCharacterRange: NSIntersectionRange(painted[i].range, visible))
                 i += 1
+            }
+            // The matched pair, if any, as a band behind each paren. A
+            // background rather than a foreground colour, so the two parens
+            // keep whatever colour they already have. Intersected with the
+            // viewport the way the tokens are, so a partner scrolled off
+            // screen costs nothing.
+            if let (opening, closing) = brackets {
+                for offset in [opening, closing] {
+                    guard let range = SQLScript.range(offset..<(offset + 1), in: cachedString)
+                    else { continue }
+                    layout.addTemporaryAttributes(
+                        [.backgroundColor: Theme.Editor.bracketMatch.nsColor],
+                        forCharacterRange: NSIntersectionRange(
+                            NSRange(range, in: cachedString), visible))
+                }
             }
         }
 

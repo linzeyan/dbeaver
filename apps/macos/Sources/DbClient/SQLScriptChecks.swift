@@ -32,6 +32,7 @@ enum SQLScriptChecks {
         checkSpansArriveAsSpans()
         checkTokenKindsSurviveTheCrossing()
         checkTokensCoverTheBuffer()
+        checkBracketsPairAcrossTheBuffer()
         checkTargetsArriveWithTheirOrigin()
         checkErrorPositionsCrossBack()
         checkTheSchemeReachesTheDialect()
@@ -113,6 +114,52 @@ enum SQLScriptChecks {
             zip(scan.spans, scan.spans.dropFirst()).allSatisfy {
                 $0.upperBound == $1.lowerBound
             }, true, "with no gap between them, which is what tokenRange walks")
+    }
+
+    /// The pair of parentheses the caret is beside, as the offsets that name
+    /// them — or nothing where there is no pair to name.
+    ///
+    /// The pairing rule is this side's own: the core hands back the tokens and
+    /// says nothing about which paren is whose, so a wrong answer here is a
+    /// mark on the wrong character, which is worse than no mark. The last case
+    /// is the one that fails if the scan counts `Character`s instead of
+    /// scalars: the flag is two scalars and one Character, and every offset
+    /// after it lands one place to the left.
+    private static func checkBracketsPairAcrossTheBuffer() {
+        let script = "SELECT (1 + (2))"
+        expect(
+            brackets(script, caret: 8), "7,15",
+            "a caret just after the outer ( pairs with the last )")
+        expect(
+            brackets(script, caret: 12), "12,14",
+            "a caret on the inner pair gets the inner one")
+        expect(
+            brackets(script, caret: 14), "12,14",
+            "and the same from the closing end")
+        expect(
+            brackets(script, caret: 0), nil,
+            "a caret at neither end of any parenthesis gets nothing")
+        expect(
+            brackets(script, caret: 9), nil,
+            "and neither does one between the two pairs")
+
+        let quoted = "SELECT ')'"
+        expect(brackets(quoted, caret: 8), nil, "a paren inside a string is not a paren")
+        expect(
+            brackets(quoted, caret: 9), nil, "and neither is the caret just after it")
+
+        let unbalanced = "SELECT (1"
+        expect(
+            brackets(unbalanced, caret: 7), nil,
+            "an unbalanced buffer gets nothing rather than a guess")
+        expect(
+            brackets(unbalanced, caret: 8), nil,
+            "and neither does the caret just after the lone (")
+
+        let wide = "🇹🇼 SELECT (1)"
+        expect(
+            brackets(wide, caret: 11), "10,12",
+            "a multi-scalar character before the parens does not move them")
     }
 
     /// A target arrives with the origin it was given, and says so on screen.
@@ -217,6 +264,14 @@ enum SQLScriptChecks {
         scanned(script, scheme: scheme).tokens.map {
             "\($0.kind):\(SQLScript.text($0.range, in: script))"
         }
+    }
+
+    /// A pair of parentheses rendered as `opening,closing`, so one comparison
+    /// covers both halves and a failure prints something readable.
+    private static func brackets(_ script: String, caret: Int) -> String? {
+        guard let (opening, closing) = scanned(script).brackets(atCaret: caret, in: script)
+        else { return nil }
+        return "\(opening),\(closing)"
     }
 
     /// A target rendered as `sql|label`, so one comparison covers both halves.
