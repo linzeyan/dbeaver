@@ -2040,6 +2040,38 @@ final class AppModel {
         return s
     }
 
+    /// Puts a predicate over one cell into the filter field and runs the browse.
+    ///
+    /// The clause is composed by the core, not here: quoting is the database's
+    /// own, and whether the value goes in bare or in quotes depends on the type
+    /// its column was declared with. This side knows neither.
+    ///
+    /// `extend` ANDs onto what is in the field rather than replacing it, and
+    /// parenthesises neither side. What is already there is the user's own text,
+    /// and wrapping it would edit something they typed; the one case where that
+    /// changes the reading is an `OR` they wrote, which binds looser than the
+    /// `AND` added here — and it is visible in the field, which is where they can
+    /// see it and fix it.
+    func filterByCell(_ request: CellFilterRequest) {
+        guard let relation = selected else { return }
+        let schema = relation.schema
+        let name = relation.name
+        let column = request.column
+        let value = request.value
+        let op = request.op
+        let extend = request.extend
+        run { db in
+            try db.cellFilter(
+                schema: schema, relation: name, column: column, op: op, value: value)
+        } then: { [self] clause in
+            // Read here rather than before the round trip: the field is editable
+            // throughout it, and "add to the filter" means the one on screen now.
+            let existing = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+            whereClause = extend && !existing.isEmpty ? "\(existing) AND \(clause)" : clause
+            applyFilters()
+        }
+    }
+
     func applyFilters() {
         activeTab = .content
         runBrowse()

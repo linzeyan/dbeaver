@@ -920,7 +920,8 @@ struct ContentPane: View {
                     pending: model.pendingCells,
                     deleted: model.deletedRows,
                     drafts: model.draftRows,
-                    onSortColumn: { model.toggleSort(column: $0) }
+                    onSortColumn: { model.toggleSort(column: $0) },
+                    onFilter: { model.filterByCell($0) }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
 

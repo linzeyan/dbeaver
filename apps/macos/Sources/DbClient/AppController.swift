@@ -195,6 +195,33 @@ final class GridViewController: NSObject, MTKViewDelegate {
 /// clicks, arrow keys, and ⌘C the way every other table on the platform does.
 /// None of that can come from SwiftUI: the content is drawn, not composed of
 /// views, so there is nothing for SwiftUI to hit-test or focus.
+/// What a filter offered over one cell can ask, spelled as the core's JSON.
+///
+/// The raw values are the wire: `db_cell_filter` reads exactly these four words,
+/// and a fifth spelling here would be a request the core rejects at run time
+/// rather than a mistake the compiler catches.
+enum CellFilterOperator: String, Encodable, Sendable {
+    case equals
+    case notEquals = "not_equals"
+    case isNull = "is_null"
+    case isNotNull = "is_not_null"
+}
+
+/// One cell, and what a menu item asks about it.
+///
+/// Carried on the menu item rather than read back off the grid when the item is
+/// chosen: a menu stays open across events, and the cell it was built for is the
+/// cell it must act on.
+struct CellFilterRequest: Sendable {
+    let column: String
+    /// The cell's text, or nil where it holds NULL — which the core turns into
+    /// `IS NULL` rather than into the `= NULL` that is never true.
+    let value: String?
+    let op: CellFilterOperator
+    /// Whether the clause is ANDed onto the filter field or replaces it.
+    let extend: Bool
+}
+
 final class GridView: MTKView {
     weak var renderer: GridRenderer?
 
@@ -207,6 +234,14 @@ final class GridView: MTKView {
     /// Whether headers respond to a click at all. Drives the cursor as well as
     /// the action: a pointing hand over a header that does nothing is a lie.
     var sortsOnHeaderClick = false
+
+    /// Called when a filter is chosen from the context menu.
+    var onFilter: ((CellFilterRequest) -> Void)?
+    /// Whether the menu offers filters at all. False for the Query pane: its
+    /// result can join five tables, and there is no answer to which of them a
+    /// column belongs to that is right often enough to write into a WHERE
+    /// clause — the same reason that pane cannot be edited or sorted.
+    var offersFilters = false
 
     /// Whether this grid takes keyboard focus when it appears. Set only for the
     /// browse pane: in the Query tab focus belongs to the editor, and a grid
@@ -429,7 +464,62 @@ final class GridView: MTKView {
         menu.addItem(value)
         menu.addItem(rows)
         menu.addItem(csv)
+
+        // A draft row is not offered any of this: it holds what somebody is
+        // typing, the database has never seen it, and every cell of it the grid
+        // can read back reads as empty.
+        if offersFilters, hit.column < table.columnNames.count, hit.row < table.rowCount {
+            let column = table.columnNames[hit.column]
+            // Read from the table rather than through `GridClipboard.value`,
+            // which renders NULL as an empty string. Here the difference is the
+            // whole question: an empty text cell and an absent value are
+            // different rows, and they filter differently.
+            let cell = table.value(row: hit.row, column: hit.column)
+            menu.addItem(.separator())
+            menu.addItem(
+                filters(titled: "Filter on \(column)", column: column, value: cell, extend: false))
+            menu.addItem(
+                filters(titled: "Add to Filter", column: column, value: cell, extend: true))
+        }
         return menu
+    }
+
+    /// One submenu of predicates over the clicked cell.
+    ///
+    /// Two submenus rather than eight items in a row: replacing the filter and
+    /// adding to it are the same four questions asked of the same cell, and a
+    /// flat list of eight would leave the reader working out which half they are
+    /// looking at.
+    ///
+    /// The two NULL entries are spelled the way SQL spells them, because that is
+    /// what lands in the filter field — somebody who then edits it by hand is
+    /// reading SQL, not this menu.
+    private func filters(
+        titled title: String, column: String, value: String?, extend: Bool
+    ) -> NSMenuItem {
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: title)
+        let offers: [(String, CellFilterOperator)] = [
+            ("Equals This Value", .equals),
+            ("Does Not Equal This Value", .notEquals),
+            ("IS NULL", .isNull),
+            ("IS NOT NULL", .isNotNull)
+        ]
+        for (name, op) in offers {
+            let item = NSMenuItem(
+                title: name, action: #selector(applyCellFilter), keyEquivalent: "")
+            item.target = self
+            item.representedObject = CellFilterRequest(
+                column: column, value: value, op: op, extend: extend)
+            submenu.addItem(item)
+        }
+        parent.submenu = submenu
+        return parent
+    }
+
+    @objc private func applyCellFilter(_ sender: NSMenuItem) {
+        guard let request = sender.representedObject as? CellFilterRequest else { return }
+        onFilter?(request)
     }
 
     override func mouseDragged(with event: NSEvent) {
