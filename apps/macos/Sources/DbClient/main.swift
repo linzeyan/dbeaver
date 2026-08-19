@@ -50,9 +50,9 @@ let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
 // `--verify-transaction`, `--verify-editing`, `--verify-clipboard`, `--verify-goto`,
-// `--verify-browse-state`,
-// `--verify-metadata`, `--verify-schema-metadata`, `--verify-import`,
-// `--verify-preferences`, `--verify-accessibility` and `--verify-quitting` run
+// `--verify-browse-state`, `--verify-history`, `--verify-metadata`,
+// `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
+// `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
 // verdict. None needs a window or a database, so they run before either exists.
 if CommandLine.arguments.contains("--verify-splitter") {
