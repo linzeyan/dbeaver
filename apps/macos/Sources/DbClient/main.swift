@@ -49,7 +49,7 @@ let connArgument = argument("--conn")
 let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
-// `--verify-transaction`, `--verify-editing`, `--verify-clipboard`,
+// `--verify-transaction`, `--verify-editing`, `--verify-clipboard`, `--verify-goto`,
 // `--verify-metadata`, `--verify-schema-metadata`, `--verify-import`,
 // `--verify-preferences`, `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
@@ -71,6 +71,9 @@ if CommandLine.arguments.contains("--verify-editing") {
 }
 if CommandLine.arguments.contains("--verify-clipboard") {
     exit(GridClipboardChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-goto") {
+    exit(GoToChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-metadata") {
     exit(MetadataChecks.run() ? 0 : 1)
