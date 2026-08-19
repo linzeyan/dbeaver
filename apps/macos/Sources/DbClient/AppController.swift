@@ -388,6 +388,50 @@ final class GridView: MTKView {
         apply(hit)
     }
 
+    /// The right-click menu. It offers to copy only what the click actually
+    /// hit: a menu offering to copy a cell that was not clicked is worse than
+    /// no menu, so the guards are the ones `mouseDown` applies, in the same
+    /// order.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let renderer, let table = renderer.table else { return nil }
+        let point = rendererPoint(of: event)
+
+        if renderer.scrollbarAxis(at: point, viewSize: bounds.size) != nil { return nil }
+        if resizeTarget(at: point) != nil { return nil }
+        if isInHeader(point) { return nil }
+
+        guard var hit = renderer.cell(at: point, table: table) else { return nil }
+        // Shift-right-click extends from wherever the range already starts, the
+        // way a shift-click does, so the menu can offer to copy more than the
+        // one cell under the pointer.
+        if event.modifierFlags.contains(.shift), let current = renderer.selection {
+            hit.anchor = current.anchor ?? current.row
+        }
+        // AppKit shows the menu after this returns, so the selection is moved
+        // first: the menu and the outline then agree about which cell is being
+        // acted on.
+        apply(hit)
+
+        // Counted from the hit rather than read back off the renderer, so this
+        // does not depend on `apply` having stored what it was given.
+        let count = hit.rows.count
+        let menu = NSMenu()
+        let value = NSMenuItem(title: "Copy Value", action: #selector(copyValue), keyEquivalent: "")
+        value.target = self
+        let rows = NSMenuItem(
+            title: "Copy \(AppModel.pluralized(count, "row"))",
+            action: #selector(copyRows), keyEquivalent: "")
+        rows.target = self
+        let csv = NSMenuItem(
+            title: "Copy \(AppModel.pluralized(count, "row")) as CSV",
+            action: #selector(copyRowsAsCSV), keyEquivalent: "")
+        csv.target = self
+        menu.addItem(value)
+        menu.addItem(rows)
+        menu.addItem(csv)
+        return menu
+    }
+
     override func mouseDragged(with event: NSEvent) {
         guard let renderer else { return }
         let point = rendererPoint(of: event)
@@ -575,50 +619,38 @@ final class GridView: MTKView {
     }
 
     private func copySelection() {
+        copy { table, selection in
+            selection.rows.count > 1
+                ? GridClipboard.tabSeparated(table, rows: selection.rows)
+                : GridClipboard.value(of: table, row: selection.row, column: selection.column)
+        }
+    }
+
+    /// The three items of the right-click menu, which differ from ⌘C and from
+    /// each other only in which rendering they ask for.
+    @objc private func copyValue() {
+        copy { GridClipboard.value(of: $0, row: $1.row, column: $1.column) }
+    }
+
+    @objc private func copyRows() {
+        copy { GridClipboard.tabSeparated($0, rows: $1.rows) }
+    }
+
+    @objc private func copyRowsAsCSV() {
+        copy { GridClipboard.csv($0, rows: $1.rows) }
+    }
+
+    /// Puts one rendering of the selection on the pasteboard, or does nothing
+    /// where there is no selection to render.
+    ///
+    /// The four callers above share this rather than each spelling the two
+    /// pasteboard calls: `clearContents()` is what takes ownership, and a copy
+    /// that set a string without it would leave the previous owner's other
+    /// representations in place for the next paste to find.
+    private func copy(_ render: (ArrowTable, GridSelection) -> String) {
         guard let renderer, let table = renderer.table, let selection = renderer.selection
         else { return }
-        let rows = selection.rows
-        let text =
-            rows.count > 1
-            ? tsv(table, rows: rows)
-            : cellText(table, row: selection.row, column: selection.column)
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
-
-    /// A cell as it should land on the pasteboard: the value, not the way the
-    /// grid spells it. NULL is empty rather than the word, which would paste
-    /// into the next tool as a literal four-character string.
-    private func cellText(_ table: ArrowTable, row: Int, column: Int) -> String {
-        table.isNull(row: row, column: column) ? "" : table.text(row: row, column: column)
-    }
-
-    /// A multi-row selection copies as TSV with a header line — the one format
-    /// a spreadsheet, a SQL console and a plain text editor all read unchanged.
-    ///
-    /// Built on the calling thread on purpose. A full 100,000-row selection
-    /// takes a visible beat, but the alternative — building it in the
-    /// background and filling the pasteboard when it finishes — means a paste
-    /// issued in that window silently yields the previous clipboard. A slow
-    /// copy is a worse experience than a fast one; a wrong copy is a bug.
-    private func tsv(_ table: ArrowTable, rows: ClosedRange<Int>) -> String {
-        var out = table.columns.map(\.name).joined(separator: "\t")
-        out.reserveCapacity(rows.count * table.columns.count * 12)
-        for r in rows {
-            out.append("\n")
-            for c in table.columns.indices {
-                if c > 0 { out.append("\t") }
-                out.append(sanitized(cellText(table, row: r, column: c)))
-            }
-        }
-        return out
-    }
-
-    /// A tab or newline inside a value would add columns and rows that were
-    /// never selected, so they collapse to spaces. The alternative — quoting —
-    /// is CSV's answer and would stop this being pasteable as plain text.
-    private func sanitized(_ value: String) -> String {
-        guard value.contains(where: { $0.isNewline || $0 == "\t" }) else { return value }
-        return String(value.map { $0.isNewline || $0 == "\t" ? " " : $0 })
+        NSPasteboard.general.setString(render(table, selection), forType: .string)
     }
 }
