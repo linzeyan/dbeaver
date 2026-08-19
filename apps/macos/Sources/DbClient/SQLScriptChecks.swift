@@ -35,6 +35,7 @@ enum SQLScriptChecks {
         checkBracketsPairAcrossTheBuffer()
         checkTargetsArriveWithTheirOrigin()
         checkErrorPositionsCrossBack()
+        checkPrefixedPositionsSubtractTheWordsWeAdded()
         checkTheSchemeReachesTheDialect()
         checkOffsetsAreCountedInScalars()
         if failures == 0 {
@@ -193,6 +194,28 @@ enum SQLScriptChecks {
             "one past the last character is where an unexpected end of input points")
         expect(SQLScript.errorOffset(ofPosition: 11, in: second), nil, "beyond that is not")
         expect(SQLScript.errorOffset(ofPosition: 0, in: second), nil, "the server never says 0")
+    }
+
+    /// A position reported about a prefixed statement names a character of the
+    /// statement, not of the prefix.
+    ///
+    /// The failure this guards against does not throw: it moves the caret onto
+    /// the wrong token, and the number is right often enough — every statement
+    /// whose trouble is far enough from the front still lands inside the buffer
+    /// — for the mistake to look like the server's.
+    private static func checkPrefixedPositionsSubtractTheWordsWeAdded() {
+        expect(
+            SQLScript.position(9, without: "EXPLAIN "), 1,
+            "the ninth character sent is the first one typed")
+        expect(
+            SQLScript.position(8, without: "EXPLAIN "), nil,
+            "a position inside the prefix names nothing the user wrote")
+        expect(
+            SQLScript.position(20, without: "EXPLAIN QUERY PLAN "), 1,
+            "SQLite's longer prefix is arithmetic rather than a constant")
+        expect(
+            SQLScript.position(1, without: ""), 1,
+            "nothing prepended is not a special case")
     }
 
     /// The connection's scheme reaches the dialect table.

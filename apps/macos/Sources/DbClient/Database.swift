@@ -182,6 +182,22 @@ final class Database: @unchecked Sendable {
         return String(cString: raw)
     }
 
+    /// The words this database writes in front of a statement to ask for its
+    /// plan, or nothing where it has no such spelling.
+    ///
+    /// Static and connection-free for the reason `formatted` is: how a database
+    /// spells this is a property of its dialect rather than of an open session.
+    ///
+    /// Nil is an answer and not a failure. SQL Server asks for a plan with a
+    /// session setting either side of the statement, which no prefix can be, and
+    /// a scheme this build has no dialect for has no answer at all — what a
+    /// caller does with nil is not offer the command.
+    static func explainPrefix(for scheme: String) -> String? {
+        guard let raw = db_sql_explain_prefix(scheme) else { return nil }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The statement that reads a relation's rows.
     ///
     /// Asked of the core rather than assembled here, because a statement is the

@@ -35,6 +35,7 @@ enum AppMenu {
     private static var transactionCommands: TransactionCommands?
     /// Target of the Query menu's Format item, held for the same reason.
     private static var formatCommand: FormatCommand?
+    private static var explainCommand: ExplainCommand?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -67,6 +68,8 @@ enum AppMenu {
         transactionCommands = transactions
         let formatting = FormatCommand(model: model)
         formatCommand = formatting
+        let explain = ExplainCommand(model: model)
+        explainCommand = explain
         let main = NSMenu()
         main.addItem(appMenu(named: name, settings: settings))
         main.addItem(fileMenu(connection: connection, export: commands))
@@ -77,7 +80,7 @@ enum AppMenu {
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
-                formatting: formatting))
+                formatting: formatting, explain: explain))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -364,7 +367,7 @@ enum AppMenu {
     /// with two values and a pair of items would let the window show both as off.
     private static func queryMenu(
         target: QueryCommands, stop: StopCommand, history: QueryHistoryCommand,
-        transactions: TransactionCommands, formatting: FormatCommand
+        transactions: TransactionCommands, formatting: FormatCommand, explain: ExplainCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Query")
@@ -373,6 +376,15 @@ enum AppMenu {
             action: #selector(QueryCommands.runScript(_:)), keyEquivalent: "r")
         script.keyEquivalentModifierMask = [.command, .option]
         script.target = target
+
+        // ⌥⌘E. ⇧⌘E is Export Result as CSV, and ⌥⌘ is the modifier Run Script
+        // already uses for "run something other than the plain ⌘R", which is
+        // what asking for a plan is.
+        let explainItem = menu.addItem(
+            withTitle: "Explain Statement",
+            action: #selector(ExplainCommand.explainStatement(_:)), keyEquivalent: "e")
+        explainItem.keyEquivalentModifierMask = [.command, .option]
+        explainItem.target = explain
 
         let stopItem = menu.addItem(
             withTitle: "Stop Running Statement",
@@ -622,6 +634,27 @@ final class FormatCommand: NSObject, NSMenuItemValidation {
     @objc func formatQuery(_ sender: Any?) { model.formatQuery() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFormatQuery }
+}
+
+/// The Query menu's Explain item, as something a menu can send to.
+///
+/// Its own object for the reason the others are: one target per answer, so
+/// `validateMenuItem` stays a sentence. This one's answer is `QueryCommands`'
+/// plus a question about the database rather than about the buffer — a
+/// connection whose dialect has no prefix greys this out and leaves Run Script
+/// alone.
+@MainActor
+final class ExplainCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func explainStatement(_ sender: Any?) { model.explainCurrentStatement() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canExplainStatement }
 }
 
 /// The Query menu's Stop item, as something a menu can send to.

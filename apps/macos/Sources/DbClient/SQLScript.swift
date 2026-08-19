@@ -316,6 +316,25 @@ enum SQLScript {
         return offset < 0 ? nil : Int(offset)
     }
 
+    /// A server's error position, read as a position in the statement the user
+    /// typed rather than in the string that was sent.
+    ///
+    /// The two differ when this application wrote something in front: an Explain
+    /// sends the statement with a prefix, and every position the server reports
+    /// is then that many characters too large.
+    ///
+    /// Nil where the position lands inside the prefix. The number is about text
+    /// the user cannot see and did not write, and moving the caret to it would be
+    /// pointing at a character chosen by arithmetic about somebody else's words.
+    ///
+    /// Counted in scalars against the server's characters because every prefix is
+    /// an ASCII word, so the two counts are the same number — and an empty prefix
+    /// subtracts nothing, which is what keeps the ordinary ⌘R path out of this.
+    static func position(_ position: Int, without prefix: String) -> Int? {
+        let inStatement = position - prefix.unicodeScalars.count
+        return inStatement < 1 ? nil : inStatement
+    }
+
     /// Line and column of a scalar offset, both counted from 1 the way every
     /// error message a user has ever read counts them.
     ///

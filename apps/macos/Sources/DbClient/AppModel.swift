@@ -245,6 +245,11 @@ final class AppModel {
         let script: String
         /// Scalar offsets of the statement within `script`.
         let range: Range<Int>
+        /// What was written in front of the statement before it was sent, empty
+        /// where nothing was. It travels with the script and the range because
+        /// the arithmetic that turns the server's number into a place in the
+        /// buffer needs all three of them or none.
+        let prefix: String
     }
 
     /// A Query-pane failure with the statement that produced it.
@@ -2263,6 +2268,39 @@ final class AppModel {
         runStatements(all, labelled: labels)
     }
 
+    /// The words this database writes in front of a statement to ask for its
+    /// plan, or nothing where it has none.
+    ///
+    /// Asked of the core on every read rather than cached: the answer is a fact
+    /// about the connection's scheme, and this window outlives more than one
+    /// connection. It is a table lookup and a string copy, which is nothing
+    /// beside the menu validation it answers.
+    private var explainPrefix: String? { Database.explainPrefix(for: scheme) }
+
+    /// Whether the database can be asked for a plan of what ⌘R would run.
+    ///
+    /// Refuses while a run is in flight for the reason `canRunScript` does — the
+    /// core queue is serial, so a second statement would only queue behind the
+    /// first and land looking like a command that did nothing — and refuses
+    /// outright where the database has no prefix, which is what the core
+    /// answering nil rather than guessing a word is for.
+    var canExplainStatement: Bool {
+        activeTab == .query && !isBusy && runTarget != nil && explainPrefix != nil
+    }
+
+    /// Asks the database how it would run the statement the caret is in.
+    ///
+    /// Explains what ⌘R would send rather than the whole buffer: a plan is read
+    /// against one statement, and the caret already says which one. The single
+    /// space is joined here rather than kept in the dialect table, because the
+    /// table records how a database spells the request and not how a caller lays
+    /// it out.
+    func explainCurrentStatement() {
+        guard canExplainStatement, let target = runTarget, let prefix = explainPrefix
+        else { return }
+        runStatements([target.range], labelled: ["explain"], prefixedWith: prefix + " ")
+    }
+
     /// Runs `ranges` of the editor buffer in order on the one connection, and
     /// installs an outcome for each.
     ///
@@ -2271,7 +2309,14 @@ final class AppModel {
     /// statements — so hopping back to the main actor between them would buy
     /// nothing but a chance for a browse to interleave into the middle of
     /// somebody's script.
-    private func runStatements(_ ranges: [Range<Int>], labelled labels: [String]) {
+    ///
+    /// A prefix, where there is one, is written in front of every statement in
+    /// the run — which is what an Explain sends. What goes out is what the step
+    /// list and the history then show: a run that asked for a plan reports the
+    /// statement it actually sent rather than the one it was made from.
+    private func runStatements(
+        _ ranges: [Range<Int>], labelled labels: [String], prefixedWith prefix: String = ""
+    ) {
         isBusy = true
         // The step on screen dims for the duration. Blanking the pane would lose
         // the result the user is comparing against, and the veil is the
@@ -2285,7 +2330,7 @@ final class AppModel {
         // The buffer as it is now. An error arrives after a round trip, and the
         // caret may only be moved while the text it indexes still exists.
         let script = queryText
-        let sql = ranges.map { SQLScript.text($0, in: script) }
+        let sql = ranges.map { prefix + SQLScript.text($0, in: script) }
 
         run { db -> ScriptOutput in
             var completed: [StatementOutput] = []
@@ -2321,14 +2366,16 @@ final class AppModel {
             }
             return ScriptOutput(completed: completed, failure: nil)
         } then: { [self] output in
-            install(output, ranges: ranges, statements: sql, labels: labels, script: script)
+            install(
+                output, ranges: ranges, statements: sql, labels: labels, script: script,
+                prefix: prefix)
         }
     }
 
     /// Turns a finished run into the steps the pane shows.
     private func install(
         _ output: ScriptOutput, ranges: [Range<Int>], statements: [String], labels: [String],
-        script: String
+        script: String, prefix: String
     ) {
         var steps: [ScriptStep] = []
         for (i, out) in output.completed.enumerated() {
@@ -2415,7 +2462,9 @@ final class AppModel {
             // the same ones every other failure gets.
             self.fail(
                 with: StatementFailure(
-                    error: failure, sent: SentStatement(script: script, range: ranges[stopped])))
+                    error: failure,
+                    sent: SentStatement(
+                        script: script, range: ranges[stopped], prefix: prefix)))
         }
     }
 
@@ -2875,8 +2924,13 @@ final class AppModel {
     /// buffer is checked against the one the statement was cut from before any
     /// of it is trusted: pointing at the wrong character is worse than not
     /// pointing, so an edited buffer gets the bare position and no caret move.
+    /// A position swallowed by a prefix this application wrote leaves the banner
+    /// as it is rather than falling through to the bare wording below: "at
+    /// position 12 of the statement" would be naming a character in words the
+    /// user never typed.
     private func pointAtSyntaxError(_ statement: StatementFailure) {
-        guard let failure = statement.error as? DbError, let position = failure.position
+        guard let failure = statement.error as? DbError, let reported = failure.position,
+            let position = SQLScript.position(reported, without: statement.sent.prefix)
         else { return }
         let sent = statement.sent
         guard sent.script == queryText,
