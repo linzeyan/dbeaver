@@ -50,7 +50,7 @@ let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
 // `--verify-transaction`, `--verify-editing`, `--verify-clipboard`, `--verify-goto`,
-// `--verify-favorites`, `--verify-record`,
+// `--verify-favorites`, `--verify-record`, `--verify-value`,
 // `--verify-browse-state`, `--verify-history`, `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -82,6 +82,9 @@ if CommandLine.arguments.contains("--verify-favorites") {
 }
 if CommandLine.arguments.contains("--verify-record") {
     exit(RecordChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-value") {
+    exit(ValueViewerChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-browse-state") {
     exit(BrowseStateChecks.run() ? 0 : 1)
