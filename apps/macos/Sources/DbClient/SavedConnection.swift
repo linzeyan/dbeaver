@@ -1,5 +1,49 @@
 import Foundation
 
+/// What the connection now open is allowed to do.
+///
+/// A value of its own rather than two flags read off the model, because the two
+/// questions are asked from four places between them — the grid, the value pane,
+/// the import target, the editor's Run — and a refusal worded differently in each
+/// of them would read as four separate faults.
+///
+/// Held as it was at the moment of connecting and never read back out of the
+/// form: somebody who unticks Read-only while a session is open has changed what
+/// the *next* connection will be, and a window that unlocked underneath them
+/// would be enforcing a mark it had already stopped showing.
+struct ConnectionSafety {
+    var isReadOnly: Bool
+    var isProduction: Bool
+
+    init(isReadOnly: Bool = false, isProduction: Bool = false) {
+        self.isReadOnly = isReadOnly
+        self.isProduction = isProduction
+    }
+
+    /// The marks of a saved connection, as a window will carry them.
+    init(of connection: SavedConnection) {
+        self.init(isReadOnly: connection.isReadOnly, isProduction: connection.isProduction)
+    }
+
+    /// Why a write this application controls is refused, or nil where it is not.
+    ///
+    /// One sentence for all of them — grid edits, generated DDL, being an import
+    /// target — because they are refused for one reason, and what a person reads
+    /// is the reason rather than the path. It names the mark and where to change
+    /// it: a control that has silently stopped working is the failure this is
+    /// written to avoid, and "nothing happens when I press Save" is how that
+    /// failure is reported.
+    ///
+    /// Production is not consulted here. It is the other question — see
+    /// `SavedConnection.isProduction` — and a mark that refused would make the
+    /// connection useless rather than careful.
+    var writeRefusal: String? {
+        guard isReadOnly else { return nil }
+        return
+            "This connection is marked read-only. Clear the mark in the connection form to write to it."
+    }
+}
+
 /// A connection that a person kept, with a name and color.
 ///
 /// The list of these is what the file holds, not a single record. Each has an
