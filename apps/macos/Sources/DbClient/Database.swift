@@ -245,7 +245,7 @@ final class Database: @unchecked Sendable {
     /// guess would write a filter that fails — or, worse, one that runs and means
     /// something else.
     func cellFilter(
-        schema: String, relation: String, column: String, op: CellFilterOperator, value: String?
+        schema: String, relation: String, column: String, op: FilterOperator, value: String?
     ) throws -> String {
         var err: UnsafeMutablePointer<CChar>?
         let request = FilterRequest(
@@ -261,8 +261,53 @@ final class Database: @unchecked Sendable {
         let schema: String
         let relation: String
         let column: String
-        let op: CellFilterOperator
+        let op: FilterOperator
         let value: String?
+
+        var json: String {
+            let data = (try? JSONEncoder().encode(self)) ?? Data()
+            return String(data: data, encoding: .utf8) ?? "{}"
+        }
+    }
+
+    /// Which columns this relation can be filtered on, and what each may be
+    /// asked.
+    ///
+    /// The core's answer rather than a reading of `columns(schema:relation:)`.
+    /// Whether a declared type can be ordered, and whether this database can be
+    /// told how to escape a `LIKE`, are both facts the core already holds — and
+    /// a popup built here from a second copy of them would offer an operator
+    /// `filterClause` then refuses to write.
+    func filterColumns(schema: String, relation: String) throws -> [FilterColumn] {
+        try decodeJSON(
+            db_filter_columns_json(handle, schema, relation, &errOut), as: [FilterColumn].self)
+    }
+
+    /// A stack of filter rows as one WHERE clause, in this database's own
+    /// quoting.
+    ///
+    /// The row form of `cellFilter`, asked for here for the reason that one is
+    /// and for one more: `contains` is a `LIKE`, a `LIKE` needs an escape
+    /// character, and which character it may be is the database's own.
+    ///
+    /// Values go over as they were typed. Quoting them on this side as well is
+    /// the second layer that makes a filter match literal apostrophes.
+    ///
+    /// No rules answers an empty string, which is the unfiltered browse.
+    func filterClause(schema: String, relation: String, rules: [FilterRule]) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        let request = RowFilterRequest(schema: schema, relation: relation, rules: rules)
+        guard let raw = db_filter_clause(handle, request.json, &err) else {
+            throw DbError(description: Database.take(&err) ?? "filter clause failed")
+        }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    private struct RowFilterRequest: Encodable {
+        let schema: String
+        let relation: String
+        let rules: [FilterRule]
 
         var json: String {
             let data = (try? JSONEncoder().encode(self)) ?? Data()

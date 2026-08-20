@@ -304,6 +304,42 @@ char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
 // type its column was declared with.
 char* db_cell_filter(DbHandle* handle, const char* filter, char** err);
 
+// A stack of filter rows as one WHERE clause, as plain text. Released with
+// db_string_free.
+//
+// `filter` is JSON:
+//
+//   {"schema": …, "relation": …,
+//    "rules": [{"column": …, "op": …, "value": …, "second": …}]}
+//
+// `op` is one of the names db_filter_columns_json offered for that column,
+// `value` is the text as typed and never pre-quoted, and `second` is the far end
+// of a "between" and absent for every other operator. The rules are ANDed in the
+// order given, and no rules answers an empty string — the unfiltered browse,
+// rather than a failure.
+//
+// The row form of db_cell_filter, here for the reason that one is and for one
+// more: "contains" is a LIKE, a LIKE needs an escape character, and which
+// character it may be is the database's own. A front end that guessed would
+// write filters that read a typed % as a wildcard.
+char* db_filter_clause(DbHandle* handle, const char* filter, char** err);
+
+// Which columns a relation can be filtered on, and what each may be asked.
+// Released with db_string_free:
+//
+//   [{"name": "qty", "data_type": "numeric", "operators": ["equals", …]}]
+//
+// Per column and per database: a column of a type nothing can be ordered by is
+// not offered "less_than", and a text column is offered "contains" only where
+// this database takes an ESCAPE clause.
+//
+// Asked here rather than worked out from db_columns_json, for the reason
+// db_row_identity_json is: a popup built from a second copy of the rule would
+// offer an operator db_filter_clause then refuses to write, and the refusal
+// would arrive as an error over a filter somebody had already typed.
+char* db_filter_columns_json(DbHandle* handle, const char* schema, const char* relation,
+                             char** err);
+
 // Which columns name one row of a relation. Released with db_string_free:
 //
 //   {"columns": ["id"], "obstacle": null}

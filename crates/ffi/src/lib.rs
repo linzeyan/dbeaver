@@ -986,6 +986,149 @@ pub unsafe extern "C" fn db_cell_filter(
     }
 }
 
+/// A stack of filter rows as one WHERE clause, as plain text. Release with
+/// `db_string_free`.
+///
+/// ```json
+/// {"schema": …, "relation": …,
+///  "rules": [{"column": …, "op": …, "value": …, "second": …}]}
+/// ```
+///
+/// `op` is one of the names `db_filter_columns_json` offered for that column.
+/// `value` is the text as it was typed and never pre-quoted — the quoting is
+/// this side's, and a caller that did it too is how a filter starts matching
+/// literal apostrophes. `second` is the far end of a `between`, and absent for
+/// every other operator.
+///
+/// The rules are ANDed in the order given. No rules answers an empty string,
+/// which is the unfiltered browse rather than a failure.
+///
+/// The row form of `db_cell_filter`, here for the reason that one is and for one
+/// more: `contains` is a `LIKE`, a `LIKE` needs an escape character, and which
+/// character it may be is the database's own. A front end that guessed would
+/// write filters that read a typed `%` as a wildcard.
+///
+/// # Safety
+/// `handle` must be live; `filter` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_filter_clause(
+    handle: *mut DbHandle,
+    filter: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || filter.is_null() {
+        unsafe { set_err(err, "null handle or filter") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let text = match unsafe { CStr::from_ptr(filter) }.to_str() {
+        Ok(text) => text,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    let requested: dbedit::RowFilter = match serde_json::from_str(text) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    let Some(dialect) = h.dialect else {
+        unsafe {
+            set_err(
+                err,
+                "this build does not write statements for this database",
+            )
+        };
+        return ptr::null_mut();
+    };
+    match runtime().block_on(dbedit::filter_clause(
+        h.driver.as_ref(),
+        dialect,
+        &requested,
+    )) {
+        Ok(clause) => match CString::new(clause) {
+            Ok(c) => c.into_raw(),
+            Err(e) => {
+                unsafe { set_err(err, e) };
+                ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Which columns a relation can be filtered on, and what each one may be asked,
+/// as JSON. Release with `db_string_free`.
+///
+/// ```json
+/// [{"name": "qty", "data_type": "numeric", "operators": ["equals", "between", …]}]
+/// ```
+///
+/// The list is per column and per database. A column of a type nothing can be
+/// ordered by is not offered `less_than`; a text column is offered `contains`
+/// only where this database takes an `ESCAPE` clause.
+///
+/// Asked for rather than worked out from `db_columns_json`, for the reason
+/// `db_row_identity_json` is asked for: a popup built from a second copy of that
+/// rule would offer an operator `db_filter_clause` then refuses to write, and
+/// the refusal would arrive as an error over a filter somebody had already
+/// typed.
+///
+/// # Safety
+/// `handle` must be live; `schema` and `relation` must be valid NUL-terminated C
+/// strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_filter_columns_json(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() {
+        unsafe { set_err(err, "null handle, schema, or relation") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let (s, r) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+        ) {
+            (Ok(s), Ok(r)) => (s, r),
+            _ => {
+                set_err(err, "schema or relation is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    // The dialect is needed here and not only in `db_filter_clause` because it
+    // decides what may be offered, not just what may be written: the answer to
+    // "can this database escape a LIKE" is what keeps `contains` off a popup for
+    // the databases that cannot.
+    let Some(dialect) = h.dialect else {
+        unsafe {
+            set_err(
+                err,
+                "this build does not write statements for this database",
+            )
+        };
+        return ptr::null_mut();
+    };
+    match runtime().block_on(dbedit::filter_columns(h.driver.as_ref(), dialect, s, r)) {
+        Ok(columns) => json_result(&columns, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// What names one row of a relation, as JSON. Release with `db_string_free`.
 ///
 /// ```json

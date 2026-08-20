@@ -239,6 +239,66 @@ struct RowIdentity: Decodable, Hashable {
     let obstacle: String?
 }
 
+/// What a filter may ask of a column, spelled as the core's JSON.
+///
+/// The raw values are the wire in both directions — `db_filter_columns_json`
+/// hands back exactly these words and `db_filter_clause` reads exactly these
+/// words — so a spelling invented here would be a request the core turns down at
+/// run time rather than a mistake the compiler catches.
+///
+/// Which of them a column is offered is the core's answer and not this side's,
+/// and the answer is `FilterColumn.operators`. The first four are offered over
+/// anything; the rest depend on what the type holds and, for the three `LIKE`
+/// ones, on whether this database can be told how to escape a wildcard.
+enum FilterOperator: String, Codable, Sendable {
+    case equals
+    case notEquals = "not_equals"
+    case isNull = "is_null"
+    case isNotNull = "is_not_null"
+    case lessThan = "less_than"
+    case lessOrEqual = "less_or_equal"
+    case greaterThan = "greater_than"
+    case greaterOrEqual = "greater_or_equal"
+    case between
+    case contains
+    case startsWith = "starts_with"
+    case endsWith = "ends_with"
+}
+
+/// One column a relation can be filtered on, and the questions worth asking of
+/// it.
+struct FilterColumn: Decodable, Hashable, Identifiable {
+    let name: String
+    /// The type as the server declared it, so a row can print it beside the
+    /// name. That is what makes an operator list shorter than the next column's
+    /// read as a consequence of the type rather than as something missing.
+    let dataType: String
+    let operators: [FilterOperator]
+
+    var id: String { name }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, operators
+        case dataType = "data_type"
+    }
+}
+
+/// One row of a filter: a column, what is asked of it, and the text typed in.
+///
+/// `Encodable` because it is also the wire. `db_filter_clause` reads exactly
+/// this shape, so the row on screen and the rule sent over are one value rather
+/// than two that have to be kept in step.
+struct FilterRule: Encodable, Hashable {
+    var column: String
+    var op: FilterOperator
+    /// The text as typed, never quoted: the quoting is the core's, and doing it
+    /// here as well is how a filter starts matching literal apostrophes. `nil`
+    /// for `isNull` and `isNotNull`, which compare against nothing.
+    var value: String?
+    /// The far end of a `between`, and `nil` for every other operator.
+    var second: String?
+}
+
 /// What the connection's transaction is doing.
 ///
 /// `transactional` decides whether the rest is worth showing at all: a

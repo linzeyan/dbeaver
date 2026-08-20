@@ -195,17 +195,6 @@ final class GridViewController: NSObject, MTKViewDelegate {
 /// clicks, arrow keys, and ⌘C the way every other table on the platform does.
 /// None of that can come from SwiftUI: the content is drawn, not composed of
 /// views, so there is nothing for SwiftUI to hit-test or focus.
-/// What a filter offered over one cell can ask, spelled as the core's JSON.
-///
-/// The raw values are the wire: `db_cell_filter` reads exactly these four words,
-/// and a fifth spelling here would be a request the core rejects at run time
-/// rather than a mistake the compiler catches.
-enum CellFilterOperator: String, Encodable, Sendable {
-    case equals
-    case notEquals = "not_equals"
-    case isNull = "is_null"
-    case isNotNull = "is_not_null"
-}
 
 /// One cell, and what a menu item asks about it.
 ///
@@ -217,7 +206,7 @@ struct CellFilterRequest: Sendable {
     /// The cell's text, or nil where it holds NULL — which the core turns into
     /// `IS NULL` rather than into the `= NULL` that is never true.
     let value: String?
-    let op: CellFilterOperator
+    let op: FilterOperator
     /// Whether the clause is ANDed onto the filter field or replaces it.
     let extend: Bool
 }
@@ -537,7 +526,7 @@ final class GridView: MTKView {
     ) -> NSMenuItem {
         let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: title)
-        let offers: [(String, CellFilterOperator)] = [
+        let offers: [(String, FilterOperator)] = [
             ("Equals This Value", .equals),
             ("Does Not Equal This Value", .notEquals),
             ("IS NULL", .isNull),
