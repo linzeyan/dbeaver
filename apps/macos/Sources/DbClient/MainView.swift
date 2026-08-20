@@ -954,7 +954,7 @@ struct ContentPane: View {
                     onFilter: { model.filterByCell($0) },
                     onCopyAsInsert: { model.copyRowsAsInsert($0) }
                 )
-                .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
+                .overlay { LoadingVeil(isVisible: model.browseResult.isVeiled) }
 
                 CellInspector(cell: model.inspectedCell(in: model.browseResult), editing: model)
             }
@@ -1006,7 +1006,7 @@ struct RecordPane: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(Theme.background.color)
-        .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
+        .overlay { LoadingVeil(isVisible: model.browseResult.isVeiled) }
         // The arrow keys move between rows, which is what the grid they replaced
         // did with them. `focusable` is what makes them arrive at all: without it
         // the pane is a stack of buttons and the key goes to whichever one was
