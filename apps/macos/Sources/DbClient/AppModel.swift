@@ -1371,6 +1371,86 @@ final class AppModel {
     /// against a query result should not have to reopen it on the way across.
     var isValueViewerOpen = false
 
+    // MARK: - The record view
+
+    /// Whether the Content pane is listing one row instead of drawing the grid.
+    ///
+    /// Window state, like the value viewer's and for a stronger reason: somebody
+    /// who reads a sixty-column table this way reads every table this way, and
+    /// being put back into the grid on each selection would be the application
+    /// arguing with them about it.
+    var isRecordViewOpen = false
+
+    /// Whether there is a row for the record view to lay out.
+    ///
+    /// The Content tab only: the Query pane's rows belong to no one relation, so
+    /// a field listed there could not be written back through anything.
+    var canShowRecord: Bool {
+        activeTab == .content && selected != nil && browseRowCount > 0
+    }
+
+    /// Which row the record view is on, counted from one, and how many there are.
+    /// Nil where there is no row — which is what keeps the header from reading
+    /// "Row 1 of 0".
+    var recordPosition: (row: Int, of: Int)? {
+        guard canShowRecord,
+            let row = Record.row(browseSelection?.row ?? 0, steppedBy: 0, rowCount: browseRowCount)
+        else { return nil }
+        return (row + 1, browseRowCount)
+    }
+
+    /// The selected row's columns, in the order the grid draws them.
+    ///
+    /// Read from the same place the grid reads: the row is the cursor's, the
+    /// hidden columns are the grid's, and each value comes through `cell(at:in:)`
+    /// — so this is the row on screen described differently, not a second
+    /// reading of the result that could drift from it.
+    var recordFields: [RecordField] {
+        guard canShowRecord,
+            let row = Record.row(browseSelection?.row ?? 0, steppedBy: 0, rowCount: browseRowCount)
+        else { return [] }
+        let grid = browseResult.table
+        return Record.fields(count: grid.columns.count, hidden: hiddenBrowseColumns) { column in
+            guard let cell = cell(at: GridSelection(row: row, column: column), in: browseResult)
+            else { return nil }
+            return RecordField(
+                column: column, name: cell.column, type: cell.type, value: cell.value,
+                isNull: cell.isNull)
+        }
+    }
+
+    /// Moves to another row, and takes the grid's cursor with it.
+    ///
+    /// There is one cursor in this window. The record view is another way of
+    /// drawing the selection rather than a second selection — which is what
+    /// keeps Save, the inspector strip and the value field all talking about the
+    /// row the list was showing once it is closed again.
+    ///
+    /// The anchor is dropped, because a range that was extended across rows in
+    /// the grid has no meaning in a view that shows one row at a time.
+    func stepRecord(by delta: Int) {
+        guard canShowRecord,
+            let row = Record.row(
+                browseSelection?.row ?? 0, steppedBy: delta, rowCount: browseRowCount)
+        else { return }
+        var selection = browseSelection ?? GridSelection(row: row, column: 0)
+        selection.row = row
+        selection.anchor = nil
+        browseSelection = selection
+    }
+
+    /// Puts the cursor on a field, which is what the value editor writes through.
+    ///
+    /// Column 0 rather than the field's own column where there is no selection
+    /// yet is not a case worth writing: a list with a field in it has a row, and
+    /// a row means a cursor.
+    func focusRecordField(_ column: Int) {
+        guard canShowRecord, var selection = browseSelection else { return }
+        selection.column = column
+        selection.anchor = nil
+        browseSelection = selection
+    }
+
     /// Whether there is a value for the viewer to show. Drives the menu item's
     /// enabled state, so the command is never offered when pressing it would
     /// open a pane with nothing in it.
@@ -1406,8 +1486,19 @@ final class AppModel {
     }
 
     func inspectedCell(in result: ResultSet) -> InspectedCell? {
-        let grid = result.table
         guard let s = selectedCell(in: result) else { return nil }
+        return cell(at: s, in: result)
+    }
+
+    /// The same, for a cell named rather than selected.
+    ///
+    /// Split out for the record view, which describes every column of one row
+    /// where the strip describes one cell of it. Both arrive here, so a value
+    /// read down the page and the same value read across the grid cannot end up
+    /// disagreeing about NULL, about a binary blob, or about a row that has not
+    /// been sent to the server yet.
+    private func cell(at s: GridSelection, in result: ResultSet) -> InspectedCell? {
+        let grid = result.table
         if result === browseResult, isDraft(row: s.row) { return draftCell(at: s) }
         let name = grid.columns[s.column].name
         let isNull = grid.isNull(row: s.row, column: s.column)

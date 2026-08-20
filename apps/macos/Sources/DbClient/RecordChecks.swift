@@ -5,6 +5,15 @@ import Foundation
 /// Behind a flag on the binary for the reason `SQLScriptChecks` gives: the
 /// package declares one executable target and it links the Rust staticlib, so a
 /// test target would have to reproduce that link.
+///
+/// One clause of `canShowRecord` is **not** checked here and cannot be: that the
+/// record view is offered on the Content tab and nowhere else. Proving it needs
+/// a model whose other two conditions hold — a relation selected and rows under
+/// it — which needs an Arrow table, which needs a server. A check written
+/// against a model with no connection passes whether the clause is there or not,
+/// which is worse than no check: it reads as coverage. Deleting the clause from
+/// `canShowRecord` must fail something, and the only thing it can fail is
+/// somebody opening the Query tab and looking.
 enum RecordChecks {
     private static var failures = 0
 
@@ -15,6 +24,10 @@ enum RecordChecks {
         checkSteppingStopsAtEitherEndRatherThanWrapping()
         checkACursorLeftOverFromABiggerResultLandsSomewhereReal()
         checkAResultWithNoRowsHasNowhereToStep()
+        MainActor.assumeIsolated {
+            checkAWindowWithNoTableOpenHasNoRecordToShow()
+            checkMovingAroundAnEmptyRecordChangesNothing()
+        }
         if failures == 0 {
             fputs("record: all checks passed\n", stderr)
         } else {
@@ -80,7 +93,57 @@ enum RecordChecks {
         expect(Record.row(0, steppedBy: 1, rowCount: 0) == nil, true, "stepping does not make one")
     }
 
+    // MARK: - What the window offers
+
+    /// With nothing browsed there is no row, so the view is not offered and the
+    /// list is empty rather than a list of columns with nothing under them.
+    @MainActor private static func checkAWindowWithNoTableOpenHasNoRecordToShow() {
+        guard let model = makeModel() else { return }
+        expect(model.canShowRecord, false, "nothing is selected, so there is nothing to lay out")
+        expect(model.recordFields.isEmpty, true, "and no fields to list")
+        expect(model.recordPosition == nil, true, "and no position to print")
+    }
+
+    /// Moving around a record that is not there does nothing at all, rather than
+    /// putting the cursor somewhere the result does not go.
+    @MainActor private static func checkMovingAroundAnEmptyRecordChangesNothing() {
+        guard let model = makeModel() else { return }
+        model.stepRecord(by: 1)
+        expect(model.browseSelection == nil, true, "stepping did not invent a cursor")
+        model.focusRecordField(3)
+        expect(model.browseSelection == nil, true, "and neither did focusing a field")
+    }
+
     // MARK: - Fixture
+
+    /// A model on scratch stores throughout, with the config redirected.
+    ///
+    /// The redirect is not optional: without it the model reads the user's saved
+    /// connections and asks the Keychain for the first one's password, which in
+    /// a process with no GUI session blocks forever — so the symptom is not a
+    /// failed check but a `make test-swift` that never returns.
+    @MainActor private static func makeModel() -> AppModel? {
+        guard let directory = scratchDirectory() else { return nil }
+        setenv("XDG_CONFIG_HOME", directory.path, 1)
+        let suite = { UserDefaults(suiteName: "dev.dbclient.verify-record.\(UUID())")! }
+        return AppModel(
+            history: QueryHistory(defaults: suite()),
+            favorites: QueryFavorites(defaults: suite()),
+            preferences: Preferences(store: suite()))
+    }
+
+    private static func scratchDirectory() -> URL? {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-verify-record-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            failures += 1
+            fputs("record FAIL: a scratch directory could be made: \(error)\n", stderr)
+            return nil
+        }
+        return root
+    }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
         guard got != want else { return }
