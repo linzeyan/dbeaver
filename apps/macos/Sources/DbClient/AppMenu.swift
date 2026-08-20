@@ -26,6 +26,8 @@ enum AppMenu {
     private static var navigatorCommand: NavigatorCommand?
     private static var goToCommand: GoToCommand?
     private static var historyNavCommand: HistoryCommand?
+    /// Target of the View menu's record item, held for the same reason.
+    private static var recordCommand: RecordCommand?
     /// Target of the View menu's three pane items, held for the same reason.
     private static var tabCommand: TabCommand?
     /// Target of the Query menu's items, held for the same reason.
@@ -61,6 +63,8 @@ enum AppMenu {
         navigatorCommand = navigator
         let goTo = GoToCommand(model: model)
         goToCommand = goTo
+        let record = RecordCommand(model: model)
+        recordCommand = record
         let historyNav = HistoryCommand(model: model)
         historyNavCommand = historyNav
         let tabs = TabCommand(model: model)
@@ -84,7 +88,7 @@ enum AppMenu {
         main.addItem(
             viewMenu(
                 target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs,
-                goTo: goTo, historyNav: historyNav))
+                goTo: goTo, historyNav: historyNav, record: record))
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
@@ -315,7 +319,7 @@ enum AppMenu {
     /// second thing a menu item can do that a bare shortcut cannot.
     private static func viewMenu(
         target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand,
-        tabs: TabCommand, goTo: GoToCommand, historyNav: HistoryCommand
+        tabs: TabCommand, goTo: GoToCommand, historyNav: HistoryCommand, record: RecordCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
@@ -375,6 +379,22 @@ enum AppMenu {
             action: #selector(ValueViewerCommand.toggleValueViewer(_:)), keyEquivalent: "v")
         value.keyEquivalentModifierMask = [.command, .option]
         value.target = valueViewer
+
+        // ⌃⌘R, and not the ⌥⌘R this was planned with: ⌥⌘R is Run Script, ⇧⌘R is
+        // Refresh and ⌘R is Run, so every modified R in this application is
+        // already spoken for. The letter is kept because it is the one somebody
+        // reaches for — "record" — and ⌃⌘ is the one combination free of both
+        // this window and the system's own bindings.
+        //
+        // Beside Show Value in Full because the two are the same errand at
+        // different sizes: one value too wide for its cell, or one row too wide
+        // for the window. Titled for the state it is not in; `validateMenuItem`
+        // rewrites it.
+        let recordItem = menu.addItem(
+            withTitle: "Show as Record",
+            action: #selector(RecordCommand.toggleRecordView(_:)), keyEquivalent: "r")
+        recordItem.keyEquivalentModifierMask = [.command, .control]
+        recordItem.target = record
 
         item.submenu = menu
         return item
@@ -835,6 +855,33 @@ final class TransactionCommands: NSObject, NSMenuItemValidation {
 
 /// The File menu's export items, as something a menu can send to.
 ///
+/// Swapping the grid for one row read down the page.
+///
+/// An `NSObject` for the reason every command object here is one: a menu action
+/// and `validateMenuItem` both need one, and `AppModel` is `@Observable` and
+/// cannot be.
+@MainActor
+final class RecordCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func toggleRecordView(_ sender: Any?) {
+        model.isRecordViewOpen.toggle()
+    }
+
+    /// Offered only where there is a row to lay out, and titled for what
+    /// pressing it does rather than for the state the window is in — which is
+    /// what the value viewer's item beside it does with the same problem.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.title = model.isRecordViewOpen ? "Show as Grid" : "Show as Record"
+        return model.canShowRecord
+    }
+}
+
 /// An `NSObject` because that is what a menu action and `validateMenuItem` need;
 /// `AppModel` is an `@Observable` class and cannot be one. It holds the model
 /// rather than reaching for a global, so there is exactly one place the menu
