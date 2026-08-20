@@ -12,6 +12,7 @@ use dbconn::{
     RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use dbedit::Edits;
+use std::collections::HashMap;
 
 /// One column of one table: name, declared type, whether it is in the primary
 /// key, whether it can be null.
@@ -716,6 +717,127 @@ async fn filtered(json: &str) -> String {
     dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
         .await
         .expect("the clause should be writable")
+}
+
+/// Each column is offered the operators its declared type can answer, and no
+/// others.
+#[tokio::test]
+async fn a_column_is_offered_what_its_type_can_answer() {
+    let columns = offered(&dbsql::POSTGRES).await;
+    // A number is ordered and is not text: comparisons and a range, no LIKE.
+    assert_eq!(
+        columns["qty"],
+        vec![
+            "equals",
+            "not_equals",
+            "is_null",
+            "is_not_null",
+            "less_than",
+            "less_or_equal",
+            "greater_than",
+            "greater_or_equal",
+            "between"
+        ]
+    );
+    // Text is ordered and is text, so it gets everything.
+    assert_eq!(
+        columns["sku"],
+        vec![
+            "equals",
+            "not_equals",
+            "is_null",
+            "is_not_null",
+            "less_than",
+            "less_or_equal",
+            "greater_than",
+            "greater_or_equal",
+            "between",
+            "contains",
+            "starts_with",
+            "ends_with"
+        ]
+    );
+    // A timestamp is ordered, which is what makes the commonest filter anybody
+    // writes available on the column they write it about.
+    assert!(columns["shipped_at"].contains(&"between".to_string()));
+    assert!(!columns["shipped_at"].contains(&"contains".to_string()));
+}
+
+/// A database that cannot be told how to escape a wildcard is not offered the
+/// operators that need one, even on a text column.
+#[tokio::test]
+async fn a_dialect_with_no_escape_clause_is_offered_no_like_operators() {
+    let columns = offered(&dbsql::CLICKHOUSE).await;
+    assert!(!columns["sku"].contains(&"contains".to_string()));
+    // The orderings are untouched: it is the escape clause that is missing, not
+    // the column's order.
+    assert!(columns["sku"].contains(&"between".to_string()));
+}
+
+/// Everything a column is offered can actually be written against it.
+///
+/// This is the case the pair exists for. The popup and the compiler are two
+/// lists that have to agree, and the way they stop agreeing is silent: an
+/// operator offered on a column `clause` refuses is a row the user fills in and
+/// an error when they press Apply.
+#[tokio::test]
+async fn every_operator_offered_for_a_column_can_be_written_against_it() {
+    let columns = dbedit::filter_columns(&Fake, &dbsql::POSTGRES, "public", "lines")
+        .await
+        .expect("the columns should be readable");
+    for column in columns {
+        // A numeric column refuses text, which is `literal`'s rule and not this
+        // one's — so the probe value has to be of the column's own type.
+        let value =
+            if column.data_type.starts_with("int") || column.data_type.starts_with("numeric") {
+                "1"
+            } else {
+                "a"
+            };
+        for op in &column.operators {
+            let filter = dbedit::RowFilter {
+                schema: "public".to_string(),
+                relation: "lines".to_string(),
+                rules: vec![dbedit::FilterRule {
+                    column: column.name.clone(),
+                    op: *op,
+                    value: Some(value.to_string()),
+                    second: Some(value.to_string()),
+                }],
+            };
+            dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{} is offered {op:?} and cannot be written: {e}",
+                        column.name
+                    )
+                });
+        }
+    }
+}
+
+/// `lines`' columns, each mapped to the operator names it is offered.
+async fn offered(dialect: &'static dbsql::Dialect) -> HashMap<String, Vec<String>> {
+    dbedit::filter_columns(&Fake, dialect, "public", "lines")
+        .await
+        .expect("the columns should be readable")
+        .into_iter()
+        .map(|column| {
+            let names = column
+                .operators
+                .iter()
+                .map(|op| {
+                    serde_json::to_value(op)
+                        .expect("an operator should serialise")
+                        .as_str()
+                        .expect("as a string")
+                        .to_string()
+                })
+                .collect();
+            (column.name, names)
+        })
+        .collect()
 }
 
 /// One `WHERE` clause, from the JSON the filter rows send.

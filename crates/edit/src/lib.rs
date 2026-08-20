@@ -158,7 +158,11 @@ pub struct CellFilter {
 ///
 /// That division is a fact about what a caller offers, not about what is
 /// compiled here — every variant below becomes a predicate by the same route.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+// `Serialize` as well as `Deserialize`, and with one `rename_all` governing
+// both: the front end sends these names back in the rules it composes, so the
+// spelling it is offered and the spelling it is understood by have to be one
+// spelling. Two derives with two attributes would be two chances to rename one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterOp {
     Equals,
@@ -259,6 +263,82 @@ pub async fn filter_clause(
         )?);
     }
     Ok(parts.join(" AND "))
+}
+
+/// One column of a relation, and the questions worth asking of it.
+#[derive(Debug, Serialize)]
+pub struct FilterColumn {
+    pub name: String,
+    /// The type as the server declared it, so the row can print it beside the
+    /// name — which is what makes an operator list that is shorter than the next
+    /// column's read as a consequence rather than as a bug.
+    pub data_type: String,
+    pub operators: Vec<FilterOp>,
+}
+
+/// What each of `relation`'s columns may be filtered by.
+///
+/// Asked of this crate rather than worked out in the front end for the reason
+/// `filter_clause` is: the two facts that decide it — what a declared type holds,
+/// and whether this dialect can be told how to escape a `LIKE` — are both here,
+/// and a front end that decided for itself would be a second copy of them that
+/// disagrees the day either is corrected.
+pub async fn filter_columns(
+    driver: &dyn Driver,
+    dialect: &'static Dialect,
+    schema: &str,
+    relation: &str,
+) -> DbResult<Vec<FilterColumn>> {
+    let columns = driver.columns(schema, relation).await?;
+    Ok(columns
+        .into_iter()
+        .map(|column| FilterColumn {
+            operators: operators(dialect, &column.data_type),
+            name: column.name,
+            data_type: column.data_type,
+        })
+        .collect())
+}
+
+/// The operators worth offering over a column of this type.
+///
+/// Three groups. The four that ask about equality and NULL are asked of
+/// anything: every database here compares any type for equality, and every
+/// column can be null or not.
+///
+/// The orderings and the range need a type with an order. Numbers, dates and
+/// text all have one; `json`, a blob and anything this build cannot classify do
+/// not, and offering `<` there produces a statement the server refuses. An
+/// unrecognised spelling therefore falls to the four, which is the same
+/// safe-way-round `numeric` takes: the cost is an operator missing from a popup,
+/// and the alternative cost is a filter that errors.
+///
+/// `LIKE` needs text *and* a dialect that takes an `ESCAPE` clause. Both halves
+/// are load-bearing — `LIKE` against an integer is an error on PostgreSQL, and
+/// on ClickHouse there is no clause to make the user's own `%` mean a per cent
+/// with. This is the one place either fact reaches a popup, so a column that
+/// cannot be asked simply is not offered it.
+fn operators(dialect: &Dialect, data_type: &str) -> Vec<FilterOp> {
+    let mut out = vec![
+        FilterOp::Equals,
+        FilterOp::NotEquals,
+        FilterOp::IsNull,
+        FilterOp::IsNotNull,
+    ];
+    let text = textual(data_type);
+    if numeric(data_type) || temporal(data_type) || text {
+        out.extend([
+            FilterOp::LessThan,
+            FilterOp::LessOrEqual,
+            FilterOp::GreaterThan,
+            FilterOp::GreaterOrEqual,
+            FilterOp::Between,
+        ]);
+    }
+    if text && dialect.like_escape.is_some() {
+        out.extend([FilterOp::Contains, FilterOp::StartsWith, FilterOp::EndsWith]);
+    }
+    out
 }
 
 /// The column `name` names, or a sentence saying which relation does not have
@@ -793,11 +873,82 @@ fn numeric(data_type: &str) -> bool {
         "decimal",
         "dec",
     ];
-    let named = data_type
+    NUMERIC.contains(&type_name(data_type).as_str())
+}
+
+/// Whether a column's declared type holds a point in time.
+///
+/// Read the same way `numeric` reads its list, and for the same reason: the
+/// spellings are six databases' and not one language's. What this decides is
+/// whether the orderings and the range are offered — a date column where they
+/// were not would be the commonest filter anybody writes, missing.
+///
+/// `interval` is deliberately absent. It is a length of time rather than a point
+/// in one, and comparing it against a typed date is a question with no answer.
+fn temporal(data_type: &str) -> bool {
+    const TEMPORAL: &[&str] = &[
+        "date",
+        "time",
+        "timetz",
+        "timestamp",
+        "timestamptz",
+        "datetime",
+        "datetime2",
+        "smalldatetime",
+        "datetimeoffset",
+        "year",
+    ];
+    TEMPORAL.contains(&type_name(data_type).as_str())
+}
+
+/// Whether a column's declared type holds characters.
+///
+/// This is the one that decides whether `LIKE` is offered, so a spelling missing
+/// from the list costs the three operators most worth having on the column most
+/// likely to want them. Missing is still the safe way round: the alternative is
+/// offering `LIKE` against a `json` or a blob, which is an error at the server.
+///
+/// `json`, `jsonb` and `xml` are deliberately absent although every one of them
+/// holds characters. They are documents, several databases refuse `LIKE` over
+/// them without a cast, and a filter that needs a cast is not one this popup can
+/// write.
+///
+/// `uuid` is absent for the same reason, and it costs more: PostgreSQL will not
+/// take `LIKE` over one without a cast either, so the column somebody most wants
+/// to search by a prefix is the one that cannot be. It also loses the orderings,
+/// which this list gates as well and which a `uuid` would accept — that is the
+/// price of one list answering both questions, and it is the cheaper mistake.
+fn textual(data_type: &str) -> bool {
+    const TEXTUAL: &[&str] = &[
+        "text",
+        "varchar",
+        "varchar2",
+        "char",
+        "bpchar",
+        "character",
+        "nvarchar",
+        "nchar",
+        "ntext",
+        "string",
+        "citext",
+        "tinytext",
+        "mediumtext",
+        "longtext",
+        "clob",
+    ];
+    TEXTUAL.contains(&type_name(data_type).as_str())
+}
+
+/// A declared type's name, up to its first `(` or space, folded down.
+///
+/// One reading for all three questions above. `numeric(18, 4)`, `tinyint(1)` and
+/// `bigint unsigned` are the types they say they are, and `interval` does not
+/// become an integer for starting with the same three letters.
+fn type_name(data_type: &str) -> String {
+    data_type
         .trim()
         .split(['(', ' '])
         .next()
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    NUMERIC.contains(&named.as_str())
+        .to_ascii_lowercase()
 }
