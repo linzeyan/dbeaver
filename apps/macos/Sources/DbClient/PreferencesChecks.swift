@@ -60,6 +60,7 @@ enum PreferencesChecks {
         expect(fresh.confirmsDeletions, true, "Save asks before it sends deletions")
         expect(fresh.insertsRowOfDefaults, false, "an empty new row is refused here, by name")
         expect(fresh.usesTranslucentSidebar, false, "the sidebar is opaque, showing only itself")
+        expect(fresh.remembersPasswords, false, "no password is kept until somebody asks for it")
         expect(
             fresh.connectionStorage, .thisMac, "the remembered connection does not leave the Mac")
     }
@@ -79,6 +80,7 @@ enum PreferencesChecks {
         first.confirmsDeletions = false
         first.insertsRowOfDefaults = true
         first.usesTranslucentSidebar = true
+        first.remembersPasswords = true
         first.connectionStorage = .iCloud
 
         // A second reader over the same store, which is what the next launch is.
@@ -87,6 +89,7 @@ enum PreferencesChecks {
         expect(second.confirmsDeletions, false, "the confirmation being off was kept")
         expect(second.insertsRowOfDefaults, true, "sending a row of defaults was kept")
         expect(second.usesTranslucentSidebar, true, "the translucent sidebar was kept")
+        expect(second.remembersPasswords, true, "remembering passwords was kept")
         expect(second.connectionStorage, .iCloud, "keeping connections in iCloud was kept")
     }
 

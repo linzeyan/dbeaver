@@ -89,11 +89,28 @@ final class Preferences {
         didSet { store.set(connectionStorage.rawValue, forKey: Key.connectionStorage) }
     }
 
+    /// Whether database passwords are kept in the login Keychain.
+    ///
+    /// Off. Reading a stored secret makes macOS ask the user to authorise it,
+    /// and this build is signed ad-hoc — the signature changes on every rebuild,
+    /// so the system treats each build as a different application and "Always
+    /// Allow" never holds. Until the app is signed with a stable identity that
+    /// panel is the ordinary experience rather than the exception, and that is
+    /// not a thing to turn on for somebody without asking.
+    ///
+    /// Off means nothing is written either. A switch that stopped reading but
+    /// kept storing would leave secrets on disk for a feature its owner had
+    /// declined.
+    var remembersPasswords: Bool {
+        didSet { store.set(remembersPasswords, forKey: Key.remembersPasswords) }
+    }
+
     /// What a fresh installation does. The only statement of these values.
     private static let registered: [String: Any] = [
         Key.hidesEmptyColumns: false,
         Key.confirmsDeletions: true,
         Key.insertsRowOfDefaults: false,
+        Key.remembersPasswords: false,
         Key.usesTranslucentSidebar: false,
         Key.connectionStorage: ConnectionStorage.thisMac.rawValue
     ]
@@ -104,6 +121,7 @@ final class Preferences {
         static let insertsRowOfDefaults = "dev.dbclient.insertsRowOfDefaults"
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
         static let connectionStorage = "dev.dbclient.connectionStorage"
+        static let remembersPasswords = "dev.dbclient.remembersPasswords"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -134,6 +152,7 @@ final class Preferences {
         confirmsDeletions = store.bool(forKey: Key.confirmsDeletions)
         insertsRowOfDefaults = store.bool(forKey: Key.insertsRowOfDefaults)
         usesTranslucentSidebar = store.bool(forKey: Key.usesTranslucentSidebar)
+        remembersPasswords = store.bool(forKey: Key.remembersPasswords)
         connectionStorage = Self.connectionStorage(in: store)
     }
 }
