@@ -479,8 +479,7 @@ final class AppModel {
         connections = ConnectionList(ConnectionStore.load(from: preferences.connectionStorage))
         if let first = connections.connections.first {
             connectionDraft = first
-            savedConnectionPassword = ConnectionKeychain.password(for: first.id) ?? ""
-            connectionPassword = savedConnectionPassword
+            deferPassword(of: first.id)
         }
         if let initialSQL { queryText = initialSQL }
         // `--caret` is the only way to put the caret anywhere but the start
@@ -529,7 +528,27 @@ final class AppModel {
     /// Kept because the password is the one field `unsavedEdits` cannot compare for
     /// itself — it is not in the value, and it never leaves the Keychain — so this
     /// is the window's own answer to "is the one on screen the one that was saved".
+    ///
+    /// Empty while `deferredPassword` is set, because nothing has been read yet.
     private var savedConnectionPassword = ""
+
+    /// The connection whose stored password has deliberately not been read.
+    ///
+    /// Reading a secret is what raises the system panel asking the user to
+    /// authorise it, and an ad-hoc-signed build is asked again after every
+    /// rebuild. Opening a window is not a reason to ask: the read waits until
+    /// something needs the secret, which is connecting.
+    ///
+    /// Nil once the read has happened, and nil where nothing was stored — both
+    /// mean `connectionPassword` can be believed as it stands.
+    private var deferredPassword: UUID?
+
+    /// Whether the form is showing a password it has not read.
+    ///
+    /// The field is empty in that state, and an empty password field otherwise
+    /// says "none saved". This is what the placeholder needs in order not to say
+    /// something untrue.
+    var hasUnreadPassword: Bool { deferredPassword != nil }
 
     /// Quick connect's draft, while a saved connection is the one on screen.
     ///
@@ -597,7 +616,13 @@ final class AppModel {
     var unsavedConnectionEdits: UnsavedConnectionEdits? {
         guard let saved = editedConnection else { return nil }
         return saved.unsavedEdits(
-            against: connectionDraft, passwordChanged: connectionPassword != savedConnectionPassword
+            against: connectionDraft,
+            // A password that has not been read cannot have been edited, so
+            // anything in the field is something just typed — and an empty field
+            // is the state it was left in, not a change to nothing.
+            passwordChanged: hasUnreadPassword
+                ? !connectionPassword.isEmpty
+                : connectionPassword != savedConnectionPassword
         )
     }
 
@@ -679,13 +704,38 @@ final class AppModel {
             connectionDraft = quickConnectDraft
             connectionPassword = quickConnectPassword
             savedConnectionPassword = ""
+            deferredPassword = nil
             return
         }
         connectionDraft = saved
+        // Clicking a row is looking, not connecting. Somebody checking which port
+        // they wrote down should not be made to authorise a Keychain read.
+        deferPassword(of: id)
+    }
+
+    /// Arranges for a connection's password to be read when it is wanted.
+    ///
+    /// Asks whether there is one, which costs a Keychain lookup but no panel, so
+    /// that the form can tell "no password saved" from "one saved, not read".
+    private func deferPassword(of id: UUID) {
+        connectionPassword = ""
+        savedConnectionPassword = ""
+        deferredPassword = ConnectionKeychain.hasPassword(for: id) ? id : nil
+    }
+
+    /// Reads the deferred password, if there is one.
+    ///
+    /// This is the call that may raise the system's permission panel, so it has
+    /// exactly one caller: the moment somebody asks to connect. Anything else
+    /// calling it would put the panel back in front of a person who had not
+    /// asked for anything needing a secret.
+    private func readDeferredPassword() {
+        guard let id = deferredPassword else { return }
         // An empty field rather than an error when the Keychain refuses — see
         // `ConnectionKeychain` for when that happens and why it is survivable.
         savedConnectionPassword = ConnectionKeychain.password(for: id) ?? ""
         connectionPassword = savedConnectionPassword
+        deferredPassword = nil
     }
 
     /// Empties Quick connect and shows it, for the sidebar's `+`.
@@ -696,6 +746,7 @@ final class AppModel {
         connectionDraft = quickConnectDraft
         connectionPassword = ""
         savedConnectionPassword = ""
+        deferredPassword = nil
     }
 
     /// Writes the form to the file, and its password to the Keychain.
@@ -708,8 +759,15 @@ final class AppModel {
         let wasQuickConnect = editedConnection == nil
         connections.save(connectionDraft)
         ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
-        ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
-        savedConnectionPassword = connectionPassword
+        // A password left unread is left alone. Writing the empty field over it
+        // would delete somebody's stored password because they saved a change to
+        // the port — and `ConnectionKeychain.save` treats empty as "store
+        // nothing", so the deletion would be silent and total.
+        if !hasUnreadPassword || !connectionPassword.isEmpty {
+            ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
+            savedConnectionPassword = connectionPassword
+            deferredPassword = nil
+        }
         // The draft became a row and stays selected, so Quick connect goes back to
         // being empty rather than a second copy of what was just saved.
         if wasQuickConnect {
@@ -722,7 +780,9 @@ final class AppModel {
     func revertConnection() {
         guard let saved = editedConnection else { return }
         connectionDraft = saved
-        connectionPassword = savedConnectionPassword
+        // Back to unread, rather than reading in order to restore. Revert undoes
+        // what was typed, and what was typed over was an empty field.
+        connectionPassword = hasUnreadPassword ? "" : savedConnectionPassword
     }
 
     /// Forgets the connection the form is showing, once its owner says so.
@@ -737,6 +797,7 @@ final class AppModel {
         connectionDraft = quickConnectDraft
         connectionPassword = quickConnectPassword
         savedConnectionPassword = ""
+        deferredPassword = nil
     }
 
     /// Settles edits before the form shows something else. False when the person
@@ -769,6 +830,9 @@ final class AppModel {
     /// mark, which is where that fact belongs.
     func connectFromForm() {
         guard canConnect else { return }
+        // The one moment the secret is actually needed, and so the one moment
+        // worth asking the user to authorise reading it.
+        readDeferredPassword()
         open(connectionDraft.settings.connectionString(password: connectionPassword))
     }
 
@@ -785,6 +849,7 @@ final class AppModel {
             settings: ConnectionSettings(connectionString: connString))
         connectionPassword = ConnectionURL.password(in: connString) ?? ""
         savedConnectionPassword = ""
+        deferredPassword = nil
         open(connString)
     }
 

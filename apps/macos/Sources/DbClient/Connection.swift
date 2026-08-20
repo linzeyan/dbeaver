@@ -486,6 +486,21 @@ enum ConnectionKeychain {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Whether a password is stored for this connection, without reading it.
+    ///
+    /// Attributes only, and that is the whole point: the Keychain consults an
+    /// item's access control when the secret itself is asked for, not when its
+    /// attributes are listed. So this answers "is there one?" without raising
+    /// the panel that asks the user to authorise a read — which is what lets the
+    /// form say a password is saved without having to look at it.
+    static func hasPassword(for id: UUID, synchronised: Bool = false) -> Bool {
+        var query = item(for: id, synchronised: synchronised)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var found: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &found) == errSecSuccess
+    }
+
     /// Deletes and adds rather than updating in place. `SecItemUpdate` needs
     /// access to the existing item and so hits the signature problem above;
     /// deleting one does not, and the add that follows leaves the item readable
