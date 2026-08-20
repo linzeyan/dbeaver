@@ -2114,7 +2114,7 @@ struct CellInspector: View {
                         offer.isEditable ? Theme.textSecondary.color : Theme.textTertiary.color
                     )
                     .disabled(!offer.isEditable)
-                    .help(offer.refusal ?? "Edit this value")
+                    .help(offer.refusal ?? "Edit this value in a box")
                     .accessibilityLabel("Edit cell value")
                 }
 

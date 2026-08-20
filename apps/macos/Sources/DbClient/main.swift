@@ -739,7 +739,18 @@ func openValueViewer(model: AppModel, on spec: String) {
                 row: min(max(0, row - 1), result.rowCount - 1), column: index)
             openViewerThroughMenu()
             fputs("cell selected   \(column) (column \(index)) row \(row)\n", stderr)
-            if editValue { openEditor() }
+            if editValue {
+                // A turn later than the selection above, deliberately. Setting
+                // the selection is what makes the inspector's `onChange` fire,
+                // and that is what ends an edit begun over a different cell;
+                // opening the box in the same turn has it closed again before
+                // it is ever drawn. Measured rather than reasoned about: the
+                // first capture taken with this flag came back showing the
+                // reading pane, twice, and came back showing the box with this.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    MainActor.assumeIsolated { openEditor() }
+                }
+            }
             return
         }
         if CFAbsoluteTimeGetCurrent() > deadline {
