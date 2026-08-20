@@ -2515,6 +2515,19 @@ struct StatusBar: View {
 
     var body: some View {
         HStack(spacing: Theme.Space.sm) {
+            // Which database this is, at the end of the window the eye rests on
+            // when the grid is full width. The toolbar chip carries the same
+            // name, and that is the point: the chip is at the far corner, and a
+            // status line that describes a result without saying whose result
+            // it is has left the most expensive mistake unmarked.
+            Text(model.connectionLabel)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textTertiary.color)
+                .lineLimit(1)
+            Rectangle()
+                .fill(Theme.separator.color)
+                .frame(width: 1, height: 10)
+
             // A truncated result is worth catching out of the corner of an eye,
             // not only on a careful read of the count.
             if model.current.capped && model.activeTab != .structure {

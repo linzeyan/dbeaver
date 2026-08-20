@@ -79,6 +79,14 @@ enum Theme {
     static let text = Tone(0xF8FA_FC)
     static let textSecondary = Tone(0x94A3_B8)
     static let textTertiary = Tone(0x7483_9A)
+    /// Muted text on the data surface: the type line under a column header,
+    /// the word NULL in a cell. Content someone reads, not chrome — it holds
+    /// 4.2:1 on the header band and 4.6:1 on the grid background, where the
+    /// tertiary label tone would fall to 3.1:1. (spec token: text.dataMuted)
+    static let textDataMuted = Tone(0x7C8A_A0)
+    /// Dimmer than NULL: the word DEFAULT in a draft row — what the table
+    /// will decide, not what the row holds. (spec token: text.dataFaint)
+    static let textDataFaint = Tone(0x6475_8B)
 
     // MARK: - Semantics
     //
@@ -133,7 +141,7 @@ enum Theme {
         /// on the header band where the name holds 5.7:1 — but deliberately not
         /// the tertiary label tone, which would fall to 3.1:1 there. A type is
         /// something the user came to read, not chrome.
-        static let headerType = Tone(0x7C8A_A0)
+        static let headerType = Theme.textDataMuted
         static let banding = Tone(0xFFFF_FF, alpha: 0.022)
         static let separator = Tone(0xFFFF_FF, alpha: 0.06)
         static let text = Tone(0xE2E8_F0)
@@ -141,7 +149,7 @@ enum Theme {
         /// 4.6:1 against the background rather than the 3.4:1 that incidental
         /// text gets away with. It is also drawn as the literal word, so the
         /// colour is a second signal rather than the only one.
-        static let nullText = Tone(0x7C8A_A0)
+        static let nullText = Theme.textDataMuted
         static let selectedRow = Theme.accent.opacity(0.18)
         static let selectedCell = Theme.accent.opacity(0.38)
         /// A cell holding a change that has not been sent. Amber rather than the
@@ -161,7 +169,7 @@ enum Theme {
         /// Dimmer than a value and dimmer than NULL, because unlike either of
         /// them it is not what the row will hold — it is what the table will
         /// decide.
-        static let defaultText = Tone(0x6475_8B)
+        static let defaultText = Theme.textDataFaint
         static let cursor = Theme.accent
         /// The scrollbar sits over the data rather than beside it, so the track
         /// is barely there and the thumb carries the whole signal.

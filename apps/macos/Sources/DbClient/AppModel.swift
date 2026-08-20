@@ -1434,15 +1434,25 @@ final class AppModel {
     /// Asks whether any schema holds something rather than whether any schema
     /// was found: a database of empty schemas reads as answered here but opens a
     /// palette with nothing in it.
-    var canGoTo: Bool { relations.values.contains { !$0.isEmpty } }
+    var canGoTo: Bool {
+        relations.values.contains { !$0.isEmpty } || !offeredFavorites.isEmpty
+    }
 
     /// Every relation this window has read, as the palette's targets.
     ///
     /// Built from the inventory already here rather than asked of the server:
     /// the palette is typed into at speed, and anything else would be a round
     /// trip per keystroke.
+    ///
+    /// The saved queries join them, unqualified: a favorite belongs to the
+    /// person rather than to a schema, so there is nothing to put in front of
+    /// its name — and the ones this connection is not offered are left out
+    /// here for the same reason the panel leaves them out.
     var goToTargets: [GoToTarget] {
         relations.values.flatMap { $0 }.map { GoToTarget(schema: $0.schema, name: $0.name) }
+            + offeredFavorites.map {
+                GoToTarget(schema: "", name: $0.name, kind: .favorite, sql: $0.sql)
+            }
     }
 
     /// Opens the relation the palette chose and shows its rows.
@@ -1458,6 +1468,14 @@ final class AppModel {
     /// offering the same stale row again.
     func goTo(_ target: GoToTarget) {
         isGoToOpen = false
+        // Through the one insertion path, which is what the history list and
+        // the favorites tab already use: appended to the buffer and selected,
+        // ready for the ⌘R after it. A second way in would be a second answer
+        // to where the caret ends up.
+        guard target.kind == .relation else {
+            insertIntoEditor(target.sql)
+            return
+        }
         guard let relation = relations[target.schema]?.first(where: { $0.name == target.name })
         else { return }
         activeTab = .content

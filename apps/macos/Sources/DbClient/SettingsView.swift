@@ -35,7 +35,8 @@ final class SettingsWindow {
         // open.
         let view = NSHostingView(
             rootView: SettingsView(
-                preferences: preferences, syncCaveat: ConnectionStore.syncCaveat()))
+                preferences: preferences, syncCaveat: ConnectionStore.syncCaveat(),
+                onPaneChange: { [weak self] in self?.fitToPane() }))
         // The window takes its height from the rows rather than a number written
         // here, so an explanation that wraps to a third line is not clipped.
         panel.setContentSize(view.fittingSize)
@@ -43,6 +44,23 @@ final class SettingsWindow {
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         window = panel
+    }
+
+    /// Re-takes the panel's height from the pane now showing.
+    ///
+    /// The panes are not the same height — Grid holds three settings and
+    /// Sidebar one — and a window sized once to the tallest of them would stand
+    /// two thirds empty on the others.
+    ///
+    /// Deferred by a turn of the run loop rather than measured on the spot: the
+    /// notice arrives from inside the SwiftUI update that is changing the pane,
+    /// and until that update has laid the new pane out the hosting view's
+    /// `fittingSize` still describes the pane being left.
+    private func fitToPane() {
+        DispatchQueue.main.async { [weak self] in
+            guard let window = self?.window, let view = window.contentView else { return }
+            window.setContentSize(view.fittingSize)
+        }
     }
 }
 
@@ -64,69 +82,156 @@ struct SettingsView: View {
     /// Standing under both answers rather than only under iCloud, for the same
     /// reason: it is a fact about the choice, not about the current pick.
     let syncCaveat: String?
+    /// Told when the switcher moves to another pane, so that the window can
+    /// take that pane's height.
+    ///
+    /// A closure out rather than a size read back in: the panel is the only
+    /// thing that knows how it is sized, and it already measures this view once
+    /// when it opens.
+    var onPaneChange: () -> Void = {}
+
+    /// Which pane is showing. Not remembered between openings: the panel is
+    /// opened to change one particular thing, and the pane it was last left on
+    /// is a worse guess at that thing than the first one is.
+    @State private var pane = SettingsPane.general
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.lg) {
-            SettingsToggle(
-                title: "Hide columns that are empty",
-                explanation:
-                    "A column that is null in every row fetched so far is left out of the "
-                    + "grid. The column is still in the result, so Copy and Export keep it. "
-                    + "Decided from the first few pages and then kept, so a value further "
-                    + "down than that will not bring the column back.",
-                isOn: $preferences.hidesEmptyColumns)
-
-            SettingsToggle(
-                title: "Confirm before deleting rows",
-                explanation:
-                    "Save asks before it sends the rows marked for deletion. Marked rows are "
-                    + "already struck through and counted beside Save, so this is a second "
-                    + "confirmation — for the press of Save that was about something else.",
-                isOn: $preferences.confirmsDeletions)
-
-            SettingsToggle(
-                title: "Insert a row of defaults for an empty new row",
-                explanation:
-                    "A new row nobody typed into is sent as the table's own defaults, in "
-                    + "whichever way this database spells that. Off, it is refused here and "
-                    + "the row is named. Databases with no spelling for it refuse either way.",
-                isOn: $preferences.insertsRowOfDefaults)
-
-            SettingsToggle(
-                title: "Translucent sidebar",
-                explanation:
-                    "The sidebar takes the system's translucency, which is what a Mac sidebar "
-                    + "usually looks like. It samples whatever the detail pane draws behind it, "
-                    + "so full-width bands on the right — the Structure tab's section strip — "
-                    + "show through the object tree as a stripe at their own height.",
-                isOn: $preferences.usesTranslucentSidebar)
-
-            SettingsToggle(
-                title: "Remember passwords",
-                explanation:
-                    "A saved connection's password is kept in your login Keychain and filled in "
-                    + "when you connect. Off, because this build is signed ad-hoc: its signature "
-                    + "changes every time it is rebuilt, so macOS treats each build as a new "
-                    + "application and asks you to authorise the read again — Always Allow does "
-                    + "not hold. While this is off nothing is written to the Keychain and "
-                    + "nothing is read from it; type the password when you connect.",
-                isOn: $preferences.remembersPasswords)
-
-            SettingsChoice(
-                title: "Keep connections",
-                explanation:
-                    "The last connection that opened is remembered so the next launch does not "
-                    + "ask again. On this Mac, the fields are a JSON file under XDG_CONFIG_HOME — "
-                    + "~/.config/dbclient/connection.json — which you can read, edit and keep in "
-                    + "your dotfiles. In iCloud, that same file goes to iCloud Drive instead, so "
-                    + "another Mac signed in to the same Apple Account opens the same database. "
-                    + "The password is in your login Keychain either way, never in the file.",
-                caveat: syncCaveat,
-                selection: $preferences.connectionStorage)
+        VStack(spacing: 0) {
+            switcher
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                switch pane {
+                case .general: general
+                case .grid: grid
+                case .sidebar: sidebar
+                }
+            }
+            .padding(Theme.Space.xl)
+            .frame(width: 460, alignment: .leading)
         }
-        .padding(Theme.Space.xl)
-        .frame(width: 460, alignment: .leading)
+        .frame(width: 460)
         .background(Theme.background.color)
+        .onChange(of: pane) { onPaneChange() }
+    }
+
+    /// The pane switcher: a symbol over a name, one button per pane.
+    ///
+    /// Along the top rather than down the side, which is where a Mac has kept
+    /// its preference tabs for twenty years — and at 460 points a sidebar would
+    /// take a third of the width these explanations need.
+    private var switcher: some View {
+        HStack(spacing: Theme.Space.lg) {
+            ForEach(SettingsPane.allCases) { candidate in
+                Button {
+                    pane = candidate
+                } label: {
+                    VStack(spacing: Theme.Space.xs) {
+                        Image(systemName: candidate.symbol)
+                            .font(.system(size: 15))
+                        Text(candidate.rawValue)
+                            .font(Theme.Typography.caption)
+                    }
+                    .foregroundStyle(
+                        candidate == pane ? Theme.accent.color : Theme.textSecondary.color
+                    )
+                    .frame(width: 72)
+                    .padding(.vertical, Theme.Space.sm)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(candidate.rawValue) settings")
+                .accessibilityAddTraits(candidate == pane ? [.isSelected] : [])
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, Theme.Space.sm)
+    }
+
+    /// What the application keeps between launches, and where it keeps it.
+    @ViewBuilder private var general: some View {
+        SettingsChoice(
+            title: "Keep connections",
+            explanation:
+                "The last connection that opened is remembered so the next launch does not "
+                + "ask again. On this Mac, the fields are a JSON file under XDG_CONFIG_HOME — "
+                + "~/.config/dbclient/connection.json — which you can read, edit and keep in "
+                + "your dotfiles. In iCloud, that same file goes to iCloud Drive instead, so "
+                + "another Mac signed in to the same Apple Account opens the same database. "
+                + "The password is in your login Keychain either way, never in the file.",
+            caveat: syncCaveat,
+            selection: $preferences.connectionStorage)
+
+        SettingsToggle(
+            title: "Remember passwords",
+            explanation:
+                "A saved connection's password is kept in your login Keychain and filled in "
+                + "when you connect. Off, because this build is signed ad-hoc: its signature "
+                + "changes every time it is rebuilt, so macOS treats each build as a new "
+                + "application and asks you to authorise the read again — Always Allow does "
+                + "not hold. While this is off nothing is written to the Keychain and "
+                + "nothing is read from it; type the password when you connect.",
+            isOn: $preferences.remembersPasswords)
+    }
+
+    /// The data surface: what it leaves out, and what it asks before sending.
+    @ViewBuilder private var grid: some View {
+        SettingsToggle(
+            title: "Hide columns that are empty",
+            explanation:
+                "A column that is null in every row fetched so far is left out of the "
+                + "grid. The column is still in the result, so Copy and Export keep it. "
+                + "Decided from the first few pages and then kept, so a value further "
+                + "down than that will not bring the column back.",
+            isOn: $preferences.hidesEmptyColumns)
+
+        SettingsToggle(
+            title: "Confirm before deleting rows",
+            explanation:
+                "Save asks before it sends the rows marked for deletion. Marked rows are "
+                + "already struck through and counted beside Save, so this is a second "
+                + "confirmation — for the press of Save that was about something else.",
+            isOn: $preferences.confirmsDeletions)
+
+        SettingsToggle(
+            title: "Insert a row of defaults for an empty new row",
+            explanation:
+                "A new row nobody typed into is sent as the table's own defaults, in "
+                + "whichever way this database spells that. Off, it is refused here and "
+                + "the row is named. Databases with no spelling for it refuse either way.",
+            isOn: $preferences.insertsRowOfDefaults)
+    }
+
+    /// The object tree down the left of the window.
+    @ViewBuilder private var sidebar: some View {
+        SettingsToggle(
+            title: "Translucent sidebar",
+            explanation:
+                "The sidebar takes the system's translucency, which is what a Mac sidebar "
+                + "usually looks like. It samples whatever the detail pane draws behind it, "
+                + "so full-width bands on the right — the Structure tab's section strip — "
+                + "show through the object tree as a stripe at their own height.",
+            isOn: $preferences.usesTranslucentSidebar)
+    }
+}
+
+/// Which page of the Settings window is showing.
+///
+/// Three pages rather than one because six settings about four different parts
+/// of the window had accumulated in a single column, and a column of six
+/// checkboxes is read by nobody who came looking for one of them.
+enum SettingsPane: String, CaseIterable, Identifiable {
+    case general = "General"
+    case grid = "Grid"
+    case sidebar = "Sidebar"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .general: return "gearshape"
+        case .grid: return "tablecells"
+        case .sidebar: return "sidebar.left"
+        }
     }
 }
 

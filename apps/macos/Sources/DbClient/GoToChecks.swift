@@ -20,6 +20,8 @@ enum GoToChecks {
         checkNamesThatBeginWithItComeFirst()
         checkADotSeparatesSchemaFromName()
         checkMatchingIgnoresCase()
+        checkASavedQueryIsFoundByItsName()
+        checkATableOutranksASavedQueryOfTheSameName()
         if failures == 0 {
             fputs("goto: all checks passed\n", stderr)
         } else {
@@ -73,6 +75,24 @@ enum GoToChecks {
             "an upper-case needle finds lower-case names and the other way round")
     }
 
+    /// A saved query is reached by a substring of its name, exactly as a table
+    /// is. The palette is one list, and a second way of finding things in it
+    /// would be a second thing to remember.
+    private static func checkASavedQueryIsFoundByItsName() {
+        expect(
+            found("rollup", in: mixed), ["nightly rollup"],
+            "the saved query is in the same list as the tables")
+    }
+
+    /// A table beats a saved query of the same name at the same match strength,
+    /// and a merely containing match still comes after both.
+    private static func checkATableOutranksASavedQueryOfTheSameName() {
+        expect(
+            found("orders", in: mixed),
+            ["public.orders", "sales.orders", "orders", "public.customer_orders"],
+            "the two tables called orders come before the saved query of that name")
+    }
+
     // MARK: - Fixture
 
     /// Two schemas, a name held by both, a name containing another, and one
@@ -86,8 +106,19 @@ enum GoToChecks {
         GoToTarget(schema: "sales", name: "regions")
     ]
 
-    private static func found(_ needle: String) -> [String] {
-        GoTo.ranked(targets, matching: needle).map(\.qualified)
+    /// The same five tables with two saved queries among them: one named for a
+    /// table that exists, which is what the ordering has to separate, and one
+    /// named for nothing in the database at all.
+    private static let mixed =
+        targets + [
+            GoToTarget(schema: "", name: "orders", kind: .favorite, sql: "select * from orders"),
+            GoToTarget(
+                schema: "", name: "nightly rollup", kind: .favorite,
+                sql: "select date, sum(total) from orders group by 1")
+        ]
+
+    private static func found(_ needle: String, in list: [GoToTarget] = targets) -> [String] {
+        GoTo.ranked(list, matching: needle).map(\.qualified)
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
