@@ -1018,6 +1018,7 @@ final class AppModel {
         suggestedQueryText = ""
         querySelection = nil
         isValueViewerOpen = false
+        isEditingValue = false
         errorMessage = nil
         staged = StagedChanges()
         // The mode belonged to the connection being dropped, not to the window.
@@ -1763,6 +1764,57 @@ final class AppModel {
         } else {
             staged.updates[cell] = PendingValue(text: value)
         }
+    }
+
+    /// Whether the value pane is a box being typed into rather than a value
+    /// being read.
+    ///
+    /// On the model, where a mode nothing outside one view can start does not
+    /// obviously belong. It is here because otherwise it cannot be photographed:
+    /// every rendering defect this window has had was caught by a screenshot,
+    /// `--cell` exists so that the reading pane is capturable at all, and a
+    /// `TextEditor` over a dark theme is exactly the control that comes out as a
+    /// white slab. A mode reachable only by a click is a mode no capture can
+    /// reach — synthetic events need accessibility permission this environment
+    /// does not grant.
+    var isEditingValue = false
+
+    /// Why the selected cell cannot be edited in the value pane, or nil where it
+    /// can.
+    ///
+    /// `editObstacle` answers for the relation — the wrong tab, a view, a table
+    /// with nothing that names a row — and is the sentence the editor row under
+    /// the grid already shows. What it does not cover is the run in progress:
+    /// `canEditCell` refuses then, and `stageEdit` refuses with it, so a box
+    /// offered during a statement would take a change and silently drop it.
+    private var valueEditObstacle: String? {
+        if let obstacle = editObstacle { return obstacle }
+        return canEditCell ? nil : "Wait for the statement that is running to finish."
+    }
+
+    /// What the value pane should offer for the selected browse cell, or nil
+    /// where there is no cell to offer anything for.
+    ///
+    /// The browse result only. The Query pane draws the same inspector and gives
+    /// it no model at all — see `CellInspector.editing` for why that is the
+    /// parameter which decides it.
+    var editedValue: ValueEdit? {
+        inspectedCell(in: browseResult).map {
+            ValueEdit.offered(for: $0, obstacle: valueEditObstacle)
+        }
+    }
+
+    /// Records what was typed into the value pane.
+    ///
+    /// Through `stageEdit`, so this is a bigger field and not a second way of
+    /// writing to the database: the same three-state handling of a draft, the
+    /// same "typed back to what it held is not a change", the same batch. What
+    /// this adds is the guard — the pane can be showing a box for a cell that
+    /// stopped being editable while it was open, and a refused value must not
+    /// reach the staging path by a route the strip's own buttons do not have.
+    func stageEditedValue(_ text: String) {
+        guard case .editable = editedValue else { return }
+        stageEdit(text)
     }
 
     /// Throws the pending changes away. The rows on screen are already the

@@ -215,6 +215,19 @@ enum ValueEdit: Equatable {
     /// as a feature this build does not have.
     case refused(String)
 
+    /// Whether there is a box to open, for the control that opens it.
+    var isEditable: Bool {
+        if case .editable = self { return true }
+        return false
+    }
+
+    /// The refusal, for the tooltip on the control this answer disabled. Nil
+    /// where there is nothing to explain.
+    var refusal: String? {
+        if case .refused(let why) = self { return why }
+        return nil
+    }
+
     /// Main-actor for the reason `RenderedValue.make` is: the sentence borrows
     /// `AppModel`'s number formatting.
     @MainActor
@@ -433,5 +446,86 @@ struct CellValueViewer: View {
             // width; the horizontal scroll view is what makes the rest reachable.
             text.fixedSize()
         }
+    }
+}
+
+/// The same pane, as a box.
+///
+/// Focused, which the reading pane deliberately is not. The header of this file
+/// argues that the viewer must take no focus, so that ↓ keeps moving the grid
+/// while a value is on screen; an editor is the one case where the opposite is
+/// required. While a value is being typed the grid has to hold still, and the
+/// arrow keys belong to the caret — a box you can arrow *out of* would swap the
+/// cell under what you were writing.
+///
+/// A `TextEditor` rather than the window's `CompactField`, for the reason this
+/// whole slice exists: a one-line field cannot hold a value with a line break in
+/// it, and a `text` column that has one could not be honestly edited at all
+/// before now.
+struct CellValueEditor: View {
+    let model: AppModel
+    /// What the box starts with — `ValueEdit.editable`'s payload, which is the
+    /// stored value and never the rendering that was on screen a moment ago.
+    let seed: String
+    @State private var typed = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(spacing: 0) {
+            TextEditor(text: $typed)
+                .font(Theme.Typography.mono)
+                .foregroundStyle(Theme.text.color)
+                // `TextEditor` draws its own opaque background, which on this
+                // theme would be the one light rectangle in the window.
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, Theme.Space.sm)
+                .padding(.vertical, Theme.Space.xs)
+                .focused($focused)
+                // The reading pane's height exactly, so pressing the pencil does
+                // not move the grid above it by a single pixel.
+                .frame(height: 220)
+                .background(Theme.background.color)
+                .accessibilityLabel("Edit cell value")
+            footer
+        }
+        // Seeded and focused together, because a box that opens empty is
+        // indistinguishable from a value that is empty.
+        .task {
+            typed = seed
+            focused = true
+        }
+        // Escape leaves without staging. A control that can only be got out of
+        // with the mouse is the complaint this pane exists to avoid.
+        .onKeyPress(.escape) {
+            model.isEditingValue = false
+            return .handled
+        }
+    }
+
+    private var footer: some View {
+        HStack(spacing: Theme.Space.sm) {
+            // The length as typed, which is the number somebody checking a value
+            // against a column's limit is looking for.
+            Text(AppModel.pluralized(typed.count, "character"))
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+            Spacer()
+            Button("Cancel") { model.isEditingValue = false }
+                .help("Leave the value as it was (⎋)")
+            Button("Stage") {
+                model.stageEditedValue(typed)
+                // Closed, because this is where the change becomes visible: the
+                // cell is marked pending in the grid and the count beside Save
+                // appears, and neither is on screen from inside the box.
+                model.isEditingValue = false
+            }
+            // Return puts a line break in the box, which is the whole point of
+            // the box, so the key that commits has to be a different one.
+            .keyboardShortcut(.return, modifiers: .command)
+            .help("Hold this value for the cell (⌘↩); nothing is sent until Save")
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.xs)
+        .background(Theme.surfaceRaised.color)
     }
 }

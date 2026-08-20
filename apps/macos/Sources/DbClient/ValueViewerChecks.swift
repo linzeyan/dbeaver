@@ -30,6 +30,7 @@ enum ValueViewerChecks {
             checkABinaryValueIsRefusedRatherThanOfferedItsPreview()
             checkTheRowsObstacleAnswersBeforeTheValueIsLookedAt()
             checkAValueTooLongToLayOutIsRefusedWithItsLength()
+            checkTheControlReadsTheSameAnswerAsThePane()
         }
         if failures == 0 {
             fputs("value: all checks passed\n", stderr)
@@ -148,6 +149,22 @@ enum ValueViewerChecks {
             sentence.contains(AppModel.formatted(cap + 1)), true,
             "and the sentence says how long it is, because \"too long\" alone "
                 + "is not something a reader can act on")
+    }
+
+    /// The two answers the strip's pencil reads agree with the case they came
+    /// from.
+    ///
+    /// The button is enabled by one and captioned by the other, so an
+    /// `isEditable` that drifted from its case would put a live pencil over a
+    /// blob — and the box behind it is seeded from a payload that case does not
+    /// have.
+    private static func checkTheControlReadsTheSameAnswerAsThePane() {
+        expect(ValueEdit.editable("x").isEditable, true, "an editable value has a box to open")
+        expect(ValueEdit.editable("x").refusal, nil, "and nothing to explain")
+        expect(ValueEdit.refused("no").isEditable, false, "a refused one has no box")
+        expect(
+            ValueEdit.refused("no").refusal, "no",
+            "and carries its sentence, for the tooltip on the control it disabled")
     }
 
     // MARK: - Harness
