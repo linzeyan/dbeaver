@@ -214,6 +214,11 @@ private struct TransactionControl: View {
 struct NavigatorView: View {
     @Bindable var model: AppModel
     @FocusState.Binding var focus: FocusArea?
+    /// Open, and not remembered between launches. There is one connection in
+    /// this tree, so a collapsed root is a sidebar showing a single row and
+    /// nothing else — a state worth being able to reach and not one worth
+    /// coming back to.
+    @State private var isConnectionExpanded = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -245,18 +250,22 @@ struct NavigatorView: View {
                     hint: "These schemas hold no tables or views.")
             } else {
                 List(selection: $model.navigatorSelection) {
-                    ForEach(model.schemas) { schema in
-                        let relations = model.visibleRelations(in: schema.name)
-                        if !relations.isEmpty {
-                            DisclosureGroup(isExpanded: expansion(for: schema.name)) {
-                                ForEach(relations) { relation in
-                                    NavigatorRow(relation: relation)
-                                        .tag(relation)
+                    DisclosureGroup(isExpanded: $isConnectionExpanded) {
+                        ForEach(model.schemas) { schema in
+                            let relations = model.visibleRelations(in: schema.name)
+                            if !relations.isEmpty {
+                                DisclosureGroup(isExpanded: expansion(for: schema.name)) {
+                                    ForEach(relations) { relation in
+                                        NavigatorRow(relation: relation)
+                                            .tag(relation)
+                                    }
+                                } label: {
+                                    SchemaLabel(name: schema.name, count: relations.count)
                                 }
-                            } label: {
-                                SchemaLabel(name: schema.name, count: relations.count)
                             }
                         }
+                    } label: {
+                        ConnectionRootRow(model: model)
                     }
                 }
                 .listStyle(.sidebar)
@@ -347,6 +356,33 @@ struct NavigatorView: View {
                 guard !model.isFiltering else { return }
                 if isOpen { model.expanded.insert(schema) } else { model.expanded.remove(schema) }
             })
+    }
+}
+
+/// The tree's root: which connection everything under it belongs to.
+///
+/// The same three marks the toolbar chip carries — colour, state, name —
+/// because they answer the same question in both places, and the sidebar is
+/// where the question is asked while reading the tree rather than while
+/// reaching for the window's corner.
+private struct ConnectionRootRow: View {
+    var model: AppModel
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs + 2) {
+            if let tone = model.connectionColor.tone {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(tone.color)
+                    .frame(width: 3, height: 12)
+            }
+            StatusDot(state: model.connectionState)
+            Text(model.connectionLabel)
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(Theme.text.color)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Connection \(model.connectionLabel), \(model.connectionState.label)")
     }
 }
 
