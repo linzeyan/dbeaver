@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// Executable checks for the query favorites store, run by `--verify-favorites`.
 ///
@@ -16,6 +17,9 @@ enum QueryFavoritesChecks {
             checkASnippetIsOnlyOfferedToItsOwnDatabase()
             checkImportingMergesRatherThanReplaces()
             checkTheListOutlivesTheWindow()
+            checkSavingKeepsTheStatementThatWouldRun()
+            checkAFavoriteArrivesInTheEditorReadyToRun()
+            checkASecondOneIsAppendedRatherThanReplacing()
         }
         if failures == 0 {
             fputs("favorites: all checks passed\n", stderr)
@@ -122,7 +126,110 @@ enum QueryFavoritesChecks {
         expect(second.favorites.first?.scheme, "postgres", "and so was what it was written for")
     }
 
+    // MARK: - What the window does with them
+
+    /// Save keeps what ⌘R would send, not the buffer around it.
+    ///
+    /// A window whose Save filed the whole editor would give one name to four
+    /// statements, and the list would be useless the first time somebody kept a
+    /// statement they had been experimenting beside.
+    @MainActor private static func checkSavingKeepsTheStatementThatWouldRun() {
+        guard let model = makeModel() else { return }
+        model.activeTab = .query
+        model.queryText = "SELECT 42"
+        expect(model.savedQuery, "SELECT 42", "one statement is the statement")
+
+        // Now two, with the caret standing in the second. Asked by what the
+        // answer holds rather than by its exact spelling: what is being pinned
+        // here is which statement was chosen, and the splitter owns where its
+        // edges fall.
+        model.queryText = "SELECT 1;\n\nSELECT 2"
+        if let caret = SQLScript.range(12..<12, in: model.queryText) {
+            model.querySelection = TextSelection(range: caret)
+        }
+        expect(model.savedQuery?.contains("SELECT 2"), true, "the caret's own statement")
+        expect(
+            model.savedQuery?.contains("SELECT 1"), false,
+            "and not the buffer it is standing in")
+
+        expect(model.saveQuery(named: "Second"), true, "and that is what Save keeps")
+        expect(
+            model.favorites.favorites.first?.sql.contains("SELECT 2"), true,
+            "under the name it was given")
+
+        // Nothing in the buffer is nothing to save, which is what disables the
+        // control rather than filing an empty statement under a name.
+        model.queryText = "   "
+        expect(model.savedQuery == nil, true, "an empty buffer has nothing to keep")
+        expect(model.saveQuery(named: "Nothing"), false, "so Save keeps nothing")
+        expect(model.favorites.favorites.count, 1, "and the list is as it was")
+    }
+
+    /// Picking a favorite puts it in the editor selected, on the Query tab, with
+    /// the panel closed — the same arrival a recalled statement gets, because
+    /// the point of both lists is a statement that is ready for the ⌘R after it.
+    @MainActor private static func checkAFavoriteArrivesInTheEditorReadyToRun() {
+        guard let model = makeModel() else { return }
+        model.activeTab = .content
+        model.isHistoryOpen = true
+        guard let favorite = model.favorites.save(name: "Count", sql: "SELECT 1", scheme: "")
+        else {
+            failures += 1
+            fputs("favorites FAIL: the fixture favorite was kept\n", stderr)
+            return
+        }
+        model.recall(favorite)
+        expect(model.queryText, "SELECT 1", "the statement is in the editor")
+        expect(model.activeTab, .query, "on the tab that can run it")
+        expect(model.isHistoryOpen, false, "with the panel out of the way")
+        expect(model.querySelection != nil, true, "and the statement selected, so ⌘R means it")
+    }
+
+    /// A second pick is appended with a terminator between, not dropped on top.
+    ///
+    /// The buffer is somebody's work: replacing it would make this list a way to
+    /// lose the statement they were part way through, reached from a panel they
+    /// opened to avoid retyping.
+    @MainActor private static func checkASecondOneIsAppendedRatherThanReplacing() {
+        guard let model = makeModel() else { return }
+        model.queryText = "SELECT 1"
+        guard let favorite = model.favorites.save(name: "Two", sql: "SELECT 2", scheme: "") else {
+            failures += 1
+            fputs("favorites FAIL: the fixture favorite was kept\n", stderr)
+            return
+        }
+        model.recall(favorite)
+        expect(model.queryText, "SELECT 1;\n\nSELECT 2", "both statements, separated")
+    }
+
     // MARK: - Fixture
+
+    /// A model on scratch stores throughout, with the config redirected.
+    ///
+    /// The redirect is not optional: without it the model reads the user's saved
+    /// connections and asks the Keychain for the first one's password, which in
+    /// a process with no GUI session blocks forever — so the symptom is not a
+    /// failed check but a `make test-swift` that never returns.
+    @MainActor private static func makeModel() -> AppModel? {
+        guard let directory = scratchDirectory() else { return nil }
+        setenv("XDG_CONFIG_HOME", directory.path, 1)
+        let history = QueryHistory(defaults: UserDefaults(suiteName: suiteName())!)
+        let preferences = Preferences(store: UserDefaults(suiteName: suiteName())!)
+        return AppModel(history: history, favorites: scratch(), preferences: preferences)
+    }
+
+    private static func scratchDirectory() -> URL? {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-verify-favorites-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            failures += 1
+            fputs("favorites FAIL: a scratch directory could be made: \(error)\n", stderr)
+            return nil
+        }
+        return root
+    }
 
     private static func suiteName() -> String { "dev.dbclient.verify-favorites.\(UUID())" }
 

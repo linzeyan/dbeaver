@@ -1810,7 +1810,7 @@ if benchMode {
             history = QueryHistory()
         }
         let model = AppModel(
-            history: history, preferences: Preferences(),
+            history: history, favorites: QueryFavorites(), preferences: Preferences(),
             initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,

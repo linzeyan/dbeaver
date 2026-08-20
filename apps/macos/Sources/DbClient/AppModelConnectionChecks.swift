@@ -173,7 +173,8 @@ enum AppModelConnectionChecks {
         // set — and a check that turns a setting on would be turning it on in
         // their own window.
         let preferences = Preferences(store: UserDefaults(suiteName: UUID().uuidString)!)
-        let model = AppModel(history: history, preferences: preferences)
+        let favorites = QueryFavorites(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let model = AppModel(history: history, favorites: favorites, preferences: preferences)
 
         // Stub alert closures to prevent modal dialogs
         model.confirmConnectionDeletion = { _ in true }
