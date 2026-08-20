@@ -3379,6 +3379,38 @@ final class AppModel {
         }
     }
 
+    // MARK: - The statement log, out to a file
+
+    /// Whether there is anything to write.
+    ///
+    /// Against what is drawn rather than against the store, because that is what
+    /// the file will hold. A history of two hundred browses with All switched off
+    /// is a full store and an empty log, and a menu item that opened a save panel
+    /// there would produce a file holding a header and nothing else.
+    var canExportHistory: Bool { !shownHistory.isEmpty }
+
+    /// What the save panel proposes. `.sql`, because that is what is in it —
+    /// calling it `.log` would hide it from the application somebody would open
+    /// it with.
+    var historyFilename: String { "dbclient-statements.sql" }
+
+    /// Writes the statements the panel is showing.
+    ///
+    /// What is shown and not what is stored. The All toggle and the filter field
+    /// are already the scope control, so a second one in the save panel would be
+    /// a way for the file to disagree with the list somebody read before asking
+    /// for it — and the answer to "why is this statement not in here" would then
+    /// live in two places.
+    func exportHistory(to url: URL) {
+        do {
+            try Data(QueryHistory.script(shownHistory).utf8).write(to: url, options: .atomic)
+            errorMessage = nil
+        } catch {
+            errorMessage =
+                "\(url.lastPathComponent) could not be written: \(error.localizedDescription)"
+        }
+    }
+
     // MARK: - Export
 
     /// Whether there is a result to write out. The menu item is disabled when

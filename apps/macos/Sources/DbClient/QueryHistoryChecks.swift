@@ -24,6 +24,10 @@ enum QueryHistoryChecks {
             checkTheOldestUntypedGoesFirst()
             checkTheWholeListIsStillCapped()
             checkAnEmptyStatementIsNotAStatement()
+            checkTheScriptSaysWhatCausedEachStatement()
+            checkTheScriptTerminatesEveryStatementExactlyOnce()
+            checkAnUnmeasuredStatementGetsNoDuration()
+            checkTheLogIsWhatThePanelIsShowing()
         }
         if failures == 0 {
             fputs("query-history: all checks passed\n", stderr)
@@ -115,7 +119,70 @@ enum QueryHistoryChecks {
         expect(history.entries.count, 0, "nothing was recorded")
     }
 
+    /// The comment above each statement is the whole reason this is a file and
+    /// not a paste of the SQL: without it there is no way to tell the SELECT
+    /// somebody typed from the one the sidebar sent.
+    @MainActor private static func checkTheScriptSaysWhatCausedEachStatement() {
+        let history = make()
+        history.record("SELECT 1", from: .browse, outcome: .rows(3), milliseconds: 12)
+        let script = QueryHistory.script(history.entries)
+        expect(script.contains("-- browse ·"), true, "the comment names the origin")
+        expect(script.contains("12 ms"), true, "and what it took")
+        expect(script.contains("3 rows"), true, "and what came back")
+    }
+
+    /// A step may or may not arrive carrying its own semicolon, and both `;;` and
+    /// a bare statement are ways for the file to fail to run.
+    @MainActor private static func checkTheScriptTerminatesEveryStatementExactlyOnce() {
+        let history = make()
+        history.record("SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1)
+        history.record("SELECT 2;", from: .query, outcome: .rows(1), milliseconds: 1)
+        let script = QueryHistory.script(history.entries)
+        expect(script.contains("SELECT 1;"), true, "the bare statement gains one")
+        expect(
+            script.contains("SELECT 2;;"), false, "and the terminated one does not gain a second")
+    }
+
+    /// Zero means nobody measured it — an edit's statements are not timed one by
+    /// one — so the file leaves it out rather than claiming the fastest run on
+    /// the list.
+    @MainActor private static func checkAnUnmeasuredStatementGetsNoDuration() {
+        let history = make()
+        history.record(
+            "DELETE FROM t WHERE id = 1", from: .edit, outcome: .affected(1),
+            milliseconds: 0)
+        expect(QueryHistory.script(history.entries).contains("0 ms"), false, "no duration is shown")
+    }
+
+    /// The file is the panel, not the store. Both narrowings decide what gets
+    /// written, and `canExportHistory` has to agree with them or the menu item
+    /// stays live over a log with nothing in it.
+    @MainActor private static func checkTheLogIsWhatThePanelIsShowing() {
+        let model = makeModel()
+        model.history.record("SELECT typed", from: .query, outcome: .rows(1), milliseconds: 1)
+        model.history.record("SELECT browsed", from: .browse, outcome: .rows(1), milliseconds: 1)
+        expect(model.shownHistory.count, 1, "the browse is out while All is off")
+        expect(model.canExportHistory, true, "and there is still something to write")
+
+        model.showsAllStatements = true
+        expect(model.shownHistory.count, 2, "All puts it back")
+
+        model.historyFilter = "BROWSED"
+        expect(model.shownHistory.count, 1, "the filter matches whatever the case")
+
+        model.historyFilter = "nothing matches this"
+        expect(model.canExportHistory, false, "and a filter that hides everything empties the log")
+    }
+
     // MARK: - Fixture
+
+    /// A model over throwaway suites, built the way `FilterRowChecks` builds its
+    /// own. Needed by the one case that is about the panel rather than about the
+    /// store — the two narrowings live on the model.
+    @MainActor private static func makeModel() -> AppModel {
+        let favorites = QueryFavorites(defaults: ScratchDefaults.store("verify-query-history"))
+        return AppModel(history: make(), favorites: favorites, preferences: Preferences())
+    }
 
     /// A store over a throwaway defaults suite, so running the checks cannot
     /// read or write the history the user's windows share.

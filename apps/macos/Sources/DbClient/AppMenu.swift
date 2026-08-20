@@ -240,6 +240,16 @@ enum AppMenu {
             action: #selector(ExportCommands.importFavorites(_:)), keyEquivalent: "")
         importQueries.target = export
 
+        menu.addItem(.separator())
+
+        // Under a rule of its own, below the two that move saved queries. Those
+        // two carry a list somebody curates in both directions; this one only
+        // goes out, and what it writes is a record nobody edits.
+        let exportLog = menu.addItem(
+            withTitle: "Export Statement Log…",
+            action: #selector(ExportCommands.exportStatements(_:)), keyEquivalent: "")
+        exportLog.target = export
+
         item.submenu = menu
         return item
     }
@@ -926,6 +936,34 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         }
     }
 
+    /// Writes the statement log out.
+    ///
+    /// No scope control, for a reason the export above it does not have: this
+    /// panel already has two, and what gets written is whatever they are leaving
+    /// on screen.
+    @objc func exportStatements(_ sender: Any?) {
+        guard model.canExportHistory else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [ExportFormat.sql.contentType]
+        panel.nameFieldStringValue = model.historyFilename
+        // Said here because the scope is set somewhere this sheet covers up. A
+        // person who narrowed the list an hour ago and exports now would
+        // otherwise find out from the file.
+        panel.message = """
+            The statements the history panel is showing are written, newest first. Turn on All, \
+            or clear the filter, to write more of them.
+            """
+        let write: (NSApplication.ModalResponse) -> Void = { [model] response in
+            guard response == .OK, let url = panel.url else { return }
+            model.exportHistory(to: url)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: write)
+        } else {
+            panel.begin(completionHandler: write)
+        }
+    }
+
     /// Reads a file of saved queries into the list.
     @objc func importFavorites(_ sender: Any?) {
         let panel = NSOpenPanel()
@@ -990,6 +1028,7 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         switch item.action {
         case #selector(importFile(_:)): return model.canImport
         case #selector(exportFavorites(_:)): return model.canExportFavorites
+        case #selector(exportStatements(_:)): return model.canExportHistory
         // Always live. Reading a file in needs nothing to already be there —
         // an empty list is exactly when somebody imports one.
         case #selector(importFavorites(_:)): return true

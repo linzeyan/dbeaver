@@ -203,6 +203,58 @@ final class QueryHistory {
         entries = kept
     }
 
+    /// How a timestamp is written into an exported file.
+    ///
+    /// ISO 8601 in the local zone: unambiguous, sortable, and the string a `sort`
+    /// or a spreadsheet orders correctly without being told how. The list on
+    /// screen says "8m ago", which is how a statement is recognised and is
+    /// useless in a file somebody opens next week.
+    private static let stamped: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [
+            .withFullDate, .withTime, .withDashSeparatorInDate, .withColonSeparatorInTime,
+            .withSpaceBetweenDateAndTime
+        ]
+        formatter.timeZone = .current
+        return formatter
+    }()
+
+    /// The entries as a file somebody can read and re-run.
+    ///
+    /// SQL rather than the JSON the saved queries use. That file is a list this
+    /// application reads back, so its shape is this application's business; this
+    /// one is evidence, and both things anybody does with evidence — read what
+    /// happened, run one of them again — want the statements themselves with the
+    /// facts above them as comments.
+    ///
+    /// Newest first, exactly as the panel drew it. The other order would read as
+    /// a transcript to be replayed top to bottom, and this is a record of what a
+    /// window did, not a migration.
+    static func script(_ entries: [QueryHistoryEntry], at stamp: Date = Date()) -> String {
+        var lines = [
+            "-- dbclient statement log · \(stamped.string(from: stamp))",
+            "-- \(AppModel.pluralized(entries.count, "statement"))"
+        ]
+        for entry in entries {
+            // Milliseconds at every size, and nothing at all where nobody
+            // measured it. One unit is what lets a file like this be sorted or
+            // added up; the panel switches to seconds past a thousand because it
+            // is read at a glance, and a file is not.
+            let took = entry.milliseconds > 0 ? " · \(Int(entry.milliseconds)) ms" : ""
+            lines.append("")
+            lines.append(
+                "-- \(entry.origin.rawValue) · \(stamped.string(from: entry.ranAt))"
+                    + "\(took) · \(entry.outcome.label)")
+            // Terminated, because what is written here is a script and the
+            // statements arrive one at a time without one. Only where it is
+            // missing: whether a step keeps its own semicolon depends on how the
+            // script it came from was split, and `;;` is a syntax error on
+            // servers that do not read it as an empty statement.
+            lines.append(entry.sql.hasSuffix(";") ? entry.sql : entry.sql + ";")
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     /// Drops everything, here and on disk. Irreversible, which is why the panel
     /// asks before calling it.
     func clear() {
