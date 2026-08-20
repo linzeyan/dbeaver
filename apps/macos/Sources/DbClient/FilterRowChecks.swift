@@ -39,6 +39,9 @@ enum FilterRowChecks {
         checkComparingAgainstNothingCarriesNothing()
         checkOnlyARangeKeepsItsFarEnd()
         checkAColumnNobodyKnowsIsLeftAlone()
+        checkACellMenuMakesARowRatherThanText()
+        checkAddToFilterKeepsWhatIsThere()
+        checkFilteringOnAColumnStartsAgain()
         if failures == 0 {
             fputs("filter-rows: all checks passed\n", stderr)
         } else {
@@ -199,6 +202,54 @@ enum FilterRowChecks {
         let settled = rule.settled(in: offered)
         expect(settled.op, .contains, "an unknown column judges nothing")
         expect(settled.value, "x", "and keeps what was typed")
+    }
+
+    /// The graduation itself. The menu used to write SQL into the field, which
+    /// is now the escape hatch rather than the way in — and a row is what the
+    /// rest of the filter surface can read, edit and remove.
+    private static func checkACellMenuMakesARowRatherThanText() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.selected = orders
+            model.filterByCell(
+                CellFilterRequest(column: "qty", value: "5", op: .equals, extend: false))
+            expect(model.filterRules.count, 1, "the menu adds a row")
+            expect(model.filterRules.first?.column, "qty", "naming the column that was clicked")
+            expect(model.filterRules.first?.value, "5", "and carrying the cell's value")
+            expect(model.whereClause, "", "and writes nothing into the Custom field")
+            expect(model.isFilterRowsOpen, true, "and opens the list it just put a row in")
+        }
+    }
+
+    /// *Add to Filter* is the menu's word for AND, and it has to mean the rows
+    /// already there rather than replacing them.
+    private static func checkAddToFilterKeepsWhatIsThere() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.selected = orders
+            model.filterByCell(
+                CellFilterRequest(column: "qty", value: "5", op: .equals, extend: false))
+            model.filterByCell(
+                CellFilterRequest(column: "sku", value: "AB", op: .notEquals, extend: true))
+            expect(model.filterRules.count, 2, "extending keeps the row that was there")
+            expect(model.filterRules.last?.column, "sku", "and puts the new one after it")
+        }
+    }
+
+    /// And *Filter on this column* is the menu's word for starting again, which
+    /// is the safer half of the change: it used to overwrite text somebody had
+    /// typed, and now the rows it replaces are rows it put there.
+    private static func checkFilteringOnAColumnStartsAgain() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.selected = orders
+            model.filterByCell(
+                CellFilterRequest(column: "qty", value: "5", op: .equals, extend: false))
+            model.filterByCell(
+                CellFilterRequest(column: "sku", value: "AB", op: .equals, extend: false))
+            expect(model.filterRules.count, 1, "not extending leaves one row")
+            expect(model.filterRules.first?.column, "sku", "the one just asked for")
+        }
     }
 
     // MARK: - Fixture
