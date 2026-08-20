@@ -1652,6 +1652,19 @@ final class AppModel {
         return cell(at: s, in: result)
     }
 
+    /// What a field opened over the selected browse cell should start with.
+    ///
+    /// The rule `CellEditorRow.seed` states, for the reason stated there: a NULL
+    /// seeds an empty field rather than the word, because what the field holds
+    /// is what would be written and "NULL" typed into a text column is four
+    /// characters. Which also means the inline editor cannot produce a NULL —
+    /// the button under the grid is where that lives, and it is the reason that
+    /// row stays.
+    var inlineEditSeed: String {
+        guard let cell = inspectedCell(in: browseResult), !cell.isNull else { return "" }
+        return cell.value
+    }
+
     /// The same, for a cell named rather than selected.
     ///
     /// Split out for the record view, which describes every column of one row

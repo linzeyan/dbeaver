@@ -353,28 +353,10 @@ extension GridView: GridAccessibilitySource {
     }
 
     func accessibleFrame(row: Int, column: Int?) -> NSRect {
-        guard let renderer, let window else { return .zero }
-        let rowHeight = CGFloat(renderer.rowHeight)
-        let top =
-            CGFloat(renderer.headerHeight) + (CGFloat(row) - CGFloat(renderer.scrollRow))
-            * rowHeight
         // Nothing to point at for a row that is scrolled out of sight. Reported
         // as empty rather than as an off-screen rectangle, which a screen reader
         // would draw its box around somewhere over the window's neighbour.
-        guard top + rowHeight > CGFloat(renderer.headerHeight), top < bounds.height else {
-            return .zero
-        }
-        var x: CGFloat = 0
-        var width = bounds.width
-        if let column {
-            x = CGFloat(renderer.columnX(column) - renderer.scrollX)
-            width = CGFloat(renderer.columnWidth(column))
-        }
-        // The renderer measures y down from the top — its first row is drawn just
-        // below the header — while an `MTKView` is not flipped, so the rectangle
-        // has to be turned over before it leaves view coordinates.
-        let inView = NSRect(
-            x: x, y: bounds.height - top - rowHeight, width: width, height: rowHeight)
+        guard let window, let inView = cellFrame(row: row, column: column) else { return .zero }
         return window.convertToScreen(convert(inView, to: nil))
     }
 

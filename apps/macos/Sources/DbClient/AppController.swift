@@ -249,6 +249,26 @@ final class GridView: MTKView {
     /// that answer is already written.
     var offersValueEditing = false
 
+    /// Called with what was typed when an inline edit is committed.
+    ///
+    /// The same `stageEdit` the field under the grid calls. Two ways of typing
+    /// into a cell, one thing they do — a second staging path would be a second
+    /// answer to "is this cell dirty".
+    var onStageEdit: ((String) -> Void)?
+
+    /// What the editor starts with for the cell the cursor is on.
+    ///
+    /// Asked for rather than read off the table: a NULL seeds an empty field
+    /// rather than the word, which is a rule about what would be *written* and
+    /// therefore belongs with the model, not with the renderer that draws the
+    /// word "NULL" in a dimmer colour.
+    var editSeed: (() -> String)?
+
+    /// The field floating over the cell being typed into, or nil when nothing
+    /// is. Also the flag for "an edit is in progress" — one thing, so a field on
+    /// screen and a grid that thinks it is idle cannot happen.
+    private var inlineEditor: InlineCellEditor?
+
     /// Whether this grid takes keyboard focus when it appears. Set only for the
     /// browse pane: in the Query tab focus belongs to the editor, and a grid
     /// that grabs it on every tab switch is worse than one that never does.
@@ -321,6 +341,12 @@ final class GridView: MTKView {
     }
 
     override func scrollWheel(with event: NSEvent) {
+        // Frozen while a cell is being typed into. The field is placed at a
+        // rectangle worked out from the scroll offset, and a grid that moved
+        // under it would leave it sitting over one row and writing to another.
+        // Sequel-Ace freezes here too, by the same accident of having a field
+        // editor in the way.
+        guard inlineEditor == nil else { return }
         guard let renderer, renderer.table != nil else { return }
 
         // Clamped so the last row lands at the bottom rather than scrolling up
@@ -427,6 +453,10 @@ final class GridView: MTKView {
             hit.anchor = current.anchor ?? current.row
         }
         apply(hit)
+        // After the selection moves, not instead of it: the editor is placed
+        // over whichever cell the cursor is on, and the first of the two clicks
+        // is what put it there.
+        if event.clickCount == 2 { beginInlineEdit() }
     }
 
     /// The right-click menu. It offers to copy only what the click actually
@@ -610,6 +640,102 @@ final class GridView: MTKView {
         return point.y >= 0 && Float(point.y) < renderer.headerHeight
     }
 
+    /// Where a cell is drawn, in this view's own coordinates, or nil for one
+    /// that is scrolled out of sight.
+    ///
+    /// The one place this geometry is written down. A screen reader points at
+    /// cells and an editor is placed over them, and two copies of the same sum
+    /// would be two chances to disagree about which row the user is looking at.
+    ///
+    /// A nil column means the whole row, which is what a screen reader asks for.
+    func cellFrame(row: Int, column: Int?) -> NSRect? {
+        guard let renderer else { return nil }
+        let rowHeight = CGFloat(renderer.rowHeight)
+        let top =
+            CGFloat(renderer.headerHeight) + (CGFloat(row) - CGFloat(renderer.scrollRow))
+            * rowHeight
+        guard top + rowHeight > CGFloat(renderer.headerHeight), top < bounds.height else {
+            return nil
+        }
+        var x: CGFloat = 0
+        var width = bounds.width
+        if let column {
+            x = CGFloat(renderer.columnX(column) - renderer.scrollX)
+            width = CGFloat(renderer.columnWidth(column))
+        }
+        // The renderer measures y down from the top — its first row is drawn just
+        // below the header — while an `MTKView` is not flipped, so the rectangle
+        // has to be turned over before it is any use here.
+        return NSRect(
+            x: x, y: bounds.height - top - rowHeight, width: width, height: rowHeight)
+    }
+
+    /// Puts a field over the cell the cursor is on.
+    ///
+    /// Refused where the relation cannot be written, by the same flag that keeps
+    /// *Edit Value…* off that menu: an editor that took a change nothing could
+    /// send would be a worse lie than a cell that does not open.
+    ///
+    /// A draft row is not excluded, unlike in the context menu. There the item
+    /// opens a box over a stored value and a draft has none; here the whole
+    /// point is to type one in, and a row nobody has typed into is exactly the
+    /// row somebody wants to type into.
+    func beginInlineEdit() {
+        guard offersValueEditing, inlineEditor == nil, let renderer,
+            let table = renderer.table, let selection = renderer.selection,
+            selection.column < table.columns.count, selection.row < renderer.totalRows
+        else { return }
+        // Brought into view first. The cursor can be on a row the last scroll
+        // left behind — Home and End put it there — and the answer somebody
+        // wants then is the cell, not silence.
+        renderer.scrollToVisible(selection, viewSize: bounds.size)
+        needsDisplay = true
+        guard let frame = cellFrame(row: selection.row, column: selection.column) else { return }
+
+        let field = InlineCellEditor(frame: frame, padding: CGFloat(renderer.cellPadding))
+        field.stringValue = editSeed?() ?? ""
+        field.onCommit = { [weak self] text in
+            guard let self else { return }
+            // Taken away before the change is staged. Staging re-runs the
+            // SwiftUI view that owns this grid, and a field still on screen
+            // through that is a field being laid out over a cell that is being
+            // repainted underneath it.
+            endInlineEdit()
+            onStageEdit?(text)
+        }
+        field.onCancel = { [weak self] in self?.endInlineEdit() }
+        addSubview(field)
+        inlineEditor = field
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    /// Throws away whatever is being typed, if anything is.
+    ///
+    /// Used where the rows under the field are about to become different rows —
+    /// a new result — which is the one case where committing would write what
+    /// was typed into whatever now happens to be at that index.
+    ///
+    /// Silenced before it is taken away, because taking it away is itself heard
+    /// as the end of an edit worth keeping. See `InlineCellEditor.abandon`.
+    func cancelInlineEdit() {
+        inlineEditor?.abandon()
+        endInlineEdit()
+    }
+
+    /// Takes the field away and puts the keyboard back on the grid.
+    ///
+    /// `inlineEditor` is cleared first: removing a field that is the first
+    /// responder ends its editing session, which is heard as a commit, and this
+    /// is what stops that from opening a second round.
+    private func endInlineEdit() {
+        guard let field = inlineEditor else { return }
+        inlineEditor = nil
+        field.removeFromSuperview()
+        window?.makeFirstResponder(self)
+        needsDisplay = true
+    }
+
     override func keyDown(with event: NSEvent) {
         guard let renderer, let table = renderer.table, renderer.totalRows > 0 else { return }
 
@@ -632,6 +758,14 @@ final class GridView: MTKView {
             case "a": apply(GridSelection(row: lastRow, column: current.column, anchor: 0))
             default: break
             }
+            return
+        }
+
+        // Return opens the cell rather than moving the cursor, which is what
+        // every grid on this platform does with it and what nothing else here
+        // uses it for.
+        if event.specialKey == .carriageReturn || event.specialKey == .enter {
+            beginInlineEdit()
             return
         }
 

@@ -94,6 +94,11 @@ struct MetalGridView: NSViewRepresentable {
     /// Called when *Edit Value…* is chosen. Nil means the item is not offered —
     /// the Query pane, and any relation this build cannot write to.
     var onEditValue: (() -> Void)?
+    /// Called with what was typed into a cell. Nil for the Query pane, for the
+    /// reason `onEditValue` is nil there.
+    var onStageEdit: ((String) -> Void)?
+    /// What an inline editor starts with. Nil for the Query pane, likewise.
+    var editSeed: (() -> String)?
 
     final class Coordinator {
         var renderer: GridRenderer?
@@ -104,6 +109,8 @@ struct MetalGridView: NSViewRepresentable {
         var onFilter: ((CellFilterRequest) -> Void)?
         var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
         var onEditValue: (() -> Void)?
+        var onStageEdit: ((String) -> Void)?
+        var editSeed: (() -> String)?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -137,6 +144,12 @@ struct MetalGridView: NSViewRepresentable {
         view.onEditValue = { [weak coordinator = context.coordinator] in
             coordinator?.onEditValue?()
         }
+        view.onStageEdit = { [weak coordinator = context.coordinator] text in
+            coordinator?.onStageEdit?(text)
+        }
+        view.editSeed = { [weak coordinator = context.coordinator] in
+            coordinator?.editSeed?() ?? ""
+        }
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
@@ -164,6 +177,8 @@ struct MetalGridView: NSViewRepresentable {
         context.coordinator.onCopyAsInsert = onCopyAsInsert
         view.offersInsertCopy = onCopyAsInsert != nil
         context.coordinator.onEditValue = onEditValue
+        context.coordinator.onStageEdit = onStageEdit
+        context.coordinator.editSeed = editSeed
         view.offersValueEditing = onEditValue != nil
         renderer.sort = sort
         renderer.pending = pending
@@ -176,6 +191,11 @@ struct MetalGridView: NSViewRepresentable {
             // an arbitrary window of unrelated data.
             renderer.scrollRow = 0
             renderer.scrollX = 0
+            // And whatever was being typed goes with it. Row 4 of the result
+            // that has just arrived is a different row from row 4 of the one
+            // that was on screen, and committing into it would write what was
+            // typed about one row into another.
+            view.cancelInlineEdit()
         }
         // A page arriving changes how many rows there are without replacing the
         // result, and that is exactly the case a screen reader cannot see: it

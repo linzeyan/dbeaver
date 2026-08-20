@@ -963,7 +963,9 @@ struct ContentPane: View {
                     // Nil where nothing can be written, which is what keeps the
                     // item off a view and off a table with no key: `editObstacle`
                     // is the same sentence `CellEditorRow` shows under the grid.
-                    onEditValue: model.editObstacle == nil ? { model.editSelectedValue() } : nil
+                    onEditValue: model.editObstacle == nil ? { model.editSelectedValue() } : nil,
+                    onStageEdit: { model.stageEdit($0) },
+                    editSeed: { model.inlineEditSeed }
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isVeiled) }
 

@@ -580,6 +580,19 @@ let editValue = CommandLine.arguments.contains("--edit-value")
 /// Only useful with `--cell`, which is what selects the cell the row is about.
 let filterOnCell = CommandLine.arguments.contains("--filter-cell")
 
+/// `--inline-edit` opens the editor over the cell `--cell` chose.
+///
+/// Exists for the reason `--edit-value` does. The editor opens on a double-click
+/// or on Return and a capture can send neither — synthetic events need
+/// accessibility permission this environment does not grant. Everything this
+/// slice is likely to get wrong is a matter of a few points: the field over the
+/// wrong row, the characters sitting high or shifted sideways from the cells
+/// beside them, a border covering its neighbours. All of it is visible in a
+/// screenshot and in nothing else.
+///
+/// Only useful with `--cell`, which is what selects the cell it opens over.
+let inlineEdit = CommandLine.arguments.contains("--inline-edit")
+
 /// `--delete-row 2` marks that 1-based row of the browse to be deleted, and
 /// `--delete-row 2-4` marks a span of them. Nothing is sent: the rows are left
 /// crossed out with Save waiting, which is the state this exists to photograph.
@@ -827,6 +840,40 @@ func openValueViewer(model: AppModel, on spec: String) {
         fputs("filter row      \(name) = \(value ?? "NULL")\n", stderr)
     }
 
+    /// Opens the editor over the selected cell, for `--inline-edit`.
+    ///
+    /// Reaches the AppKit view by walking the window, which nothing else here
+    /// does. Nothing hands a `GridView` out of SwiftUI, and the editor is a
+    /// subview of one — the alternative is a flag on the model that exists only
+    /// to be photographed, which is a mode the application would then have.
+    ///
+    /// The browse grid is the one that can be written to. The window has two.
+    func openInlineEditor() {
+        func grid(in view: NSView) -> GridView? {
+            if let found = view as? GridView, found.offersValueEditing { return found }
+            for sub in view.subviews {
+                if let found = grid(in: sub) { return found }
+            }
+            return nil
+        }
+        guard let content = NSApp.windows.first(where: \.isVisible)?.contentView,
+            let found = grid(in: content)
+        else {
+            fputs("no writable grid in the window: --inline-edit needs a table\n", stderr)
+            exit(1)
+        }
+        found.beginInlineEdit()
+        // Loud for the reason the other probes are loud. A refused edit leaves
+        // the grid looking exactly as it does with none open, and a capture of
+        // that would be filed as a picture of the editor.
+        guard let field = found.subviews.compactMap({ $0 as? InlineCellEditor }).first else {
+            fputs("the editor did not open over the selected cell\n", stderr)
+            exit(1)
+        }
+        fputs("inline editor   frame \(NSStringFromRect(field.frame))\n", stderr)
+        fputs("inline editor   seed “\(field.stringValue)”\n", stderr)
+    }
+
     func poll() {
         let result = model.current
         if let index = result.table.columns.firstIndex(where: { $0.name == column }),
@@ -855,6 +902,15 @@ func openValueViewer(model: AppModel, on spec: String) {
                 // photograph the grid mid-reload.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                     MainActor.assumeIsolated { filterOnSelectedCell() }
+                }
+            }
+            if inlineEdit {
+                // Later still. The field is placed at a rectangle worked out
+                // from where the grid is scrolled to, and SwiftUI has to have
+                // pushed this selection into the renderer before that rectangle
+                // means anything.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    MainActor.assumeIsolated { openInlineEditor() }
                 }
             }
             return
