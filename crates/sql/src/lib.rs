@@ -10,6 +10,7 @@
 //! replaces it, and the rules it earned are kept as the tests in `tests/`.
 
 mod complete;
+mod danger;
 mod dialect;
 mod format;
 mod keywords;
@@ -18,6 +19,7 @@ mod parse;
 mod script;
 
 pub use complete::{Completion, Expect, complete};
+pub use danger::{Danger, danger};
 pub use dialect::{
     ALL, CLICKHOUSE, DUCKDB, Dialect, DoubleQuote, MSSQL, MYSQL, POSTGRES, Parameter, RowLimit,
     SQLITE, for_scheme, of_scheme,
