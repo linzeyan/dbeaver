@@ -45,13 +45,42 @@ final class ResultSet {
     /// What the status bar says about this result.
     private(set) var summary = ""
     private(set) var isLoading = false
+    /// Whether the fetch in flight is adding to rows already on screen.
+    ///
+    /// Beside `isLoading` rather than in place of it. Everything that asks "is a
+    /// fetch in flight" — `canLoadMore`, `canExport`, and the capture helpers
+    /// that wait for one to finish — keeps meaning what it meant, and this
+    /// answers the one further question the veil has: whether there is anything
+    /// behind it worth reading.
+    private(set) var isExtending = false
     var selection: GridSelection?
 
     var hasRun: Bool { generation > 0 }
 
-    func beginLoading() { isLoading = true }
+    /// Whether to dim what is on screen while this fetch runs.
+    ///
+    /// A first page has nothing behind it worth keeping: the grid is empty, or
+    /// it is holding the rows of the table the user has just navigated away
+    /// from, and leaving either undimmed presents it as the answer to the
+    /// question just asked. A page appended to rows the reader is already
+    /// reading is the opposite case — those rows are theirs, they asked for more
+    /// of them, and covering them stops the reading the fetch exists to extend.
+    /// Sequel Ace's `tableLoadTimer` is this lesson: watching data arrive is
+    /// materially different from waiting for it.
+    var isVeiled: Bool { isLoading && !isExtending }
 
-    func abandonLoading() { isLoading = false }
+    /// Assigns rather than raises, both times. A browse begun after a *Load
+    /// more* is not an extension of anything, and a flag only ever turned on
+    /// would leave every browse for the rest of the session undimmed.
+    func beginLoading(appending: Bool = false) {
+        isLoading = true
+        isExtending = appending
+    }
+
+    func abandonLoading() {
+        isLoading = false
+        isExtending = false
+    }
 
     /// The statement these rows came from, for anything that has to ask the
     /// server the same question again.
@@ -101,6 +130,7 @@ final class ResultSet {
         statement = ""
         selection = nil
         isLoading = false
+        isExtending = false
     }
 
     private func publish(capped: Bool, milliseconds: Double, summary: String) {
@@ -109,6 +139,7 @@ final class ResultSet {
         self.milliseconds = milliseconds
         self.summary = summary
         isLoading = false
+        isExtending = false
     }
 }
 
@@ -2308,7 +2339,7 @@ final class AppModel {
     /// pages the way a second `OFFSET` could.
     func loadMore() {
         guard canLoadMore, let selected, let cursor = browseCursor else { return }
-        beginBrowseFetch()
+        beginBrowseFetch(appending: true)
         fetchBrowsePage(
             from: cursor, takingSchema: false, describedAs: selected.name,
             since: CFAbsoluteTimeGetCurrent(), appending: true)
@@ -2347,9 +2378,9 @@ final class AppModel {
         browseFetchInFlight = false
     }
 
-    private func beginBrowseFetch() {
+    private func beginBrowseFetch(appending: Bool = false) {
         isBusy = true
-        browseResult.beginLoading()
+        browseResult.beginLoading(appending: appending)
         browseFetchInFlight = true
         status = "Running…"
         // A new fetch supersedes the previous failure; leaving the banner up
@@ -2586,7 +2617,13 @@ final class AppModel {
             if activeTab == .query, let step = selectedScriptStep { return step.summary }
             // Each pane reports its own result. Falling back to `status` covers
             // the connection messages and the window before anything has run.
-            return current.summary.isEmpty ? status : current.summary
+            let line = current.summary.isEmpty ? status : current.summary
+            // The only feedback an appended page gets, now that the veil is not
+            // over it. `canLoadMore` reads `isLoading`, so the button disappears
+            // the instant it is pressed — without this sentence the window
+            // answers the click by doing nothing visible for the length of a
+            // hundred-thousand-row fetch.
+            return current.isExtending ? "\(line) · loading more…" : line
         }
     }
 
