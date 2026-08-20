@@ -169,6 +169,9 @@ pub enum FilterOp {
     LessOrEqual,
     GreaterThan,
     GreaterOrEqual,
+    /// `BETWEEN a AND b`, inclusive at both ends as SQL's own is. The only
+    /// operator here with a second operand, and the reason `clause` takes one.
+    Between,
     /// `LIKE '%v%'`, with everything in `v` that `LIKE` reads as syntax written
     /// back as the character that was typed.
     Contains,
@@ -187,16 +190,93 @@ pub async fn cell_filter(
     filter: &CellFilter,
 ) -> DbResult<String> {
     let columns = driver.columns(&filter.schema, &filter.relation).await?;
-    let column = columns
+    let column = column_named(&columns, &filter.schema, &filter.relation, &filter.column)?;
+    clause(dialect, column, filter.op, filter.value.as_deref(), None)
+}
+
+/// Every row of the filter editor, over one relation.
+///
+/// One relation for the reason `Edits` is one: this composes the `WHERE` of a
+/// browse, and a browse shows one table.
+#[derive(Debug, Deserialize)]
+pub struct RowFilter {
+    pub schema: String,
+    pub relation: String,
+    pub rules: Vec<FilterRule>,
+}
+
+/// One row: a column, an operator, and what it compares against.
+#[derive(Debug, Deserialize)]
+pub struct FilterRule {
+    pub column: String,
+    pub op: FilterOp,
+    /// Ignored by the two operators that ask about NULL directly, and required
+    /// by every other one — see `clause` for why an empty value is refused
+    /// rather than read as a question about NULL.
+    pub value: Option<String>,
+    /// The far end of a `BETWEEN`, and nothing else's. Absent from the JSON for
+    /// every other operator, which serde reads as `None` the way it does for
+    /// `CellFilter::value`.
+    pub second: Option<String>,
+}
+
+/// The `WHERE` clause `filter` asks for, written in this database's own quoting.
+///
+/// AND-joined in the order the rows are in, and unparenthesised: every predicate
+/// here is one comparison written by this function, so there is no precedence to
+/// protect and brackets would only make the field harder to read for the person
+/// who opens it to edit by hand.
+///
+/// No rules is an empty string rather than a clause that is always true. The
+/// caller leaves the `WHERE` off entirely, and `1=1` would be this crate putting
+/// something in a statement nobody asked for.
+///
+/// A rule naming a column the relation does not have is an error rather than a
+/// row quietly skipped. Skipping it would return fewer rows than the filter on
+/// screen describes, and nothing would say so — the failure this whole crate is
+/// arranged to avoid.
+pub async fn filter_clause(
+    driver: &dyn Driver,
+    dialect: &'static Dialect,
+    filter: &RowFilter,
+) -> DbResult<String> {
+    if filter.rules.is_empty() {
+        return Ok(String::new());
+    }
+    // Once for the whole stack, not once per rule: the rules are all over one
+    // relation, and a metadata read per row would make a five-row filter five
+    // round trips.
+    let columns = driver.columns(&filter.schema, &filter.relation).await?;
+    let mut parts = Vec::with_capacity(filter.rules.len());
+    for rule in &filter.rules {
+        let column = column_named(&columns, &filter.schema, &filter.relation, &rule.column)?;
+        parts.push(clause(
+            dialect,
+            column,
+            rule.op,
+            rule.value.as_deref(),
+            rule.second.as_deref(),
+        )?);
+    }
+    Ok(parts.join(" AND "))
+}
+
+/// The column `name` names, or a sentence saying which relation does not have
+/// it.
+///
+/// Shared by the cell menu and the filter rows because both ask it and the
+/// sentence is the one a person reads: a lookup written twice is a message that
+/// drifts, and this one names the table it looked in.
+fn column_named<'a>(
+    columns: &'a [ColumnInfo],
+    schema: &str,
+    relation: &str,
+    name: &str,
+) -> DbResult<&'a ColumnInfo> {
+    columns
         .iter()
-        .find(|column| column.name == filter.column)
-        .ok_or_else(|| {
-            DbError::new(format!(
-                "{}.{} has no column {}",
-                filter.schema, filter.relation, filter.column
-            ))
-        })?;
-    clause(dialect, column, filter.op, filter.value.as_deref())
+        .find(|column| column.name == name)
+        .ok_or_else(|| DbError::new(format!("{schema}.{relation} has no column {name}")))
 }
 
 /// One predicate over one column.
@@ -221,6 +301,9 @@ fn clause(
     column: &ColumnInfo,
     op: FilterOp,
     value: Option<&str>,
+    // The far end of a range. `None` for every operator but `Between`, which
+    // refuses without it: a range with one end is a row still being typed.
+    second: Option<&str>,
 ) -> DbResult<String> {
     let name = dialect.quote(&column.name);
     Ok(match (op, value) {
@@ -235,6 +318,7 @@ fn clause(
             | FilterOp::LessOrEqual
             | FilterOp::GreaterThan
             | FilterOp::GreaterOrEqual
+            | FilterOp::Between
             | FilterOp::Contains
             | FilterOp::StartsWith
             | FilterOp::EndsWith,
@@ -252,6 +336,24 @@ fn clause(
         (FilterOp::GreaterThan, value) => format!("{name} > {}", literal(dialect, column, value)?),
         (FilterOp::GreaterOrEqual, value) => {
             format!("{name} >= {}", literal(dialect, column, value)?)
+        }
+        (FilterOp::Between, value) => {
+            let Some(second) = second else {
+                return Err(DbError::new(format!(
+                    "the filter on {} is a range with only one end",
+                    column.name
+                )));
+            };
+            // Both ends written by `literal`, so a range over a numeric column
+            // refuses a non-numeric end the same way a comparison does. The ends
+            // are not reordered: `BETWEEN 9 AND 1` matches nothing on every
+            // database here, and silently swapping them would answer a question
+            // the reader did not ask while their row still reads the other way.
+            format!(
+                "{name} BETWEEN {} AND {}",
+                literal(dialect, column, value)?,
+                literal(dialect, column, Some(second))?
+            )
         }
         // The pattern is built from the escaped value and then quoted, in that
         // order. Escaping after quoting would escape the quoting.

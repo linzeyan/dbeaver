@@ -642,10 +642,86 @@ async fn an_operator_with_no_value_is_an_unfinished_row_and_not_a_question_about
     assert!(why.contains("no value to compare against"), "{why}");
 }
 
+/// Several rows become one clause, AND-joined in the order they were given, each
+/// written the way its own column reads it.
+#[tokio::test]
+async fn a_stack_of_rules_becomes_one_and_joined_clause() {
+    assert_eq!(
+        rows(
+            r#"{"schema":"public","relation":"lines","rules":[
+                {"column":"qty","op":"greater_than","value":"2"},
+                {"column":"sku","op":"starts_with","value":"AB"},
+                {"column":"note","op":"is_null"}]}"#
+        )
+        .await,
+        r"qty > 2 AND sku LIKE 'AB%' ESCAPE '\' AND note IS NULL"
+    );
+}
+
+/// A range is inclusive at both ends and keeps the ends in the order they were
+/// given, and one end alone is a row still being typed.
+#[tokio::test]
+async fn a_range_takes_both_ends_and_refuses_one() {
+    assert_eq!(
+        rows(
+            r#"{"schema":"public","relation":"lines","rules":[
+                {"column":"qty","op":"between","value":"1","second":"9"}]}"#
+        )
+        .await,
+        "qty BETWEEN 1 AND 9"
+    );
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"qty","op":"between","value":"1"}]}"#,
+    )
+    .unwrap();
+    let why = dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("a range with one end is not a filter")
+        .to_string();
+    assert!(why.contains("only one end"), "{why}");
+}
+
+/// No rules is no clause at all. The caller leaves the `WHERE` off; a filter
+/// that is always true would be this crate adding a predicate nobody asked for.
+#[tokio::test]
+async fn an_empty_stack_writes_nothing() {
+    assert_eq!(
+        rows(r#"{"schema":"public","relation":"lines","rules":[]}"#).await,
+        ""
+    );
+}
+
+/// A rule over a column the relation does not have is refused by name.
+///
+/// Skipping it would return more rows than the filter on screen describes, with
+/// nothing anywhere saying a row had been ignored.
+#[tokio::test]
+async fn a_rule_over_a_column_that_is_not_there_is_refused_by_name() {
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"nope","op":"equals","value":"1"}]}"#,
+    )
+    .unwrap();
+    let why = dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("a column that is not there is not a filter")
+        .to_string();
+    assert!(why.contains("has no column nope"), "{why}");
+}
+
 /// One clause, from the JSON the front end sends.
 async fn filtered(json: &str) -> String {
     let filter: dbedit::CellFilter = serde_json::from_str(json).expect("the filter should parse");
     dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect("the clause should be writable")
+}
+
+/// One `WHERE` clause, from the JSON the filter rows send.
+async fn rows(json: &str) -> String {
+    let filter: dbedit::RowFilter = serde_json::from_str(json).expect("the filter should parse");
+    dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
         .await
         .expect("the clause should be writable")
 }
