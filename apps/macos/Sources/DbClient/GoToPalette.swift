@@ -40,7 +40,7 @@ struct GoToPalette: View {
     }
 
     private var field: some View {
-        TextField("Go to table", text: $needle)
+        TextField("Go to table or saved query", text: $needle)
             .textFieldStyle(.plain)
             .font(Theme.Typography.title)
             .focused($typing)
@@ -75,13 +75,24 @@ struct GoToPalette: View {
                 Text(matches[index].name)
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.text.color)
-                // The schema, quietly. Two schemas can hold a table of the same
-                // name, and without this the palette would offer the same row
-                // twice with nothing to choose between them.
-                Text(matches[index].schema)
+                    .lineLimit(1)
+                // The schema, or the statement a saved query would type,
+                // quietly. Two schemas can hold a table of the same name and
+                // two favorites can be named alike, and without this the
+                // palette would offer the same row twice with nothing to
+                // choose between them. Tail-truncated, because a statement is
+                // as long as somebody wrote it.
+                Text(matches[index].detail)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Spacer(minLength: 0)
+                if let label = matches[index].kind.label {
+                    Text(label)
+                        .font(Theme.Typography.micro)
+                        .foregroundStyle(Theme.textTertiary.color)
+                }
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 1)
