@@ -278,6 +278,9 @@ struct ConnectionChooser: View {
                 // marked: a SQLite file somebody is not to write to is as real a
                 // thing as a production server.
                 safetyRow
+                if let test = model.connectionTest {
+                    testRow(test)
+                }
             }
 
             buttons
@@ -361,6 +364,13 @@ struct ConnectionChooser: View {
                         .help("Put back the values this connection was saved with")
                 }
 
+                // Before Save, because it is the question somebody asks *of* a
+                // form they are not sure about — and left of the two buttons that
+                // change something, since it changes nothing.
+                Button("Test", action: model.testConnection)
+                    .disabled(!model.canTestConnection)
+                    .help("Open this connection, ask what answered, and close it again")
+
                 Button("Save", action: model.saveConnection)
                     .disabled(!model.canSaveConnection)
                     .help("Keep this connection in the file")
@@ -418,6 +428,40 @@ struct ConnectionChooser: View {
             .accessibilityLabel("Database kind")
             Spacer(minLength: 0)
         }
+    }
+
+    /// What the last Test found, in the fields' own alignment so that it reads as
+    /// another line of the form rather than as something laid over it.
+    ///
+    /// Its own row rather than the error banner at the top of the card. That
+    /// banner is where a failed *connect* goes and it can be dismissed, because
+    /// it describes something that stopped happening; a test result describes
+    /// something that was asked for and answered, and it stays until the next
+    /// question.
+    ///
+    /// The three states borrow the dot the window already uses for a connection,
+    /// rather than three new symbols meaning the same three things.
+    @ViewBuilder
+    private func testRow(_ test: AppModel.ConnectionTest) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("")
+            switch test {
+            case .running:
+                StatusDot(state: .connecting)
+                Text("Testing…").foregroundStyle(Theme.textSecondary.color)
+            case .reached(let info):
+                StatusDot(state: .connected)
+                Text(info.label).foregroundStyle(Theme.text.color)
+            case .failed(let message):
+                StatusDot(state: .failed)
+                Text(message)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(2)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(Theme.Typography.caption)
+        .accessibilityElement(children: .combine)
     }
 
     /// What this connection is allowed to be.

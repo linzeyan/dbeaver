@@ -809,6 +809,76 @@ final class AppModel {
     /// Whether Connect has something to try.
     var canConnect: Bool { connectionDraft.settings.isComplete && !isConnecting }
 
+    /// What the last Test found, or nil before anybody has pressed it.
+    ///
+    /// Three states rather than a flag and a message, because "not tried" is not
+    /// "failed": a form that opened showing a red line about a connection nobody
+    /// has tested would be reporting its own state as the database's.
+    enum ConnectionTest: Equatable {
+        case running
+        case reached(ServerInfo)
+        case failed(String)
+    }
+
+    /// The last Test's answer. Cleared when the form moves to another connection:
+    /// an answer about the row somebody just left is worse than no answer.
+    private(set) var connectionTest: ConnectionTest?
+
+    /// Whether Test has something to try — Connect's question, and one more: a
+    /// test already in flight is not worth starting twice.
+    var canTestConnection: Bool {
+        connectionDraft.settings.isComplete && connectionTest != .running
+    }
+
+    /// Opens what the form describes, asks what answered, and lets it go.
+    ///
+    /// A connection of its own, and off the core queue rather than on it: that
+    /// queue belongs to whatever database is already open, and a test that waited
+    /// behind a running query would report a timeout against a server that is
+    /// perfectly well. Nothing here touches the session — finding out before
+    /// replacing anything is the whole point of a test.
+    ///
+    /// The failure lands in `connectionTest` rather than in `connectionError`:
+    /// the banner is where a failed *connect* goes, and a test that failed has
+    /// not yet stopped anybody from doing anything.
+    func testConnection() {
+        guard canTestConnection else { return }
+        readDeferredPassword()
+        let connString = connectionDraft.settings.connectionString(password: connectionPassword)
+        connectionTest = .running
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let outcome: ConnectionTest
+            do {
+                outcome = .reached(try Database(connString: connString).serverInfo())
+            } catch {
+                outcome = .failed("\(error)")
+            }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.connectionTest = outcome
+                    if case .reached(let info) = outcome { self?.record(server: info.label) }
+                }
+            }
+        }
+    }
+
+    /// Keeps what answered against the connection it answered for.
+    ///
+    /// Written straight to the file rather than waiting for Save, because it is
+    /// not an edit: nobody typed it, `unsavedEdits` does not compare it, and a
+    /// record that needed saving would leave the row wrong until somebody pressed
+    /// a button about something they had never done. Quick connect has nowhere to
+    /// keep it, which is what the lookup below decides.
+    private func record(server: String) {
+        guard !server.isEmpty else { return }
+        connectionDraft.server = server
+        guard var saved = connections.connection(connectionDraft.id), saved.server != server
+        else { return }
+        saved.server = server
+        connections.save(saved)
+        ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
+    }
+
     /// The saved connection the form is editing, or nil for Quick connect.
     var editedConnection: SavedConnection? { connections.connection(connectionDraft.id) }
 
@@ -905,6 +975,9 @@ final class AppModel {
     func selectConnection(_ id: UUID?) {
         guard id != selectedConnectionID else { return }
         guard settleUnsavedConnectionEdits() else { return }
+        // The last test was about the connection being left. Left on screen it
+        // would read as a statement about the one arriving.
+        connectionTest = nil
         if editedConnection == nil {
             quickConnectDraft = connectionDraft
             quickConnectPassword = connectionPassword
@@ -1129,6 +1202,7 @@ final class AppModel {
         relations = inventory.relations
         connectionLabel = Self.label(for: connString)
         connectionColor = connectionDraft.color
+        record(server: inventory.server)
         connectionState = .connected
         // Open the schema a user most likely wants, and land on a table
         // rather than an empty pane. Opening to nothing makes every session
@@ -1222,12 +1296,20 @@ final class AppModel {
         for schema in schemas {
             relations[schema.name] = try db.relations(schema: schema.name)
         }
-        return Inventory(schemas: schemas, relations: relations)
+        // Asked here, where a failure costs the label and not the connection. A
+        // database that will not say what it is is still a database somebody has
+        // just opened, and refusing to show it over a version string would be
+        // this application deciding the answer mattered more than the data.
+        return Inventory(
+            schemas: schemas, relations: relations,
+            server: (try? db.serverInfo())?.label ?? "")
     }
 
     private struct Inventory: Sendable {
         let schemas: [SchemaInfo]
         let relations: [String: [RelationInfo]]
+        /// What answered, for the list row to keep. Empty where it would not say.
+        let server: String
     }
 
     // MARK: - Refresh
