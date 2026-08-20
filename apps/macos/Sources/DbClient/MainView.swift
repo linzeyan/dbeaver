@@ -77,6 +77,29 @@ struct MainView: View {
             .help("\(model.connectionState.label) — \(model.connectionLabel)")
         }
 
+        // Back and Forward at the navigation end, where every window that has
+        // them puts them. Always present rather than appearing with the first
+        // visit: a control that materialises under the pointer is worse than one
+        // that is briefly dim.
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: 2) {
+                Button {
+                    model.goBack()
+                } label: {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .disabled(!model.canGoBack)
+                .help("Back (⌘[)")
+                Button {
+                    model.goForward()
+                } label: {
+                    Label("Forward", systemImage: "chevron.right")
+                }
+                .disabled(!model.canGoForward)
+                .help("Forward (⌘])")
+            }
+        }
+
         // Only where there is a transaction to control. Most of the databases
         // here run every statement on a connection borrowed from a pool, where
         // nothing could hold one open, and a Commit button that can never do

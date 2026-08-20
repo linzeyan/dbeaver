@@ -146,7 +146,12 @@ final class AppModel {
     private(set) var filterFocusRequests = 0
 
     // Detail
-    var activeTab: DetailTab = .content
+    /// Which pane is showing.
+    ///
+    /// Recorded in the history on its way through, because moving between a
+    /// table's structure and its rows is moving: Back from the rows should mean
+    /// the description of the same table, not the table before it.
+    var activeTab: DetailTab = .content { didSet { recordVisit() } }
     private(set) var columns: [ColumnInfo] = []
     /// Which of those columns name one row, as the core decides it. Read
     /// alongside the columns, because every question about editing is a question
@@ -894,6 +899,7 @@ final class AppModel {
         // a different table on a different server.
         browseStore.clear()
         stateToRestore = nil
+        browseHistory.clear()
         queryText = ""
         suggestedQueryText = ""
         querySelection = nil
@@ -1129,6 +1135,52 @@ final class AppModel {
     var canFilterObjects: Bool { !schemas.isEmpty }
 
     func focusNavigatorFilter() { filterFocusRequests += 1 }
+
+    // MARK: - Back and forward
+
+    /// Where this window has been, and where Back and Forward go.
+    private var browseHistory = BrowseHistory()
+
+    /// Set while Back or Forward is doing the moving.
+    ///
+    /// Without it the arrival that Back performs would be recorded as a new
+    /// place, which appends to the path and throws away everything ahead — so
+    /// Back would work once and Forward would never have anywhere to go.
+    private var isNavigatingHistory = false
+
+    var canGoBack: Bool { browseHistory.canGoBack }
+    var canGoForward: Bool { browseHistory.canGoForward }
+
+    func goBack() { travel(to: browseHistory.goBack()) }
+    func goForward() { travel(to: browseHistory.goForward()) }
+
+    /// Notes where the window now is, unless Back or Forward put it there.
+    ///
+    /// Called from two places, because there are two ways to move: picking
+    /// another relation, and switching tab. `BrowseHistory.visit` ignores an
+    /// arrival at the place already current, which is what lets both call it
+    /// without either having to know whether the other just did.
+    private func recordVisit() {
+        guard !isNavigatingHistory, let selected else { return }
+        browseHistory.visit(Visit(relationID: selected.id, tab: activeTab))
+    }
+
+    /// Goes where the history says, if that place is still on the tree.
+    ///
+    /// A visit naming a relation the sidebar no longer has is dropped rather
+    /// than reported: the path is a record of where this window went, and a table
+    /// dropped by somebody else is not an error this window made. The cursor has
+    /// already moved by then, so pressing Back again steps past it.
+    ///
+    /// `findRelation(named:)` is the lookup the `--relation` flag uses, and a
+    /// `Visit`'s id is spelled the way that flag spells one.
+    private func travel(to visit: Visit?) {
+        guard let visit, let relation = findRelation(named: visit.relationID) else { return }
+        isNavigatingHistory = true
+        defer { isNavigatingHistory = false }
+        activeTab = visit.tab
+        selected = relation
+    }
 
     // MARK: - Go to
 
@@ -1651,6 +1703,7 @@ final class AppModel {
         orderClause = appliedInitialFilters ? restored.orderClause : (initialFilters.order ?? "")
         appliedInitialFilters = true
         stateToRestore = restored
+        recordVisit()
         // Cleared rather than left showing the previous relation's structure
         // while the new one loads.
         clearRelationDetail()
