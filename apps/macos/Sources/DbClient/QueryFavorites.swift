@@ -148,3 +148,36 @@ final class QueryFavorites {
         return decoded
     }
 }
+
+/// Reading and writing the list as a file.
+///
+/// A different job from `write`/`load`, and spelt differently on purpose. Those
+/// two move bytes between this process and its own defaults, where nobody looks
+/// and nothing else reads. These two produce a document: something a person
+/// opens in an editor, keeps in a repository, and sends to a colleague.
+extension QueryFavorites {
+    /// The list as a file worth reading.
+    ///
+    /// Pretty-printed, keys sorted, dates as ISO 8601 — none of which the
+    /// defaults blob needs and all of which a file does. Sorted keys in
+    /// particular: two exports of one list must be the same bytes, or every
+    /// export is a diff.
+    static func encoded(_ favorites: [QueryFavorite]) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(favorites)
+    }
+
+    /// What such a file holds, or a thrown error.
+    ///
+    /// Throws where `load` shrugs, and the difference is who is waiting. A store
+    /// that cannot read what last week's build wrote should open anyway; an
+    /// import that cannot read the file it was handed has somebody standing
+    /// there expecting to be told whether it worked.
+    static func decoded(_ data: Data) throws -> [QueryFavorite] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode([QueryFavorite].self, from: data)
+    }
+}

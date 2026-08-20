@@ -20,6 +20,8 @@ enum QueryFavoritesChecks {
             checkSavingKeepsTheStatementThatWouldRun()
             checkAFavoriteArrivesInTheEditorReadyToRun()
             checkASecondOneIsAppendedRatherThanReplacing()
+            checkAnExportedFileReadsBackAsTheListThatWroteIt()
+            checkAFileThisBuildCannotReadLeavesTheListAlone()
         }
         if failures == 0 {
             fputs("favorites: all checks passed\n", stderr)
@@ -200,6 +202,66 @@ enum QueryFavoritesChecks {
         }
         model.recall(favorite)
         expect(model.queryText, "SELECT 1;\n\nSELECT 2", "both statements, separated")
+    }
+
+    // MARK: - The file
+
+    /// A file written by this build reads back as what wrote it, whole.
+    ///
+    /// This is the entire promise of an export. A field dropped in the round
+    /// trip is a statement that comes back offered to the wrong database, or
+    /// under no name at all — and neither is visible until somebody needs the
+    /// query.
+    @MainActor private static func checkAnExportedFileReadsBackAsTheListThatWroteIt() {
+        let store = scratch()
+        store.save(name: "Postgres one", sql: "SELECT 1", scheme: "postgres")
+        store.save(name: "Anywhere", sql: "SELECT 2", scheme: "")
+        let written = store.favorites
+
+        do {
+            let data = try QueryFavorites.encoded(written)
+            let read = try QueryFavorites.decoded(data)
+            expect(read.map(\.id), written.map(\.id), "the same queries, in the same order")
+            expect(read.map(\.name), written.map(\.name), "under the same names")
+            expect(read.map(\.sql), written.map(\.sql), "holding the same statements")
+            expect(read.map(\.scheme), written.map(\.scheme), "for the same databases")
+            // To the second, not to the microsecond. ISO 8601 is what makes the
+            // file legible, and `savedAt` exists only to break ties in the
+            // ordering — a timestamp a person can read is worth more here than
+            // one that survives a round trip bit for bit.
+            expect(
+                read.map { Int($0.savedAt.timeIntervalSince1970) },
+                written.map { Int($0.savedAt.timeIntervalSince1970) },
+                "saved at the same moment, to the second")
+        } catch {
+            failures += 1
+            fputs("favorites FAIL: the list was written and read back: \(error)\n", stderr)
+        }
+    }
+
+    /// A file this build cannot read is refused, and the list is untouched.
+    ///
+    /// The opposite of what the defaults store does with the same problem, and
+    /// deliberately: an unreadable import that quietly emptied the list would
+    /// destroy the thing it was asked to add to.
+    @MainActor private static func checkAFileThisBuildCannotReadLeavesTheListAlone() {
+        guard let model = makeModel() else { return }
+        model.favorites.save(name: "Mine", sql: "SELECT 1", scheme: "")
+
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-verify-favorites-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        do {
+            try Data("this is not a saved-queries file".utf8).write(to: file)
+        } catch {
+            failures += 1
+            fputs("favorites FAIL: the fixture file was written: \(error)\n", stderr)
+            return
+        }
+
+        model.importFavorites(from: file)
+        expect(model.favorites.favorites.map(\.name), ["Mine"], "the list is as it was")
+        expect(model.errorMessage != nil, true, "and the window says why nothing happened")
     }
 
     // MARK: - Fixture

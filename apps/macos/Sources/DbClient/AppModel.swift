@@ -2891,6 +2891,53 @@ final class AppModel {
         return favorites.save(name: name, sql: sql, scheme: scheme) != nil
     }
 
+    // MARK: - Saved queries, in and out of a file
+
+    /// Whether there is a list worth writing out. The item is greyed rather than
+    /// producing a file holding `[]`, which is a file somebody would then try to
+    /// work out what was wrong with.
+    var canExportFavorites: Bool { !favorites.favorites.isEmpty }
+
+    /// What the save panel proposes. Named for the application rather than for
+    /// the connection: the file is a list of statements, and which database
+    /// happened to be open when it was written says nothing about what is in it.
+    var favoritesFilename: String { "dbclient-queries.json" }
+
+    /// Writes every saved query, not only the ones the open connection is
+    /// offered. The list belongs to the person, not to the session — exporting
+    /// while connected to PostgreSQL must not silently drop their MySQL ones.
+    func exportFavorites(to url: URL) {
+        do {
+            try QueryFavorites.encoded(favorites.favorites).write(to: url, options: .atomic)
+            errorMessage = nil
+        } catch {
+            errorMessage =
+                "\(url.lastPathComponent) could not be written: \(error.localizedDescription)"
+        }
+    }
+
+    /// Reads a file of saved queries into the list.
+    ///
+    /// Merged rather than replaced — see `QueryFavorites.merge` — so opening the
+    /// wrong file is something a person can walk back from.
+    ///
+    /// On success the window goes to the list that just changed. An import with
+    /// no visible consequence is indistinguishable from one that silently did
+    /// nothing, and this is the only evidence it worked.
+    func importFavorites(from url: URL) {
+        do {
+            let incoming = try QueryFavorites.decoded(try Data(contentsOf: url))
+            favorites.merge(incoming)
+            errorMessage = nil
+            activeTab = .query
+            queryPanelTab = .favorites
+            isHistoryOpen = true
+        } catch {
+            errorMessage =
+                "\(url.lastPathComponent) is not a saved-queries file this build can read."
+        }
+    }
+
     // MARK: - Export
 
     /// Whether there is a result to write out. The menu item is disabled when
