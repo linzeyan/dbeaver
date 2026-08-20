@@ -31,11 +31,25 @@ struct SavedConnection: Identifiable, Equatable, Codable {
     /// would make the connection useless.
     var isProduction: Bool
 
+    /// What answered, the last time this connection was opened or tested.
+    ///
+    /// A record and not a setting: nobody types it, nothing compares it when
+    /// deciding whether the form has unsaved edits, and a connection nothing has
+    /// ever answered has none. It is kept because it is the only thing that tells
+    /// two rows apart when both say `postgres://` and one of them is CockroachDB
+    /// — the scheme names a wire protocol, and the product is what somebody
+    /// actually has open.
+    ///
+    /// One string, as it was shown: "PostgreSQL 17.0". Kept as a product and a
+    /// version it would be a structure nothing reads as one, in a file somebody
+    /// opens and reads.
+    var server: String
+
     var settings: ConnectionSettings
 
     init(
         id: UUID = UUID(), name: String = "", color: ConnectionColor = .none,
-        isReadOnly: Bool = false, isProduction: Bool = false,
+        isReadOnly: Bool = false, isProduction: Bool = false, server: String = "",
         settings: ConnectionSettings
     ) {
         self.id = id
@@ -43,6 +57,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         self.color = color
         self.isReadOnly = isReadOnly
         self.isProduction = isProduction
+        self.server = server
         self.settings = settings
     }
 
@@ -77,12 +92,23 @@ struct SavedConnection: Identifiable, Equatable, Codable {
 
     /// The line under the heading: enough of the connection to tell two rows apart.
     ///
+    /// What answered comes first and the address last, because this line truncates
+    /// in its middle: the product and the database are the two ends somebody reads
+    /// a row by, and the port between them is the part that can afford to go. A
+    /// connection nothing has answered yet is the address alone, rather than a
+    /// separator with nothing in front of it.
+    var subtitle: String {
+        server.isEmpty ? address : "\(server) · \(address)"
+    }
+
+    /// Where this connection points, as a label.
+    ///
     /// Built here rather than by asking `connectionString` for a URL, because a URL
     /// would carry the scheme and the percent-encoding and this is a label. Each
     /// separator belongs to the part after it, so a connection with no port reads
     /// `ana@db.example/sales` rather than `ana@db.example:/sales` — punctuation with
     /// nothing behind it looks like the line was cut off.
-    var subtitle: String {
+    private var address: String {
         if settings.driver?.shape == .file {
             return settings.path
         }
@@ -139,12 +165,16 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         var production: Bool
         var readOnly: Bool
         var scheme: String
+        /// What answered, the last time. Written even when empty, for the reason
+        /// the flags above it are: a key that appears only sometimes is one
+        /// nobody reading the file can rely on being told about.
+        var server: String
         var user: String
 
         init(
             color: String, database: String, host: String, id: String, name: String, path: String,
             port: String, production: Bool = false, readOnly: Bool = false, scheme: String,
-            user: String
+            server: String = "", user: String
         ) {
             self.color = color
             self.database = database
@@ -156,6 +186,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.production = production
             self.readOnly = readOnly
             self.scheme = scheme
+            self.server = server
             self.user = user
         }
 
@@ -170,6 +201,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.production = connection.isProduction
             self.readOnly = connection.isReadOnly
             self.scheme = connection.settings.scheme
+            self.server = connection.server
             self.user = connection.settings.user
         }
 
@@ -199,6 +231,11 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.production = try container.decodeIfPresent(Bool.self, forKey: .production) ?? false
             self.readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
 
+            // Nothing, for an entry nothing has answered — including every entry
+            // written before this was recorded at all. The next connection fills
+            // it in, and until then the row says only where it points.
+            self.server = try container.decodeIfPresent(String.self, forKey: .server) ?? ""
+
             // An entry somebody typed has no id, and one is minted here rather than
             // at the call site: an entry that arrived without an identity still has
             // to have one before anything can keep its password.
@@ -207,7 +244,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case color, database, host, id, name, path, port, production, readOnly, scheme, user
+            case color, database, host, id, name, path, port, production, readOnly, scheme, server,
+                user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -223,7 +261,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             )
             return SavedConnection(
                 id: id, name: self.name, color: color, isReadOnly: self.readOnly,
-                isProduction: self.production, settings: settings)
+                isProduction: self.production, server: self.server, settings: settings)
         }
     }
 }

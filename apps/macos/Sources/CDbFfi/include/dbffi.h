@@ -88,6 +88,16 @@ int db_cancel(DbHandle* handle, char** err);
 // form cannot offer one this build does not have.
 char* db_drivers_json(char** err);
 
+// What answered this connection: {"product": "…", "version": "…"}. Release with
+// db_string_free.
+//
+// A round trip, unlike db_drivers_json above it: that one says what this build
+// can open, and this one says what it actually opened. The scheme names a wire
+// protocol rather than a product, so a postgres:// connection may report
+// CockroachDB and a mysql:// one may report TiDB. The version is the server's
+// own spelling, and is empty where it states none.
+char* db_server_info_json(DbHandle* handle, char** err);
+
 // One reading of an editor buffer: what to paint, where the statements are, and
 // which one a run would send. Takes no handle for the reason db_drivers_json
 // does not — reading SQL needs the dialect and not the connection, and an editor

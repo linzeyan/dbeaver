@@ -4,6 +4,25 @@ import Foundation
 // serde output, so a rename on either side fails to decode rather than silently
 // producing empty values.
 
+/// What answered a connection: the product on the other end, and its version.
+///
+/// Asked rather than taken from the scheme, which names a wire protocol: a
+/// `postgres://` connection may be CockroachDB or GreptimeDB, and a window that
+/// labelled it PostgreSQL would be naming the driver and calling it the
+/// database.
+struct ServerInfo: Decodable, Hashable {
+    let product: String
+    /// Empty where the server states none. Several of the databases here have no
+    /// version to report at all, and each driver's own source says why.
+    let version: String
+
+    /// The two as one line to put on screen — "PostgreSQL 17.0", or the product
+    /// alone where there is no version to add.
+    var label: String {
+        version.isEmpty ? product : "\(product) \(version)"
+    }
+}
+
 struct SchemaInfo: Decodable, Hashable, Identifiable {
     let name: String
     var id: String { name }

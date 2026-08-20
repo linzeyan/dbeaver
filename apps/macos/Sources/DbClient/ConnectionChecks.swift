@@ -32,6 +32,7 @@ enum ConnectionChecks {
         checkStorageClearsOther()
         checkConnectionList()
         checkSafetyFlags()
+        checkServerRecord()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -537,6 +538,44 @@ enum ConnectionChecks {
         expect(ConnectionList.isWorthSaving(draft), false, "an untouched form is not worth saving")
         draft.isProduction = true
         expect(ConnectionList.isWorthSaving(draft), true, "marking one production is a decision")
+    }
+
+    /// What answered is kept, shown in front of the address, and is not an edit.
+    ///
+    /// The last of those is the one that would be found late and by accident: the
+    /// record is written by connecting, so if it counted as an unsaved edit then
+    /// opening a connection would leave its own form dirty, and every switch to
+    /// another row would ask about changes nobody made.
+    private static func checkServerRecord() {
+        let reached = SavedConnection(
+            id: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            server: "CockroachDB 23.1.11",
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        let back = SavedConnection.Raw(from: reached).toSavedConnection()
+        expect(back.server, "CockroachDB 23.1.11", "what answered survives the file")
+        expect(
+            back.subtitle, "CockroachDB 23.1.11 · ana@db.example:5432/sales",
+            "and is read in front of the address")
+
+        // The product is the whole point of recording it: this row and one
+        // against real PostgreSQL are otherwise the same two lines.
+        var untried = reached
+        untried.server = ""
+        expect(
+            untried.subtitle, "ana@db.example:5432/sales",
+            "a connection nothing has answered is the address alone")
+
+        expect(
+            reached.unsavedEdits(against: untried, passwordChanged: false) == nil, true,
+            "and what answered is a record rather than an edit")
+
+        // An entry written before this key existed decodes rather than throwing:
+        // one throw anywhere empties the whole list.
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(decoded?.server ?? "missing", "", "an entry from before it has answered nothing")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

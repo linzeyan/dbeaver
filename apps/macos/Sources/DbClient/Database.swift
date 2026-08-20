@@ -73,6 +73,17 @@ final class Database: @unchecked Sendable {
         }
     }
 
+    // MARK: - Identity
+
+    /// What answered this connection.
+    ///
+    /// A round trip rather than something read off the connection string, and
+    /// priced like a statement rather than like an accessor: it is asked once,
+    /// when a connection opens or when somebody presses Test.
+    func serverInfo() throws -> ServerInfo {
+        try decodeJSON(db_server_info_json(handle, &errOut), as: ServerInfo.self)
+    }
+
     // MARK: - Metadata
 
     func schemas() throws -> [SchemaInfo] {
