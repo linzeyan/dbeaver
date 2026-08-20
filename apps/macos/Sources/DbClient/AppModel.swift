@@ -3249,6 +3249,91 @@ final class AppModel {
         runStatements([target.range], labelled: ["explain"], prefixedWith: prefix + " ")
     }
 
+    /// What is about to be sent to a connection somebody marked production.
+    struct ProductionRun {
+        /// How many statements the run would send, of which `worst` is one.
+        let count: Int
+        /// The statement that set the level, which is the one the question is
+        /// about — the first of the worst, so that a script's answer does not
+        /// move when a later statement ties with it.
+        let worst: String
+        let danger: SQLScript.Danger
+        /// The connection as the window is naming it, so that the dialog and the
+        /// title bar cannot disagree about which server this is.
+        let label: String
+
+        var question: String {
+            count == 1
+                ? "Run this statement on “\(label)”?"
+                : "Run \(count) statements on “\(label)”?"
+        }
+
+        /// The mark is not the news — the window has been showing it all along.
+        /// What somebody cannot see from the Run button is which statement the
+        /// caret was in, so the statement is what this shows.
+        var detail: String {
+            let opening =
+                "This connection is marked production, and what you are about to run "
+                + "\(danger.sentence)."
+            let scope =
+                count == 1
+                ? "" : " It is one of \(count) statements this run would send, in order."
+            return "\(opening)\(scope)\n\n\(preview)"
+        }
+
+        /// Cut rather than shown whole. A dialog that has become a scrolling
+        /// document is one people dismiss without reading, which is the failure
+        /// this whole mark exists to avoid.
+        private var preview: String {
+            worst.count <= 300 ? worst : "\(worst.prefix(300))…"
+        }
+    }
+
+    /// Puts the production question, and answers whether the statements go.
+    ///
+    /// A property rather than a method for the reason `confirmDeletion` is one:
+    /// the alert runs a modal loop, and the check suites have nobody at the
+    /// keyboard to answer it.
+    @ObservationIgnored
+    var confirmProductionRun: @MainActor (ProductionRun) -> Bool = { run in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = run.question
+        alert.informativeText = run.detail
+        // Run leads because it is what pressing ⌘R asked for; Cancel takes the
+        // escape key, so dismissing the sheet without reading it sends nothing.
+        alert.addButton(withTitle: "Run")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Whether `sql` may go, having asked if the connection says to ask.
+    ///
+    /// Asked here rather than at each of the three callers, because this is the
+    /// one place editor text leaves for the server. A fourth way to run a
+    /// statement, added later, is gated by having to come through here at all —
+    /// three separate guards would leave it ungated by being forgotten.
+    ///
+    /// Asked every time, with no memory of a previous yes. dbx queues one
+    /// confirmation per connection and drops it on disconnect; a remembered yes
+    /// is the same as no mark for the rest of the session, and asking twice is
+    /// cheaper than protecting nothing.
+    private func mayRun(_ sql: [String]) -> Bool {
+        let judged = sql.map { (text: $0, danger: SQLScript.danger(of: $0, scheme: scheme)) }
+        // The first of the worst, written out rather than left to `max(by:)`,
+        // whose answer among equals is not something to depend on.
+        guard var worst = judged.first else { return true }
+        for candidate in judged.dropFirst() where candidate.danger > worst.danger {
+            worst = candidate
+        }
+        guard safety.asks(about: worst.danger) else { return true }
+        return confirmProductionRun(
+            ProductionRun(
+                count: sql.count, worst: worst.text, danger: worst.danger,
+                label: connectionLabel))
+    }
+
     /// Runs `ranges` of the editor buffer in order on the one connection, and
     /// installs an outcome for each.
     ///
@@ -3265,6 +3350,14 @@ final class AppModel {
     private func runStatements(
         _ ranges: [Range<Int>], labelled labels: [String], prefixedWith prefix: String = ""
     ) {
+        // The buffer as it is now. An error arrives after a round trip, and the
+        // caret may only be moved while the text it indexes still exists.
+        let script = queryText
+        let sql = ranges.map { prefix + SQLScript.text($0, in: script) }
+        // Before anything on screen moves. A window that had already dimmed the
+        // result and said "Running…" behind the question would be describing a
+        // run nobody had agreed to, and answering Cancel would leave it saying so.
+        guard mayRun(sql) else { return }
         isBusy = true
         // The step on screen dims for the duration. Blanking the pane would lose
         // the result the user is comparing against, and the veil is the
@@ -3275,10 +3368,6 @@ final class AppModel {
         // attribute an old error to the outcomes now on screen.
         errorMessage = nil
         let batchRows = self.batchRows
-        // The buffer as it is now. An error arrives after a round trip, and the
-        // caret may only be moved while the text it indexes still exists.
-        let script = queryText
-        let sql = ranges.map { prefix + SQLScript.text($0, in: script) }
 
         run { db -> ScriptOutput in
             var completed: [StatementOutput] = []

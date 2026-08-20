@@ -42,6 +42,21 @@ struct ConnectionSafety {
         return
             "This connection is marked read-only. Clear the mark in the connection form to write to it."
     }
+
+    /// Whether a statement this dangerous is worth stopping to ask about.
+    ///
+    /// Reads never are, on any connection. A question in front of every SELECT
+    /// is a question nobody reads by the third one, and a mark whose dialog is
+    /// dismissed reflexively protects nothing — it only teaches the reflex that
+    /// will dismiss the one that mattered.
+    ///
+    /// Read-only is not consulted, and the asymmetry is the point: it has
+    /// already refused the writes this application controls, and the ones it has
+    /// not refused are statements somebody typed themselves. Marking a
+    /// connection read-only is not a claim that its user cannot write SQL.
+    func asks(about danger: SQLScript.Danger) -> Bool {
+        isProduction && danger >= .modify
+    }
 }
 
 /// A connection that a person kept, with a name and color.
