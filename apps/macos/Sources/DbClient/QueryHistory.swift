@@ -51,7 +51,29 @@ enum QueryHistoryOutcome: Codable, Equatable {
     }
 }
 
-/// One statement the Query pane sent, and what came back.
+/// What caused a statement to be sent.
+///
+/// The Query pane is not the only thing this window sends. A browse is a SELECT
+/// somebody caused by clicking a table without typing a word of it, and an edit
+/// is an UPDATE the core wrote for changes staged in a grid — and "what did this
+/// application just run on my database" is a question about all of them. A
+/// history that answered it only for the typed ones would be answering an easier
+/// question than the one being asked.
+///
+/// Three cases and not one per call site: what a reader wants to know is whether
+/// they wrote it, whether looking at a table caused it, or whether it changed
+/// something. Which button was pressed is a finer distinction than the list has
+/// room to draw.
+enum QueryHistoryOrigin: String, Codable, Equatable, CaseIterable {
+    /// Typed into the Query pane and sent with ⌘R or ⌥⌘R.
+    case query
+    /// The browse's own SELECT, sent by choosing a table or pressing Apply.
+    case browse
+    /// An INSERT, UPDATE or DELETE the core wrote for staged grid changes.
+    case edit
+}
+
+/// One statement this window sent, and what came back.
 struct QueryHistoryEntry: Codable, Identifiable, Equatable {
     let id: UUID
     /// The statement as sent, verbatim. This is what goes back in the editor,
@@ -61,6 +83,15 @@ struct QueryHistoryEntry: Codable, Identifiable, Equatable {
     /// a user recognises a statement by, but a stored duration would be wrong
     /// the moment the window was closed.
     let ranAt: Date
+    /// What caused it.
+    let origin: QueryHistoryOrigin
+    /// What the server took, as the run measured it.
+    ///
+    /// Zero means nothing measured it — a statement that failed before it was
+    /// timed — rather than a statement that took no time. The two have to read
+    /// differently wherever this is drawn, because "0 ms" is the fastest thing
+    /// on the list and "we never found out" is not a speed at all.
+    let milliseconds: Double
     let outcome: QueryHistoryOutcome
 
     /// The statement on one line, for the list. Whitespace is collapsed rather
@@ -94,6 +125,16 @@ final class QueryHistory {
     /// it the oldest go, because a history is read from the top.
     static let limit = 200
 
+    /// And how many of those may be statements nobody typed.
+    ///
+    /// A browse runs every time a table is picked, so a single cap on the total
+    /// would leave the list all browses within a minute of opening a database —
+    /// and the statement somebody typed twenty minutes ago, which is the one
+    /// thing this exists to give back, would have been pushed off the end by the
+    /// sidebar. Half the list is reserved for the typed ones by capping the
+    /// others at half.
+    static let untypedLimit = 100
+
     private static let key = "dev.dbclient.queryHistory"
 
     private let defaults: UserDefaults
@@ -110,24 +151,56 @@ final class QueryHistory {
     /// A failure is recorded like any other outcome, and is the entry most worth
     /// keeping: the statement with the typo in it is precisely the one someone
     /// comes back for.
-    func record(_ sql: String, outcome: QueryHistoryOutcome, at ranAt: Date = Date()) {
+    func record(
+        _ sql: String, from origin: QueryHistoryOrigin, outcome: QueryHistoryOutcome,
+        milliseconds: Double, at ranAt: Date = Date()
+    ) {
         let statement = sql.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !statement.isEmpty else { return }
         let entry = QueryHistoryEntry(
-            id: UUID(), sql: statement, ranAt: ranAt, outcome: outcome)
+            id: UUID(), sql: statement, ranAt: ranAt, origin: origin,
+            milliseconds: milliseconds, outcome: outcome)
         // A statement run again replaces its own entry rather than stacking a
         // second one: pressing ⌘R four times while fixing a table would
         // otherwise push everything else off the top of the list with four
         // copies of one statement. Replaced rather than left alone, because the
         // newer run is the true one — its outcome may differ, and an entry still
         // reading "8m ago" for something sent a second ago is simply wrong.
-        if entries.first?.sql == statement {
+        //
+        // The origin has to match as well. The same SELECT can be typed into the
+        // Query pane and produced by the browse, and folding those two together
+        // would answer "did I run this or did the sidebar" with whichever came
+        // second.
+        if entries.first?.sql == statement, entries.first?.origin == origin {
             entries[0] = entry
         } else {
             entries.insert(entry, at: 0)
         }
-        if entries.count > Self.limit { entries.removeLast(entries.count - Self.limit) }
+        trim()
         save()
+    }
+
+    /// Drops whatever the two caps say cannot be kept, newest first.
+    ///
+    /// The untyped cap is applied on the way through rather than afterwards, so
+    /// a hundred-and-first browse falls out while a typed statement below it
+    /// stays. Written as one pass with an explicit order because that order is
+    /// the whole rule: `removeAll(where:)` does not promise to visit in
+    /// sequence, and a rule about which of two entries survives cannot be built
+    /// on a predicate whose call order is unspecified.
+    private func trim() {
+        var untyped = 0
+        var kept: [QueryHistoryEntry] = []
+        kept.reserveCapacity(min(entries.count, Self.limit))
+        for entry in entries {
+            if entry.origin != .query {
+                untyped += 1
+                if untyped > Self.untypedLimit { continue }
+            }
+            kept.append(entry)
+            if kept.count == Self.limit { break }
+        }
+        entries = kept
     }
 
     /// Drops everything, here and on disk. Irreversible, which is why the panel

@@ -3107,7 +3107,13 @@ final class AppModel {
         // failure never reached the server.
         for step in steps {
             guard let outcome = QueryHistoryOutcome(step.outcome) else { continue }
-            history.record(step.sql, outcome: outcome)
+            // The duration off the step's own result rather than re-measured
+            // here: that is the number the status bar shows for the same step,
+            // and a history disagreeing with the line under the grid about one
+            // statement would make both of them worth checking.
+            history.record(
+                step.sql, from: .query, outcome: outcome,
+                milliseconds: step.result.milliseconds)
         }
         // Where the eye should go. A run that stopped has exactly one place
         // worth looking and it is the statement that stopped it; a run that
