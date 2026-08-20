@@ -680,7 +680,12 @@ final class GridView: MTKView {
     /// opens a box over a stored value and a draft has none; here the whole
     /// point is to type one in, and a row nobody has typed into is exactly the
     /// row somebody wants to type into.
-    func beginInlineEdit() {
+    /// `typing` is the character that opened it, where a character did. It
+    /// replaces the cell's value rather than being appended to it — which is
+    /// what typing over a selected value means everywhere else — and the caret
+    /// goes after it rather than over it, or the second keystroke would delete
+    /// the first.
+    func beginInlineEdit(typing: String? = nil) {
         guard offersValueEditing, inlineEditor == nil, let renderer,
             let table = renderer.table, let selection = renderer.selection,
             selection.column < table.columns.count, selection.row < renderer.totalRows
@@ -693,8 +698,8 @@ final class GridView: MTKView {
         guard let frame = cellFrame(row: selection.row, column: selection.column) else { return }
 
         let field = InlineCellEditor(frame: frame, padding: CGFloat(renderer.cellPadding))
-        field.stringValue = editSeed?() ?? ""
-        field.onCommit = { [weak self] text in
+        field.stringValue = typing ?? (editSeed?() ?? "")
+        field.onCommit = { [weak self] text, ending in
             guard let self else { return }
             // Taken away before the change is staged. Staging re-runs the
             // SwiftUI view that owns this grid, and a field still on screen
@@ -702,12 +707,41 @@ final class GridView: MTKView {
             // repainted underneath it.
             endInlineEdit()
             onStageEdit?(text)
+            moveAfterEdit(ending)
         }
         field.onCancel = { [weak self] in self?.endInlineEdit() }
         addSubview(field)
         inlineEditor = field
         window?.makeFirstResponder(field)
-        field.currentEditor()?.selectAll(nil)
+        if typing == nil {
+            field.currentEditor()?.selectAll(nil)
+        } else {
+            field.currentEditor()?.selectedRange = NSRange(
+                location: (field.stringValue as NSString).length, length: 0)
+        }
+    }
+
+    /// Where Tab leaves the cursor, and whether it opens a cell there.
+    ///
+    /// Nothing happens at the two edges. Wrapping to the next row is what a
+    /// spreadsheet does and this is not one: a row here is a row of a table
+    /// somebody is about to write to, and a Tab that quietly moved to a
+    /// different one would put the next thing typed in a place nobody looked at.
+    private func moveAfterEdit(_ ending: InlineCellEditor.Ending) {
+        guard ending != .here, let renderer, let table = renderer.table,
+            let current = renderer.selection
+        else { return }
+        let step = ending == .next ? 1 : -1
+        let column = renderer.drawnColumn(from: current.column + step, step: step)
+        guard column >= 0, column < table.columns.count, column != current.column else { return }
+        var next = current
+        next.column = column
+        // The range is dropped, the way an unshifted arrow key drops it: a Tab
+        // is a move, and a move collapses whatever was extended.
+        next.anchor = nil
+        apply(next)
+        renderer.scrollToVisible(next, viewSize: bounds.size)
+        beginInlineEdit()
     }
 
     /// Throws away whatever is being typed, if anything is.
@@ -766,6 +800,31 @@ final class GridView: MTKView {
         // uses it for.
         if event.specialKey == .carriageReturn || event.specialKey == .enter {
             beginInlineEdit()
+            return
+        }
+
+        // And so does typing. This is the whole difference between a grid with
+        // an editor in it and a grid that is typeable: without it every value
+        // costs a Return first, which is a key nobody presses before typing
+        // anywhere else.
+        //
+        // `specialKey` catches the arrows, the pages and the deletes; what is
+        // left is filtered for control characters and for Control, which makes a
+        // keystroke a command rather than a character.
+        //
+        // The character is written into the field rather than replayed into it,
+        // which is what an input method would need. A value that begins in
+        // Chinese or Japanese therefore starts with Return rather than with the
+        // first letter of it; the composer works normally from there. Replaying
+        // the event would fix that and would fail silently when it did not —
+        // there is no way to send a synthetic keystroke to this window in the
+        // environment its screenshots are taken in, so the version that can be
+        // checked is the one that ships.
+        if event.specialKey == nil, !event.modifierFlags.contains(.control),
+            let typed = event.characters, !typed.isEmpty,
+            typed.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+        {
+            beginInlineEdit(typing: typed)
             return
         }
 

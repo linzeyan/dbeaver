@@ -593,6 +593,17 @@ let filterOnCell = CommandLine.arguments.contains("--filter-cell")
 /// Only useful with `--cell`, which is what selects the cell it opens over.
 let inlineEdit = CommandLine.arguments.contains("--inline-edit")
 
+/// `--inline-type x` opens the editor the way typing `x` over the cell does,
+/// rather than the way Return does. Exists for the reason `--inline-edit` does:
+/// what a capture has to show is that the character replaces the value instead
+/// of being appended to it, and that the caret sits after it.
+let inlineTyped = argument("--inline-type")
+
+/// `--inline-tab` then sends the editor a Tab, so a capture shows which cell it
+/// lands on. The move is the half of this that a screenshot can be wrong about
+/// in a way nothing else catches: one column too far, or none at all.
+let inlineTab = CommandLine.arguments.contains("--inline-tab")
+
 /// `--delete-row 2` marks that 1-based row of the browse to be deleted, and
 /// `--delete-row 2-4` marks a span of them. Nothing is sent: the rows are left
 /// crossed out with Save waiting, which is the state this exists to photograph.
@@ -862,13 +873,25 @@ func openValueViewer(model: AppModel, on spec: String) {
             fputs("no writable grid in the window: --inline-edit needs a table\n", stderr)
             exit(1)
         }
-        found.beginInlineEdit()
+        found.beginInlineEdit(typing: inlineTyped)
         // Loud for the reason the other probes are loud. A refused edit leaves
         // the grid looking exactly as it does with none open, and a capture of
         // that would be filed as a picture of the editor.
-        guard let field = found.subviews.compactMap({ $0 as? InlineCellEditor }).first else {
+        guard var field = found.subviews.compactMap({ $0 as? InlineCellEditor }).first else {
             fputs("the editor did not open over the selected cell\n", stderr)
             exit(1)
+        }
+        if inlineTab {
+            fputs("inline editor   before tab \(NSStringFromRect(field.frame))\n", stderr)
+            // Through the field editor's own command dispatch rather than by
+            // calling the grid's move directly, so what is exercised is the path
+            // a Tab key actually takes: text view, delegate, commit, move.
+            field.currentEditor()?.doCommand(by: #selector(NSResponder.insertTab(_:)))
+            guard let moved = found.subviews.compactMap({ $0 as? InlineCellEditor }).first else {
+                fputs("tab closed the editor instead of moving it\n", stderr)
+                exit(1)
+            }
+            field = moved
         }
         fputs("inline editor   frame \(NSStringFromRect(field.frame))\n", stderr)
         fputs("inline editor   seed “\(field.stringValue)”\n", stderr)

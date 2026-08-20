@@ -12,9 +12,22 @@ import AppKit
 /// so committing has to be idempotent or clicking another cell would stage the
 /// same change twice.
 final class InlineCellEditor: NSTextField, NSTextFieldDelegate {
-    /// Called with what was typed, once, when Return or a click elsewhere ends
-    /// the edit.
-    var onCommit: ((String) -> Void)?
+    /// Where the cursor should go once the value is kept.
+    ///
+    /// Carried out of here rather than decided by the grid, because the key that
+    /// ended the edit is the only evidence of it and this is where that key
+    /// arrives. Return stays put: somebody who has just fixed one value is as
+    /// likely to look at it as to move on, and a cursor that walked off the cell
+    /// they were reading would be answering for them.
+    enum Ending {
+        case here
+        case next
+        case previous
+    }
+
+    /// Called with what was typed, once, when Return, Tab or a click elsewhere
+    /// ends the edit.
+    var onCommit: ((String, Ending) -> Void)?
     /// Called instead when Escape does. The two are separate because they are
     /// different answers: one is a value and the other is "forget I typed that".
     var onCancel: (() -> Void)?
@@ -26,11 +39,10 @@ final class InlineCellEditor: NSTextField, NSTextFieldDelegate {
         super.init(frame: frame)
         let inset = InsetTextFieldCell(textCell: "")
         inset.padding = padding
-        // The single-line mode is what centres the text in a 20pt row; without
-        // it the cell lays out from the top and the characters sit high by three
-        // points against the ones either side of them. Scrollable rather than
-        // wrapping for the same reason: a value longer than the column is a
-        // value being scrolled through, not a cell that grew a second line.
+        // One line, and one that scrolls rather than wraps: a value longer than
+        // its column is a value being scrolled through, not a cell that grew a
+        // second line. Where that line sits is `InsetTextFieldCell`'s answer,
+        // not this one's.
         inset.usesSingleLineMode = true
         inset.isScrollable = true
         inset.wraps = false
@@ -57,19 +69,20 @@ final class InlineCellEditor: NSTextField, NSTextFieldDelegate {
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError("not loaded from a nib") }
 
-    /// Return, Tab and a click elsewhere all mean the same thing: keep it.
-    ///
-    /// Tab keeps it and stops there rather than moving to the next cell. Moving
-    /// is worth having and is not free — the next cell has to be scrolled to and
-    /// a new field placed over it — and a Tab that committed to the wrong cell
-    /// would be worse than one that does nothing after committing.
+    /// Return, Tab and a click elsewhere all mean the same thing about the
+    /// value: keep it. They differ only in where the cursor goes next.
     func control(
         _ control: NSControl, textView: NSTextView, doCommandBy selector: Selector
     ) -> Bool {
         switch selector {
-        case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)),
-            #selector(NSResponder.insertBacktab(_:)):
-            commit()
+        case #selector(NSResponder.insertNewline(_:)):
+            commit(going: .here)
+            return true
+        case #selector(NSResponder.insertTab(_:)):
+            commit(going: .next)
+            return true
+        case #selector(NSResponder.insertBacktab(_:)):
+            commit(going: .previous)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
             guard !finished else { return true }
@@ -86,7 +99,10 @@ final class InlineCellEditor: NSTextField, NSTextFieldDelegate {
     /// Save, so keeping it costs a mark on a cell that can be reverted, and
     /// discarding it costs whatever was typed.
     func controlTextDidEndEditing(_ obj: Notification) {
-        commit()
+        // Nowhere in particular. Whatever took the focus away is where the
+        // person is looking, and moving the grid's cursor under it would be this
+        // window arguing with the click that just happened.
+        commit(going: .here)
     }
 
     /// Stops it reporting anything at all.
@@ -100,10 +116,10 @@ final class InlineCellEditor: NSTextField, NSTextFieldDelegate {
         finished = true
     }
 
-    private func commit() {
+    private func commit(going ending: Ending) {
         guard !finished else { return }
         finished = true
-        onCommit?(stringValue)
+        onCommit?(stringValue, ending)
     }
 }
 
