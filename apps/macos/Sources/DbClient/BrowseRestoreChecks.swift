@@ -29,6 +29,8 @@ enum BrowseRestoreChecks {
         checkAFreshTableOpensUnfiltered()
         checkComingBackBringsTheFilter()
         checkTablesDoNotShareFilters()
+        checkVisitingTablesFillsThePath()
+        checkSwitchingTabIsAMove()
         if failures == 0 {
             fputs("browse-restore: all checks passed\n", stderr)
         } else {
@@ -80,6 +82,34 @@ enum BrowseRestoreChecks {
             expect(model.whereClause, "id > 10", "the first table's filter is its own")
             model.selected = regions
             expect(model.whereClause, "code IS NULL", "and so is the second's")
+        }
+    }
+
+    /// Selecting tables is what fills the path. These pin the recording rather
+    /// than the walking: `BrowseHistoryChecks` already walks a path, and Back
+    /// cannot be driven from here because it resolves the relation through the
+    /// sidebar, which a model with no connection has none of.
+    private static func checkVisitingTablesFillsThePath() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(model.canGoBack, false, "a window that has opened nothing cannot go back")
+            model.selected = orders
+            expect(model.canGoBack, false, "nor can one that has opened its first table")
+            model.selected = regions
+            expect(model.canGoBack, true, "the second table is what gives Back somewhere to go")
+            expect(model.canGoForward, false, "with nothing ahead of it")
+        }
+    }
+
+    /// Switching tab is moving too, so Back from a table's rows means that
+    /// table's structure rather than the table before it.
+    private static func checkSwitchingTabIsAMove() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.selected = orders
+            expect(model.canGoBack, false, "one table on one tab is one place")
+            model.activeTab = .structure
+            expect(model.canGoBack, true, "and the same table on another tab is a second")
         }
     }
 

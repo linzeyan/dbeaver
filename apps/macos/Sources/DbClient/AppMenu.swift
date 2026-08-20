@@ -24,6 +24,7 @@ enum AppMenu {
     /// Target of the View menu's object-filter item, held for the same reason.
     private static var navigatorCommand: NavigatorCommand?
     private static var goToCommand: GoToCommand?
+    private static var historyNavCommand: HistoryCommand?
     /// Target of the View menu's three pane items, held for the same reason.
     private static var tabCommand: TabCommand?
     /// Target of the Query menu's items, held for the same reason.
@@ -59,6 +60,8 @@ enum AppMenu {
         navigatorCommand = navigator
         let goTo = GoToCommand(model: model)
         goToCommand = goTo
+        let historyNav = HistoryCommand(model: model)
+        historyNavCommand = historyNav
         let tabs = TabCommand(model: model)
         tabCommand = tabs
         let query = QueryCommands(model: model)
@@ -80,7 +83,7 @@ enum AppMenu {
         main.addItem(
             viewMenu(
                 target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs,
-                goTo: goTo))
+                goTo: goTo, historyNav: historyNav))
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
@@ -294,7 +297,7 @@ enum AppMenu {
     /// second thing a menu item can do that a bare shortcut cannot.
     private static func viewMenu(
         target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand,
-        tabs: TabCommand, goTo: GoToCommand
+        tabs: TabCommand, goTo: GoToCommand, historyNav: HistoryCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
@@ -332,6 +335,20 @@ enum AppMenu {
             action: #selector(GoToCommand.showGoTo(_:)), keyEquivalent: "o")
         goToItem.keyEquivalentModifierMask = [.command, .shift]
         goToItem.target = goTo
+
+        // ⌘[ and ⌘], which is where a decade of browsers and Xcode put Back and
+        // Forward, and which nothing in this window takes. Beside Go to Table
+        // because all three are the same errand: getting to a table without
+        // hunting for it in the tree.
+        let back = menu.addItem(
+            withTitle: "Back", action: #selector(HistoryCommand.goBack(_:)), keyEquivalent: "[")
+        back.keyEquivalentModifierMask = .command
+        back.target = historyNav
+        let forward = menu.addItem(
+            withTitle: "Forward", action: #selector(HistoryCommand.goForward(_:)),
+            keyEquivalent: "]")
+        forward.keyEquivalentModifierMask = .command
+        forward.target = historyNav
 
         menu.addItem(.separator())
         // Titled for the closed state; `validateMenuItem` rewrites it.
@@ -648,6 +665,29 @@ final class FormatCommand: NSObject, NSMenuItemValidation {
     @objc func formatQuery(_ sender: Any?) { model.formatQuery() }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFormatQuery }
+}
+
+/// The View menu's Back and Forward items, as something a menu can send to.
+///
+/// Two items on one target, unlike the others in this file, so `validateMenuItem`
+/// has to ask which item is asking. Splitting them into an object each to match
+/// the rest would be a class per menu item for a uniformity nothing reads.
+@MainActor
+final class HistoryCommand: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func goBack(_ sender: Any?) { model.goBack() }
+
+    @objc func goForward(_ sender: Any?) { model.goForward() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        item.action == #selector(goForward(_:)) ? model.canGoForward : model.canGoBack
+    }
 }
 
 /// The View menu's Go to Table item, as something a menu can send to.
