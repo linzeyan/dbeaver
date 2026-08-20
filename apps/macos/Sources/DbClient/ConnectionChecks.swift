@@ -33,6 +33,7 @@ enum ConnectionChecks {
         checkConnectionList()
         checkSafetyFlags()
         checkServerRecord()
+        checkWriteRefusal()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -576,6 +577,46 @@ enum ConnectionChecks {
         let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
         let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
         expect(decoded?.server ?? "missing", "", "an entry from before it has answered nothing")
+    }
+
+    /// A read-only connection refuses this application's own writes, says which
+    /// mark refused them, and a production one does not refuse at all.
+    ///
+    /// The sentence is checked and not merely the Bool. A refusal that does not
+    /// name the mark is indistinguishable from a bug: somebody whose grid has
+    /// quietly stopped taking edits reports "Save does nothing", and the whole
+    /// point of the mark is that they should instead be told they set it.
+    ///
+    /// The two flags being separate is checked here too, because collapsing them
+    /// is the obvious simplification and it is wrong in both directions — a
+    /// production connection that refused writes would be a connection nobody
+    /// could use, and a read-only one that merely asked would be a promise
+    /// broken by pressing Return.
+    private static func checkWriteRefusal() {
+        expect(ConnectionSafety().writeRefusal, nil, "an unmarked connection refuses nothing")
+        expect(
+            ConnectionSafety(isProduction: true).writeRefusal, nil,
+            "and neither does a production one — production asks rather than refuses")
+
+        let refusal = ConnectionSafety(isReadOnly: true).writeRefusal
+        expect(refusal != nil, true, "a read-only connection refuses")
+        expect(
+            refusal?.contains("read-only") ?? false, true,
+            "and the refusal names the mark that caused it")
+        expect(
+            refusal?.contains("connection form") ?? false, true,
+            "and says where the mark can be cleared")
+
+        // What a window carries is what it opened, which is what makes the
+        // refusal survive somebody clearing the box afterwards.
+        let opened = ConnectionSafety(
+            of: SavedConnection(
+                isReadOnly: true, isProduction: true,
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                    user: "ana")))
+        expect(opened.isReadOnly, true, "a session's safety is the entry it was opened from")
+        expect(opened.isProduction, true, "both marks, not only the one that refuses")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

@@ -500,6 +500,15 @@ final class AppModel {
     /// A mark that stopped at the moment of connecting would be a mark shown only
     /// when it does not matter yet.
     private(set) var connectionColor: ConnectionColor = .none
+
+    /// What the connection now open is allowed to do.
+    ///
+    /// Carried out of the chooser into the session for the reason `connectionColor`
+    /// above is, and answering a sharper question than the colour does: a mark
+    /// that stopped at the moment of connecting would be a mark that applied only
+    /// while nothing could go wrong.
+    private(set) var safety = ConnectionSafety()
+
     private(set) var status = "Connecting…"
 
     /// What `status` says when the connection is not doing anything.
@@ -1202,6 +1211,7 @@ final class AppModel {
         relations = inventory.relations
         connectionLabel = Self.label(for: connString)
         connectionColor = connectionDraft.color
+        safety = ConnectionSafety(of: connectionDraft)
         record(server: inventory.server)
         connectionState = .connected
         // Open the schema a user most likely wants, and land on a table
@@ -1282,6 +1292,11 @@ final class AppModel {
         staged = StagedChanges()
         // The mode belonged to the connection being dropped, not to the window.
         transaction = .none
+        // As did the marks. A window that kept the previous connection's
+        // read-only mark would refuse writes to a database nobody marked, and
+        // one that kept a cleared mark would allow them to a database somebody
+        // did — the second is the direction that costs data.
+        safety = ConnectionSafety()
     }
 
     /// The navigator's whole contents, read in one pass.
@@ -1920,9 +1935,13 @@ final class AppModel {
     /// view has no rows of its own to name. The key is the other half of the same
     /// question: without something that names one row there is no way to say
     /// which row a change is to, so the core refuses and this does not offer.
+    ///
+    /// The connection's own read-only mark leads the list, because it is the one
+    /// reason here that is not a discovery about the data but a decision the user
+    /// already made.
     var canEditCell: Bool {
-        activeTab == .content && selected?.kind == .table && !isBusy && hasRowIdentity
-            && selectedCell(in: browseResult) != nil
+        safety.writeRefusal == nil && activeTab == .content && selected?.kind == .table && !isBusy
+            && hasRowIdentity && selectedCell(in: browseResult) != nil
     }
 
     /// Whether the core found something that names one row of the selection.
@@ -1935,11 +1954,17 @@ final class AppModel {
     /// Why the selected cell cannot be changed, for a pane that has to say so.
     ///
     /// A control that is simply absent reads as a feature this build does not
-    /// have. The two reasons a user can act on — the wrong tab, and a table with
-    /// nothing to identify a row by — are worth a sentence each, and the second
-    /// sentence is the core's own: it is the one place that knows whether a
-    /// unique constraint was turned down and which.
+    /// have. The three reasons a user can act on — the connection's read-only
+    /// mark, the wrong tab, and a table with nothing to identify a row by — are
+    /// worth a sentence each, and the last of those is the core's own: it is the
+    /// one place that knows whether a unique constraint was turned down and which.
+    ///
+    /// The mark leads because it is the answer for every tab and every relation.
+    /// A window that said "editing is for a browsed table" about a connection
+    /// somebody had marked read-only would send them off to browse one and find
+    /// the grid exactly as locked.
     var editObstacle: String? {
+        if let refusal = safety.writeRefusal { return refusal }
         guard activeTab == .content, let selected else { return "Editing is for a browsed table." }
         guard selected.kind == .table else {
             return "A \(selected.kind.label.lowercased()) has no rows of its own to change."
@@ -3708,9 +3733,12 @@ final class AppModel {
     /// Whether a file has a table to go into.
     ///
     /// Rows go into a relation, and the Query tab is not showing one — a result
-    /// is not a table, however much it looks like one on screen.
+    /// is not a table, however much it looks like one on screen. A connection
+    /// marked read-only has no table to offer either, which greys the menu item;
+    /// `importFile` below is what answers the drop that never went near a menu.
     var canImport: Bool {
-        activeTab != .query && selected != nil && !isBusy && !isExporting && !isImporting
+        safety.writeRefusal == nil && activeTab != .query && selected != nil && !isBusy
+            && !isExporting && !isImporting
     }
 
     /// The table a file is read into.
@@ -3730,6 +3758,14 @@ final class AppModel {
     /// file already says what it is and a picker would only offer a way to
     /// disagree with it.
     func importFile(from url: URL) {
+        // Before the table is worked out, because a dropped file arrives here
+        // without passing a menu that could have been greyed out. Answering a
+        // drop with silence looks like the drop was missed rather than refused,
+        // and the difference matters when the file is somebody's afternoon.
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) Nothing was read from \(url.lastPathComponent)."
+            return
+        }
         guard let table = importTableName else { return }
         guard let format = ExportFormat(importPathExtension: url.pathExtension) else {
             let named =
