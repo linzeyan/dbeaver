@@ -2006,11 +2006,17 @@ struct CellInspector: View {
         // the pane are two readings of the same work, and doing it twice would
         // re-indent a document twice on every arrow key.
         let rendered = cell.flatMap { $0.isExpanded ? RenderedValue.make(from: $0) : nil }
+        // Nil in the Query pane, where nothing may be written at all.
+        let offer = editing.flatMap { $0.editedValue }
         VStack(spacing: 0) {
-            strip(rendered)
+            strip(rendered, offer: offer)
             if let rendered {
                 Rectangle().fill(Theme.separator.color).frame(height: 1)
-                CellValueViewer(rendered: rendered)
+                if let editing, editing.isEditingValue, case .editable(let seed)? = offer {
+                    CellValueEditor(model: editing, seed: seed)
+                } else {
+                    CellValueViewer(rendered: rendered)
+                }
             }
             if let editing {
                 Rectangle().fill(Theme.separator.color).frame(height: 1)
@@ -2019,9 +2025,22 @@ struct CellInspector: View {
                 CellEditorRow(model: editing, cell: cell)
             }
         }
+        // A box still open over a cell it was not opened for is one keystroke
+        // away from writing this value into that one — the hazard
+        // `CellEditorRow` re-seeds its field against, and worse here, because
+        // the box holds a whole document rather than a line.
+        .onChange(of: identity) { editing?.isEditingValue = false }
     }
 
-    private func strip(_ rendered: RenderedValue?) -> some View {
+    /// Which cell the pane is over, and whether it is open, as one string to
+    /// watch. Closing the viewer ends the edit as surely as moving off the cell
+    /// does: reopening it should not put anyone back inside a box they left.
+    private var identity: String {
+        guard let cell else { return "" }
+        return "\(cell.isExpanded)\u{1}\(cell.address)\u{1}\(cell.column)"
+    }
+
+    private func strip(_ rendered: RenderedValue?, offer: ValueEdit?) -> some View {
         HStack(spacing: Theme.Space.sm) {
             if let cell {
                 // The shortcut is the fast way in and an invisible one. A strip
@@ -2064,6 +2083,35 @@ struct CellInspector: View {
                         .truncationMode(.tail)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Only where something may be written, only while the pane is
+                // open — a pencil beside a closed strip would open a box over a
+                // value nobody has looked at — and not while it already is the
+                // box, which is its own affordance.
+                if let offer, let editing, cell.isExpanded, !editing.isEditingValue {
+                    Button {
+                        editing.isEditingValue = true
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 10))
+                            .frame(width: 20, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    // Tertiary here is a dimmed control rather than a contrast
+                    // failure: a disabled button is meant to read as disabled,
+                    // and the reason is already on screen — one line below in
+                    // `CellEditorRow` for a row that cannot be written, and in
+                    // the descriptor beside this for a value that cannot:
+                    // "hex dump · 200 bytes", "first 131,072 of 400,000
+                    // characters".
+                    .foregroundStyle(
+                        offer.isEditable ? Theme.textSecondary.color : Theme.textTertiary.color
+                    )
+                    .disabled(!offer.isEditable)
+                    .help(offer.refusal ?? "Edit this value")
+                    .accessibilityLabel("Edit cell value")
                 }
 
                 Button {
