@@ -226,6 +226,18 @@ final class AppModel {
     /// see `--history-store`.
     let history: QueryHistory
 
+    /// The statements kept by name, across launches.
+    ///
+    /// A store of its own beside the history rather than a flag on its entries.
+    /// The two answer different questions — what did I run, what do I always
+    /// run — they are read in different orders, and a history that drops its
+    /// oldest entry to stay under its limit must not be able to drop something
+    /// somebody took the trouble to name.
+    ///
+    /// Held rather than created here for the reason the history is: a check
+    /// hands in a scratch store.
+    let favorites: QueryFavorites
+
     /// The settings the window reads. Held rather than reached for through a
     /// global so that a check can hand in a scratch store, the way the history
     /// is — and so the Settings window and this model are demonstrably looking
@@ -238,6 +250,26 @@ final class AppModel {
     /// only ever feeds the editor, and there is nothing to read from it on the
     /// other tabs.
     var isHistoryOpen = false
+
+    /// The two lists that panel can show.
+    enum QueryPanelTab: String, CaseIterable, Identifiable {
+        case history
+        case favorites
+
+        var id: String { rawValue }
+
+        /// What the control reads. Written here rather than at the control so
+        /// that the two cases cannot be labelled in one place and switched on in
+        /// another.
+        var title: String { self == .history ? "History" : "Favorites" }
+    }
+
+    /// Which of the two the panel is showing.
+    ///
+    /// Kept apart from `isHistoryOpen` rather than folded into it: picking a
+    /// statement closes the panel, and somebody working out of their favorites
+    /// would otherwise be put back on the history every single time.
+    var queryPanelTab = QueryPanelTab.history
 
     var queryText = ""
     /// Where the caret or selection is in the editor.
@@ -454,7 +486,7 @@ final class AppModel {
     private let initialSQLIsScript: Bool
 
     init(
-        history: QueryHistory, preferences: Preferences,
+        history: QueryHistory, favorites: QueryFavorites, preferences: Preferences,
         initialTab: DetailTab = .content, initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
@@ -463,6 +495,7 @@ final class AppModel {
     ) {
         self.navigatorFilter = initialFilter ?? ""
         self.history = history
+        self.favorites = favorites
         self.preferences = preferences
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
@@ -2789,6 +2822,24 @@ final class AppModel {
     /// The panel closes on the way out: the pick is the whole transaction, and
     /// the rows it was occupying are worth more to the result below it.
     func recall(_ entry: QueryHistoryEntry) {
+        insertIntoEditor(entry.sql)
+    }
+
+    /// The same, for a statement somebody kept by name.
+    ///
+    /// A favorite arrives exactly as a recalled statement does, because from the
+    /// editor's side there is no difference: it is a statement appended to the
+    /// buffer and selected, ready for the ⌘R that follows.
+    func recall(_ favorite: QueryFavorite) {
+        insertIntoEditor(favorite.sql)
+    }
+
+    /// Appends a statement to the buffer and selects it.
+    ///
+    /// One implementation for both lists. Two would be two answers to where the
+    /// caret ends up, and the whole value of either list is that the statement
+    /// arrives ready to run.
+    private func insertIntoEditor(_ sql: String) {
         activeTab = .query
         isHistoryOpen = false
         let existing = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2796,12 +2847,48 @@ final class AppModel {
         // ends without one would run straight into what is being appended and
         // the two would go to the server as a single statement.
         let prefix = existing.isEmpty ? "" : existing + (existing.hasSuffix(";") ? "\n\n" : ";\n\n")
-        queryText = prefix + entry.sql
+        queryText = prefix + sql
         let start = prefix.unicodeScalars.count
-        let end = start + entry.sql.unicodeScalars.count
+        let end = start + sql.unicodeScalars.count
         if let selection = SQLScript.range(start..<end, in: queryText) {
             querySelection = TextSelection(range: selection)
         }
+    }
+
+    /// What Save Query would keep: exactly what ⌘R would send.
+    ///
+    /// One rule rather than three, and the one already on screen — the hint in
+    /// the editor's corner names this same statement before it runs, so what is
+    /// about to be saved is legible before anybody saves it. Keeping the whole
+    /// buffer instead would file four statements under one name; keeping only a
+    /// highlighted selection would leave the commonest case, a caret standing in
+    /// a statement, with nothing to save at all.
+    ///
+    /// Nil where there is nothing to keep, which is what disables the control
+    /// rather than offering one that files an empty statement.
+    var savedQuery: String? {
+        guard activeTab == .query, let target = runTarget else { return nil }
+        let sql = SQLScript.text(target.range, in: queryText)
+        return sql.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : sql
+    }
+
+    /// The favorites worth offering against the connection that is open.
+    ///
+    /// Empty scheme and all, which is `QueryFavorites.offered(to:)`'s decision
+    /// rather than this one — before a connection lands `scheme` is empty too,
+    /// and a list that showed nothing until you connected would hide the
+    /// statements somebody keeps precisely so they do not have to remember them.
+    var offeredFavorites: [QueryFavorite] { favorites.offered(to: scheme) }
+
+    /// Keeps `savedQuery` under `name`, and says whether anything was kept.
+    ///
+    /// The scheme is taken from the connection that is open and is empty where
+    /// there is none — which is what later makes the statement offered
+    /// everywhere rather than nowhere.
+    @discardableResult
+    func saveQuery(named name: String) -> Bool {
+        guard let sql = savedQuery else { return false }
+        return favorites.save(name: name, sql: sql, scheme: scheme) != nil
     }
 
     // MARK: - Export

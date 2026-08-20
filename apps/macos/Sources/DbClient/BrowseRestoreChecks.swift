@@ -139,7 +139,8 @@ enum BrowseRestoreChecks {
     /// cannot read or write the history the user's windows share.
     @MainActor private static func makeModel() -> AppModel {
         let history = QueryHistory(defaults: UserDefaults(suiteName: UUID().uuidString)!)
-        return AppModel(history: history, preferences: Preferences())
+        let favorites = QueryFavorites(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        return AppModel(history: history, favorites: favorites, preferences: Preferences())
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
