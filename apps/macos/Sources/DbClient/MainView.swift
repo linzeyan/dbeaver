@@ -1172,8 +1172,8 @@ struct QueryPane: View {
                     .foregroundStyle(
                         model.isHistoryOpen ? Theme.accent.color : Theme.textSecondary.color
                     )
-                    .help("Statements this window has run (⇧⌘H)")
-                    .accessibilityLabel("Query history")
+                    .help("Statements this window has run, and the ones you kept (⇧⌘H)")
+                    .accessibilityLabel("Query panel")
                 }
                 .padding(Theme.Space.sm)
             }
@@ -1186,7 +1186,7 @@ struct QueryPane: View {
                 // Directly under the editor it feeds, and above the outcome
                 // list, which describes the run rather than the buffer.
                 if model.isHistoryOpen {
-                    QueryHistoryPanel(model: model)
+                    QueryPanel(model: model)
                     Rectangle().fill(Theme.separator.color).frame(height: 1)
                 }
 
@@ -1252,13 +1252,19 @@ struct QueryPane: View {
 /// already contested between the editor and the result, and a list of past
 /// statements is worth less than either while it is not being read. Picking a
 /// statement closes it again, so the cost is bounded to the moment it is in use.
-private struct QueryHistoryPanel: View {
+private struct QueryPanel: View {
     @Bindable var model: AppModel
     /// Set by the Clear button, cleared by either answer. Clearing is
     /// irreversible, so it is asked in the panel's own header rather than
     /// through an alert: a modal would take the window away from the thing it
     /// is about, which is the objection `InlineBanner` already carries.
     @State private var confirmingClear = false
+    /// Set by Save Query, cleared by either answer. In the header for the same
+    /// reason the Clear confirmation is, and with one more of its own: the
+    /// statement being kept is printed beside the field, so the name is typed
+    /// against something on screen rather than against something remembered.
+    @State private var naming = false
+    @State private var typedName = ""
     @State private var hovered: UUID?
 
     /// Seven rows before it scrolls, two more than the outcome list gets: this
@@ -1270,17 +1276,22 @@ private struct QueryHistoryPanel: View {
         VStack(spacing: 0) {
             header
             Rectangle().fill(Theme.separator.color).frame(height: 1)
-            if model.history.entries.isEmpty {
-                // Says what fills the list rather than that it is empty. This is
-                // where someone who found the panel before they needed it is
-                // standing.
-                Text("Nothing has run yet — ⌘R sends the statement the caret is in.")
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: Self.rowHeight * 2)
-            } else {
-                list
+            switch model.queryPanelTab {
+            case .history:
+                if model.history.entries.isEmpty {
+                    // Says what fills the list rather than that it is empty. This
+                    // is where someone who found the panel before they needed it
+                    // is standing.
+                    note("Nothing has run yet — ⌘R sends the statement the caret is in.")
+                } else {
+                    list
+                }
+            case .favorites:
+                if model.offeredFavorites.isEmpty {
+                    note("Nothing kept yet — Save Query keeps the statement ⌘R would send.")
+                } else {
+                    favoritesList
+                }
             }
         }
         // `background`, not `surface`, and that is the seam rather than a
@@ -1294,7 +1305,18 @@ private struct QueryHistoryPanel: View {
         // this window.
         .background(Theme.background.color)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Query history")
+        .accessibilityLabel(
+            model.queryPanelTab == .history ? "Query history" : "Saved queries")
+    }
+
+    /// What an empty list says. Both of them name what would fill it, because
+    /// somebody reading either one has found the panel before they needed it.
+    private func note(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.Typography.caption)
+            .foregroundStyle(Theme.textTertiary.color)
+            .frame(maxWidth: .infinity)
+            .frame(height: Self.rowHeight * 2)
     }
 
     private var header: some View {
@@ -1321,20 +1343,77 @@ private struct QueryHistoryPanel: View {
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
                 .tint(Theme.danger.color)
-            } else {
-                Text("History")
+            } else if naming {
+                Text("Save as")
                     .font(Theme.Typography.captionEmphasis)
                     .foregroundStyle(Theme.textSecondary.color)
-                Text(AppModel.pluralized(model.history.entries.count, "statement"))
-                    .font(Theme.Typography.digits)
+
+                TextField("", text: $typedName)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .frame(width: 160)
+                    .onSubmit { keep() }
+                    .accessibilityLabel("Name for this query")
+
+                // The statement about to be filed, so that the name is typed
+                // against something on screen. Without it this is a text field
+                // asking you to label something you have to remember.
+                Text(model.savedQuery ?? "")
+                    .font(Theme.Typography.monoSmall)
                     .foregroundStyle(Theme.textTertiary.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button("Cancel") {
+                    naming = false
+                    typedName = ""
+                }
+                .controlSize(.small)
+                Button("Save") { keep() }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(typedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            } else {
+                // A segmented control rather than two buttons: these are two
+                // readings of one panel, and exactly one of them is showing.
+                Picker("", selection: $model.queryPanelTab) {
+                    ForEach(AppModel.QueryPanelTab.allCases) { tab in
+                        Text(tab.title).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .frame(width: 156)
+                .accessibilityLabel("Which list to show")
+
+                Text(
+                    model.queryPanelTab == .history
+                        ? AppModel.pluralized(model.history.entries.count, "statement")
+                        : AppModel.pluralized(model.offeredFavorites.count, "query")
+                )
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
 
                 Spacer(minLength: Theme.Space.sm)
 
-                if !model.history.entries.isEmpty {
+                if model.queryPanelTab == .history, !model.history.entries.isEmpty {
                     Button("Clear…") { confirmingClear = true }
                         .controlSize(.small)
                         .help("Delete every statement in the history")
+                }
+
+                // Offered only with something to keep, rather than dimmed for
+                // the whole of a session the way a permanent one would be on the
+                // Content tab.
+                if model.queryPanelTab == .favorites, model.savedQuery != nil {
+                    Button("Save Query…") {
+                        typedName = ""
+                        naming = true
+                    }
+                    .controlSize(.small)
+                    .help("Keep the statement ⌘R would send, under a name")
                 }
 
                 Button {
@@ -1373,6 +1452,103 @@ private struct QueryHistoryPanel: View {
             height: Self.rowHeight
                 * CGFloat(min(model.history.entries.count, Self.maxRows))
         )
+    }
+
+    /// Keeps what is in the editor under the typed name, and puts the header
+    /// back. Silent where nothing was kept, because the only way that happens is
+    /// an empty name — and the Save button is already disabled for one.
+    ///
+    /// The panel stays open, unlike every other thing that finishes in it. The
+    /// list underneath is the only confirmation this action has, and closing on
+    /// success would hide the one thing the user is looking for.
+    private func keep() {
+        guard model.saveQuery(named: typedName) else { return }
+        naming = false
+        typedName = ""
+    }
+
+    private var favoritesList: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(model.offeredFavorites) { favorite in
+                    Button {
+                        model.recall(favorite)
+                    } label: {
+                        favoriteRow(favorite)
+                    }
+                    .buttonStyle(.plain)
+                    // Outside the button's own label rather than inside it: a
+                    // button nested in a button's label never receives the click
+                    // that was meant for it, and forgetting a query by missing
+                    // the trash by two points is the wrong way to find that out.
+                    .overlay(alignment: .trailing) {
+                        if hovered == favorite.id {
+                            Button {
+                                model.favorites.remove(favorite.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 9))
+                                    .frame(width: 18, height: 18)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Theme.textSecondary.color)
+                            .help("Forget this query")
+                            .accessibilityLabel("Forget \(favorite.name)")
+                            .padding(.trailing, Theme.Space.md)
+                        }
+                    }
+                }
+            }
+        }
+        .frame(
+            height: Self.rowHeight
+                * CGFloat(min(model.offeredFavorites.count, Self.maxRows))
+        )
+    }
+
+    private func favoriteRow(_ favorite: QueryFavorite) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "star.fill")
+                .font(.system(size: 9))
+                .foregroundStyle(Theme.accent.color)
+                .frame(width: 12)
+
+            // The name leads, because it is what this list is searched by. The
+            // statement beside it is how somebody confirms they picked the one
+            // they meant before pressing ⌘R on it.
+            Text(favorite.name)
+                .font(Theme.Typography.captionEmphasis)
+                .foregroundStyle(Theme.text.color)
+                .lineLimit(1)
+
+            Text(favorite.sql.split(whereSeparator: \.isWhitespace).joined(separator: " "))
+                .font(Theme.Typography.monoSmall)
+                .foregroundStyle(Theme.textSecondary.color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // Where the trash button is drawn. Reserved rather than overlapped,
+            // so the statement is not read through the icon that sits over it.
+            Color.clear.frame(width: 18)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: Self.rowHeight)
+        .background(hovered == favorite.id ? Theme.surfaceRaised.color : Color.clear)
+        .contentShape(Rectangle())
+        // Every row is one line of a statement that may be twenty; the tooltip
+        // is what makes the rest of it reachable without recalling it first.
+        .help(favorite.sql)
+        .onHover { inside in
+            if inside {
+                hovered = favorite.id
+            } else if hovered == favorite.id {
+                hovered = nil
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(favorite.name), \(favorite.sql)")
     }
 
     private func row(_ entry: QueryHistoryEntry) -> some View {
