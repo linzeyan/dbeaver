@@ -263,6 +263,32 @@ enum FilterOperator: String, Codable, Sendable {
     case contains
     case startsWith = "starts_with"
     case endsWith = "ends_with"
+
+    /// What the popup calls it.
+    ///
+    /// Not the raw value, deliberately. The wire spells `not_equals`, and a
+    /// popup that said so would be asking somebody to read JSON. Where SQL has a
+    /// symbol this uses it, because that is what the Custom field beside it will
+    /// show; where SQL has a keyword this uses the keyword in capitals, for the
+    /// same reason. The last three are lower-case words on purpose: `contains`
+    /// is this window's name for a `LIKE` with a wildcard at each end, and
+    /// dressing it as SQL would suggest it is something that can be typed.
+    var label: String {
+        switch self {
+        case .equals: return "="
+        case .notEquals: return "≠"
+        case .isNull: return "IS NULL"
+        case .isNotNull: return "IS NOT NULL"
+        case .lessThan: return "<"
+        case .lessOrEqual: return "≤"
+        case .greaterThan: return ">"
+        case .greaterOrEqual: return "≥"
+        case .between: return "BETWEEN"
+        case .contains: return "contains"
+        case .startsWith: return "starts with"
+        case .endsWith: return "ends with"
+        }
+    }
 }
 
 /// One column a relation can be filtered on, and the questions worth asking of

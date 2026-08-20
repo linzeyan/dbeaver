@@ -30,6 +30,13 @@ enum FocusArea: Hashable {
     /// The chooser's own filter field. Separate from `navigatorFilter` because the
     /// two are never on screen together and each draws its own ring.
     case connectionFilter
+    /// A filter row's value field, and the far end of a row that is a range.
+    ///
+    /// Carrying the row's index because there are as many of these as there are
+    /// rows, and `CompactField` draws its focus ring from whichever area it was
+    /// given: one case shared by every row would ring all of them at once.
+    case filterValue(Int)
+    case filterSecond(Int)
 }
 
 struct MainView: View {
@@ -1268,29 +1275,237 @@ struct FilterBar: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        HStack(spacing: Theme.Space.sm) {
-            let hint = model.filterHint
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            HStack(spacing: Theme.Space.sm) {
+                let hint = model.filterHint
 
-            FieldLabel(text: "Where")
-            CompactField(
-                placeholder: hint.where, text: $model.whereClause,
-                area: .whereField, focus: $focus, onSubmit: model.applyFilters)
+                // Absent rather than disabled where the core named no columns:
+                // a database this build writes no statements for, or a relation
+                // whose columns have not arrived. A disclosure that opened onto
+                // an empty list would be an offer that is not one.
+                if !model.filterColumns.isEmpty {
+                    FilterRowsToggle(model: model)
+                }
 
-            FieldLabel(text: "Order by")
-            CompactField(
-                placeholder: hint.order, text: $model.orderClause,
-                area: .orderField, focus: $focus, onSubmit: model.applyFilters
-            )
-            .frame(maxWidth: 190)
+                FieldLabel(text: "Custom")
+                // Relabelled from "Where" because it is no longer the only way
+                // to filter — it is the escape hatch, and the rows are the way
+                // in. While there are rows it is theirs: greyed, and showing the
+                // WHERE they compiled to, so that what is running can be read
+                // without a second control to read it in.
+                CompactField(
+                    placeholder: model.isCustomFilterEditable ? hint.where : mirrored,
+                    text: $model.whereClause,
+                    area: .whereField, focus: $focus, onSubmit: model.applyFilters
+                )
+                .disabled(!model.isCustomFilterEditable)
+                .help(
+                    model.isCustomFilterEditable
+                        ? "" : "Remove the filter rows to write this by hand")
 
-            Button("Apply") { model.applyFilters() }
-                .controlSize(.small)
-                .disabled(model.selected == nil || model.isBusy)
-                .help("Re-run the browse query with these filters (↩)")
+                FieldLabel(text: "Order by")
+                CompactField(
+                    placeholder: hint.order, text: $model.orderClause,
+                    area: .orderField, focus: $focus, onSubmit: model.applyFilters
+                )
+                .frame(maxWidth: 190)
+
+                Button("Apply") { model.applyFilters() }
+                    .controlSize(.small)
+                    .disabled(model.selected == nil || model.isBusy)
+                    // No `.keyboardShortcut(.return)`. The ↩ in the help text is
+                    // the one `CompactField` sends through `onSubmit`, from the
+                    // fields on this bar. A window-level binding would take it
+                    // from the cell editor a few points below, where ↩ means
+                    // commit this value and pressing it would instead re-run the
+                    // browse the edit has not been staged into yet.
+                    .help("Re-run the browse query with these filters (↩)")
+            }
+            if model.isFilterRowsOpen, !model.filterColumns.isEmpty {
+                FilterRows(model: model, focus: $focus)
+            }
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
         .background(Theme.surface.color)
+    }
+
+    /// What the Custom field shows while the rows own it.
+    ///
+    /// Before the first Apply there is no clause yet, and saying so is better
+    /// than an empty box that reads as an unfiltered browse — the rows are on
+    /// screen but nothing has been sent for them.
+    private var mirrored: String {
+        model.compiledClause.isEmpty ? "the rows below, once applied" : model.compiledClause
+    }
+}
+
+/// The control that opens the filter rows, and says how many are running when it
+/// is shut.
+///
+/// The count is not decoration. These rows compile into the browse's WHERE, so a
+/// closed disclosure would otherwise be a filter with nothing on screen saying
+/// it is there — the failure the greyed Custom field also guards against, from
+/// the other side.
+struct FilterRowsToggle: View {
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Button {
+            model.isFilterRowsOpen.toggle()
+        } label: {
+            HStack(spacing: Theme.Space.xs) {
+                Image(systemName: model.isFilterRowsOpen ? "chevron.down" : "chevron.right")
+                    .font(Theme.Typography.micro)
+                FieldLabel(text: "Filters")
+                if !model.filterRules.isEmpty {
+                    Text("\(model.filterRules.count)")
+                        .font(Theme.Typography.micro.weight(.semibold))
+                        .foregroundStyle(Theme.surface.color)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Theme.accent.color))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.textTertiary.color)
+        .help("Build the filter out of this table's columns")
+        .accessibilityLabel(
+            model.filterRules.isEmpty ? "Filters" : "Filters, \(model.filterRules.count) active")
+    }
+}
+
+/// The list itself: a row per rule, and the button that adds one.
+struct FilterRows: View {
+    @Bindable var model: AppModel
+    @FocusState.Binding var focus: FocusArea?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            // Identified by position rather than by the rule. Two rows asking
+            // the same thing of the same column are a state somebody can reach
+            // by pressing Add twice, and identity by value would collapse them
+            // into one row that then edits both.
+            ForEach(Array(model.filterRules.enumerated()), id: \.offset) { index, rule in
+                FilterRuleRow(model: model, index: index, rule: rule, focus: $focus)
+            }
+            Button {
+                if let rule = model.newFilterRule { model.addFilterRule(rule) }
+            } label: {
+                Label("Add Filter", systemImage: "plus")
+            }
+            .controlSize(.small)
+            .disabled(model.newFilterRule == nil)
+            .help("Add a row to the filter")
+        }
+    }
+}
+
+/// One row: a column, an operator, and what to compare against.
+///
+/// Reads its rule out of the model by index and writes every change back through
+/// `updateFilterRule` rather than binding into the array. That is what keeps
+/// `FilterRule.settled` between each popup and the stored row — moving a row to
+/// a column that cannot answer its operator has to correct the operator, and a
+/// binding straight into the array would go around the correction.
+struct FilterRuleRow: View {
+    @Bindable var model: AppModel
+    let index: Int
+    let rule: FilterRule
+    @FocusState.Binding var focus: FocusArea?
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Picker("", selection: binding(\.column)) {
+                ForEach(model.filterColumns) { column in
+                    Text(column.name).tag(column.name)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 150)
+            .accessibilityLabel("Filter column")
+
+            Picker("", selection: binding(\.op)) {
+                ForEach(operators, id: \.self) { op in
+                    Text(op.label).tag(op)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 130)
+            .accessibilityLabel("Filter operator")
+
+            // No field at all for the operators that compare against nothing,
+            // rather than a disabled one. There is nothing to type, and an empty
+            // box beside IS NULL reads as a value somebody forgot to fill in.
+            if rule.op != .isNull, rule.op != .isNotNull {
+                CompactField(
+                    placeholder: "value", text: text(\.value),
+                    area: .filterValue(index), focus: $focus, onSubmit: model.applyFilters
+                )
+                .frame(maxWidth: 180)
+                .accessibilityLabel("Filter value")
+            }
+            if rule.op == .between {
+                FieldLabel(text: "and")
+                CompactField(
+                    placeholder: "value", text: text(\.second),
+                    area: .filterSecond(index), focus: $focus, onSubmit: model.applyFilters
+                )
+                .frame(maxWidth: 180)
+                .accessibilityLabel("Filter range end")
+            }
+
+            Button {
+                model.removeFilterRule(at: index)
+            } label: {
+                Image(systemName: "minus.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textTertiary.color)
+            .help("Remove this row")
+            .accessibilityLabel("Remove filter row")
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The operators this row's column can answer.
+    ///
+    /// A column the relation does not have — a restored filter after the table
+    /// changed underneath it — offers only what the row already says. The popup
+    /// has to be able to draw the row's own operator or the row would appear on
+    /// screen saying something other than what it will send.
+    private var operators: [FilterOperator] {
+        model.filterColumns.first { $0.name == rule.column }?.operators ?? [rule.op]
+    }
+
+    /// A binding onto one field of the row, routed back through the model.
+    private func binding<T>(_ key: WritableKeyPath<FilterRule, T>) -> Binding<T> {
+        Binding(
+            get: { rule[keyPath: key] },
+            set: { new in
+                var edited = rule
+                edited[keyPath: key] = new
+                model.updateFilterRule(at: index, to: edited)
+            })
+    }
+
+    /// The same, for the two optional text fields.
+    ///
+    /// A row holds `nil` for "nothing to compare against" and a field holds "",
+    /// so the two are mapped onto each other here: emptying the box is the same
+    /// as never having filled it, and the core refuses both by name rather than
+    /// comparing against an empty string.
+    private func text(_ key: WritableKeyPath<FilterRule, String?>) -> Binding<String> {
+        Binding(
+            get: { rule[keyPath: key] ?? "" },
+            set: { new in
+                var edited = rule
+                edited[keyPath: key] = new.isEmpty ? nil : new
+                model.updateFilterRule(at: index, to: edited)
+            })
     }
 }
 

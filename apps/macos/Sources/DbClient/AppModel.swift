@@ -326,6 +326,18 @@ final class AppModel {
     /// other tabs.
     var isHistoryOpen = false
 
+    /// Whether the filter rows are showing under the browse's filter bar.
+    ///
+    /// One flag for the window rather than one per table. Closing it is a
+    /// statement about how much room the bar should take, not about the table
+    /// that happened to be open — and a disclosure that reopened itself on every
+    /// third table would be a control fighting whoever shut it.
+    ///
+    /// Shutting it does not hide what is running. The toggle carries the number
+    /// of rows, and the Custom field beside it goes on showing the WHERE they
+    /// compiled to.
+    var isFilterRowsOpen = false
+
     /// The two lists that panel can show.
     enum QueryPanelTab: String, CaseIterable, Identifiable {
         case history
