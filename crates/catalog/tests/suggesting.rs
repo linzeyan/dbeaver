@@ -9,7 +9,8 @@
 use dbcatalog::{Kind, Names};
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,6 +30,9 @@ impl Fake {
 
 #[async_trait::async_trait]
 impl Driver for Fake {
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        unreachable!("completion never asks the server who it is")
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(["public", "archive"]

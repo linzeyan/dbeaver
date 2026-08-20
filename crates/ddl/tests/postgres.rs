@@ -14,8 +14,8 @@
 
 use dbconn::{
     Browse, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver,
-    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo,
+    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_postgres::PgSource;
 
@@ -189,6 +189,9 @@ struct Fixture {
 
 #[async_trait::async_trait]
 impl Driver for Fixture {
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        unreachable!("DDL is rendered for a relation the caller already has")
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         unreachable!("DDL is rendered for a relation the caller already has")
     }

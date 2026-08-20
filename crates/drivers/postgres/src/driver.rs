@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -34,6 +34,14 @@ impl From<PgError> for DbError {
 
 #[async_trait]
 impl Driver for PgSource {
+    /// `SELECT version()`, whose first word is the product's own name — which is
+    /// how a connection opened as `postgres://` reports CockroachDB or
+    /// GreptimeDB as itself instead of as PostgreSQL.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::from_banner(
+            &scalar_text(self, "SELECT version()").await?,
+        ))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(PgSource::schemas(self).await?)
     }

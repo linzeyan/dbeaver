@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, DuckError, DuckSource};
@@ -29,6 +29,14 @@ impl From<DuckError> for DbError {
 
 #[async_trait]
 impl Driver for DuckSource {
+    /// DuckDB writes its version with a leading `v`, and it is kept: the version
+    /// is the server's own spelling and this client does not tidy it.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new(
+            "DuckDB",
+            scalar_text(self, "SELECT version()").await?,
+        ))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(DuckSource::schemas(self).await?)
     }

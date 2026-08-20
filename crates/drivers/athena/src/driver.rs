@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{AthenaError, AthenaSource, Rows, RowsCancel};
@@ -63,6 +63,12 @@ fn browse_sql(what: &Browse<'_>) -> String {
 
 #[async_trait]
 impl Driver for AthenaSource {
+    /// The product, without a version. Athena runs an engine version Amazon
+    /// chooses per workgroup rather than one the session can ask for, and no
+    /// server has answered this driver to disagree.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new("Athena", ""))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(AthenaSource::schemas(self).await?)
     }

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MsSqlError, MsSqlSource};
@@ -34,6 +34,17 @@ impl From<MsSqlError> for DbError {
 
 #[async_trait]
 impl Driver for MsSqlSource {
+    /// The version property rather than `@@VERSION`, which answers with four
+    /// lines of banner: the edition, the build date and the operating system are
+    /// prose around the one number this is asking for.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        let version = scalar_text(
+            self,
+            "SELECT CAST(SERVERPROPERTY('ProductVersion') AS varchar(128))",
+        )
+        .await?;
+        Ok(ServerInfo::new("SQL Server", version))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(MsSqlSource::schemas(self).await?)
     }

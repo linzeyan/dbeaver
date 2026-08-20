@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, RedisError, RedisSource};
@@ -40,6 +40,13 @@ fn database_of(schema: &str) -> &str {
 
 #[async_trait]
 impl Driver for RedisSource {
+    /// The product, without a version. Redis states its build in `INFO server`,
+    /// whose reply is a block of `key:value` text rather than a row — reading it
+    /// is parsing, and parsing it here would put a second reader beside the one
+    /// this driver already has.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new("Redis", ""))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(RedisSource::schemas(self).await?)
     }

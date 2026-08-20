@@ -9,7 +9,7 @@
 
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use dbedit::Edits;
 use std::collections::HashMap;
@@ -123,6 +123,9 @@ impl Driver for Fake {
     }
     async fn triggers(&self, _: &str, _: &str) -> DbResult<Vec<TriggerInfo>> {
         unreachable!("the server fires its own triggers")
+    }
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        unreachable!("an edit does not ask the server who it is")
     }
 
     fn browse(&self, _: &Browse<'_>) -> String {

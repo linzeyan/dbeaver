@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -36,6 +36,28 @@ impl From<MySqlError> for DbError {
 
 #[async_trait]
 impl Driver for MySqlSource {
+    /// `SELECT VERSION()`, read for the product as well as for the number.
+    ///
+    /// MySQL answers with a bare version — `8.0.35` — and the products speaking
+    /// its protocol append their own name to one: `8.0.11-TiDB-v7.5.0`,
+    /// `5.5.5-10.6.4-MariaDB`. So the string names the product where there is one
+    /// to name, and the version is kept whole, because the compatibility version
+    /// in front of it is part of what the server said.
+    ///
+    /// StarRocks is not in the list because it cannot be: it answers with a
+    /// MySQL version and nothing of its own, and a guess here would be printed to
+    /// somebody as a fact.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        let version = scalar_text(self, "SELECT VERSION()").await?;
+        let product = if version.contains("TiDB") {
+            "TiDB"
+        } else if version.contains("MariaDB") {
+            "MariaDB"
+        } else {
+            "MySQL"
+        };
+        Ok(ServerInfo::new(product, version))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(MySqlSource::schemas(self).await?)
     }

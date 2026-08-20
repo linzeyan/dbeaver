@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MongoError, MongoSource};
@@ -29,6 +29,13 @@ impl From<MongoError> for DbError {
 
 #[async_trait]
 impl Driver for MongoSource {
+    /// The product, without a version. MongoDB states its build in reply to
+    /// `buildInfo`, which answers with a flat document rather than a cursor, and
+    /// this driver's reader reads cursors. Naming the product is what can be
+    /// answered honestly until it reads one.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new("MongoDB", ""))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(MongoSource::schemas(self).await?)
     }

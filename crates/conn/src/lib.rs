@@ -53,6 +53,7 @@ pub use metadata::{
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
+use arrow::util::display::{ArrayFormatter, FormatOptions};
 use async_trait::async_trait;
 use std::fmt;
 
@@ -133,6 +134,72 @@ impl std::error::Error for DbError {}
 
 pub type DbResult<T> = Result<T, DbError>;
 
+/// What actually answered, once the connection was made.
+///
+/// Asked rather than assumed, because a scheme names a wire protocol and not a
+/// product: `postgres://` reaches CockroachDB and GreptimeDB as readily as
+/// PostgreSQL, and `mysql://` reaches TiDB and MariaDB. A client that printed the
+/// scheme's label would be showing somebody the name of the driver that opened
+/// the connection while calling it the name of their database.
+///
+/// Two fields and no more. Charset and identifier case are facts each driver
+/// already acts on where they matter, and collecting them here would be a second
+/// copy for a front end to disagree with. What a front end has no other way to
+/// learn is which product is on the other end, and which version of it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ServerInfo {
+    /// What the product calls itself: "PostgreSQL", "TiDB", "SQLite".
+    pub product: String,
+    /// The version as the server states it, or empty where it states none.
+    ///
+    /// The server's own spelling, unparsed. The databases here spell it three
+    /// ways — `17.0`, `v1.1.3`, `8.0.11-TiDB-v7.5.0` — and a client that
+    /// normalized them would be deciding, for a version it has never seen, which
+    /// half of the string was the number.
+    pub version: String,
+}
+
+impl ServerInfo {
+    /// The product and version a driver names itself.
+    pub fn new(product: impl Into<String>, version: impl Into<String>) -> Self {
+        Self {
+            product: product.into(),
+            version: version.into(),
+        }
+    }
+
+    /// The product and version out of a banner whose first word is the product's
+    /// own name.
+    ///
+    /// The shape PostgreSQL answers `SELECT version()` in — "PostgreSQL 17.0
+    /// (Debian 17.0-1) on aarch64…" — and the shape the products speaking its
+    /// protocol answer in too, with their own name in front. Reading the first
+    /// word is therefore how a connection opened as `postgres://` learns that it
+    /// is not on PostgreSQL, which is the whole reason for asking.
+    ///
+    /// The version is the first word starting with a digit rather than the second
+    /// word, because the second word is not always one: CockroachDB answers
+    /// "CockroachDB CCL v23.1.11 (aarch64, built …)", and a rule that took the
+    /// word after the name would report its licence as its version.
+    pub fn from_banner(banner: &str) -> Self {
+        let mut words = banner.split_whitespace();
+        let product = words.next().unwrap_or_default();
+        let version = words
+            .find(|word| {
+                word.strip_prefix('v')
+                    .unwrap_or(word)
+                    .starts_with(|c: char| c.is_ascii_digit())
+            })
+            // The leading `v` and any trailing comma go, and nothing else does:
+            // both are punctuation around the number rather than part of it, and
+            // a banner is prose.
+            .unwrap_or_default()
+            .trim_end_matches(',')
+            .trim_start_matches('v');
+        Self::new(product, version)
+    }
+}
+
 /// One session against one database.
 ///
 /// A session, not a connection: an implementation is free to hold several, and
@@ -142,6 +209,19 @@ pub type DbResult<T> = Result<T, DbError>;
 /// visible from here.
 #[async_trait]
 pub trait Driver: Send + Sync {
+    // ---- Identity -------------------------------------------------------
+
+    /// What is actually at the other end of this connection.
+    ///
+    /// A round trip rather than a fact read off the connection string: the
+    /// string names a protocol and the answer names a product. Priced as a
+    /// statement, because it is one — whoever opens the connection asks once.
+    ///
+    /// No default, for the reason `transactional` has none. A driver that cannot
+    /// ask has to say what it is instead, out loud, where the reason it cannot
+    /// can be read beside it.
+    async fn server_info(&self) -> DbResult<ServerInfo>;
+
     // ---- Metadata -------------------------------------------------------
 
     /// The navigator root. A database with no schema layer of its own answers
@@ -283,6 +363,38 @@ pub trait Driver: Send + Sync {
     /// client that quietly did nothing would leave somebody believing there is a
     /// point they can come back to.
     async fn transaction(&self, step: &TxStep) -> DbResult<()>;
+}
+
+/// The first value of the first row `statement` produces, as text.
+///
+/// Here rather than in each driver that wants one: asking a database what it is
+/// is a scalar query in every database that can answer at all, and fifteen copies
+/// of "run it, take the first batch, read cell (0, 0)" would be fifteen places
+/// for one of them to read the wrong column. It takes the trait object rather
+/// than a generic so that there is one instantiation of it, and so a driver can
+/// pass `self`.
+///
+/// Formatted rather than downcast, because the answer's type is the server's
+/// choice and not this caller's: SQL Server hands a property back as a variant
+/// and ClickHouse hands a version back as a string, so a downcast to one of them
+/// would fail on the next database to be asked. `ArrayFormatter` renders whatever
+/// arrived.
+pub async fn scalar_text(driver: &dyn Driver, statement: &str) -> DbResult<String> {
+    let mut stream = driver.query(statement, 1).await?;
+    while let Some(batch) = stream.next_batch().await? {
+        // An empty batch is not the end of a result: a driver may settle the
+        // schema before it has a row, and the value is in the batch after it.
+        if batch.num_columns() == 0 || batch.num_rows() == 0 {
+            continue;
+        }
+        let options = FormatOptions::default();
+        let formatter = ArrayFormatter::try_new(batch.column(0).as_ref(), &options)
+            .map_err(|e| DbError::new(e.to_string()))?;
+        return Ok(formatter.value(0).to_string());
+    }
+    Err(DbError::new(format!(
+        "the server answered nothing to `{statement}`"
+    )))
 }
 
 /// What a browse is asking for.
@@ -448,7 +560,7 @@ pub trait CursorCancel: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::Browse;
+    use super::{Browse, ServerInfo};
 
     fn browse<'a>(
         filter: Option<&'a str>,
@@ -463,6 +575,33 @@ mod tests {
             keys,
             limit: None,
         }
+    }
+
+    /// A banner is read for the product as well as the version, which is the
+    /// whole reason a connection asks instead of trusting its own scheme.
+    #[test]
+    fn a_postgres_wire_server_is_named_by_its_own_banner() {
+        assert_eq!(
+            ServerInfo::from_banner("PostgreSQL 17.0 (Debian 17.0-1) on aarch64"),
+            ServerInfo::new("PostgreSQL", "17.0")
+        );
+        // Not "CCL". The second word of this one is a licence, and a rule that
+        // took the word after the name would report it as the version.
+        assert_eq!(
+            ServerInfo::from_banner("CockroachDB CCL v23.1.11 (aarch64, built 2023/11/13)"),
+            ServerInfo::new("CockroachDB", "23.1.11")
+        );
+    }
+
+    /// A banner with no number in it keeps its name and admits to no version,
+    /// rather than reporting a word as one.
+    #[test]
+    fn a_banner_with_no_version_in_it_states_none() {
+        assert_eq!(
+            ServerInfo::from_banner("Ferrous"),
+            ServerInfo::new("Ferrous", "")
+        );
+        assert_eq!(ServerInfo::from_banner(""), ServerInfo::new("", ""));
     }
 
     /// The defect this whole call exists for: a front end wrote PostgreSQL's
