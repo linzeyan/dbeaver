@@ -26,6 +26,7 @@ enum BrowseRestoreChecks {
         setenv("XDG_CONFIG_HOME", scratch.path, 1)
 
         failures = 0
+        defer { ScratchDefaults.release() }
         checkAFreshTableOpensUnfiltered()
         checkComingBackBringsTheFilter()
         checkTablesDoNotShareFilters()
@@ -138,8 +139,8 @@ enum BrowseRestoreChecks {
     /// builds its own: a throwaway defaults suite, so that running the checks
     /// cannot read or write the history the user's windows share.
     @MainActor private static func makeModel() -> AppModel {
-        let history = QueryHistory(defaults: UserDefaults(suiteName: UUID().uuidString)!)
-        let favorites = QueryFavorites(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let history = QueryHistory(defaults: ScratchDefaults.store("verify-browse-restore"))
+        let favorites = QueryFavorites(defaults: ScratchDefaults.store("verify-browse-restore"))
         return AppModel(history: history, favorites: favorites, preferences: Preferences())
     }
 

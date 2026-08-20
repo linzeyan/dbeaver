@@ -28,6 +28,8 @@ enum PreferencesChecks {
 
     static func run() -> Bool {
         failures = 0
+        defer { ScratchDefaults.release() }
+        checkAScratchSuiteLeavesNoFileBehind()
         checkTheDefaultsAreTheOnesThatWereDecided()
         checkASettingSurvivesBeingWrittenAndReadBack()
         checkAConnectionKeptOnThisMacComesBack()
@@ -51,6 +53,40 @@ enum PreferencesChecks {
 
     // MARK: - The store
 
+    /// A scratch suite leaves nothing behind — not its values, and not its file.
+    ///
+    /// The checks ran without this for a while and left several hundred plists in
+    /// `~/Library/Preferences`. `removePersistentDomain` empties a domain and does
+    /// not delete it, so "cleaned up" quietly meant "one more empty file every
+    /// run": invisible from inside the application, permanent outside it, and
+    /// exactly the shape of the Keychain items an earlier version of these checks
+    /// saved and never removed.
+    ///
+    /// First in the run, because `release` drops every suite handed out so far.
+    /// Anywhere later and it would empty the stores the checks above it hold.
+    private static func checkAScratchSuiteLeavesNoFileBehind() {
+        let directory = NSHomeDirectory() + "/Library/Preferences"
+        func leftovers() -> [String] {
+            (try? FileManager.default.contentsOfDirectory(atPath: directory))?
+                .filter { $0.hasPrefix("dev.dbclient.verify-leak.") } ?? []
+        }
+        // A run that failed this check left its own file behind, and without
+        // this the next run would fail on that rather than on anything it did.
+        // A check that stays red after the bug is fixed teaches people to
+        // ignore it.
+        for stale in leftovers() {
+            try? FileManager.default.removeItem(atPath: directory + "/" + stale)
+        }
+
+        let store = ScratchDefaults.store("verify-leak")
+        // Written to on purpose. An untouched suite has no file to leave behind,
+        // so a probe that skipped this would pass against the bug it is here for.
+        store.set(true, forKey: "dev.dbclient.leakProbe")
+        store.synchronize()
+        ScratchDefaults.release()
+        expect(leftovers(), [], "the suite's plist is gone rather than merely emptied")
+    }
+
     /// What a fresh installation does. Written out as the sentences the decisions
     /// were recorded as, because that is the thing being checked — not that the
     /// store round-trips, but that it starts on the answer given.
@@ -68,12 +104,7 @@ enum PreferencesChecks {
     /// A setting has to outlive the window, or the Settings window is a switch
     /// that resets every launch.
     private static func checkASettingSurvivesBeingWrittenAndReadBack() {
-        let name = suiteName()
-        guard let store = UserDefaults(suiteName: name) else {
-            fail("a scratch defaults suite could be made")
-            return
-        }
-        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let store = ScratchDefaults.store("verify-preferences")
 
         let first = Preferences(store: store)
         first.hidesEmptyColumns = true
@@ -370,17 +401,7 @@ enum PreferencesChecks {
     /// a scratch suite reads back exactly what `Preferences` registered — which
     /// is the thing being asserted on.
     private static func scratch() -> Preferences {
-        let name = suiteName()
-        UserDefaults.standard.removePersistentDomain(forName: name)
-        guard let store = UserDefaults(suiteName: name) else {
-            fail("a scratch defaults suite could be made")
-            return Preferences(store: .standard)
-        }
-        return Preferences(store: store)
-    }
-
-    private static func suiteName() -> String {
-        "dev.dbclient.verify.\(UUID().uuidString)"
+        Preferences(store: ScratchDefaults.store("verify-preferences"))
     }
 
     /// A directory nothing else can see, for the checks that write files. Removed
