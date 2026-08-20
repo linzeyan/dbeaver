@@ -148,19 +148,39 @@ pub struct CellFilter {
     pub value: Option<String>,
 }
 
-/// What a filter offered over one cell can ask.
+/// What a filter over one column can ask.
 ///
-/// Four, and deliberately not more: these are the questions whose answer is the
-/// same in every dialect this build speaks. `LIKE`, ranges and dates all differ
-/// between them, and belong to a filter editor rather than to a menu item that
-/// has to be right without being read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// The first four are the questions whose answer is the same in every dialect
+/// this build speaks, and they are the four the grid's cell menu offers: a menu
+/// item has to be right without being read. The rest arrived with the filter
+/// rows, where the column, its declared type and the operator sit on screen
+/// together, so a pairing that makes no sense is visible before it runs.
+///
+/// That division is a fact about what a caller offers, not about what is
+/// compiled here — every variant below becomes a predicate by the same route.
+// `Serialize` as well as `Deserialize`, and with one `rename_all` governing
+// both: the front end sends these names back in the rules it composes, so the
+// spelling it is offered and the spelling it is understood by have to be one
+// spelling. Two derives with two attributes would be two chances to rename one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterOp {
     Equals,
     NotEquals,
     IsNull,
     IsNotNull,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
+    /// `BETWEEN a AND b`, inclusive at both ends as SQL's own is. The only
+    /// operator here with a second operand, and the reason `clause` takes one.
+    Between,
+    /// `LIKE '%v%'`, with everything in `v` that `LIKE` reads as syntax written
+    /// back as the character that was typed.
+    Contains,
+    StartsWith,
+    EndsWith,
 }
 
 /// The predicate `filter` asks for, written in this database's own quoting.
@@ -174,22 +194,182 @@ pub async fn cell_filter(
     filter: &CellFilter,
 ) -> DbResult<String> {
     let columns = driver.columns(&filter.schema, &filter.relation).await?;
-    let column = columns
+    let column = column_named(&columns, &filter.schema, &filter.relation, &filter.column)?;
+    clause(dialect, column, filter.op, filter.value.as_deref(), None)
+}
+
+/// Every row of the filter editor, over one relation.
+///
+/// One relation for the reason `Edits` is one: this composes the `WHERE` of a
+/// browse, and a browse shows one table.
+#[derive(Debug, Deserialize)]
+pub struct RowFilter {
+    pub schema: String,
+    pub relation: String,
+    pub rules: Vec<FilterRule>,
+}
+
+/// One row: a column, an operator, and what it compares against.
+#[derive(Debug, Deserialize)]
+pub struct FilterRule {
+    pub column: String,
+    pub op: FilterOp,
+    /// Ignored by the two operators that ask about NULL directly, and required
+    /// by every other one — see `clause` for why an empty value is refused
+    /// rather than read as a question about NULL.
+    pub value: Option<String>,
+    /// The far end of a `BETWEEN`, and nothing else's. Absent from the JSON for
+    /// every other operator, which serde reads as `None` the way it does for
+    /// `CellFilter::value`.
+    pub second: Option<String>,
+}
+
+/// The `WHERE` clause `filter` asks for, written in this database's own quoting.
+///
+/// AND-joined in the order the rows are in, and unparenthesised: every predicate
+/// here is one comparison written by this function, so there is no precedence to
+/// protect and brackets would only make the field harder to read for the person
+/// who opens it to edit by hand.
+///
+/// No rules is an empty string rather than a clause that is always true. The
+/// caller leaves the `WHERE` off entirely, and `1=1` would be this crate putting
+/// something in a statement nobody asked for.
+///
+/// A rule naming a column the relation does not have is an error rather than a
+/// row quietly skipped. Skipping it would return fewer rows than the filter on
+/// screen describes, and nothing would say so — the failure this whole crate is
+/// arranged to avoid.
+pub async fn filter_clause(
+    driver: &dyn Driver,
+    dialect: &'static Dialect,
+    filter: &RowFilter,
+) -> DbResult<String> {
+    if filter.rules.is_empty() {
+        return Ok(String::new());
+    }
+    // Once for the whole stack, not once per rule: the rules are all over one
+    // relation, and a metadata read per row would make a five-row filter five
+    // round trips.
+    let columns = driver.columns(&filter.schema, &filter.relation).await?;
+    let mut parts = Vec::with_capacity(filter.rules.len());
+    for rule in &filter.rules {
+        let column = column_named(&columns, &filter.schema, &filter.relation, &rule.column)?;
+        parts.push(clause(
+            dialect,
+            column,
+            rule.op,
+            rule.value.as_deref(),
+            rule.second.as_deref(),
+        )?);
+    }
+    Ok(parts.join(" AND "))
+}
+
+/// One column of a relation, and the questions worth asking of it.
+#[derive(Debug, Serialize)]
+pub struct FilterColumn {
+    pub name: String,
+    /// The type as the server declared it, so the row can print it beside the
+    /// name — which is what makes an operator list that is shorter than the next
+    /// column's read as a consequence rather than as a bug.
+    pub data_type: String,
+    pub operators: Vec<FilterOp>,
+}
+
+/// What each of `relation`'s columns may be filtered by.
+///
+/// Asked of this crate rather than worked out in the front end for the reason
+/// `filter_clause` is: the two facts that decide it — what a declared type holds,
+/// and whether this dialect can be told how to escape a `LIKE` — are both here,
+/// and a front end that decided for itself would be a second copy of them that
+/// disagrees the day either is corrected.
+pub async fn filter_columns(
+    driver: &dyn Driver,
+    dialect: &'static Dialect,
+    schema: &str,
+    relation: &str,
+) -> DbResult<Vec<FilterColumn>> {
+    let columns = driver.columns(schema, relation).await?;
+    Ok(columns
+        .into_iter()
+        .map(|column| FilterColumn {
+            operators: operators(dialect, &column.data_type),
+            name: column.name,
+            data_type: column.data_type,
+        })
+        .collect())
+}
+
+/// The operators worth offering over a column of this type.
+///
+/// Three groups. The four that ask about equality and NULL are asked of
+/// anything: every database here compares any type for equality, and every
+/// column can be null or not.
+///
+/// The orderings and the range need a type with an order. Numbers, dates and
+/// text all have one; `json`, a blob and anything this build cannot classify do
+/// not, and offering `<` there produces a statement the server refuses. An
+/// unrecognised spelling therefore falls to the four, which is the same
+/// safe-way-round `numeric` takes: the cost is an operator missing from a popup,
+/// and the alternative cost is a filter that errors.
+///
+/// `LIKE` needs text *and* a dialect that takes an `ESCAPE` clause. Both halves
+/// are load-bearing — `LIKE` against an integer is an error on PostgreSQL, and
+/// on ClickHouse there is no clause to make the user's own `%` mean a per cent
+/// with. This is the one place either fact reaches a popup, so a column that
+/// cannot be asked simply is not offered it.
+fn operators(dialect: &Dialect, data_type: &str) -> Vec<FilterOp> {
+    let mut out = vec![
+        FilterOp::Equals,
+        FilterOp::NotEquals,
+        FilterOp::IsNull,
+        FilterOp::IsNotNull,
+    ];
+    let text = textual(data_type);
+    if numeric(data_type) || temporal(data_type) || text {
+        out.extend([
+            FilterOp::LessThan,
+            FilterOp::LessOrEqual,
+            FilterOp::GreaterThan,
+            FilterOp::GreaterOrEqual,
+            FilterOp::Between,
+        ]);
+    }
+    if text && dialect.like_escape.is_some() {
+        out.extend([FilterOp::Contains, FilterOp::StartsWith, FilterOp::EndsWith]);
+    }
+    out
+}
+
+/// The column `name` names, or a sentence saying which relation does not have
+/// it.
+///
+/// Shared by the cell menu and the filter rows because both ask it and the
+/// sentence is the one a person reads: a lookup written twice is a message that
+/// drifts, and this one names the table it looked in.
+fn column_named<'a>(
+    columns: &'a [ColumnInfo],
+    schema: &str,
+    relation: &str,
+    name: &str,
+) -> DbResult<&'a ColumnInfo> {
+    columns
         .iter()
-        .find(|column| column.name == filter.column)
-        .ok_or_else(|| {
-            DbError::new(format!(
-                "{}.{} has no column {}",
-                filter.schema, filter.relation, filter.column
-            ))
-        })?;
-    clause(dialect, column, filter.op, filter.value.as_deref())
+        .find(|column| column.name == name)
+        .ok_or_else(|| DbError::new(format!("{schema}.{relation} has no column {name}")))
 }
 
 /// One predicate over one column.
 ///
 /// Split from `cell_filter` because everything decided here is decided without a
 /// database: how the operators are spelled, and what happens to NULL.
+///
+/// A missing value means two different things and this is where they part. For
+/// `equals` it is a NULL cell asking to match itself, which is a question with an
+/// answer. For every operator added since, it is a filter row nobody has finished
+/// typing, and there is no answer to guess: `x < NULL` is valid SQL and is never
+/// true, so guessing would turn a half-typed row into an empty grid — which
+/// reads as a fact about the table rather than as a row still being written.
 ///
 /// A NULL cell asked to match itself becomes `IS NULL`, and its negation `IS NOT
 /// NULL`. `= NULL` is never true in SQL — not even of a NULL — so the literal
@@ -201,6 +381,9 @@ fn clause(
     column: &ColumnInfo,
     op: FilterOp,
     value: Option<&str>,
+    // The far end of a range. `None` for every operator but `Between`, which
+    // refuses without it: a range with one end is a row still being typed.
+    second: Option<&str>,
 ) -> DbResult<String> {
     let name = dialect.quote(&column.name);
     Ok(match (op, value) {
@@ -210,7 +393,99 @@ fn clause(
         // `<>` rather than `!=`: every database here takes both, and this one is
         // the standard's.
         (FilterOp::NotEquals, value) => format!("{name} <> {}", literal(dialect, column, value)?),
+        (
+            FilterOp::LessThan
+            | FilterOp::LessOrEqual
+            | FilterOp::GreaterThan
+            | FilterOp::GreaterOrEqual
+            | FilterOp::Between
+            | FilterOp::Contains
+            | FilterOp::StartsWith
+            | FilterOp::EndsWith,
+            None,
+        ) => {
+            return Err(DbError::new(format!(
+                "the filter on {} has no value to compare against",
+                column.name
+            )));
+        }
+        (FilterOp::LessThan, value) => format!("{name} < {}", literal(dialect, column, value)?),
+        (FilterOp::LessOrEqual, value) => {
+            format!("{name} <= {}", literal(dialect, column, value)?)
+        }
+        (FilterOp::GreaterThan, value) => format!("{name} > {}", literal(dialect, column, value)?),
+        (FilterOp::GreaterOrEqual, value) => {
+            format!("{name} >= {}", literal(dialect, column, value)?)
+        }
+        (FilterOp::Between, value) => {
+            let Some(second) = second else {
+                return Err(DbError::new(format!(
+                    "the filter on {} is a range with only one end",
+                    column.name
+                )));
+            };
+            // Both ends written by `literal`, so a range over a numeric column
+            // refuses a non-numeric end the same way a comparison does. The ends
+            // are not reordered: `BETWEEN 9 AND 1` matches nothing on every
+            // database here, and silently swapping them would answer a question
+            // the reader did not ask while their row still reads the other way.
+            format!(
+                "{name} BETWEEN {} AND {}",
+                literal(dialect, column, value)?,
+                literal(dialect, column, Some(second))?
+            )
+        }
+        // The pattern is built from the escaped value and then quoted, in that
+        // order. Escaping after quoting would escape the quoting.
+        (FilterOp::Contains, Some(text)) => {
+            like(dialect, &name, &format!("%{}%", escape_like(text)))?
+        }
+        (FilterOp::StartsWith, Some(text)) => {
+            like(dialect, &name, &format!("{}%", escape_like(text)))?
+        }
+        (FilterOp::EndsWith, Some(text)) => {
+            like(dialect, &name, &format!("%{}", escape_like(text)))?
+        }
     })
+}
+
+/// A `LIKE` predicate whose pattern means the characters that were typed.
+///
+/// The `ESCAPE` clause is read off the dialect rather than assumed. Without one,
+/// a value holding a `%` — a discount column is full of them — silently matches
+/// anything, and the failure is a grid of the wrong rows with nothing on screen
+/// saying so. A dialect with no clause is one this build cannot spell a
+/// wildcard-safe `LIKE` for, and the operator is refused by name instead of
+/// guessed at; the caller offering it is what stops anybody reaching this.
+fn like(dialect: &Dialect, name: &str, pattern: &str) -> DbResult<String> {
+    let Some(escape) = dialect.like_escape else {
+        return Err(DbError::new(format!(
+            "{} takes no ESCAPE clause, so this build writes no LIKE filter for it",
+            dialect.name
+        )));
+    };
+    Ok(format!(
+        "{name} LIKE {} ESCAPE {}",
+        dialect.string_literal(pattern),
+        dialect.string_literal(escape)
+    ))
+}
+
+/// `value` with everything `LIKE` reads as syntax written back as itself.
+///
+/// The backslash goes first. Escaping the per cent first would leave the
+/// backslash pass adding a second escape to the one just written, and the
+/// pattern would hold two characters where the user typed one.
+///
+/// The result is still a bare string: `string_literal` quotes it afterwards, and
+/// on the dialects where a backslash also escapes inside a string literal that
+/// pass doubles these again — which is correct, and is why the two are separate
+/// steps rather than one.
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// What names one row of a relation, for a caller that has to decide whether to
@@ -598,11 +873,82 @@ fn numeric(data_type: &str) -> bool {
         "decimal",
         "dec",
     ];
-    let named = data_type
+    NUMERIC.contains(&type_name(data_type).as_str())
+}
+
+/// Whether a column's declared type holds a point in time.
+///
+/// Read the same way `numeric` reads its list, and for the same reason: the
+/// spellings are six databases' and not one language's. What this decides is
+/// whether the orderings and the range are offered — a date column where they
+/// were not would be the commonest filter anybody writes, missing.
+///
+/// `interval` is deliberately absent. It is a length of time rather than a point
+/// in one, and comparing it against a typed date is a question with no answer.
+fn temporal(data_type: &str) -> bool {
+    const TEMPORAL: &[&str] = &[
+        "date",
+        "time",
+        "timetz",
+        "timestamp",
+        "timestamptz",
+        "datetime",
+        "datetime2",
+        "smalldatetime",
+        "datetimeoffset",
+        "year",
+    ];
+    TEMPORAL.contains(&type_name(data_type).as_str())
+}
+
+/// Whether a column's declared type holds characters.
+///
+/// This is the one that decides whether `LIKE` is offered, so a spelling missing
+/// from the list costs the three operators most worth having on the column most
+/// likely to want them. Missing is still the safe way round: the alternative is
+/// offering `LIKE` against a `json` or a blob, which is an error at the server.
+///
+/// `json`, `jsonb` and `xml` are deliberately absent although every one of them
+/// holds characters. They are documents, several databases refuse `LIKE` over
+/// them without a cast, and a filter that needs a cast is not one this popup can
+/// write.
+///
+/// `uuid` is absent for the same reason, and it costs more: PostgreSQL will not
+/// take `LIKE` over one without a cast either, so the column somebody most wants
+/// to search by a prefix is the one that cannot be. It also loses the orderings,
+/// which this list gates as well and which a `uuid` would accept — that is the
+/// price of one list answering both questions, and it is the cheaper mistake.
+fn textual(data_type: &str) -> bool {
+    const TEXTUAL: &[&str] = &[
+        "text",
+        "varchar",
+        "varchar2",
+        "char",
+        "bpchar",
+        "character",
+        "nvarchar",
+        "nchar",
+        "ntext",
+        "string",
+        "citext",
+        "tinytext",
+        "mediumtext",
+        "longtext",
+        "clob",
+    ];
+    TEXTUAL.contains(&type_name(data_type).as_str())
+}
+
+/// A declared type's name, up to its first `(` or space, folded down.
+///
+/// One reading for all three questions above. `numeric(18, 4)`, `tinyint(1)` and
+/// `bigint unsigned` are the types they say they are, and `interval` does not
+/// become an integer for starting with the same three letters.
+fn type_name(data_type: &str) -> String {
+    data_type
         .trim()
         .split(['(', ' '])
         .next()
         .unwrap_or_default()
-        .to_ascii_lowercase();
-    NUMERIC.contains(&named.as_str())
+        .to_ascii_lowercase()
 }

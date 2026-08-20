@@ -12,6 +12,7 @@ use dbconn::{
     RelationshipInfo, ResultStream, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use dbedit::Edits;
+use std::collections::HashMap;
 
 /// One column of one table: name, declared type, whether it is in the primary
 /// key, whether it can be null.
@@ -543,10 +544,306 @@ async fn a_cell_filter_is_written_the_way_its_column_reads_it() {
     assert!(why.contains("not a number"), "{why}");
 }
 
+/// Each ordering operator becomes the comparison it names, with its value
+/// written the way its column reads it — bare for a number, quoted for text.
+#[tokio::test]
+async fn an_ordering_operator_becomes_the_comparison_it_names() {
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"qty","op":"greater_than",
+                "value":"2"}"#
+        )
+        .await,
+        "qty > 2"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"qty","op":"less_or_equal",
+                "value":"2"}"#
+        )
+        .await,
+        "qty <= 2"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"shipped_at",
+                "op":"greater_or_equal","value":"2024-01-01"}"#
+        )
+        .await,
+        "shipped_at >= '2024-01-01'"
+    );
+}
+
+/// The three `LIKE` operators put the wildcards where the operator says, and
+/// nowhere the value says.
+///
+/// The second case is the whole reason `escape_like` exists: a value holding a
+/// per cent is ordinary data — a discount, a completion — and read as a wildcard
+/// it returns rows nobody asked for while looking exactly like a filter that
+/// worked.
+#[tokio::test]
+async fn a_like_filter_matches_the_characters_that_were_typed() {
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"sku","op":"contains",
+                "value":"ab"}"#
+        )
+        .await,
+        r"sku LIKE '%ab%' ESCAPE '\'"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"sku","op":"starts_with",
+                "value":"50%"}"#
+        )
+        .await,
+        r"sku LIKE '50\%%' ESCAPE '\'"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"sku","op":"ends_with",
+                "value":"a_b"}"#
+        )
+        .await,
+        r"sku LIKE '%a\_b' ESCAPE '\'"
+    );
+}
+
+/// A database with no `ESCAPE` clause is refused by name rather than handed a
+/// pattern whose wildcards it will read.
+#[tokio::test]
+async fn a_dialect_without_an_escape_clause_gets_no_like_filter() {
+    let filter: dbedit::CellFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","column":"sku","op":"contains","value":"a"}"#,
+    )
+    .unwrap();
+    let why = dbedit::cell_filter(&Fake, &dbsql::CLICKHOUSE, &filter)
+        .await
+        .expect_err("a LIKE this build cannot escape is not a filter")
+        .to_string();
+    assert!(why.contains("ESCAPE"), "{why}");
+}
+
+/// An operator added since the cell menu, with nothing to compare against, is a
+/// row still being typed and is refused.
+///
+/// `equals` keeps its own answer, which the case above this file pins: over a
+/// NULL cell it is `IS NULL`. Both readings are right and they are right about
+/// different things, which is why one function has to give two answers.
+#[tokio::test]
+async fn an_operator_with_no_value_is_an_unfinished_row_and_not_a_question_about_null() {
+    let filter: dbedit::CellFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","column":"qty","op":"less_than"}"#,
+    )
+    .unwrap();
+    let why = dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("a comparison against nothing is not a filter")
+        .to_string();
+    assert!(why.contains("no value to compare against"), "{why}");
+}
+
+/// Several rows become one clause, AND-joined in the order they were given, each
+/// written the way its own column reads it.
+#[tokio::test]
+async fn a_stack_of_rules_becomes_one_and_joined_clause() {
+    assert_eq!(
+        rows(
+            r#"{"schema":"public","relation":"lines","rules":[
+                {"column":"qty","op":"greater_than","value":"2"},
+                {"column":"sku","op":"starts_with","value":"AB"},
+                {"column":"note","op":"is_null"}]}"#
+        )
+        .await,
+        r"qty > 2 AND sku LIKE 'AB%' ESCAPE '\' AND note IS NULL"
+    );
+}
+
+/// A range is inclusive at both ends and keeps the ends in the order they were
+/// given, and one end alone is a row still being typed.
+#[tokio::test]
+async fn a_range_takes_both_ends_and_refuses_one() {
+    assert_eq!(
+        rows(
+            r#"{"schema":"public","relation":"lines","rules":[
+                {"column":"qty","op":"between","value":"1","second":"9"}]}"#
+        )
+        .await,
+        "qty BETWEEN 1 AND 9"
+    );
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"qty","op":"between","value":"1"}]}"#,
+    )
+    .unwrap();
+    let why = dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("a range with one end is not a filter")
+        .to_string();
+    assert!(why.contains("only one end"), "{why}");
+}
+
+/// No rules is no clause at all. The caller leaves the `WHERE` off; a filter
+/// that is always true would be this crate adding a predicate nobody asked for.
+#[tokio::test]
+async fn an_empty_stack_writes_nothing() {
+    assert_eq!(
+        rows(r#"{"schema":"public","relation":"lines","rules":[]}"#).await,
+        ""
+    );
+}
+
+/// A rule over a column the relation does not have is refused by name.
+///
+/// Skipping it would return more rows than the filter on screen describes, with
+/// nothing anywhere saying a row had been ignored.
+#[tokio::test]
+async fn a_rule_over_a_column_that_is_not_there_is_refused_by_name() {
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"nope","op":"equals","value":"1"}]}"#,
+    )
+    .unwrap();
+    let why = dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("a column that is not there is not a filter")
+        .to_string();
+    assert!(why.contains("has no column nope"), "{why}");
+}
+
 /// One clause, from the JSON the front end sends.
 async fn filtered(json: &str) -> String {
     let filter: dbedit::CellFilter = serde_json::from_str(json).expect("the filter should parse");
     dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect("the clause should be writable")
+}
+
+/// Each column is offered the operators its declared type can answer, and no
+/// others.
+#[tokio::test]
+async fn a_column_is_offered_what_its_type_can_answer() {
+    let columns = offered(&dbsql::POSTGRES).await;
+    // A number is ordered and is not text: comparisons and a range, no LIKE.
+    assert_eq!(
+        columns["qty"],
+        vec![
+            "equals",
+            "not_equals",
+            "is_null",
+            "is_not_null",
+            "less_than",
+            "less_or_equal",
+            "greater_than",
+            "greater_or_equal",
+            "between"
+        ]
+    );
+    // Text is ordered and is text, so it gets everything.
+    assert_eq!(
+        columns["sku"],
+        vec![
+            "equals",
+            "not_equals",
+            "is_null",
+            "is_not_null",
+            "less_than",
+            "less_or_equal",
+            "greater_than",
+            "greater_or_equal",
+            "between",
+            "contains",
+            "starts_with",
+            "ends_with"
+        ]
+    );
+    // A timestamp is ordered, which is what makes the commonest filter anybody
+    // writes available on the column they write it about.
+    assert!(columns["shipped_at"].contains(&"between".to_string()));
+    assert!(!columns["shipped_at"].contains(&"contains".to_string()));
+}
+
+/// A database that cannot be told how to escape a wildcard is not offered the
+/// operators that need one, even on a text column.
+#[tokio::test]
+async fn a_dialect_with_no_escape_clause_is_offered_no_like_operators() {
+    let columns = offered(&dbsql::CLICKHOUSE).await;
+    assert!(!columns["sku"].contains(&"contains".to_string()));
+    // The orderings are untouched: it is the escape clause that is missing, not
+    // the column's order.
+    assert!(columns["sku"].contains(&"between".to_string()));
+}
+
+/// Everything a column is offered can actually be written against it.
+///
+/// This is the case the pair exists for. The popup and the compiler are two
+/// lists that have to agree, and the way they stop agreeing is silent: an
+/// operator offered on a column `clause` refuses is a row the user fills in and
+/// an error when they press Apply.
+#[tokio::test]
+async fn every_operator_offered_for_a_column_can_be_written_against_it() {
+    let columns = dbedit::filter_columns(&Fake, &dbsql::POSTGRES, "public", "lines")
+        .await
+        .expect("the columns should be readable");
+    for column in columns {
+        // A numeric column refuses text, which is `literal`'s rule and not this
+        // one's — so the probe value has to be of the column's own type.
+        let value =
+            if column.data_type.starts_with("int") || column.data_type.starts_with("numeric") {
+                "1"
+            } else {
+                "a"
+            };
+        for op in &column.operators {
+            let filter = dbedit::RowFilter {
+                schema: "public".to_string(),
+                relation: "lines".to_string(),
+                rules: vec![dbedit::FilterRule {
+                    column: column.name.clone(),
+                    op: *op,
+                    value: Some(value.to_string()),
+                    second: Some(value.to_string()),
+                }],
+            };
+            dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{} is offered {op:?} and cannot be written: {e}",
+                        column.name
+                    )
+                });
+        }
+    }
+}
+
+/// `lines`' columns, each mapped to the operator names it is offered.
+async fn offered(dialect: &'static dbsql::Dialect) -> HashMap<String, Vec<String>> {
+    dbedit::filter_columns(&Fake, dialect, "public", "lines")
+        .await
+        .expect("the columns should be readable")
+        .into_iter()
+        .map(|column| {
+            let names = column
+                .operators
+                .iter()
+                .map(|op| {
+                    serde_json::to_value(op)
+                        .expect("an operator should serialise")
+                        .as_str()
+                        .expect("as a string")
+                        .to_string()
+                })
+                .collect();
+            (column.name, names)
+        })
+        .collect()
+}
+
+/// One `WHERE` clause, from the JSON the filter rows send.
+async fn rows(json: &str) -> String {
+    let filter: dbedit::RowFilter = serde_json::from_str(json).expect("the filter should parse");
+    dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
         .await
         .expect("the clause should be writable")
 }
