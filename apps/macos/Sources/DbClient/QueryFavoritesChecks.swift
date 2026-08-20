@@ -1,0 +1,140 @@
+import Foundation
+
+/// Executable checks for the query favorites store, run by `--verify-favorites`.
+///
+/// Behind a flag on the binary for the reason `SQLScriptChecks` gives: the
+/// package declares one executable target and it links the Rust staticlib, so a
+/// test target would have to reproduce that link.
+enum QueryFavoritesChecks {
+    private static var failures = 0
+
+    static func run() -> Bool {
+        failures = 0
+        MainActor.assumeIsolated {
+            checkAFavoriteNeedsBothANameAndAStatement()
+            checkTheListReadsByName()
+            checkASnippetIsOnlyOfferedToItsOwnDatabase()
+            checkImportingMergesRatherThanReplaces()
+            checkTheListOutlivesTheWindow()
+        }
+        if failures == 0 {
+            fputs("favorites: all checks passed\n", stderr)
+        } else {
+            fputs("favorites: \(failures) check(s) failed\n", stderr)
+        }
+        return failures == 0
+    }
+
+    // MARK: - Cases
+
+    /// Both halves are required: an unnamed favorite cannot be found again, and
+    /// an empty one has nothing to run.
+    @MainActor private static func checkAFavoriteNeedsBothANameAndAStatement() {
+        let store = scratch()
+        expect(
+            store.save(name: "  ", sql: "SELECT 1", scheme: "postgres") == nil, true,
+            "a name of spaces is refused")
+        expect(
+            store.save(name: "Count", sql: "   ", scheme: "postgres") == nil, true,
+            "and so is a statement of spaces")
+        expect(store.favorites.count, 0, "so nothing was kept")
+
+        // And the surrounding whitespace goes, so that a statement pasted with a
+        // trailing newline is not stored differently from one typed.
+        store.save(name: " Count ", sql: " SELECT 1\n", scheme: "postgres")
+        expect(store.favorites.first?.name, "Count", "the name is trimmed")
+        expect(store.favorites.first?.sql, "SELECT 1", "and so is the statement")
+    }
+
+    /// A favorite is looked up, not scanned, so the list reads alphabetically
+    /// rather than newest-first the way the history does.
+    @MainActor private static func checkTheListReadsByName() {
+        let store = scratch()
+        store.save(name: "Zombies", sql: "SELECT 1", scheme: "")
+        store.save(name: "apples", sql: "SELECT 2", scheme: "")
+        store.save(name: "Mangoes", sql: "SELECT 3", scheme: "")
+        expect(
+            store.favorites.map(\.name), ["apples", "Mangoes", "Zombies"],
+            "by name, ignoring case")
+    }
+
+    /// The databases here disagree about quoting and about LIMIT, so a snippet
+    /// written for one is a statement that cannot run on another.
+    @MainActor private static func checkASnippetIsOnlyOfferedToItsOwnDatabase() {
+        let store = scratch()
+        store.save(name: "Postgres only", sql: "SELECT 1", scheme: "postgres")
+        store.save(name: "MySQL only", sql: "SELECT 2", scheme: "mysql")
+        store.save(name: "Anywhere", sql: "SELECT 3", scheme: "")
+        expect(
+            store.offered(to: "postgres").map(\.name), ["Anywhere", "Postgres only"],
+            "a postgres connection is offered its own and the unattributed one")
+        expect(
+            store.offered(to: "mysql").map(\.name), ["Anywhere", "MySQL only"],
+            "and a mysql connection the same")
+    }
+
+    /// An import adds to what is here. Replacing would make one mistaken import
+    /// unrecoverable, and re-importing the same file must not double the list.
+    @MainActor private static func checkImportingMergesRatherThanReplaces() {
+        let store = scratch()
+        store.save(name: "Mine", sql: "SELECT 1", scheme: "")
+        let incoming = [
+            QueryFavorite(
+                id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,
+                name: "Theirs", sql: "SELECT 2", scheme: "", savedAt: Date())
+        ]
+        store.merge(incoming)
+        expect(store.favorites.map(\.name), ["Mine", "Theirs"], "both lists are here")
+
+        store.merge(incoming)
+        expect(
+            store.favorites.map(\.name), ["Mine", "Theirs"],
+            "and importing the same file again changes nothing")
+
+        let edited = [
+            QueryFavorite(
+                id: UUID(uuidString: "00000000-0000-0000-0000-0000000000AA")!,
+                name: "Theirs, renamed", sql: "SELECT 2", scheme: "", savedAt: Date())
+        ]
+        store.merge(edited)
+        expect(
+            store.favorites.map(\.name), ["Mine", "Theirs, renamed"],
+            "an entry that came back edited replaces the one it names")
+    }
+
+    /// A favorite that did not survive the window would be a worse note-taking
+    /// tool than the editor it was saved from.
+    @MainActor private static func checkTheListOutlivesTheWindow() {
+        let name = suiteName()
+        guard let store = UserDefaults(suiteName: name) else {
+            failures += 1
+            fputs("favorites FAIL: a scratch defaults suite could be made\n", stderr)
+            return
+        }
+        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+
+        let first = QueryFavorites(defaults: store)
+        first.save(name: "Slow queries", sql: "SELECT 1", scheme: "postgres")
+
+        // A second reader over the same store, which is what the next launch is.
+        let second = QueryFavorites(defaults: store)
+        expect(second.favorites.map(\.name), ["Slow queries"], "the favorite was kept")
+        expect(second.favorites.first?.scheme, "postgres", "and so was what it was written for")
+    }
+
+    // MARK: - Fixture
+
+    private static func suiteName() -> String { "dev.dbclient.verify-favorites.\(UUID())" }
+
+    /// A store on a suite of its own, so that running the checks cannot read or
+    /// write the favorites a developer's own window is showing.
+    @MainActor private static func scratch() -> QueryFavorites {
+        QueryFavorites(defaults: UserDefaults(suiteName: suiteName())!)
+    }
+
+    private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
+        guard got != want else { return }
+        failures += 1
+        fputs("favorites FAIL: \(what)\n  want: \(want)\n  got:  \(got)\n", stderr)
+    }
+}
