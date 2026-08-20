@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{FlightSqlError, FlightSqlSource, Rows, RowsCancel};
@@ -60,6 +60,13 @@ fn browse_sql(what: &Browse<'_>) -> String {
 
 #[async_trait]
 impl Driver for FlightSqlSource {
+    /// The protocol, because that is all this connection knows. What is behind a
+    /// Flight SQL endpoint is not in the connection string — the catalogue entry
+    /// says as much — and the one place it could be read from is `GetSqlInfo`,
+    /// which this driver does not call.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new("Arrow Flight SQL", ""))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(FlightSqlSource::schemas(self).await?)
     }

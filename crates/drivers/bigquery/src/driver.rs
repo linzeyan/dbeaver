@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{BigQueryError, BigQuerySource, Rows, RowsCancel};
@@ -76,6 +76,11 @@ fn browse_sql(project: &str, what: &Browse<'_>) -> String {
 
 #[async_trait]
 impl Driver for BigQuerySource {
+    /// BigQuery has no version to report — it is a service rather than a server
+    /// somebody runs a build of — so the product is the whole of the answer.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new("BigQuery", ""))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(BigQuerySource::schemas(self).await?)
     }

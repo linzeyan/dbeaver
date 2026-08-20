@@ -221,6 +221,36 @@ pub unsafe extern "C" fn db_drivers_json(err: *mut *mut c_char) -> *mut c_char {
     json_result(&registry::CATALOG, err)
 }
 
+/// What answered this connection — product and version — as a JSON object.
+/// Release with `db_string_free`.
+///
+/// A round trip, unlike the call above it: that one answers what this build can
+/// open, and this one answers what it actually opened. They sit together because
+/// a front end reads them for the same reason, and because without this one the
+/// only way to learn that a `postgres://` connection reached CockroachDB is to
+/// read it out of an error message.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_server_info_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.driver.server_info()) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Everything an editor asks about one buffer of SQL, in one answer.
 ///
 /// The three questions — what to paint, where the statements are, and which one

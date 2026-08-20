@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, SqliteError, SqliteSource};
@@ -28,6 +28,15 @@ impl From<SqliteError> for DbError {
 
 #[async_trait]
 impl Driver for SqliteSource {
+    /// The library's own version, which is the whole of the answer here: SQLite
+    /// is this process rather than a server, so there is no product on the other
+    /// end to be surprised by.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new(
+            "SQLite",
+            scalar_text(self, "SELECT sqlite_version()").await?,
+        ))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(SqliteSource::schemas(self).await?)
     }

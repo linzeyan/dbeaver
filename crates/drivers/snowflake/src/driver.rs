@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{Rows, RowsCancel, SnowflakeError, SnowflakeSource, parts, quote};
@@ -93,6 +93,16 @@ fn browse_sql(what: &Browse<'_>) -> String {
 
 #[async_trait]
 impl Driver for SnowflakeSource {
+    /// The one driver here whose version is asked for without a server ever
+    /// having answered: `CURRENT_VERSION()` is Snowflake's own documented way to
+    /// state it, so it is written rather than left blank — a statement from the
+    /// vendor's documentation is a different thing from a guess.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new(
+            "Snowflake",
+            scalar_text(self, "SELECT CURRENT_VERSION()").await?,
+        ))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(SnowflakeSource::schemas(self).await?)
     }

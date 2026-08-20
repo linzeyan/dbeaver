@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
     DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{CassandraError, CassandraSource, Rows, RowsCancel};
@@ -72,6 +72,14 @@ fn browse_cql(what: &Browse<'_>) -> String {
 
 #[async_trait]
 impl Driver for CassandraSource {
+    /// The release version out of `system.local`, which is the one row every node
+    /// keeps about itself. CQL has no `version()` to call.
+    async fn server_info(&self) -> DbResult<ServerInfo> {
+        Ok(ServerInfo::new(
+            "Cassandra",
+            scalar_text(self, "SELECT release_version FROM system.local").await?,
+        ))
+    }
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(CassandraSource::schemas(self).await?)
     }

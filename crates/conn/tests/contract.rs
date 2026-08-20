@@ -1492,10 +1492,32 @@ async fn every_check(subject: &Subject) {
         cancels_an_idle_cursor_without_complaining(subject).await;
     }
     reports_where_a_statement_is_wrong(subject).await;
+    names_what_answered(subject).await;
     walks_the_navigator(subject).await;
     states_a_unique_key_in_columns(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// A driver names the product it reached, and does not answer with silence.
+///
+/// The product only. What a version looks like is the server's business — the
+/// databases here spell one three ways, and several have no version to state at
+/// all — but a driver that cannot say which product it reached leaves the front
+/// end printing the scheme's label, which is the name of the driver rather than
+/// the name of the database. That is the failure this check exists for, and it
+/// is the one that cannot be seen on screen: "PostgreSQL" over a CockroachDB
+/// connection looks exactly like the truth.
+async fn names_what_answered(subject: &Subject) {
+    let info = subject
+        .driver
+        .server_info()
+        .await
+        .expect("server_info failed");
+    assert!(
+        !info.product.is_empty(),
+        "a driver has to name the product it reached"
+    );
 }
 
 /// A UNIQUE constraint is reported as the columns it is over, and those columns
