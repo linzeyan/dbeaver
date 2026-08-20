@@ -148,12 +148,16 @@ pub struct CellFilter {
     pub value: Option<String>,
 }
 
-/// What a filter offered over one cell can ask.
+/// What a filter over one column can ask.
 ///
-/// Four, and deliberately not more: these are the questions whose answer is the
-/// same in every dialect this build speaks. `LIKE`, ranges and dates all differ
-/// between them, and belong to a filter editor rather than to a menu item that
-/// has to be right without being read.
+/// The first four are the questions whose answer is the same in every dialect
+/// this build speaks, and they are the four the grid's cell menu offers: a menu
+/// item has to be right without being read. The rest arrived with the filter
+/// rows, where the column, its declared type and the operator sit on screen
+/// together, so a pairing that makes no sense is visible before it runs.
+///
+/// That division is a fact about what a caller offers, not about what is
+/// compiled here — every variant below becomes a predicate by the same route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FilterOp {
@@ -161,6 +165,15 @@ pub enum FilterOp {
     NotEquals,
     IsNull,
     IsNotNull,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
+    /// `LIKE '%v%'`, with everything in `v` that `LIKE` reads as syntax written
+    /// back as the character that was typed.
+    Contains,
+    StartsWith,
+    EndsWith,
 }
 
 /// The predicate `filter` asks for, written in this database's own quoting.
@@ -191,6 +204,13 @@ pub async fn cell_filter(
 /// Split from `cell_filter` because everything decided here is decided without a
 /// database: how the operators are spelled, and what happens to NULL.
 ///
+/// A missing value means two different things and this is where they part. For
+/// `equals` it is a NULL cell asking to match itself, which is a question with an
+/// answer. For every operator added since, it is a filter row nobody has finished
+/// typing, and there is no answer to guess: `x < NULL` is valid SQL and is never
+/// true, so guessing would turn a half-typed row into an empty grid — which
+/// reads as a fact about the table rather than as a row still being written.
+///
 /// A NULL cell asked to match itself becomes `IS NULL`, and its negation `IS NOT
 /// NULL`. `= NULL` is never true in SQL — not even of a NULL — so the literal
 /// reading of "filter to this cell's value" over an empty cell is a filter that
@@ -210,7 +230,80 @@ fn clause(
         // `<>` rather than `!=`: every database here takes both, and this one is
         // the standard's.
         (FilterOp::NotEquals, value) => format!("{name} <> {}", literal(dialect, column, value)?),
+        (
+            FilterOp::LessThan
+            | FilterOp::LessOrEqual
+            | FilterOp::GreaterThan
+            | FilterOp::GreaterOrEqual
+            | FilterOp::Contains
+            | FilterOp::StartsWith
+            | FilterOp::EndsWith,
+            None,
+        ) => {
+            return Err(DbError::new(format!(
+                "the filter on {} has no value to compare against",
+                column.name
+            )));
+        }
+        (FilterOp::LessThan, value) => format!("{name} < {}", literal(dialect, column, value)?),
+        (FilterOp::LessOrEqual, value) => {
+            format!("{name} <= {}", literal(dialect, column, value)?)
+        }
+        (FilterOp::GreaterThan, value) => format!("{name} > {}", literal(dialect, column, value)?),
+        (FilterOp::GreaterOrEqual, value) => {
+            format!("{name} >= {}", literal(dialect, column, value)?)
+        }
+        // The pattern is built from the escaped value and then quoted, in that
+        // order. Escaping after quoting would escape the quoting.
+        (FilterOp::Contains, Some(text)) => {
+            like(dialect, &name, &format!("%{}%", escape_like(text)))?
+        }
+        (FilterOp::StartsWith, Some(text)) => {
+            like(dialect, &name, &format!("{}%", escape_like(text)))?
+        }
+        (FilterOp::EndsWith, Some(text)) => {
+            like(dialect, &name, &format!("%{}", escape_like(text)))?
+        }
     })
+}
+
+/// A `LIKE` predicate whose pattern means the characters that were typed.
+///
+/// The `ESCAPE` clause is read off the dialect rather than assumed. Without one,
+/// a value holding a `%` — a discount column is full of them — silently matches
+/// anything, and the failure is a grid of the wrong rows with nothing on screen
+/// saying so. A dialect with no clause is one this build cannot spell a
+/// wildcard-safe `LIKE` for, and the operator is refused by name instead of
+/// guessed at; the caller offering it is what stops anybody reaching this.
+fn like(dialect: &Dialect, name: &str, pattern: &str) -> DbResult<String> {
+    let Some(escape) = dialect.like_escape else {
+        return Err(DbError::new(format!(
+            "{} takes no ESCAPE clause, so this build writes no LIKE filter for it",
+            dialect.name
+        )));
+    };
+    Ok(format!(
+        "{name} LIKE {} ESCAPE {}",
+        dialect.string_literal(pattern),
+        dialect.string_literal(escape)
+    ))
+}
+
+/// `value` with everything `LIKE` reads as syntax written back as itself.
+///
+/// The backslash goes first. Escaping the per cent first would leave the
+/// backslash pass adding a second escape to the one just written, and the
+/// pattern would hold two characters where the user typed one.
+///
+/// The result is still a bare string: `string_literal` quotes it afterwards, and
+/// on the dialects where a backslash also escapes inside a string literal that
+/// pass doubles these again — which is correct, and is why the two are separate
+/// steps rather than one.
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// What names one row of a relation, for a caller that has to decide whether to

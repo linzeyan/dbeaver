@@ -543,6 +543,105 @@ async fn a_cell_filter_is_written_the_way_its_column_reads_it() {
     assert!(why.contains("not a number"), "{why}");
 }
 
+/// Each ordering operator becomes the comparison it names, with its value
+/// written the way its column reads it — bare for a number, quoted for text.
+#[tokio::test]
+async fn an_ordering_operator_becomes_the_comparison_it_names() {
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"qty","op":"greater_than",
+                "value":"2"}"#
+        )
+        .await,
+        "qty > 2"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"qty","op":"less_or_equal",
+                "value":"2"}"#
+        )
+        .await,
+        "qty <= 2"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"shipped_at",
+                "op":"greater_or_equal","value":"2024-01-01"}"#
+        )
+        .await,
+        "shipped_at >= '2024-01-01'"
+    );
+}
+
+/// The three `LIKE` operators put the wildcards where the operator says, and
+/// nowhere the value says.
+///
+/// The second case is the whole reason `escape_like` exists: a value holding a
+/// per cent is ordinary data — a discount, a completion — and read as a wildcard
+/// it returns rows nobody asked for while looking exactly like a filter that
+/// worked.
+#[tokio::test]
+async fn a_like_filter_matches_the_characters_that_were_typed() {
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"sku","op":"contains",
+                "value":"ab"}"#
+        )
+        .await,
+        r"sku LIKE '%ab%' ESCAPE '\'"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"sku","op":"starts_with",
+                "value":"50%"}"#
+        )
+        .await,
+        r"sku LIKE '50\%%' ESCAPE '\'"
+    );
+    assert_eq!(
+        filtered(
+            r#"{"schema":"public","relation":"lines","column":"sku","op":"ends_with",
+                "value":"a_b"}"#
+        )
+        .await,
+        r"sku LIKE '%a\_b' ESCAPE '\'"
+    );
+}
+
+/// A database with no `ESCAPE` clause is refused by name rather than handed a
+/// pattern whose wildcards it will read.
+#[tokio::test]
+async fn a_dialect_without_an_escape_clause_gets_no_like_filter() {
+    let filter: dbedit::CellFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","column":"sku","op":"contains","value":"a"}"#,
+    )
+    .unwrap();
+    let why = dbedit::cell_filter(&Fake, &dbsql::CLICKHOUSE, &filter)
+        .await
+        .expect_err("a LIKE this build cannot escape is not a filter")
+        .to_string();
+    assert!(why.contains("ESCAPE"), "{why}");
+}
+
+/// An operator added since the cell menu, with nothing to compare against, is a
+/// row still being typed and is refused.
+///
+/// `equals` keeps its own answer, which the case above this file pins: over a
+/// NULL cell it is `IS NULL`. Both readings are right and they are right about
+/// different things, which is why one function has to give two answers.
+#[tokio::test]
+async fn an_operator_with_no_value_is_an_unfinished_row_and_not_a_question_about_null() {
+    let filter: dbedit::CellFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","column":"qty","op":"less_than"}"#,
+    )
+    .unwrap();
+    let why = dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+        .await
+        .expect_err("a comparison against nothing is not a filter")
+        .to_string();
+    assert!(why.contains("no value to compare against"), "{why}");
+}
+
 /// One clause, from the JSON the front end sends.
 async fn filtered(json: &str) -> String {
     let filter: dbedit::CellFilter = serde_json::from_str(json).expect("the filter should parse");
