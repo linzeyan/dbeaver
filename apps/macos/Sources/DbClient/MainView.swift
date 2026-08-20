@@ -258,6 +258,17 @@ struct NavigatorView: View {
                                     ForEach(relations) { relation in
                                         NavigatorRow(relation: relation)
                                             .tag(relation)
+                                            // The window's own selected tone,
+                                            // now that the system's is switched
+                                            // off below. A shade stronger than
+                                            // the grid's 0.18, which is read
+                                            // with a brighter cell cursor over
+                                            // it; this band is the only layer
+                                            // there is.
+                                            .listRowBackground(
+                                                relation == model.navigatorSelection
+                                                    ? Theme.accent.opacity(0.22).color
+                                                    : Color.clear)
                                     }
                                 } label: {
                                     SchemaLabel(name: schema.name, count: relations.count)
@@ -266,6 +277,7 @@ struct NavigatorView: View {
                         }
                     } label: {
                         ConnectionRootRow(model: model)
+                            .background(ListSelectionHighlightOff())
                     }
                 }
                 .listStyle(.sidebar)
@@ -356,6 +368,49 @@ struct NavigatorView: View {
                 guard !model.isFiltering else { return }
                 if isOpen { model.expanded.insert(schema) } else { model.expanded.remove(schema) }
             })
+    }
+}
+
+/// Switches off the system's selection fill on the `List` this sits inside.
+///
+/// SwiftUI offers no way to colour a `List`'s selection, and both of the
+/// supported approaches were tried against a screenshot before this one.
+/// `.tint` reaches only the emphasized fill — the one drawn while the list is
+/// first responder — and leaves untouched the unemphasized grey a sidebar
+/// wears for most of its life, which is exactly the state this one is in
+/// whenever somebody is reading the pane beside it. `.listRowBackground` draws
+/// *behind* the system fill rather than instead of it, so both appeared at
+/// once, which read worse than the grey alone.
+///
+/// Placed in the background of a row rather than of the `List`: a row's backing
+/// view sits inside the table's own scroll view, so `enclosingScrollView` is a
+/// short and certain walk, while a background on the `List` is a sibling of
+/// that scroll view and would have to go hunting for it. The root row is the
+/// one that is always there to carry it.
+///
+/// The cost is a reach into SwiftUI's own view hierarchy, and a macOS release
+/// that changes the shape of it stops this finding the table. It fails by doing
+/// nothing — the sidebar goes back to the grey it has today — which is what
+/// makes the reach affordable at all.
+///
+/// What goes with the system fill is its second signal: grey meant "selected,
+/// but the keyboard is somewhere else" and blue meant "selected, and the arrow
+/// keys move here". One indigo says only the first half. Traded deliberately —
+/// a tone belonging to no palette in the window was the louder problem.
+private struct ListSelectionHighlightOff: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { NSView() }
+
+    /// Deferred by a turn of the run loop: `updateNSView` can run before this
+    /// view is in the hierarchy, and there is no scroll view above it to find
+    /// until it is. Applied on every update rather than once, so a table
+    /// SwiftUI has rebuilt underneath is caught rather than missed.
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let table = view.enclosingScrollView?.documentView as? NSTableView else {
+                return
+            }
+            table.selectionHighlightStyle = .none
+        }
     }
 }
 
