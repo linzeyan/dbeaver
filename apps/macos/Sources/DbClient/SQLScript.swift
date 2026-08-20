@@ -206,6 +206,61 @@ enum SQLScript {
         }
     }
 
+    /// How much a statement costs if it was not meant.
+    ///
+    /// Ordered, and the order is most of the type: what a caller asks is whether
+    /// this is worse than what it is willing to send without a question, and
+    /// `>=` is that question.
+    enum Danger: String, Comparable {
+        case safe
+        case modify
+        case dangerous
+        case fatal
+
+        private var rank: Int {
+            switch self {
+            case .safe: return 0
+            case .modify: return 1
+            case .dangerous: return 2
+            case .fatal: return 3
+            }
+        }
+
+        static func < (a: Danger, b: Danger) -> Bool { a.rank < b.rank }
+
+        /// What it does, in the words of the thing rather than of a severity.
+        ///
+        /// A question that says "this is dangerous" tells somebody how to feel
+        /// about a statement they can already see; one that says what it changes
+        /// tells them something they might not have noticed.
+        var sentence: String {
+            switch self {
+            case .safe: return "reads from it"
+            case .modify: return "changes rows on it"
+            case .dangerous: return "changes what a table is"
+            case .fatal: return "destroys something on it"
+            }
+        }
+    }
+
+    /// What running `sql` against `scheme`'s database would do.
+    ///
+    /// Asked of the core because the core has the lexer: a search of the text
+    /// finds the word DROP in a comment, in a string literal and in a column
+    /// called `dropped_at`, and only a token stream tells those apart.
+    ///
+    /// Not memoized, unlike `scan` below it: this is asked once when somebody
+    /// presses Run, not on every keystroke.
+    ///
+    /// An answer this build cannot read is taken as `.modify` rather than
+    /// `.safe`, which is the direction the core's own table takes for a word it
+    /// does not recognise: the way to be wrong here is the way that asks.
+    static func danger(of sql: String, scheme: String) -> Danger {
+        guard let raw = db_sql_danger(sql, scheme) else { return .modify }
+        defer { db_string_free(raw) }
+        return Danger(rawValue: String(cString: raw)) ?? .modify
+    }
+
     /// The core's reading of `script`, in the dialect `scheme` names.
     ///
     /// Memoized on its arguments, which is what holds a keystroke to one call

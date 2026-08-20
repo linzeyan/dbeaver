@@ -447,6 +447,41 @@ pub unsafe extern "C" fn db_sql_explain_prefix(scheme: *const c_char) -> *mut c_
     CString::new(prefix).map_or(ptr::null_mut(), CString::into_raw)
 }
 
+/// What running `text` would do: `safe`, `modify`, `dangerous` or `fatal`.
+/// Release with `db_string_free`.
+///
+/// Takes no handle, like `db_sql_scan_json`: the answer is read from the SQL and
+/// the dialect, and the question is asked before anything is sent. The answer is
+/// the worst of the statements in `text`, because a script goes out statement by
+/// statement and every one of them lands.
+///
+/// Takes no `err` either, like `db_sql_explain_prefix` above: there is no failure
+/// this can report that a caller could act on. NULL means the text could not be
+/// read at all, which is a caller's bug rather than a user's.
+///
+/// Read from each statement's head and nothing else — `crates/sql/src/danger.rs`
+/// says why that limit is deliberate. It is enough to decide whether to ask a
+/// question, and it is not a promise about what the server will do with what it
+/// is sent.
+///
+/// # Safety
+/// `text` and `scheme` must be valid NUL-terminated C strings. The returned
+/// string is the caller's, released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_danger(text: *const c_char, scheme: *const c_char) -> *mut c_char {
+    if text.is_null() || scheme.is_null() {
+        return ptr::null_mut();
+    }
+    let (Ok(text), Ok(scheme)) = (
+        unsafe { CStr::from_ptr(text) }.to_str(),
+        unsafe { CStr::from_ptr(scheme) }.to_str(),
+    ) else {
+        return ptr::null_mut();
+    };
+    let word = dbsql::script_danger(text, dbsql::for_scheme(scheme)).name();
+    CString::new(word).map_or(ptr::null_mut(), CString::into_raw)
+}
+
 /// Where a server's error position lands in the buffer, or -1 when the number
 /// could not have come from what was sent.
 ///

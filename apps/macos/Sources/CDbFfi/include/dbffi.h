@@ -161,6 +161,20 @@ char* db_sql_format(const char* text, char** err);
 // guessing the word would produce a statement the server refuses.
 char* db_sql_explain_prefix(const char* scheme);
 
+// What running this SQL would do: "safe", "modify", "dangerous" or "fatal".
+// Released with db_string_free. NULL where the text could not be read at all.
+//
+// Takes no handle, like db_sql_scan_json: the answer comes from the SQL and the
+// dialect, and the question is asked before anything is sent. It is the worst of
+// the statements in the text, since a script goes out statement by statement and
+// every one of them lands.
+//
+// Read from each statement's head and nothing else. That is enough to decide
+// whether to ask a question, and it is not a promise about what the server will
+// do with what it is sent — a front end that treated it as one would be
+// guaranteeing something it cannot see.
+char* db_sql_danger(const char* text, const char* scheme);
+
 // Where a server error position lands in the buffer, or -1 when the number could
 // not have come from what was sent.
 //
