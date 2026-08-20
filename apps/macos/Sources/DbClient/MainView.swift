@@ -419,6 +419,7 @@ struct DetailPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            SessionTabBar(model: model)
             TabBar(selection: $model.activeTab)
             Rectangle().fill(Theme.separator.color).frame(height: 1)
 
