@@ -131,30 +131,14 @@ pub async fn statements(
     Ok(out)
 }
 
-/// One cell's value, as a predicate the browse's filter field can hold.
-///
-/// The front end asks rather than composing it, for the reason `statements`
-/// exists: quoting is the database's own, and a value's spelling depends on the
-/// type its column was declared with. It also has no way to be right about NULL,
-/// which is what `clause` is about.
-#[derive(Debug, Deserialize)]
-pub struct CellFilter {
-    pub schema: String,
-    pub relation: String,
-    pub column: String,
-    pub op: FilterOp,
-    /// The cell's value as the grid holds it, or `None` for a NULL cell.
-    /// Ignored by the two operators that ask about NULL directly.
-    pub value: Option<String>,
-}
-
 /// What a filter over one column can ask.
 ///
 /// The first four are the questions whose answer is the same in every dialect
 /// this build speaks, and they are the four the grid's cell menu offers: a menu
-/// item has to be right without being read. The rest arrived with the filter
-/// rows, where the column, its declared type and the operator sit on screen
-/// together, so a pairing that makes no sense is visible before it runs.
+/// item has to be right without being read, and the menu has no room to say
+/// which column can be asked what. The rest are the filter rows', where the
+/// column, its declared type and the operator sit on screen together and a
+/// pairing that makes no sense is visible before it runs.
 ///
 /// That division is a fact about what a caller offers, not about what is
 /// compiled here — every variant below becomes a predicate by the same route.
@@ -183,21 +167,6 @@ pub enum FilterOp {
     EndsWith,
 }
 
-/// The predicate `filter` asks for, written in this database's own quoting.
-///
-/// Reads the relation's columns for the reason `statements` does: the grid holds
-/// every value as text, and whether this one is written bare or quoted is a fact
-/// about the column rather than about the characters.
-pub async fn cell_filter(
-    driver: &dyn Driver,
-    dialect: &'static Dialect,
-    filter: &CellFilter,
-) -> DbResult<String> {
-    let columns = driver.columns(&filter.schema, &filter.relation).await?;
-    let column = column_named(&columns, &filter.schema, &filter.relation, &filter.column)?;
-    clause(dialect, column, filter.op, filter.value.as_deref(), None)
-}
-
 /// Every row of the filter editor, over one relation.
 ///
 /// One relation for the reason `Edits` is one: this composes the `WHERE` of a
@@ -220,7 +189,7 @@ pub struct FilterRule {
     pub value: Option<String>,
     /// The far end of a `BETWEEN`, and nothing else's. Absent from the JSON for
     /// every other operator, which serde reads as `None` the way it does for
-    /// `CellFilter::value`.
+    /// `value` above.
     pub second: Option<String>,
 }
 
@@ -344,9 +313,9 @@ fn operators(dialect: &Dialect, data_type: &str) -> Vec<FilterOp> {
 /// The column `name` names, or a sentence saying which relation does not have
 /// it.
 ///
-/// Shared by the cell menu and the filter rows because both ask it and the
-/// sentence is the one a person reads: a lookup written twice is a message that
-/// drifts, and this one names the table it looked in.
+/// A function rather than the `ok_or_else` written inline where it is called,
+/// because the sentence is the one a person reads: it names the table it looked
+/// in, and a stack of five rows can reach it five different ways.
 fn column_named<'a>(
     columns: &'a [ColumnInfo],
     schema: &str,
@@ -361,8 +330,10 @@ fn column_named<'a>(
 
 /// One predicate over one column.
 ///
-/// Split from `cell_filter` because everything decided here is decided without a
-/// database: how the operators are spelled, and what happens to NULL.
+/// Split from `filter_clause` because everything decided here is decided without
+/// a database: how the operators are spelled, and what happens to NULL. The
+/// columns are read once for a whole stack, and nothing below this line wants
+/// them again.
 ///
 /// A missing value means two different things and this is where they part. For
 /// `equals` it is a NULL cell asking to match itself, which is a question with an

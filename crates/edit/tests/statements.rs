@@ -533,11 +533,12 @@ async fn a_cell_filter_is_written_the_way_its_column_reads_it() {
     );
     // The same refusal an edit makes: a typing mistake must not become a
     // predicate that runs against a numeric column.
-    let filter: dbedit::CellFilter = serde_json::from_str(
-        r#"{"schema":"public","relation":"lines","column":"qty","op":"equals","value":"abc"}"#,
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"qty","op":"equals","value":"abc"}]}"#,
     )
     .unwrap();
-    let why = dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+    let why = dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
         .await
         .expect_err("text that is not a number is not a filter")
         .to_string();
@@ -613,11 +614,12 @@ async fn a_like_filter_matches_the_characters_that_were_typed() {
 /// pattern whose wildcards it will read.
 #[tokio::test]
 async fn a_dialect_without_an_escape_clause_gets_no_like_filter() {
-    let filter: dbedit::CellFilter = serde_json::from_str(
-        r#"{"schema":"public","relation":"lines","column":"sku","op":"contains","value":"a"}"#,
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"sku","op":"contains","value":"a"}]}"#,
     )
     .unwrap();
-    let why = dbedit::cell_filter(&Fake, &dbsql::CLICKHOUSE, &filter)
+    let why = dbedit::filter_clause(&Fake, &dbsql::CLICKHOUSE, &filter)
         .await
         .expect_err("a LIKE this build cannot escape is not a filter")
         .to_string();
@@ -632,11 +634,12 @@ async fn a_dialect_without_an_escape_clause_gets_no_like_filter() {
 /// different things, which is why one function has to give two answers.
 #[tokio::test]
 async fn an_operator_with_no_value_is_an_unfinished_row_and_not_a_question_about_null() {
-    let filter: dbedit::CellFilter = serde_json::from_str(
-        r#"{"schema":"public","relation":"lines","column":"qty","op":"less_than"}"#,
+    let filter: dbedit::RowFilter = serde_json::from_str(
+        r#"{"schema":"public","relation":"lines","rules":[
+            {"column":"qty","op":"less_than"}]}"#,
     )
     .unwrap();
-    let why = dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+    let why = dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
         .await
         .expect_err("a comparison against nothing is not a filter")
         .to_string();
@@ -711,10 +714,22 @@ async fn a_rule_over_a_column_that_is_not_there_is_refused_by_name() {
     assert!(why.contains("has no column nope"), "{why}");
 }
 
-/// One clause, from the JSON the front end sends.
+/// One clause, from a filter over a single cell.
+///
+/// The grid's cell menu makes these, and a menu that has picked one cell has
+/// picked one rule — `filter_clause` writes a stack of one exactly as it writes
+/// any other stack's first row. The relation is the fixture's; the copy of it
+/// each case carries inside its own JSON is read past, which is what let these
+/// cases go on saying what they always said when the one-cell entry point went
+/// away.
 async fn filtered(json: &str) -> String {
-    let filter: dbedit::CellFilter = serde_json::from_str(json).expect("the filter should parse");
-    dbedit::cell_filter(&Fake, &dbsql::POSTGRES, &filter)
+    let rule: dbedit::FilterRule = serde_json::from_str(json).expect("the rule should parse");
+    let filter = dbedit::RowFilter {
+        schema: "public".into(),
+        relation: "lines".into(),
+        rules: vec![rule],
+    };
+    dbedit::filter_clause(&Fake, &dbsql::POSTGRES, &filter)
         .await
         .expect("the clause should be writable")
 }
