@@ -1415,6 +1415,29 @@ final class AppModel {
         if !isValueViewerOpen { isEditingValue = false }
     }
 
+    /// Opens the value pane over the selected cell, as a box where that cell has
+    /// a value the box can hold.
+    ///
+    /// The grid's context menu calls this, and it cannot be what the pencil does:
+    /// that button is only drawn once the pane is open, which is the right rule
+    /// for a control living in the pane's own header and the wrong one for a
+    /// right-click, which is how somebody with nothing open asks to change the
+    /// cell under the pointer. So this opens both, in that order.
+    ///
+    /// A value the box is refused — a blob, or one too long to lay out — still
+    /// opens the pane, and deliberately. The alternative was a menu item that did
+    /// nothing for those cells, and the pane is where the reason already is: the
+    /// descriptor beside the value says "hex dump · 200 bytes", and the pencil
+    /// beside it is disabled carrying the sentence. Opening on a refusal answers
+    /// the question that was asked; doing nothing would not.
+    ///
+    /// `isValueViewerOpen` is set first because `editedValue` is read through the
+    /// inspected cell, and that cell is built from this flag.
+    func editSelectedValue() {
+        isValueViewerOpen = true
+        isEditingValue = editedValue?.isEditable == true
+    }
+
     // MARK: - The record view
 
     /// Whether the Content pane is listing one row instead of drawing the grid.

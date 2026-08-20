@@ -91,6 +91,9 @@ struct MetalGridView: NSViewRepresentable {
     /// Called with the selected rows when *Copy as INSERT* is chosen. Nil means
     /// the item is not offered, for the reason `onFilter` is not.
     var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
+    /// Called when *Edit Value…* is chosen. Nil means the item is not offered —
+    /// the Query pane, and any relation this build cannot write to.
+    var onEditValue: (() -> Void)?
 
     final class Coordinator {
         var renderer: GridRenderer?
@@ -100,6 +103,7 @@ struct MetalGridView: NSViewRepresentable {
         var onSortColumn: ((Int) -> Void)?
         var onFilter: ((CellFilterRequest) -> Void)?
         var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
+        var onEditValue: (() -> Void)?
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -130,6 +134,9 @@ struct MetalGridView: NSViewRepresentable {
         view.onCopyAsInsert = { [weak coordinator = context.coordinator] rows in
             coordinator?.onCopyAsInsert?(rows)
         }
+        view.onEditValue = { [weak coordinator = context.coordinator] in
+            coordinator?.onEditValue?()
+        }
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
@@ -156,6 +163,8 @@ struct MetalGridView: NSViewRepresentable {
         view.offersFilters = onFilter != nil
         context.coordinator.onCopyAsInsert = onCopyAsInsert
         view.offersInsertCopy = onCopyAsInsert != nil
+        context.coordinator.onEditValue = onEditValue
+        view.offersValueEditing = onEditValue != nil
         renderer.sort = sort
         renderer.pending = pending
         renderer.deleted = deleted
