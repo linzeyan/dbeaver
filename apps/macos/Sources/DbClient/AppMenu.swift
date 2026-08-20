@@ -590,7 +590,7 @@ final class ValueViewerCommand: NSObject, NSMenuItemValidation {
         super.init()
     }
 
-    @objc func toggleValueViewer(_ sender: Any?) { model.isValueViewerOpen.toggle() }
+    @objc func toggleValueViewer(_ sender: Any?) { model.toggleValueViewer() }
 
     /// Greyed out while no cell is selected, and re-titled to say what pressing
     /// it will do. A toggle whose title never changes leaves the reader working
