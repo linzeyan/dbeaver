@@ -1976,23 +1976,57 @@ final class AppModel {
         status = "Saving…"
         errorMessage = nil
         let batchRows = self.batchRows
-        run { db -> Int in
+        run { db -> [WrittenStatement] in
             let statements = try db.editStatements(request)
+            var sent: [WrittenStatement] = []
             for sql in statements {
                 let query = try db.query(sql, batchRows: batchRows)
                 // Drained, because a statement that violates a constraint fails
                 // when the server executes it rather than when it accepts it.
                 while try query.nextBatch() != nil {}
+                sent.append(WrittenStatement(sql: sql, affected: query.rowsAffected ?? 0))
             }
-            return statements.count
-        } then: { [self] count in
+            return sent
+        } then: { [self] sent in
+            // One entry per statement rather than one per Save. What brings
+            // somebody to this list is the UPDATE, not the fact that a button
+            // was pressed — and a Save of four changes is four statements the
+            // server saw separately.
+            //
+            // Each carries a zero duration, which is what the entry's own note
+            // says a zero means: nothing measured it. Timing the loop would
+            // produce one number for the batch, and hanging that on all four
+            // would be four wrong durations in place of four honest blanks.
+            //
+            // Only what was sent. A Save that fails part way never reaches here,
+            // so the statements before the failure go unrecorded — the banner is
+            // where that answer lives today, and a history that claimed a run it
+            // could not describe would be worse than one that is silent.
+            for statement in sent {
+                history.record(
+                    statement.sql, from: .edit, outcome: .affected(statement.affected),
+                    milliseconds: 0)
+            }
             staged = StagedChanges()
             isBusy = false
-            status = Self.pluralized(count, "statement") + " sent"
+            status = Self.pluralized(sent.count, "statement") + " sent"
             // Whatever the transaction is doing now, a write is what moved it.
             refreshTransaction()
             runBrowse()
         }
+    }
+
+    /// One statement a Save sent, and what the server said it touched.
+    ///
+    /// Carried back out of the connection's thread rather than recorded where it
+    /// was sent: `QueryHistory` is main-actor and the loop that sends these is
+    /// not. `rowsAffected` being nil is read as none rather than as unknown — an
+    /// UPDATE that matched nothing and an UPDATE whose driver returned no tag
+    /// both changed no row this side can name, and inventing a distinction the
+    /// list has no way to draw would be worse than the one it can.
+    private struct WrittenStatement: Sendable {
+        let sql: String
+        let affected: Int
     }
 
     /// Puts the deletion question, and answers whether Save may go on.
@@ -2540,6 +2574,17 @@ final class AppModel {
             browseResult.finish(
                 statement: browseStatementText, capped: capped,
                 milliseconds: fetched.milliseconds, summary: summary)
+            // Here, and deliberately not for an appended page. A later page is
+            // the same statement still running — one FETCH after another on one
+            // cursor — and an entry per page would say a table was browsed forty
+            // times when it was opened once.
+            //
+            // The count is the whole result's as it stands, not this page's. An
+            // entry saying 200 rows for a table of a million is the truthful
+            // answer to what came back, and `capped` is what says there is more.
+            history.record(
+                browseStatementText, from: .browse, outcome: .rows(grid.rowCount),
+                milliseconds: fetched.milliseconds)
         }
         // The rows describe themselves from here on, so `status` goes back to
         // describing the connection. Not putting it back is what left "Running…"

@@ -355,6 +355,48 @@ if preferencesProbe {
     }
 }
 
+/// `--history-probe` browses a table, deletes a row from it, and prints what the
+/// statement history holds after each.
+///
+/// Exists for the reason `--preferences` does. `--verify-query-history` checks
+/// the store's own rules — the two caps, the replacement, what an entry keeps —
+/// and cannot check that anything calls it. Both recordings sit at the far end
+/// of the model's background pipeline, which a model with no connection never
+/// reaches, so the mistakes left are a call site that is missing, one that fires
+/// per page instead of per browse, and one that passes the wrong origin. All
+/// three are visible in the two lists this prints and in nothing else.
+///
+/// It writes. `history_probe` is created and dropped in the database `--conn`
+/// names, so point it at a scratch database rather than at anything that
+/// matters. `--relation history_probe` is what opens it, so the two go together;
+/// the Makefile target passes both, and `--history-store` as well, because a
+/// probe has no business writing into somebody's real history.
+///
+/// The table is built before the window connects, for the reason `--preferences`
+/// builds its own there: the navigator reads its inventory once at connect time,
+/// and a table created after that is one the sidebar has never heard of.
+let historyProbe = CommandLine.arguments.contains("--history-probe")
+if historyProbe {
+    guard let conn = connArgument else {
+        fputs("--history-probe needs --conn\n", stderr)
+        exit(2)
+    }
+    do {
+        let db = try Database(connString: conn)
+        func ran(_ sql: String) throws {
+            let query = try db.query(sql, batchRows: 1000)
+            while try query.nextBatch() != nil {}
+        }
+        try ran("DROP TABLE IF EXISTS history_probe")
+        // A primary key, because the Save half needs a row the core can name.
+        try ran("CREATE TABLE history_probe (id serial PRIMARY KEY, label varchar(32))")
+        try ran("INSERT INTO history_probe (label) VALUES ('one'), ('two'), ('three')")
+    } catch {
+        fputs("history: could not build the fixture: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 /// `--transaction` drives one manual-commit transaction against `--conn` and
 /// prints what the connection says at each step.
 ///
@@ -812,6 +854,80 @@ func openValueViewer(model: AppModel, on spec: String) {
         }
         if CFAbsoluteTimeGetCurrent() > deadline {
             fputs("no column named \(column) in the opened result\n", stderr)
+            exit(1)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// Drives `--history-probe`. Polls for the reason `openValueViewer` does: the
+/// rows arrive through the model's own background pipeline and there is no
+/// completion hook to hang this on.
+///
+/// Unlike the capture probes it exits — nothing here is being photographed, and
+/// the two lists it prints are the whole claim. A build that records nothing
+/// prints two empty lists; one that records per page prints a browse entry for
+/// every FETCH; one that passes the wrong origin prints the wrong word.
+@MainActor
+func probeHistory(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    // Answered yes without anybody being asked. `confirmsDeletions` may be on,
+    // and a probe that stopped on a question would hang rather than fail.
+    model.confirmDeletion = { _ in true }
+
+    /// The top of the list, which is as much of it as this can be wrong about.
+    func report(_ what: String) {
+        let lines = model.history.entries.prefix(4).map { entry in
+            let origin = entry.origin.rawValue.padding(
+                toLength: 7, withPad: " ", startingAt: 0)
+            return "  \(origin) \(Int(entry.milliseconds)) ms · \(entry.outcome.label) · "
+                + entry.preview
+        }
+        let body = lines.isEmpty ? "  (nothing)" : lines.joined(separator: "\n")
+        fputs("history \(what)\n\(body)\n", stderr)
+    }
+
+    /// Drops the fixture, so a database used for this twice is not left holding
+    /// a table nobody asked for.
+    func tidy() {
+        guard let conn = connArgument, let db = try? Database(connString: conn) else { return }
+        guard let query = try? db.query("DROP TABLE IF EXISTS history_probe", batchRows: 1)
+        else { return }
+        while (try? query.nextBatch()) ?? nil != nil {}
+    }
+
+    var saved = false
+    func poll() {
+        let browse = model.browseResult
+        if !saved {
+            guard browse.hasRun, !browse.isLoading, browse.rowCount > 0, !model.isBusy else {
+                return again()
+            }
+            report("after the browse")
+            // The smallest Save there is: one row marked, one DELETE sent.
+            browse.selection = GridSelection(row: 0, column: 0)
+            model.toggleDeleteSelectedRows()
+            model.applyEdits()
+            saved = true
+            return again()
+        }
+        // The re-browse that follows a write has to have settled too, or the
+        // second list would be read in the gap between the DELETE landing and
+        // the SELECT that follows it being recorded.
+        guard !model.isBusy, model.staged.count == 0, browse.hasRun, !browse.isLoading
+        else { return again() }
+        report("after the save")
+        tidy()
+        exit(0)
+    }
+
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("history: nothing arrived within the deadline\n", stderr)
+            tidy()
             exit(1)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -1955,6 +2071,7 @@ if benchMode {
             driveHistory(model: model, open: showHistory, pick: historyPick)
         }
         if preferencesProbe { probePreferences(model: model) }
+        if historyProbe { probeHistory(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }

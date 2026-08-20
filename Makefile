@@ -284,8 +284,20 @@ test-swift: release ## Swift-side checks, run inside the app binary
 test-preferences: release db-check ## Drive each setting both ways through the window
 	./$(APP_BIN) --preferences --conn "$(PG_CONN)" --relation prefs_probe
 
+# The two history call sites checked against a live window, for the reason
+# `test-preferences` is: `--verify-query-history` pins the store's rules and can
+# say nothing about whether a browse or a Save reaches it. This one browses a
+# table it made, deletes a row from it, and prints the list after each.
+#
+# `--history-store` because a probe has no business writing into the history the
+# user's own windows share.
+.PHONY: test-history
+test-history: release db-check ## Prove a browse and a Save reach the statement history
+	./$(APP_BIN) --history-probe --conn "$(PG_CONN)" --relation history_probe \
+		--history-store dev.dbclient.historyprobe
+
 .PHONY: test-all
-test-all: test test-integration test-swift test-preferences ## Every test
+test-all: test test-integration test-swift test-preferences test-history ## Every test
 
 ##@ Quality
 
