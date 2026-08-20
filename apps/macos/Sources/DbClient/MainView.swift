@@ -931,6 +931,12 @@ struct ContentPane: View {
                     symbol: "tablecells",
                     title: "Nothing selected",
                     hint: "Choose a table in the sidebar to browse its rows.")
+            } else if model.isRecordViewOpen, model.canShowRecord {
+                // The grid goes, rather than sharing the height with it. A
+                // sixty-column row is unreadable across, which is the whole
+                // reason this view exists; keeping both would leave neither
+                // enough of the pane to be read in.
+                RecordPane(model: model)
             } else {
                 MetalGridView(
                     table: model.browseResult.table,
@@ -956,6 +962,176 @@ struct ContentPane: View {
             Rectangle().fill(Theme.separator.color).frame(height: 1)
             FilterBar(model: model, focus: $focus)
         }
+    }
+}
+
+/// One row read down the page instead of across it.
+///
+/// A table wide enough to need this is a table where the grid has stopped
+/// working: sixty columns is a horizontal scroll for every value after the
+/// fourth, and comparing two of them means scrolling between them. Listed down
+/// the page they are all on screen at once, which is the whole trade — one row
+/// instead of many.
+///
+/// It has no cursor of its own. Picking a field moves the grid's, so the strip
+/// underneath describes the field that was picked and the value box writes to
+/// it: this is a second way to draw the selection, not a second selection. That
+/// is also why the pane keeps the `CellInspector` below it rather than replacing
+/// it — a record view you cannot edit from would be a worse grid.
+struct RecordPane: View {
+    @Bindable var model: AppModel
+
+    /// The name column's width. Fixed rather than sized to the longest name:
+    /// the values are what is being read, and a column that resized itself per
+    /// table would move every value sideways on each selection.
+    private static let nameWidth: CGFloat = 168
+    private static let rowHeight: CGFloat = 22
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(model.recordFields) { field in
+                        Button {
+                            model.focusRecordField(field.column)
+                        } label: {
+                            row(field)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Theme.background.color)
+        .overlay { LoadingVeil(isVisible: model.browseResult.isLoading) }
+        // The arrow keys move between rows, which is what the grid they replaced
+        // did with them. `focusable` is what makes them arrive at all: without it
+        // the pane is a stack of buttons and the key goes to whichever one was
+        // clicked last.
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.upArrow) {
+            model.stepRecord(by: -1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            model.stepRecord(by: 1)
+            return .handled
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Record view")
+    }
+
+    private var header: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Text("Record")
+                .font(Theme.Typography.captionEmphasis)
+                .foregroundStyle(Theme.textSecondary.color)
+
+            if let position = model.recordPosition {
+                // Counted from one and against the total, because the question
+                // this answers is "where am I", and a bare row number answers
+                // half of it.
+                Text(
+                    "\(AppModel.formatted(position.row)) of \(AppModel.formatted(position.of))"
+                )
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+            }
+
+            Spacer(minLength: Theme.Space.sm)
+
+            Button {
+                model.stepRecord(by: -1)
+            } label: {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary.color)
+            .help("Previous row (↑)")
+            .accessibilityLabel("Previous row")
+
+            Button {
+                model.stepRecord(by: 1)
+            } label: {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary.color)
+            .help("Next row (↓)")
+            .accessibilityLabel("Next row")
+
+            Button {
+                model.isRecordViewOpen = false
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary.color)
+            .help("Back to the grid (⌃⌘R)")
+            .accessibilityLabel("Back to the grid")
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 26)
+        .background(Theme.surfaceRaised.color)
+    }
+
+    private func row(_ field: RecordField) -> some View {
+        let focused = model.browseSelection?.column == field.column
+        return HStack(alignment: .top, spacing: Theme.Space.sm) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(field.name)
+                    .font(Theme.Typography.captionEmphasis)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if !field.type.isEmpty {
+                    Text(field.type)
+                        .font(Theme.Typography.micro)
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .lineLimit(1)
+                }
+            }
+            .frame(width: Self.nameWidth, alignment: .leading)
+
+            // NULL keeps the tertiary tone the strip gives it, so the word is
+            // visibly not a value somebody typed.
+            Text(field.value)
+                .font(Theme.Typography.monoSmall)
+                .foregroundStyle(field.isNull ? Theme.textTertiary.color : Theme.text.color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(minHeight: Self.rowHeight, alignment: .leading)
+        .background(focused ? Theme.surfaceRaised.color : Color.clear)
+        .overlay(alignment: .leading) {
+            // The same 2pt rule the grid draws down a selected row, so which
+            // field the strip below is describing is answerable at a glance.
+            Rectangle()
+                .fill(focused ? Theme.accent.color : Color.clear)
+                .frame(width: 2)
+        }
+        .contentShape(Rectangle())
+        // One line each, however long the value is. The strip and the value
+        // viewer under the pane are where a long one is read in full.
+        .help(field.value)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(field.name), \(field.value)")
     }
 }
 
