@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 /// The application's menu bar.
 ///
@@ -217,6 +218,23 @@ enum AppMenu {
             withTitle: "Import into Table…",
             action: #selector(ExportCommands.importFile(_:)), keyEquivalent: "")
         importItem.target = export
+
+        menu.addItem(.separator())
+
+        // Their own group, under a rule of their own. The five above export a
+        // result and the one above them reads rows into a table; these two move
+        // the statements somebody keeps, which is neither the data nor the
+        // database. No shortcuts: this is done when a Mac is set up or handed
+        // over, not twice a day.
+        let exportQueries = menu.addItem(
+            withTitle: "Export Saved Queries…",
+            action: #selector(ExportCommands.exportFavorites(_:)), keyEquivalent: "")
+        exportQueries.target = export
+
+        let importQueries = menu.addItem(
+            withTitle: "Import Saved Queries…",
+            action: #selector(ExportCommands.importFavorites(_:)), keyEquivalent: "")
+        importQueries.target = export
 
         item.submenu = menu
         return item
@@ -840,6 +858,50 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
 
     @objc func exportSQL(_ sender: Any?) { present(.sql) }
 
+    /// Writes the saved queries out.
+    ///
+    /// No format menu and no scope control, unlike the result exports above:
+    /// there is one format and there is one list, so both controls would be a
+    /// question with a single answer.
+    @objc func exportFavorites(_ sender: Any?) {
+        guard model.canExportFavorites else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = model.favoritesFilename
+        let write: (NSApplication.ModalResponse) -> Void = { [model] response in
+            guard response == .OK, let url = panel.url else { return }
+            model.exportFavorites(to: url)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: write)
+        } else {
+            panel.begin(completionHandler: write)
+        }
+    }
+
+    /// Reads a file of saved queries into the list.
+    @objc func importFavorites(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        // Said before the file is chosen, because the answer changes which file
+        // somebody picks: this adds to the list rather than becoming it.
+        panel.message = """
+            Queries in this file are added to the ones already saved. A query the file has \
+            already been imported from is replaced rather than duplicated.
+            """
+        let read: (NSApplication.ModalResponse) -> Void = { [model] response in
+            guard response == .OK, let url = panel.url else { return }
+            model.importFavorites(from: url)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: read)
+        } else {
+            panel.begin(completionHandler: read)
+        }
+    }
+
     /// Asks for a file and reads it into the relation being browsed.
     ///
     /// An open panel and no format menu: the file's extension already says what
@@ -878,7 +940,14 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
     /// Import asks a different question: it needs a table to read into, not a
     /// result to read out of, and those are true at different times.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        item.action == #selector(importFile(_:)) ? model.canImport : model.canExport
+        switch item.action {
+        case #selector(importFile(_:)): return model.canImport
+        case #selector(exportFavorites(_:)): return model.canExportFavorites
+        // Always live. Reading a file in needs nothing to already be there —
+        // an empty list is exactly when somebody imports one.
+        case #selector(importFavorites(_:)): return true
+        default: return model.canExport
+        }
     }
 
     /// The scope control, kept alive between building the panel and reading the
