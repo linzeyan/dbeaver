@@ -25,22 +25,29 @@ struct SessionTabBar: View {
                             },
                             close: { model.closeQueryBuffer(entry.offset) })
                     }
+                    // Inside the scroller, after the last tab, rather than
+                    // pinned to the right of the strip. A horizontal
+                    // `ScrollView` takes all the width it is offered, so a
+                    // button beside it lands at the far edge of the window —
+                    // a hand's travel from the tabs it adds to, and reading
+                    // as a window control rather than as part of the strip.
+                    // The cost is that enough tabs scroll it off; ⌘T is the
+                    // answer then, and it is in the File menu saying so.
+                    Button {
+                        model.addQueryBuffer()
+                        model.activeTab = .query
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.textSecondary.color)
+                            .frame(width: 28, height: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("New query tab (⌘T)")
+                    .accessibilityLabel("New query tab")
                 }
             }
-            Button {
-                model.addQueryBuffer()
-                model.activeTab = .query
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Theme.textSecondary.color)
-                    .frame(width: 28, height: 32)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("New query tab (⌘T)")
-            .accessibilityLabel("New query tab")
-            Spacer(minLength: 0)
         }
         .frame(height: 32)
         .background(Theme.background.color)
