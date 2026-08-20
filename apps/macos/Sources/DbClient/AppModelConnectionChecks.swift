@@ -24,6 +24,7 @@ enum AppModelConnectionChecks {
         setenv("XDG_CONFIG_HOME", scratch.path, 1)
 
         failures = 0
+        defer { ScratchDefaults.release() }
         checkSelectingRowLoadsIntoForm()
         checkSelectingQuickConnect()
         checkTypedEditBecomesUnsavedEdits()
@@ -167,13 +168,13 @@ enum AppModelConnectionChecks {
 
     /// Creates a model with stubbed alert closures and given connections
     @MainActor private static func makeModel(with connections: [SavedConnection] = []) -> AppModel {
-        let history = QueryHistory(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let history = QueryHistory(defaults: ScratchDefaults.store("verify-chooser"))
         // A scratch store, which is what `Preferences.init` says its argument is
         // for. On the standard one these checks read whatever the developer has
         // set — and a check that turns a setting on would be turning it on in
         // their own window.
-        let preferences = Preferences(store: UserDefaults(suiteName: UUID().uuidString)!)
-        let favorites = QueryFavorites(defaults: UserDefaults(suiteName: UUID().uuidString)!)
+        let preferences = Preferences(store: ScratchDefaults.store("verify-chooser"))
+        let favorites = QueryFavorites(defaults: ScratchDefaults.store("verify-chooser"))
         let model = AppModel(history: history, favorites: favorites, preferences: preferences)
 
         // Stub alert closures to prevent modal dialogs

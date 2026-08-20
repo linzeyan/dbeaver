@@ -19,6 +19,7 @@ enum RecordChecks {
 
     static func run() -> Bool {
         failures = 0
+        defer { ScratchDefaults.release() }
         checkAHiddenColumnIsLeftOutWithoutMovingTheRest()
         checkAColumnThatCannotBeDescribedIsDroppedNotBlanked()
         checkSteppingStopsAtEitherEndRatherThanWrapping()
@@ -125,11 +126,10 @@ enum RecordChecks {
     @MainActor private static func makeModel() -> AppModel? {
         guard let directory = scratchDirectory() else { return nil }
         setenv("XDG_CONFIG_HOME", directory.path, 1)
-        let suite = { UserDefaults(suiteName: "dev.dbclient.verify-record.\(UUID())")! }
         return AppModel(
-            history: QueryHistory(defaults: suite()),
-            favorites: QueryFavorites(defaults: suite()),
-            preferences: Preferences(store: suite()))
+            history: QueryHistory(defaults: ScratchDefaults.store("verify-record")),
+            favorites: QueryFavorites(defaults: ScratchDefaults.store("verify-record")),
+            preferences: Preferences(store: ScratchDefaults.store("verify-record")))
     }
 
     private static func scratchDirectory() -> URL? {

@@ -11,6 +11,7 @@ enum QueryFavoritesChecks {
 
     static func run() -> Bool {
         failures = 0
+        defer { ScratchDefaults.release() }
         MainActor.assumeIsolated {
             checkAFavoriteNeedsBothANameAndAStatement()
             checkTheListReadsByName()
@@ -111,13 +112,7 @@ enum QueryFavoritesChecks {
     /// A favorite that did not survive the window would be a worse note-taking
     /// tool than the editor it was saved from.
     @MainActor private static func checkTheListOutlivesTheWindow() {
-        let name = suiteName()
-        guard let store = UserDefaults(suiteName: name) else {
-            failures += 1
-            fputs("favorites FAIL: a scratch defaults suite could be made\n", stderr)
-            return
-        }
-        defer { UserDefaults.standard.removePersistentDomain(forName: name) }
+        let store = ScratchDefaults.store("verify-favorites")
 
         let first = QueryFavorites(defaults: store)
         first.save(name: "Slow queries", sql: "SELECT 1", scheme: "postgres")
@@ -275,8 +270,8 @@ enum QueryFavoritesChecks {
     @MainActor private static func makeModel() -> AppModel? {
         guard let directory = scratchDirectory() else { return nil }
         setenv("XDG_CONFIG_HOME", directory.path, 1)
-        let history = QueryHistory(defaults: UserDefaults(suiteName: suiteName())!)
-        let preferences = Preferences(store: UserDefaults(suiteName: suiteName())!)
+        let history = QueryHistory(defaults: ScratchDefaults.store("verify-favorites"))
+        let preferences = Preferences(store: ScratchDefaults.store("verify-favorites"))
         return AppModel(history: history, favorites: scratch(), preferences: preferences)
     }
 
@@ -293,12 +288,10 @@ enum QueryFavoritesChecks {
         return root
     }
 
-    private static func suiteName() -> String { "dev.dbclient.verify-favorites.\(UUID())" }
-
     /// A store on a suite of its own, so that running the checks cannot read or
     /// write the favorites a developer's own window is showing.
     @MainActor private static func scratch() -> QueryFavorites {
-        QueryFavorites(defaults: UserDefaults(suiteName: suiteName())!)
+        QueryFavorites(defaults: ScratchDefaults.store("verify-favorites"))
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
