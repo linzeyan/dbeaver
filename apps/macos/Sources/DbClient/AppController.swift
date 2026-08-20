@@ -250,6 +250,16 @@ final class GridView: MTKView {
     /// none.
     var offersInsertCopy = false
 
+    /// Called when *Edit Value…* is chosen.
+    var onEditValue: (() -> Void)?
+    /// Whether that item is offered. False for the Query pane, and false for any
+    /// relation this build cannot write to — a menu item that opens a pane over a
+    /// value nothing can change is an offer that is not one. The per-*value*
+    /// refusals are not asked here: whether a blob is too long to lay out is a
+    /// question about the cell that was clicked, and the pane it opens is where
+    /// that answer is already written.
+    var offersValueEditing = false
+
     /// Whether this grid takes keyboard focus when it appears. Set only for the
     /// browse pane: in the Query tab focus belongs to the editor, and a grid
     /// that grabs it on every tab switch is worse than one that never does.
@@ -495,6 +505,20 @@ final class GridView: MTKView {
             menu.addItem(
                 filters(titled: "Add to Filter", column: column, value: cell, extend: true))
         }
+
+        // Last, and behind a separator, because it is the one item here that
+        // changes something. Everything above it reads the cell.
+        //
+        // A draft row is excluded by the same bound the filters use: it holds
+        // what somebody is typing, so there is no stored value for a box to
+        // start from.
+        if offersValueEditing, hit.column < table.columnNames.count, hit.row < table.rowCount {
+            menu.addItem(.separator())
+            let edit = NSMenuItem(
+                title: "Edit Value…", action: #selector(editValue), keyEquivalent: "")
+            edit.target = self
+            menu.addItem(edit)
+        }
         return menu
     }
 
@@ -534,6 +558,16 @@ final class GridView: MTKView {
     @objc private func applyCellFilter(_ sender: NSMenuItem) {
         guard let request = sender.representedObject as? CellFilterRequest else { return }
         onFilter?(request)
+    }
+
+    /// Asks for the box over whichever cell the menu was opened on.
+    ///
+    /// Carries no cell of its own. `menu(for:)` moved the selection to the hit
+    /// before the menu was shown, so the model already knows which cell this is —
+    /// and passing a second copy of it would be a second answer to the question
+    /// the outline on screen is already answering.
+    @objc private func editValue(_ sender: Any?) {
+        onEditValue?()
     }
 
     /// Hands the selected rows off to be rendered as statements.

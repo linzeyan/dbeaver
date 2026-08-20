@@ -952,7 +952,11 @@ struct ContentPane: View {
                     drafts: model.draftRows,
                     onSortColumn: { model.toggleSort(column: $0) },
                     onFilter: { model.filterByCell($0) },
-                    onCopyAsInsert: { model.copyRowsAsInsert($0) }
+                    onCopyAsInsert: { model.copyRowsAsInsert($0) },
+                    // Nil where nothing can be written, which is what keeps the
+                    // item off a view and off a table with no key: `editObstacle`
+                    // is the same sentence `CellEditorRow` shows under the grid.
+                    onEditValue: model.editObstacle == nil ? { model.editSelectedValue() } : nil
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isVeiled) }
 
