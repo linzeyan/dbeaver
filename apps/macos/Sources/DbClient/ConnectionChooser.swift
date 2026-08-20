@@ -267,7 +267,12 @@ struct ConnectionChooser: View {
                     }
                     row("Database", $model.connectionDraft.settings.database, .connectDatabase, "")
                     row("User", $model.connectionDraft.settings.user, .connectUser, "")
-                    row("Password", $model.connectionPassword, .connectPassword, "", isSecure: true)
+                    // An empty secure field says "no password saved". Where one
+                    // is saved and simply has not been read, the placeholder is
+                    // what stops the form from saying something untrue.
+                    row(
+                        "Password", $model.connectionPassword, .connectPassword,
+                        model.hasUnreadPassword ? "Saved" : "", isSecure: true)
                 }
             }
 

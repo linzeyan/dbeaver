@@ -34,12 +34,70 @@ enum AppModelConnectionChecks {
         checkDeleteIsRefusedWhenNothingToDelete()
         checkSettleUnsavedConnectionEditsHonoursAnswers()
         checkFilterNarrowsByTitleAndAddress()
+        checkSelectingARowDoesNotReadThePassword()
+        checkSavingDoesNotWipeAnUnreadPassword()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
             fputs("connection-chooser: \(failures) check(s) failed\n", stderr)
         }
         return failures == 0
+    }
+
+    /// Clicking a row is looking, not connecting, and must not raise the panel
+    /// that asks permission to read a secret.
+    ///
+    /// The password is written by this check and deleted afterwards. It is the
+    /// same process that reads it back, so no panel appears here either way —
+    /// what is being pinned is that the model does not go and look.
+    private static func checkSelectingARowDoesNotReadThePassword() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Stored Password",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+            let model = makeModel(with: [connection])
+            ConnectionKeychain.save("s3cret", for: connection.id)
+            defer { ConnectionKeychain.delete(for: connection.id) }
+
+            model.selectConnection(connection.id)
+            expect(model.hasUnreadPassword, true, "the form knows there is one it has not read")
+            expect(model.connectionPassword, "", "and the field is empty rather than filled")
+            expect(
+                model.unsavedConnectionEdits == nil, true,
+                "an unread password is not an unsaved edit")
+        }
+    }
+
+    /// Saving an unrelated change must not delete a password that was never
+    /// read. `ConnectionKeychain.save` stores nothing for an empty string, so
+    /// writing the untouched field through would erase it silently.
+    private static func checkSavingDoesNotWipeAnUnreadPassword() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Stored Password",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+            let model = makeModel(with: [connection])
+            ConnectionKeychain.save("s3cret", for: connection.id)
+            defer { ConnectionKeychain.delete(for: connection.id) }
+
+            model.selectConnection(connection.id)
+            model.connectionDraft.settings.port = "5433"
+            model.saveConnection()
+            expect(
+                ConnectionKeychain.password(for: connection.id), "s3cret",
+                "the stored password outlived a change to the port")
+
+            // And a password that *was* typed still replaces it.
+            model.connectionPassword = "typed"
+            model.saveConnection()
+            expect(
+                ConnectionKeychain.password(for: connection.id), "typed",
+                "but typing one over it still writes")
+        }
     }
 
     // MARK: - Helper
