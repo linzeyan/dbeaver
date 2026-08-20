@@ -8,15 +8,41 @@ struct SavedConnection: Identifiable, Equatable, Codable {
     var id: UUID
     var name: String  // what the user called it; "" means untitled
     var color: ConnectionColor
+
+    /// Whether this connection refuses the writes this application is in charge
+    /// of.
+    ///
+    /// Grid edits, generated DDL and being an import target — the three places
+    /// this application decides on its own to write something. Deliberately not
+    /// the editor: a client that promised read-only and then let a `DELETE`
+    /// through because it could not parse the statement would be worse than one
+    /// that promised nothing, and parsing arbitrary SQL to find out is a promise
+    /// this cannot keep. What the editor gets is `isProduction`, which asks
+    /// instead of refusing.
+    var isReadOnly: Bool
+
+    /// Whether a write here is worth stopping to confirm.
+    ///
+    /// A different question from `isReadOnly`, which is why both exist: one is
+    /// about what this connection is for, the other about what it costs to be
+    /// wrong. A staging database can be read-only for an afternoon; the
+    /// production one is never safe to write to by accident, and the answer to
+    /// that is a question in front of the statement rather than a refusal that
+    /// would make the connection useless.
+    var isProduction: Bool
+
     var settings: ConnectionSettings
 
     init(
         id: UUID = UUID(), name: String = "", color: ConnectionColor = .none,
+        isReadOnly: Bool = false, isProduction: Bool = false,
         settings: ConnectionSettings
     ) {
         self.id = id
         self.name = name
         self.color = color
+        self.isReadOnly = isReadOnly
+        self.isProduction = isProduction
         self.settings = settings
     }
 
@@ -106,12 +132,19 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         var name: String
         var path: String
         var port: String
+        /// Written even when false, unlike the fields somebody might not have
+        /// typed. This file is one a person opens and edits, and a flag that
+        /// appeared only once it had been switched on would be a setting nobody
+        /// could discover from the file itself.
+        var production: Bool
+        var readOnly: Bool
         var scheme: String
         var user: String
 
         init(
             color: String, database: String, host: String, id: String, name: String, path: String,
-            port: String, scheme: String, user: String
+            port: String, production: Bool = false, readOnly: Bool = false, scheme: String,
+            user: String
         ) {
             self.color = color
             self.database = database
@@ -120,6 +153,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.name = name
             self.path = path
             self.port = port
+            self.production = production
+            self.readOnly = readOnly
             self.scheme = scheme
             self.user = user
         }
@@ -132,6 +167,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.name = connection.name
             self.path = connection.settings.path
             self.port = connection.settings.port
+            self.production = connection.isProduction
+            self.readOnly = connection.isReadOnly
             self.scheme = connection.settings.scheme
             self.user = connection.settings.user
         }
@@ -155,6 +192,13 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.color = try container.decodeIfPresent(String.self, forKey: .color) ?? "none"
             self.path = try container.decodeIfPresent(String.self, forKey: .path) ?? ""
 
+            // Absent means neither, which is what an entry written before these
+            // existed meant. Safe in that direction and only that direction: a
+            // missing flag read as "production" would put a confirmation in front
+            // of every statement on every connection in somebody's file.
+            self.production = try container.decodeIfPresent(Bool.self, forKey: .production) ?? false
+            self.readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+
             // An entry somebody typed has no id, and one is minted here rather than
             // at the call site: an entry that arrived without an identity still has
             // to have one before anything can keep its password.
@@ -163,7 +207,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case color, database, host, id, name, path, port, scheme, user
+            case color, database, host, id, name, path, port, production, readOnly, scheme, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -177,7 +221,9 @@ struct SavedConnection: Identifiable, Equatable, Codable {
                 user: self.user,
                 path: self.path
             )
-            return SavedConnection(id: id, name: self.name, color: color, settings: settings)
+            return SavedConnection(
+                id: id, name: self.name, color: color, isReadOnly: self.readOnly,
+                isProduction: self.production, settings: settings)
         }
     }
 }
@@ -274,6 +320,14 @@ extension SavedConnection {
 
         if self.color != draft.color {
             changedFields.append("Colour")
+        }
+
+        if self.isReadOnly != draft.isReadOnly {
+            changedFields.append("Read-only")
+        }
+
+        if self.isProduction != draft.isProduction {
+            changedFields.append("Production")
         }
 
         if self.settings.scheme != draft.settings.scheme {

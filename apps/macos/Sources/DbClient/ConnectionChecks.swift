@@ -31,6 +31,7 @@ enum ConnectionChecks {
         checkUnsavedEdits()
         checkStorageClearsOther()
         checkConnectionList()
+        checkSafetyFlags()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -501,6 +502,41 @@ enum ConnectionChecks {
     ) -> ConnectionSettings {
         ConnectionSettings(
             scheme: "postgres", host: host, port: port, database: database, user: user)
+    }
+
+    /// The two safety flags survive the file, and a draft carrying one is kept.
+    ///
+    /// Written because both failures are silent. A flag that does not round-trip
+    /// leaves a production database unmarked on the next launch, which is the one
+    /// moment the mark exists for; and a form somebody switched Read-only on in,
+    /// having typed nothing else, would be thrown away as an untouched form.
+    private static func checkSafetyFlags() {
+        let guarded = SavedConnection(
+            id: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            name: "ledger",
+            color: .red,
+            isReadOnly: true,
+            isProduction: true,
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "ledger",
+                user: "ana"))
+        let back = SavedConnection.Raw(from: guarded).toSavedConnection()
+        expect(back.isReadOnly, true, "read-only survives the file")
+        expect(back.isProduction, true, "and so does the production mark")
+
+        // An entry written before the flags existed is neither of them, rather
+        // than a decode failure — one throw anywhere empties the whole list.
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(
+            decoded?.production ?? true, false, "an entry from before the flags is not production")
+        expect(decoded?.readOnly ?? true, false, "and not read-only either")
+
+        guard let driver = DriverCatalog.first else { return }
+        var draft = SavedConnection(settings: .suggested(for: driver))
+        expect(ConnectionList.isWorthSaving(draft), false, "an untouched form is not worth saving")
+        draft.isProduction = true
+        expect(ConnectionList.isWorthSaving(draft), true, "marking one production is a decision")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
