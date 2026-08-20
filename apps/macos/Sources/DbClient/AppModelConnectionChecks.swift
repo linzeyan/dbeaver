@@ -39,6 +39,7 @@ enum AppModelConnectionChecks {
         checkSavingDoesNotWipeAnUnreadPassword()
         checkATypedPasswordIsNotOverwritten()
         checkTheKeychainIsUntouchedWhileTheSettingIsOff()
+        checkProductionQuestion()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -164,6 +165,66 @@ enum AppModelConnectionChecks {
         }
     }
 
+    /// A production connection asks about writes, says nothing about reads, and
+    /// the question it puts names the statement rather than a severity.
+    ///
+    /// The wording is pinned and not merely the Bool. A dialog that says only
+    /// "this is dangerous" tells somebody how to feel about a statement they can
+    /// already see; the one thing they cannot see from the Run button is which
+    /// statement the caret was in, and that is what has to be in the box.
+    ///
+    /// The read case is the one worth defending hardest. A question in front of
+    /// every SELECT would be dismissed reflexively within a minute, and the
+    /// reflex is what would then dismiss the DROP.
+    private static func checkProductionQuestion() {
+        MainActor.assumeIsolated {
+            let production = ConnectionSafety(isProduction: true)
+            expect(
+                production.asks(about: .safe), false,
+                "a read on production is not worth a dialog")
+            expect(production.asks(about: .modify), true, "a write on production is")
+            expect(production.asks(about: .fatal), true, "and so is a drop")
+            expect(
+                ConnectionSafety(isReadOnly: true).asks(about: .fatal), false,
+                "read-only refuses this client's writes rather than asking about typed SQL")
+            expect(
+                ConnectionSafety().asks(about: .fatal), false,
+                "and an unmarked connection runs what it is given")
+
+            let one = AppModel.ProductionRun(
+                count: 1, worst: "DELETE FROM orders", danger: .modify,
+                label: "ana@db.example/sales")
+            expect(
+                one.question, "Run this statement on “ana@db.example/sales”?",
+                "one statement is asked about as one")
+            expect(
+                one.detail.contains("DELETE FROM orders"), true,
+                "and the question shows the statement itself")
+            expect(
+                one.detail.contains("changes rows on it"), true,
+                "and says what running it would do")
+
+            let many = AppModel.ProductionRun(
+                count: 5, worst: "DROP TABLE orders", danger: .fatal,
+                label: "ana@db.example/sales")
+            expect(
+                many.question, "Run 5 statements on “ana@db.example/sales”?",
+                "a script is asked about by its count")
+            expect(
+                many.detail.contains("one of 5"), true,
+                "and the statement shown is placed among them")
+            expect(
+                many.detail.contains("destroys something on it"), true,
+                "with the worst of them setting the words")
+
+            // A dialog that has become a document is one people dismiss without
+            // reading it, which is the failure this mark exists to avoid.
+            let long = AppModel.ProductionRun(
+                count: 1, worst: String(repeating: "x", count: 900), danger: .fatal, label: "db")
+            expect(long.detail.count < 500, true, "a long statement is cut rather than shown whole")
+        }
+    }
+
     // MARK: - Helper
 
     /// Creates a model with stubbed alert closures and given connections
@@ -180,6 +241,9 @@ enum AppModelConnectionChecks {
         // Stub alert closures to prevent modal dialogs
         model.confirmConnectionDeletion = { _ in true }
         model.resolveUnsavedConnection = { _ in .discard }
+        // Refuses rather than allows: a check that reached this without meaning
+        // to should fail loudly by running nothing, not quietly by running it.
+        model.confirmProductionRun = { _ in false }
 
         model.connections = ConnectionList(connections)
         return model
