@@ -19,7 +19,7 @@ mod parse;
 mod script;
 
 pub use complete::{Completion, Expect, complete};
-pub use danger::{Danger, danger};
+pub use danger::{Danger, danger, script_danger};
 pub use dialect::{
     ALL, CLICKHOUSE, DUCKDB, Dialect, DoubleQuote, MSSQL, MYSQL, POSTGRES, Parameter, RowLimit,
     SQLITE, for_scheme, of_scheme,

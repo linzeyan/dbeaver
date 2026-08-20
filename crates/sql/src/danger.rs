@@ -92,6 +92,30 @@ pub fn danger(statement: &str, dialect: &Dialect) -> Danger {
     known(&word(head)).unwrap_or(Danger::Modify)
 }
 
+/// The worst thing anywhere in `script`.
+///
+/// A script is sent statement by statement and every one of them lands, so what
+/// a caller has to ask about is the worst of them rather than the first: a
+/// buffer that reads three tables and then drops one is a drop.
+///
+/// Split by the same reader the editor splits by, rather than on `;` here. A
+/// semicolon inside a string literal or a dollar-quoted body is not a boundary,
+/// and a splitter that thought it was would read `SELECT 'a; DROP TABLE t'` as
+/// two statements and report a drop nobody wrote.
+pub fn script_danger(script: &str, dialect: &Dialect) -> Danger {
+    let chars: Vec<char> = script.chars().collect();
+    crate::script::statements(script, dialect)
+        .into_iter()
+        .map(|span| {
+            let text: String = chars[span.start as usize..span.end as usize]
+                .iter()
+                .collect();
+            danger(&text, dialect)
+        })
+        .max()
+        .unwrap_or(Danger::Safe)
+}
+
 /// Where a word sits, or `None` for one this table says nothing about.
 ///
 /// One table rather than one per dialect. What it holds are the words every SQL
@@ -116,7 +140,7 @@ fn known(word: &str) -> Option<Danger> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Danger, danger};
+    use super::{Danger, danger, script_danger};
     use crate::dialect::{MYSQL, POSTGRES};
 
     #[test]
@@ -186,5 +210,28 @@ mod tests {
     #[test]
     fn an_unrecognised_head_is_asked_about_rather_than_waved_through() {
         assert_eq!(danger("FLUSH PRIVILEGES", &MYSQL), Danger::Modify);
+    }
+
+    /// A script is answered by its worst statement, not its first. Reading the
+    /// first is the mistake that lets a buffer beginning `SELECT 1;` carry a
+    /// drop past a question.
+    #[test]
+    fn a_script_is_named_by_the_worst_thing_in_it() {
+        assert_eq!(script_danger("SELECT 1; SELECT 2", &POSTGRES), Danger::Safe);
+        assert_eq!(
+            script_danger("SELECT 1;\nDROP TABLE orders;\nSELECT 2", &POSTGRES),
+            Danger::Fatal
+        );
+        assert_eq!(script_danger("", &POSTGRES), Danger::Safe);
+    }
+
+    /// The semicolon inside the string is not a boundary, so there is one
+    /// statement here and it is a read.
+    #[test]
+    fn a_semicolon_in_a_string_does_not_make_a_second_statement() {
+        assert_eq!(
+            script_danger("SELECT 'a; DROP TABLE orders'", &POSTGRES),
+            Danger::Safe
+        );
     }
 }
