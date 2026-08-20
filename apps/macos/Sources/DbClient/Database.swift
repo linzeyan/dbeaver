@@ -237,39 +237,6 @@ final class Database: @unchecked Sendable {
         }
     }
 
-    /// A predicate over one cell, written in this database's own quoting.
-    ///
-    /// Asked of the core for the reason `browseStatement` is: quoting is the
-    /// database's own, and whether a value is written bare or in quotes is a fact
-    /// about the type its column was declared with. This side has neither, and a
-    /// guess would write a filter that fails — or, worse, one that runs and means
-    /// something else.
-    func cellFilter(
-        schema: String, relation: String, column: String, op: FilterOperator, value: String?
-    ) throws -> String {
-        var err: UnsafeMutablePointer<CChar>?
-        let request = FilterRequest(
-            schema: schema, relation: relation, column: column, op: op, value: value)
-        guard let raw = db_cell_filter(handle, request.json, &err) else {
-            throw DbError(description: Database.take(&err) ?? "filter clause failed")
-        }
-        defer { db_string_free(raw) }
-        return String(cString: raw)
-    }
-
-    private struct FilterRequest: Encodable {
-        let schema: String
-        let relation: String
-        let column: String
-        let op: FilterOperator
-        let value: String?
-
-        var json: String {
-            let data = (try? JSONEncoder().encode(self)) ?? Data()
-            return String(data: data, encoding: .utf8) ?? "{}"
-        }
-    }
-
     /// Which columns this relation can be filtered on, and what each may be
     /// asked.
     ///
@@ -286,9 +253,17 @@ final class Database: @unchecked Sendable {
     /// A stack of filter rows as one WHERE clause, in this database's own
     /// quoting.
     ///
-    /// The row form of `cellFilter`, asked for here for the reason that one is
-    /// and for one more: `contains` is a `LIKE`, a `LIKE` needs an escape
-    /// character, and which character it may be is the database's own.
+    /// Asked of the core for the reason `browseStatement` is: quoting is the
+    /// database's own, and whether a value is written bare or in quotes is a
+    /// fact about the type its column was declared with. This side has neither,
+    /// and a guess would write a filter that fails — or, worse, one that runs
+    /// and means something else. `contains` adds a third: it is a `LIKE`, a
+    /// `LIKE` needs an escape character, and which character it may be is the
+    /// database's own as well.
+    ///
+    /// One row goes the same way as five. The cell menu's *Equals This Value*
+    /// is a stack of one, and it had its own call until the menu started adding
+    /// rows instead of writing text.
     ///
     /// Values go over as they were typed. Quoting them on this side as well is
     /// the second layer that makes a filter match literal apostrophes.

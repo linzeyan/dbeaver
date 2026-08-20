@@ -288,22 +288,6 @@ char* db_browse_statement(DbHandle* handle, const char* what, char** err);
 // the wrong row.
 char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
 
-// One cell's value as a predicate for the browse's filter field, as plain text.
-// Released with db_string_free.
-//
-// `filter` is JSON:
-//
-//   {"schema": …, "relation": …, "column": …, "op": …, "value": …}
-//
-// `op` is "equals", "not_equals", "is_null" or "is_not_null". A `value` of JSON
-// null is a NULL cell, and "equals" over one answers `IS NULL` — `= NULL` is
-// never true, so the literal reading would be a filter matching nothing.
-//
-// Written by the core rather than the front end because quoting is the
-// database's own, and whether a value goes in bare or in quotes depends on the
-// type its column was declared with.
-char* db_cell_filter(DbHandle* handle, const char* filter, char** err);
-
 // A stack of filter rows as one WHERE clause, as plain text. Released with
 // db_string_free.
 //
@@ -316,12 +300,15 @@ char* db_cell_filter(DbHandle* handle, const char* filter, char** err);
 // `value` is the text as typed and never pre-quoted, and `second` is the far end
 // of a "between" and absent for every other operator. The rules are ANDed in the
 // order given, and no rules answers an empty string — the unfiltered browse,
-// rather than a failure.
+// rather than a failure. One rule is an ordinary stack: it is what the grid's
+// cell menu sends, and there is no second call for it.
 //
-// The row form of db_cell_filter, here for the reason that one is and for one
-// more: "contains" is a LIKE, a LIKE needs an escape character, and which
-// character it may be is the database's own. A front end that guessed would
-// write filters that read a typed % as a wildcard.
+// Written by the core rather than the front end because quoting is the
+// database's own and whether a value goes in bare or in quotes depends on its
+// column's declared type — and because "contains" is a LIKE, a LIKE needs an
+// escape character, and which character it may be is the database's own too. A
+// front end that guessed at either would write filters that read a typed % as a
+// wildcard.
 char* db_filter_clause(DbHandle* handle, const char* filter, char** err);
 
 // Which columns a relation can be filtered on, and what each may be asked.
