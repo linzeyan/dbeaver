@@ -524,6 +524,17 @@ let initialCell = argument("--cell")
 /// `--cell`, which is what selects the cell there is a value to edit.
 let editValue = CommandLine.arguments.contains("--edit-value")
 
+/// `--filter-cell` turns the cell `--cell` chose into a filter row, the way the
+/// grid's context menu does, and opens the list it lands in.
+///
+/// Exists for the reason `--edit-value` does. A row is made by right-clicking a
+/// cell and choosing an item, or by pressing Add and working two popups, and a
+/// capture can do none of it. Without this the only picture of the filter rows
+/// is of the shut disclosure, which is a picture of a chevron.
+///
+/// Only useful with `--cell`, which is what selects the cell the row is about.
+let filterOnCell = CommandLine.arguments.contains("--filter-cell")
+
 /// `--delete-row 2` marks that 1-based row of the browse to be deleted, and
 /// `--delete-row 2-4` marks a span of them. Nothing is sent: the rows are left
 /// crossed out with Save waiting, which is the state this exists to photograph.
@@ -738,6 +749,32 @@ func openValueViewer(model: AppModel, on spec: String) {
         fputs("value editor    open\n", stderr)
     }
 
+    /// Adds the row the cell menu would add, for `--filter-cell`.
+    ///
+    /// Through `filterByCell` with the request the menu builds, rather than by
+    /// appending a rule to the model. What this exists to photograph is the row
+    /// that entry point produces, and a rule pushed straight in would skip the
+    /// settling that shapes it and the Apply that compiles it — the two things
+    /// most likely to be wrong and the two a picture would show.
+    ///
+    /// Loud for the reason the caller is loud: a capture that quietly filtered
+    /// on nothing would be filed as a screenshot of the rows.
+    func filterOnSelectedCell() {
+        let result = model.current
+        guard let selection = result.selection,
+            selection.column < result.table.columnNames.count
+        else {
+            fputs(
+                "no cell to filter on: --filter-cell needs --cell to have selected one\n", stderr)
+            exit(1)
+        }
+        let name = result.table.columnNames[selection.column]
+        let value = result.table.value(row: selection.row, column: selection.column)
+        model.filterByCell(
+            CellFilterRequest(column: name, value: value, op: .equals, extend: false))
+        fputs("filter row      \(name) = \(value ?? "NULL")\n", stderr)
+    }
+
     func poll() {
         let result = model.current
         if let index = result.table.columns.firstIndex(where: { $0.name == column }),
@@ -757,6 +794,15 @@ func openValueViewer(model: AppModel, on spec: String) {
                 // reading pane, twice, and came back showing the box with this.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                     MainActor.assumeIsolated { openEditor() }
+                }
+            }
+            if filterOnCell {
+                // Later than the selection for the reason above, and later than
+                // `--edit-value` on purpose: this one re-runs the browse, and a
+                // filter applied while the first result is still settling would
+                // photograph the grid mid-reload.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    MainActor.assumeIsolated { filterOnSelectedCell() }
                 }
             }
             return

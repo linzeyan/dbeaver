@@ -1340,8 +1340,12 @@ struct FilterBar: View {
     }
 }
 
-/// The control that opens the filter rows, and says how many are running when it
-/// is shut.
+/// The control that opens the filter rows, and says how many are running.
+///
+/// The count is drawn whether the list is open or shut, rather than only when
+/// shut. Open, it is the one place the number appears at all — the rows
+/// themselves have to be counted — and a badge that vanished on the way down
+/// would read as the filter being let go of.
 ///
 /// The count is not decoration. These rows compile into the browse's WHERE, so a
 /// closed disclosure would otherwise be a filter with nothing on screen saying
