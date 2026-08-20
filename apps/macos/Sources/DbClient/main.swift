@@ -52,6 +52,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-transaction`, `--verify-editing`, `--verify-clipboard`, `--verify-goto`,
 // `--verify-favorites`, `--verify-record`, `--verify-value`,
 // `--verify-browse-state`, `--verify-history`, `--verify-progressive`,
+// `--verify-filter-rows`,
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -110,6 +111,9 @@ if CommandLine.arguments.contains("--verify-history") {
 }
 if CommandLine.arguments.contains("--verify-progressive") {
     exit(ProgressiveLoadChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-filter-rows") {
+    exit(MainActor.assumeIsolated { FilterRowChecks.run() } ? 0 : 1)
 }
 
 // The three that have to state their isolation. `Preferences`, the grid's

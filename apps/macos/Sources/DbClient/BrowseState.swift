@@ -17,6 +17,20 @@ struct BrowseState: Equatable {
     /// restored table from drawing an arrow its ORDER BY does not say.
     var orderClause = ""
 
+    /// The filter rows, in the order they were shown.
+    var rules: [FilterRule] = []
+
+    /// The WHERE those rows compiled to, as the core wrote it.
+    ///
+    /// Kept beside them rather than derived on the way back in, because either
+    /// half alone restores a lie: the rows without the clause draw a filter over
+    /// a grid that is not filtered, and the clause without the rows filters the
+    /// grid with nothing on screen saying why. It was written against this
+    /// relation's columns, which is why it travels with this relation and why
+    /// `BrowseStore.clear()` matters — the same `schema.name` on another server
+    /// is another table.
+    var compiledClause = ""
+
     /// The cell that was selected when the table was left. Read it back through
     /// `selection(within:)` rather than straight out of here.
     var selection: GridSelection?
@@ -27,7 +41,7 @@ struct BrowseState: Equatable {
     /// fresh one, and holding it would grow the store by an entry per table
     /// anybody clicked. The store drops these rather than store them.
     var isEmpty: Bool {
-        whereClause.isEmpty && orderClause.isEmpty && selection == nil
+        whereClause.isEmpty && orderClause.isEmpty && rules.isEmpty && selection == nil
     }
 
     /// The selection to restore once `rowCount` rows have arrived, which is not

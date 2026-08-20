@@ -251,6 +251,50 @@ final class AppModel {
     var whereClause = ""
     var orderClause = ""
 
+    /// The filter rows, in the order they are drawn.
+    ///
+    /// Read from anywhere and written only through the three functions beside
+    /// `applyFilters`. That is what holds the one invariant this pair has: these
+    /// and `whereClause` are never both filled, because they are two ways of
+    /// saying one thing and a browse can only send one WHERE.
+    private(set) var filterRules: [FilterRule] = []
+
+    /// The WHERE those rows last compiled to, as the core wrote it.
+    ///
+    /// Somewhere other than `whereClause` on purpose. Writing it there would put
+    /// the rows and a text saying the same thing in two editable places, and the
+    /// next keystroke in either would make them disagree with nothing on screen
+    /// saying which one the grid is showing.
+    private(set) var compiledClause = ""
+
+    /// What each column of the selected relation may be asked, as the core
+    /// answers it.
+    ///
+    /// Empty until a relation's columns have arrived, and empty for good against
+    /// a database this build writes no statements for. The rows are drawn from
+    /// this, so empty is also how the *Filters* disclosure knows not to offer
+    /// itself — an offer this side cannot compile is not one.
+    private(set) var filterColumns: [FilterColumn] = []
+
+    /// Whether the Custom field may be typed into.
+    ///
+    /// False while there are rows. The two are mutually exclusive by the plan's
+    /// own rule — no merged half-SQL — and a field that is visibly disabled is
+    /// how somebody finds out that removing the rows is what gives it back,
+    /// rather than typing into it and watching the text be ignored.
+    var isCustomFilterEditable: Bool { filterRules.isEmpty }
+
+    /// The WHERE the browse will send: what the rows compiled to where there are
+    /// rows, and the Custom field's text where there are not.
+    ///
+    /// A property rather than a choice made inside `browseAsk`, because this is
+    /// the mutual exclusion itself and a rule nothing can read is a rule nothing
+    /// can check.
+    var browsePredicate: String {
+        (filterRules.isEmpty ? whereClause : compiledClause)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Every statement this window has sent, newest first, kept across launches.
     ///
     /// Held rather than created here so a capture can hand in a scratch store;
@@ -1040,6 +1084,11 @@ final class AppModel {
         selectedStep = 0
         whereClause = ""
         orderClause = ""
+        filterRules = []
+        compiledClause = ""
+        // Not merely stale: these say which operators a column can be asked, and
+        // the answer is the previous database's dialect.
+        filterColumns = []
         // The store's keys are `schema.name` strings, and the same string names
         // a different table on a different server.
         browseStore.clear()
@@ -2011,6 +2060,7 @@ final class AppModel {
             browseStore.save(
                 BrowseState(
                     whereClause: whereClause, orderClause: orderClause,
+                    rules: filterRules, compiledClause: compiledClause,
                     selection: browseResult.selection),
                 for: previous.id)
         }
@@ -2024,6 +2074,11 @@ final class AppModel {
         let restored = browseStore.state(for: selected.id)
         whereClause = appliedInitialFilters ? restored.whereClause : (initialFilters.where ?? "")
         orderClause = appliedInitialFilters ? restored.orderClause : (initialFilters.order ?? "")
+        // Both halves or neither. `--where` is the first selection's exception
+        // for the field only: it is a WHERE somebody typed on the command line,
+        // and there are no rows that compiled to it.
+        filterRules = appliedInitialFilters ? restored.rules : []
+        compiledClause = appliedInitialFilters ? restored.compiledClause : ""
         appliedInitialFilters = true
         stateToRestore = restored
         recordVisit()
@@ -2078,12 +2133,19 @@ final class AppModel {
         run { db in
             (
                 try db.columns(schema: relation.schema, relation: relation.name),
-                try db.rowIdentity(schema: relation.schema, relation: relation.name)
+                try db.rowIdentity(schema: relation.schema, relation: relation.name),
+                // Soft, and the only one of the three that is. A database this
+                // build writes no statements for still has columns worth
+                // showing, and letting this throw would take the Structure pane
+                // down with the filter popup. Empty is the honest answer: no
+                // column can be asked anything, so nothing is offered.
+                (try? db.filterColumns(schema: relation.schema, relation: relation.name)) ?? []
             )
         } then: { [self] catalog in
             isBusy = false
             columns = catalog.0
             rowIdentity = catalog.1
+            filterColumns = catalog.2
             next()
         }
     }
@@ -2220,7 +2282,7 @@ final class AppModel {
     /// No limit. The cursor is what bounds a page, and it holds its own
     /// position.
     private func browseAsk(for relation: RelationInfo) -> BrowseAsk {
-        let predicate = whereClause.trimmingCharacters(in: .whitespacesAndNewlines)
+        let predicate = browsePredicate
         let user = orderClause.trimmingCharacters(in: .whitespacesAndNewlines)
         return BrowseAsk(
             schema: relation.schema, relation: relation.name,
@@ -2565,9 +2627,67 @@ final class AppModel {
         }
     }
 
+    /// Adds a row, and takes the Custom field with it.
+    func addFilterRule(_ rule: FilterRule) {
+        // Emptied rather than kept and ignored. A filter that is still on screen
+        // but no longer being sent is the one that gets blamed for the row
+        // count, and nothing anywhere would contradict it.
+        whereClause = ""
+        filterRules.append(rule)
+    }
+
+    /// Replaces one row, for a popup or a field that changed.
+    ///
+    /// Out of range is ignored rather than trapped. The rows are drawn from this
+    /// array and each carries its own index, so a view built one frame ago can
+    /// address a row a Remove button has since taken away — a real sequence, and
+    /// not one worth crashing a window over.
+    func updateFilterRule(at index: Int, to rule: FilterRule) {
+        guard filterRules.indices.contains(index) else { return }
+        filterRules[index] = rule
+    }
+
+    /// Drops one row, and with the last of them the clause they compiled to.
+    ///
+    /// The clause has to go with them or the next browse would send a WHERE that
+    /// nothing on screen says. The Custom field is left as it is — empty, since
+    /// `addFilterRule` emptied it — which is the unfiltered browse.
+    func removeFilterRule(at index: Int) {
+        guard filterRules.indices.contains(index) else { return }
+        filterRules.remove(at: index)
+        if filterRules.isEmpty { compiledClause = "" }
+    }
+
+    /// Runs the browse with what the filter bar now says.
+    ///
+    /// Rows go to the core to be compiled and the browse waits for the answer.
+    /// It has to: the clause is written in this database's own quoting, and the
+    /// only other way to have one here would be a second compiler in Swift that
+    /// disagrees with `dbedit`'s the day either is corrected.
+    ///
+    /// A stack the core refuses — a comparison with nothing typed into it, a
+    /// range with one end — stops here rather than running unfiltered. `run`
+    /// puts the reason on screen and does not call back, so the grid goes on
+    /// showing the rows the last filter returned, which is the honest thing for
+    /// it to be showing.
     func applyFilters() {
         activeTab = .content
-        runBrowse()
+        guard !filterRules.isEmpty, let relation = selected else {
+            // No rows means the Custom field is the filter, and it needs no
+            // round trip. The clause is dropped in case rows were what ran last.
+            compiledClause = ""
+            runBrowse()
+            return
+        }
+        let schema = relation.schema
+        let name = relation.name
+        let rules = filterRules
+        run { db in
+            try db.filterClause(schema: schema, relation: name, rules: rules)
+        } then: { [self] clause in
+            compiledClause = clause
+            runBrowse()
+        }
     }
 
     // MARK: - Sorting
