@@ -1682,6 +1682,16 @@ private struct QueryPanel: View {
                     // is where someone who found the panel before they needed it
                     // is standing.
                     note("Nothing has run yet — ⌘R sends the statement the caret is in.")
+                } else if model.shownHistory.isEmpty {
+                    // A different sentence, because a different thing is true.
+                    // Statements have run and something here is hiding them, so
+                    // each of the two narrowings says how to undo itself —
+                    // "nothing has run yet" over a store of two hundred would be
+                    // the panel lying about itself.
+                    note(
+                        model.historyFilter.isEmpty
+                            ? "Nothing typed is left — turn on All to see what the window sent."
+                            : "No statement here matches that.")
                 } else {
                     list
                 }
@@ -1787,16 +1797,41 @@ private struct QueryPanel: View {
                 .frame(width: 156)
                 .accessibilityLabel("Which list to show")
 
+                // The count of what is drawn, not of what is stored. A header
+                // promising two hundred statements over a list showing four
+                // would be describing the store rather than the panel.
                 Text(
                     model.queryPanelTab == .history
-                        ? AppModel.pluralized(model.history.entries.count, "statement")
+                        ? AppModel.pluralized(model.shownHistory.count, "statement")
                         : AppModel.pluralized(model.offeredFavorites.count, "query")
                 )
                 .font(Theme.Typography.digits)
                 .foregroundStyle(Theme.textTertiary.color)
 
+                if model.queryPanelTab == .history {
+                    // The plain field the Save-as row above uses, rather than
+                    // the `CompactField` the filter bar uses. That one draws its
+                    // focus ring from a `FocusArea` and this panel is handed no
+                    // focus binding — and matching the header it sits in beats
+                    // matching a bar on another tab.
+                    TextField("Filter", text: $model.historyFilter)
+                        .textFieldStyle(.roundedBorder)
+                        .controlSize(.small)
+                        .frame(width: 150)
+                        .accessibilityLabel("Filter the statements")
+
+                    Toggle("All", isOn: $model.showsAllStatements)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .font(Theme.Typography.caption)
+                        .help("Show the browses and the edits, not only what was typed")
+                        .accessibilityLabel("Show all statements")
+                }
+
                 Spacer(minLength: Theme.Space.sm)
 
+                // Against the store rather than against what is drawn, because
+                // that is what it deletes. Clear is not "clear these four".
                 if model.queryPanelTab == .history, !model.history.entries.isEmpty {
                     Button("Clear…") { confirmingClear = true }
                         .controlSize(.small)
@@ -1837,7 +1872,7 @@ private struct QueryPanel: View {
     private var list: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(model.history.entries) { entry in
+                ForEach(model.shownHistory) { entry in
                     Button {
                         model.recall(entry)
                     } label: {
@@ -1847,9 +1882,11 @@ private struct QueryPanel: View {
                 }
             }
         }
+        // Sized from what is drawn, so narrowing the list shrinks the panel
+        // rather than leaving four rows floating in seven rows of space.
         .frame(
             height: Self.rowHeight
-                * CGFloat(min(model.history.entries.count, Self.maxRows))
+                * CGFloat(min(model.shownHistory.count, Self.maxRows))
         )
     }
 
@@ -1950,6 +1987,22 @@ private struct QueryPanel: View {
         .accessibilityLabel("\(favorite.name), \(favorite.sql)")
     }
 
+    /// What the server took, or nothing at all where nobody measured it.
+    ///
+    /// Blank rather than "0 ms". A zero means unmeasured — an edit's statements
+    /// are not timed one by one — and printing it would make the row nobody
+    /// timed the fastest-looking one on the list.
+    ///
+    /// Milliseconds up to a second and seconds past it, which is where the digit
+    /// that matters moves: "1,240 ms" is read by counting commas and "1.24 s" is
+    /// read at a glance.
+    private static func took(_ entry: QueryHistoryEntry) -> String {
+        guard entry.milliseconds > 0 else { return "" }
+        return entry.milliseconds < 1000
+            ? "\(Int(entry.milliseconds)) ms"
+            : String(format: "%.2f s", entry.milliseconds / 1000)
+    }
+
     private func row(_ entry: QueryHistoryEntry) -> some View {
         let failed = entry.outcome.isFailure
         return HStack(spacing: Theme.Space.sm) {
@@ -1970,10 +2023,25 @@ private struct QueryPanel: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
+            // Only while everything is shown. With the list narrowed to what was
+            // typed every row would say "query", which is a column of one word
+            // repeated taking space from the statement beside it.
+            if model.showsAllStatements {
+                Text(entry.origin.rawValue)
+                    .font(Theme.Typography.micro)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .frame(width: 44, alignment: .leading)
+            }
+
             Text(entry.outcome.label)
                 .font(Theme.Typography.digits)
                 .foregroundStyle(failed ? Theme.dangerText.color : Theme.textSecondary.color)
                 .lineLimit(1)
+
+            Text(Self.took(entry))
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+                .frame(width: 52, alignment: .trailing)
 
             Text(Self.age(of: entry))
                 .font(Theme.Typography.digits)

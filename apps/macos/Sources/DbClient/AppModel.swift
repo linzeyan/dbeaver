@@ -338,6 +338,36 @@ final class AppModel {
     /// compiled to.
     var isFilterRowsOpen = false
 
+    /// Whether the history list shows the statements nobody typed.
+    ///
+    /// Off to begin with, which is the list this panel has always been. Someone
+    /// opens it to find a statement they wrote, and browses outnumber those
+    /// within a minute of clicking about in the sidebar. Turning it on is what
+    /// makes this the console: every statement the window sent, in the order it
+    /// sent them.
+    var showsAllStatements = false
+
+    /// What the history list is being narrowed by.
+    ///
+    /// Matched against the whole statement rather than the one-line preview, so
+    /// a table named in the fifteenth line of a script is still findable by
+    /// name — which is how somebody looks for "the one that touched orders".
+    var historyFilter = ""
+
+    /// The entries the panel draws, in the store's own order.
+    ///
+    /// Both narrowings in one place because the count in the header, the rows
+    /// themselves and the sentence shown when there are none all have to agree
+    /// about what is being shown. Three readers deciding separately is three
+    /// chances for a header to promise a row the list does not draw.
+    var shownHistory: [QueryHistoryEntry] {
+        let needle = historyFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return history.entries.filter { entry in
+            guard showsAllStatements || entry.origin == .query else { return false }
+            return needle.isEmpty || entry.sql.lowercased().contains(needle)
+        }
+    }
+
     /// The two lists that panel can show.
     enum QueryPanelTab: String, CaseIterable, Identifiable {
         case history
@@ -1088,6 +1118,10 @@ final class AppModel {
         expanded = []
         selected = nil
         navigatorFilter = ""
+        // The needle almost certainly names a table of the database being left,
+        // and a panel that opened onto "no statement here matches that" would be
+        // reporting a filter nobody remembers typing.
+        historyFilter = ""
         columns = []
         clearRelationDetail()
         browseResult.discard()

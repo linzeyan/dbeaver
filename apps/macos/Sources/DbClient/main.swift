@@ -610,6 +610,13 @@ let historyStore = argument("--history-store")
 /// `--history` opens the history panel, through the menu item that owns it.
 let showHistory = CommandLine.arguments.contains("--history")
 
+/// `--history-all` turns the panel's *All* checkbox on before the shutter.
+///
+/// Exists for the reason `--history` does, one control further in: the origin
+/// column is drawn only while All is on, so without this there is no way to
+/// photograph the half of the panel that browses and edits appear in.
+let historyAll = CommandLine.arguments.contains("--history-all")
+
 /// `--history-pick 2` recalls the nth-newest statement into the editor.
 ///
 /// Both exist for the reason `--cell` does: the panel is opened with a keystroke
@@ -1606,7 +1613,7 @@ func runScriptWhenReady(model: AppModel) {
 /// stay up for the shutter — so waiting for a history that never fills has to be
 /// loud, or a capture of an empty panel would read as the panel failing to draw.
 @MainActor
-func driveHistory(model: AppModel, open: Bool, pick: Int?) {
+func driveHistory(model: AppModel, open: Bool, all: Bool, pick: Int?) {
     let deadline = CFAbsoluteTimeGetCurrent() + 180
     // Counted from 1, like the list it indexes and like every other ordinal in
     // this window. Rejected rather than clamped: a probe that quietly picked a
@@ -1657,6 +1664,10 @@ func driveHistory(model: AppModel, open: Bool, pick: Int?) {
             fputs("history \(i + 1)       \(entry.outcome.label) · \(entry.preview)\n", stderr)
         }
         if open { openThroughMenu() }
+        // Set rather than clicked, unlike the panel itself. A checkbox in a
+        // SwiftUI header has no menu item behind it to send, and what is being
+        // proved here is what the list draws, not what the toggle is wired to.
+        if all { model.showsAllStatements = true }
         if let pick {
             let entry = model.history.entries[pick - 1]
             model.recall(entry)
@@ -2067,8 +2078,9 @@ if benchMode {
         if let loadMorePages { loadMoreWhenReady(model: model, pages: loadMorePages) }
         if runScriptMode { runScriptWhenReady(model: model) }
         if completeMode { completeWhenReady(model: model) }
-        if showHistory || historyPick != nil {
-            driveHistory(model: model, open: showHistory, pick: historyPick)
+        if showHistory || historyAll || historyPick != nil {
+            driveHistory(
+                model: model, open: showHistory, all: historyAll, pick: historyPick)
         }
         if preferencesProbe { probePreferences(model: model) }
         if historyProbe { probeHistory(model: model) }
