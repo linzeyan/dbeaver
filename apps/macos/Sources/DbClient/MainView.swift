@@ -517,6 +517,35 @@ enum StructureDetail: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+extension View {
+    /// The Structure pane's six tables, dressed alike.
+    ///
+    /// Striping off: AppKit paints the alternating background across the
+    /// table's whole height, so the area past the last row renders as a stack
+    /// of empty bars that read as rows the table failed to fill.
+    ///
+    /// The scroll view's own background hidden, for the reason `ValueViewer`
+    /// gives about `TextEditor`: an AppKit control left alone draws the
+    /// system's control colour, a neutral near-black, while every other
+    /// surface in this window is the palette's blue-tinted `background`. A
+    /// table in it reads as a panel borrowed from another application and
+    /// dropped into the pane.
+    ///
+    /// And the surface named rather than inherited, because what is behind
+    /// these two is a `VSplitView` rather than the pane, and a table that is
+    /// merely transparent is a table whose colour is whatever the splitter
+    /// decides.
+    ///
+    /// One modifier rather than the same line written six times, which is what
+    /// it was — and five of those six carried no reason with them.
+    fileprivate func structureTableSurface() -> some View {
+        self
+            .tableStyle(.inset(alternatesRowBackgrounds: false))
+            .scrollContentBackground(.hidden)
+            .background(Theme.background.color)
+    }
+}
+
 struct StructurePane: View {
     @Bindable var model: AppModel
     @FocusState.Binding var focus: FocusArea?
@@ -709,10 +738,7 @@ struct StructurePane: View {
                     .lineLimit(1)
             }
         }
-        // Striping off. AppKit paints the alternating background across the
-        // table's whole height, so the area past the last column renders as
-        // a stack of empty bars that read as rows the table failed to fill.
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .structureTableSurface()
         // A focus target so this pane has somewhere for focus to be.
         // Clearing focus is not enough — SwiftUI then falls back to the
         // only text field on screen, which is the sidebar's filter, and the
@@ -763,7 +789,7 @@ struct StructurePane: View {
             }
             .width(min: 70, ideal: 96)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .structureTableSurface()
     }
 
     private static func keyLabel(_ index: IndexInfo) -> String {
@@ -795,7 +821,7 @@ struct StructurePane: View {
             }
             .width(min: 80, ideal: 150)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .structureTableSurface()
     }
 
     private var referencedByTable: some View {
@@ -830,7 +856,7 @@ struct StructurePane: View {
             }
             .width(min: 80, ideal: 150)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .structureTableSurface()
     }
 
     private var constraintsTable: some View {
@@ -858,7 +884,7 @@ struct StructurePane: View {
                     .help(constraint.definition)
             }
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .structureTableSurface()
     }
 
     private var triggersTable: some View {
@@ -902,7 +928,7 @@ struct StructurePane: View {
                     .help(trigger.definition ?? trigger.runsLabel)
             }
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .structureTableSurface()
     }
 }
 

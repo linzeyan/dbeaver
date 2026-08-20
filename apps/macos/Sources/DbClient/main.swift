@@ -2096,7 +2096,15 @@ if benchMode {
     // appearance and flashes on the first frame.
     Theme.apply(to: app)
 
-    window.titlebarAppearsTransparent = false
+    // Transparent, so the unified titlebar and toolbar take the background set
+    // on the line below rather than the system's own material. Opaque, that
+    // strip is a neutral near-black running the full width of the window —
+    // above the sidebar and the detail column alike — while every other
+    // surface under it is the palette's blue-tinted background, and the seam
+    // reads as two applications stacked. `.fullSizeContentView` is already in
+    // the style mask and the toolbar still lays out beneath it, so nothing
+    // moves; what changes is the fill.
+    window.titlebarAppearsTransparent = true
     window.toolbarStyle = .unified
     window.backgroundColor = NSColor(Theme.background.color)
     // Below this the grid shows one column and the filter bar wraps; there is
