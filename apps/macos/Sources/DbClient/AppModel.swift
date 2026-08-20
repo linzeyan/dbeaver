@@ -165,6 +165,17 @@ final class AppModel {
     // Content pane
     let browseResult = ResultSet()
 
+    /// What each relation's Content tab was showing, so that leaving a table and
+    /// coming back is not the same as opening it.
+    private var browseStore = BrowseStore()
+
+    /// The state to put back once the newly selected relation's rows arrive.
+    ///
+    /// Held rather than applied at selection time because there is nothing to
+    /// select yet: the grid is emptied and refilled by a round trip, and
+    /// `install` clears any selection made before that lands.
+    private var stateToRestore: BrowseState?
+
     // Query pane
 
     /// The statements the pane last ran, in order, each with what it did.
@@ -879,6 +890,10 @@ final class AppModel {
         selectedStep = 0
         whereClause = ""
         orderClause = ""
+        // The store's keys are `schema.name` strings, and the same string names
+        // a different table on a different server.
+        browseStore.clear()
+        stateToRestore = nil
         queryText = ""
         suggestedQueryText = ""
         querySelection = nil
@@ -1614,12 +1629,28 @@ final class AppModel {
 
     private func selectionChanged(from previous: RelationInfo?) {
         guard !isReselecting, let selected, selected != previous else { return }
-        // Filters describe the previous table's columns and cannot be assumed
-        // to apply here; carrying them over would produce confusing errors.
+        // What the table being left was showing, saved before the fields below
+        // are overwritten with the new one's. This is the last moment they still
+        // mean the previous table.
+        if let previous {
+            browseStore.save(
+                BrowseState(
+                    whereClause: whereClause, orderClause: orderClause,
+                    selection: browseResult.selection),
+                for: previous.id)
+        }
+        // These fields used to be cleared here, because a filter naming the
+        // previous table's columns cannot be assumed to run against this one.
+        // That is still true of a table being opened for the first time, and a
+        // fresh state is what the store answers for one. A table being returned
+        // to is the case that changes: it had these filters, and re-typing them
+        // was the cost of every A→B→A comparison.
         // The first selection is the exception: it is where --where/--order land.
-        whereClause = appliedInitialFilters ? "" : (initialFilters.where ?? "")
-        orderClause = appliedInitialFilters ? "" : (initialFilters.order ?? "")
+        let restored = browseStore.state(for: selected.id)
+        whereClause = appliedInitialFilters ? restored.whereClause : (initialFilters.where ?? "")
+        orderClause = appliedInitialFilters ? restored.orderClause : (initialFilters.order ?? "")
         appliedInitialFilters = true
+        stateToRestore = restored
         // Cleared rather than left showing the previous relation's structure
         // while the new one loads.
         clearRelationDetail()
@@ -2035,6 +2066,15 @@ final class AppModel {
         emptyColumns.weigh(
             rows: before..<grid.rowCount, columnCount: grid.columns.count,
             isNull: { grid.isNull(row: $0, column: $1) })
+        // The selection this table had when it was last open, put back now that
+        // its rows are here. Only on a fresh browse: an appended page is more of
+        // the same result, and the selection was dealt with when the first page
+        // landed. `selection(within:)` is what drops a row that has not come
+        // back rather than pointing at the wrong one.
+        if !appending, let restoring = stateToRestore {
+            browseResult.selection = restoring.selection(within: grid.rowCount)
+            stateToRestore = nil
+        }
         // A short page is the end of the result: the server fills a FETCH to the
         // count asked for until it runs out. Exhausted is not a state the cursor
         // has to be asked about twice, and asking would cost a round trip per

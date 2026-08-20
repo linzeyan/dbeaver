@@ -79,6 +79,9 @@ if CommandLine.arguments.contains("--verify-goto") {
 if CommandLine.arguments.contains("--verify-browse-state") {
     exit(BrowseStateChecks.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-browse-restore") {
+    exit(MainActor.assumeIsolated { BrowseRestoreChecks.run() } ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-metadata") {
     exit(MetadataChecks.run() ? 0 : 1)
 }
