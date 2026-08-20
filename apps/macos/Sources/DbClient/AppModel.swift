@@ -2633,7 +2633,19 @@ final class AppModel {
         // but no longer being sent is the one that gets blamed for the row
         // count, and nothing anywhere would contradict it.
         whereClause = ""
-        filterRules.append(rule)
+        filterRules.append(rule.settled(in: filterColumns))
+    }
+
+    /// The row the *Filters* list adds, or nil where nothing here can be
+    /// filtered — a database this build writes no statements for, or a relation
+    /// whose columns have not arrived.
+    ///
+    /// The first column and its first operator, which is `equals` for every
+    /// type. A row that arrives already asking something is one popup away from
+    /// the question somebody wanted; an empty one is a form to fill in.
+    var newFilterRule: FilterRule? {
+        guard let column = filterColumns.first, let op = column.operators.first else { return nil }
+        return FilterRule(column: column.name, op: op)
     }
 
     /// Replaces one row, for a popup or a field that changed.
@@ -2644,7 +2656,7 @@ final class AppModel {
     /// not one worth crashing a window over.
     func updateFilterRule(at index: Int, to rule: FilterRule) {
         guard filterRules.indices.contains(index) else { return }
-        filterRules[index] = rule
+        filterRules[index] = rule.settled(in: filterColumns)
     }
 
     /// Drops one row, and with the last of them the clause they compiled to.

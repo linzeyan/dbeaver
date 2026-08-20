@@ -34,6 +34,11 @@ enum FilterRowChecks {
         checkTablesDoNotShareRows()
         checkAStateHoldingOnlyRowsIsWorthKeeping()
         checkAnIndexOutOfRangeChangesNothing()
+        checkAnOperatorTheColumnCannotAnswerFallsBack()
+        checkAnOperatorTheColumnCanAnswerIsLeftAlone()
+        checkComparingAgainstNothingCarriesNothing()
+        checkOnlyARangeKeepsItsFarEnd()
+        checkAColumnNobodyKnowsIsLeftAlone()
         if failures == 0 {
             fputs("filter-rows: all checks passed\n", stderr)
         } else {
@@ -146,6 +151,56 @@ enum FilterRowChecks {
         }
     }
 
+    /// The case the rule exists for: a row moved from a text column to a numeric
+    /// one is still asking `contains`, and `LIKE` against a number is an error
+    /// the server raises after somebody has typed a value.
+    private static func checkAnOperatorTheColumnCannotAnswerFallsBack() {
+        let rule = FilterRule(column: "qty", op: .contains, value: "5")
+        expect(rule.settled(in: offered).op, .equals, "an impossible operator falls to the first")
+    }
+
+    /// And one it can answer is not touched. A row that changed its own operator
+    /// every time a value was typed into it would be unusable.
+    private static func checkAnOperatorTheColumnCanAnswerIsLeftAlone() {
+        let rule = FilterRule(column: "sku", op: .startsWith, value: "AB")
+        let settled = rule.settled(in: offered)
+        expect(settled.op, .startsWith, "an operator the column offers stays")
+        expect(settled.value, "AB", "and so does what was typed for it")
+    }
+
+    /// Text left behind by an operator that compares against nothing would go to
+    /// the core at the next Apply, as part of a filter with nothing on screen
+    /// describing it.
+    private static func checkComparingAgainstNothingCarriesNothing() {
+        let rule = FilterRule(column: "qty", op: .isNull, value: "5", second: "9")
+        let settled = rule.settled(in: offered)
+        expect(settled.value, nil, "IS NULL carries no value")
+        expect(settled.second, nil, "and no far end")
+    }
+
+    /// Only a range has two ends. The second field is the one most likely to be
+    /// left filled, because changing `BETWEEN` to `>` hides it rather than
+    /// clearing it.
+    private static func checkOnlyARangeKeepsItsFarEnd() {
+        let narrowed = FilterRule(column: "qty", op: .greaterThan, value: "5", second: "9")
+        expect(narrowed.settled(in: offered).second, nil, "a comparison drops the far end")
+        let range = FilterRule(column: "qty", op: .between, value: "5", second: "9")
+        let settled = range.settled(in: offered)
+        expect(settled.value, "5", "a range keeps the near end")
+        expect(settled.second, "9", "and the far one")
+    }
+
+    /// A row naming a column the relation does not have is left as it is. It
+    /// happens to a restored filter when the table changed underneath it, and
+    /// the core's error naming the column is a better answer than a silent move
+    /// to a column nobody chose.
+    private static func checkAColumnNobodyKnowsIsLeftAlone() {
+        let rule = FilterRule(column: "gone", op: .contains, value: "x")
+        let settled = rule.settled(in: offered)
+        expect(settled.op, .contains, "an unknown column judges nothing")
+        expect(settled.value, "x", "and keeps what was typed")
+    }
+
     // MARK: - Fixture
 
     /// A directory of its own for the config this check must not read.
@@ -165,6 +220,26 @@ enum FilterRowChecks {
         schema: "public", name: "orders", kind: .table, estimatedRows: nil)
     private static let regions = RelationInfo(
         schema: "sales", name: "regions", kind: .table, estimatedRows: nil)
+
+    /// What the core would answer for a two-column table: a number that can be
+    /// ordered and compared, and text that can also be searched. Written by hand
+    /// because the answer is the core's and this check has no connection to ask
+    /// — `crates/edit` is where the lists themselves are pinned, against a real
+    /// dialect.
+    private static let offered = [
+        FilterColumn(
+            name: "qty", dataType: "numeric",
+            operators: [
+                .equals, .notEquals, .isNull, .isNotNull, .lessThan, .lessOrEqual, .greaterThan,
+                .greaterOrEqual, .between
+            ]),
+        FilterColumn(
+            name: "sku", dataType: "text",
+            operators: [
+                .equals, .notEquals, .isNull, .isNotNull, .lessThan, .lessOrEqual, .greaterThan,
+                .greaterOrEqual, .between, .contains, .startsWith, .endsWith
+            ])
+    ]
 
     /// A model with no connection, built the way `BrowseRestoreChecks` builds
     /// its own: a throwaway defaults suite, so that running the checks cannot

@@ -297,6 +297,48 @@ struct FilterRule: Encodable, Hashable {
     var value: String?
     /// The far end of a `between`, and `nil` for every other operator.
     var second: String?
+
+    /// This row made consistent with the column it names.
+    ///
+    /// A row is three controls over one value and any of them can be moved to a
+    /// place that makes another's answer impossible. Two corrections follow from
+    /// that.
+    ///
+    /// An operator the column cannot answer falls back to the column's first,
+    /// which is `equals` everywhere — the case is `contains` on a row dragged
+    /// from a text column onto an integer. Refusing the move was the
+    /// alternative, and a popup that will not change is worse to use than one
+    /// that changes to something obvious.
+    ///
+    /// Operands the operator does not have are dropped. `IS NULL` compares
+    /// against nothing and everything but `BETWEEN` has one end, so text stays
+    /// in the row only while a field is showing it. Left behind, it would go to
+    /// the core at the next Apply as part of a filter nothing on screen
+    /// describes.
+    ///
+    /// A column not in `columns` is left holding whatever it holds. That is a
+    /// row naming something this relation does not have — a table changed under
+    /// a restored filter — and the honest answer is the error the core gives it,
+    /// naming the column, rather than a silent move to a column somebody did not
+    /// choose.
+    func settled(in columns: [FilterColumn]) -> FilterRule {
+        var settled = self
+        if let column = columns.first(where: { $0.name == column }),
+            !column.operators.contains(settled.op)
+        {
+            settled.op = column.operators.first ?? .equals
+        }
+        switch settled.op {
+        case .isNull, .isNotNull:
+            settled.value = nil
+            settled.second = nil
+        case .between:
+            break
+        default:
+            settled.second = nil
+        }
+        return settled
+    }
 }
 
 /// What the connection's transaction is doing.
