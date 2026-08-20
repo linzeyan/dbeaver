@@ -256,6 +256,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-goto
 	./$(APP_BIN) --verify-favorites
 	./$(APP_BIN) --verify-record
+	./$(APP_BIN) --verify-value
 	./$(APP_BIN) --verify-browse-state
 	./$(APP_BIN) --verify-browse-restore
 	./$(APP_BIN) --verify-metadata

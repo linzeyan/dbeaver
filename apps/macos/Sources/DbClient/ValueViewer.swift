@@ -86,7 +86,13 @@ struct RenderedValue {
     /// full TextKit layout on every arrow key. The cap is generous enough that
     /// no ordinary value meets it and small enough that the pathological one
     /// does not lock the window.
-    private static let characterCap = 128 * 1024
+    ///
+    /// Not private, because `ValueEdit` bounds the editor at the same number.
+    /// The two are one decision: an editable box is a `TextView` doing the same
+    /// layout on every *keystroke* rather than every arrow key, so a value this
+    /// pane will not draw is not a value the editor can hold either. Two
+    /// constants would be two chances to raise one and forget the other.
+    static let characterCap = 128 * 1024
 
     /// How much of a binary value gets dumped.
     ///
@@ -180,6 +186,65 @@ struct RenderedValue {
         return RenderedValue(
             text: cut ? String(text.prefix(characterCap)) : text,
             descriptor: descriptor, isPlaceholder: false, wraps: wraps)
+    }
+}
+
+/// Whether the value on screen can be edited in full, and what to say when it
+/// cannot.
+///
+/// Answered here rather than in the view because the wrong answer is silent.
+/// What the pane draws is a rendering — `RenderedValue` re-indents JSON, dumps
+/// binary as hex, and cuts anything past the cap — and a box seeded from that
+/// text would send this program's formatting to the server the moment it was
+/// staged: a `jsonb` document rewritten with two-space indents, a `bytea`
+/// replaced by the words of its own hex dump, a long `text` column truncated to
+/// its first 128 K. Every one of those is an edit the user did not make and
+/// would not see. So the editable case carries the *stored* string, and the
+/// cases that cannot be edited honestly are refused with a sentence.
+///
+/// NULL and a zero-length string both seed an empty box. That is not a
+/// conflation: what is typed is what gets written in either case, and the NULL
+/// button on the strip is how a value goes back to being NULL. Seeding the word
+/// "NULL" would put four characters in a text column, which is the mistake
+/// `CellEditorRow.seed` already avoids for the one-line field.
+enum ValueEdit: Equatable {
+    /// The text the box starts with — the stored value, not the rendering.
+    case editable(String)
+    /// Why this value cannot be edited here, as a sentence to show in place of
+    /// the box. Said rather than hidden: an editor that is simply absent reads
+    /// as a feature this build does not have.
+    case refused(String)
+
+    /// Main-actor for the reason `RenderedValue.make` is: the sentence borrows
+    /// `AppModel`'s number formatting.
+    @MainActor
+    static func offered(for cell: AppModel.InspectedCell, obstacle: String?) -> ValueEdit {
+        // The row's problem first, and before looking at the value at all. A
+        // relation with no key cannot have any of its cells written, so
+        // answering "this one happens to be binary" would send the reader off
+        // to convert a column that was never the reason.
+        if let obstacle { return .refused(obstacle) }
+
+        if case .binary = cell.rendering {
+            // The plan's judgement, and it is fail-loud rather than a
+            // limitation quietly hidden: `cell.value` for a binary column is
+            // `ValueRendering.preview` — the first 64 bytes and an ellipsis —
+            // so a box seeded with it would offer to replace a blob with a
+            // truncated transcription of itself. A hex editor is a real piece
+            // of work and has not been earned; until it is, say so.
+            return .refused("A binary value cannot be edited here.")
+        }
+
+        guard cell.value.count <= RenderedValue.characterCap else {
+            // The length is the stored one, which is what a reader would check
+            // against `length()`, and it is in the sentence because "too long"
+            // without a number is not something anyone can act on.
+            return .refused(
+                "This value is too long to edit here — "
+                    + "\(AppModel.pluralized(cell.value.count, "character")).")
+        }
+
+        return .editable(cell.isNull ? "" : cell.value)
     }
 }
 
