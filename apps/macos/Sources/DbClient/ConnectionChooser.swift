@@ -274,6 +274,10 @@ struct ConnectionChooser: View {
                         "Password", $model.connectionPassword, .connectPassword,
                         model.hasUnreadPassword ? "Saved" : "", isSecure: true)
                 }
+                // Outside the branch above, because both answers to it can be
+                // marked: a SQLite file somebody is not to write to is as real a
+                // thing as a production server.
+                safetyRow
             }
 
             buttons
@@ -416,6 +420,30 @@ struct ConnectionChooser: View {
         }
     }
 
+    /// What this connection is allowed to be.
+    ///
+    /// Two checkboxes rather than one control with three settings, because they
+    /// are not exclusive and the pair that proves it is the ordinary case: a
+    /// production database somebody is browsing with edits switched off. A
+    /// control that made them exclusive would be inventing a rule the flags do
+    /// not have.
+    ///
+    /// Below the fields that say where the database is, since it is a different
+    /// kind of answer — those describe the database, and these describe what this
+    /// application may do to it.
+    private var safetyRow: some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("Safety")
+            Toggle("Read-only", isOn: $model.connectionDraft.isReadOnly)
+                .help("Refuse grid edits, generated DDL and imports on this connection")
+            Toggle("Production", isOn: $model.connectionDraft.isProduction)
+                .help("Ask before writing to this connection")
+            Spacer(minLength: 0)
+        }
+        .font(Theme.Typography.body)
+        .foregroundStyle(Theme.text.color)
+    }
+
     /// The mark that tells one server from another at a glance.
     ///
     /// Eight swatches rather than a colour well: the point is that two people
@@ -554,8 +582,15 @@ private struct ConnectionRow: View {
             .frame(width: 3, height: 24)
     }
 
-    /// At most one mark, and the unsaved one wins: of the two it is the only one
-    /// asking the reader to do something.
+    /// One mark asking the reader to do something, or else everything that is
+    /// true of the connection.
+    ///
+    /// The unsaved pencil still wins alone: of everything shown here it is the
+    /// only thing asking for a decision, and a row cannot ask two. The rest are
+    /// facts and are shown together — a deliberate change to the one-mark rule
+    /// this row used to keep, because a production connection that stopped being
+    /// marked as one the moment it was opened would be hiding the mark exactly
+    /// when it matters.
     @ViewBuilder
     private var marker: some View {
         if hasUnsavedEdits {
@@ -563,8 +598,24 @@ private struct ConnectionRow: View {
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(Theme.warning.color)
                 .accessibilityHidden(true)
-        } else if isOpen {
-            StatusDot(state: .connected)
+        } else {
+            HStack(spacing: Theme.Space.xs) {
+                if connection.isReadOnly {
+                    Image(systemName: "lock")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .accessibilityHidden(true)
+                }
+                if connection.isProduction {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.danger.color)
+                        .accessibilityHidden(true)
+                }
+                if isOpen {
+                    StatusDot(state: .connected)
+                }
+            }
         }
     }
 
@@ -573,6 +624,10 @@ private struct ConnectionRow: View {
     private var accessibilityLabel: String {
         var parts = [connection.title, connection.subtitle]
         if connection.color != .none { parts.append(connection.color.label) }
+        // Before the open dot and the pencil, because these two are the reason
+        // somebody would stop at this row rather than a detail about its state.
+        if connection.isReadOnly { parts.append("Read-only") }
+        if connection.isProduction { parts.append("Production") }
         if hasUnsavedEdits { parts.append("Unsaved changes") }
         if isOpen { parts.append("Open") }
         return parts.joined(separator: ", ")
