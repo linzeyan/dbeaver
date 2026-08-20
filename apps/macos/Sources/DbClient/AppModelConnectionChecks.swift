@@ -36,6 +36,8 @@ enum AppModelConnectionChecks {
         checkFilterNarrowsByTitleAndAddress()
         checkSelectingARowDoesNotReadThePassword()
         checkSavingDoesNotWipeAnUnreadPassword()
+        checkATypedPasswordIsNotOverwritten()
+        checkTheKeychainIsUntouchedWhileTheSettingIsOff()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -58,6 +60,7 @@ enum AppModelConnectionChecks {
                     scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
                     user: "user"))
             let model = makeModel(with: [connection])
+            model.preferences.remembersPasswords = true
             ConnectionKeychain.save("s3cret", for: connection.id)
             defer { ConnectionKeychain.delete(for: connection.id) }
 
@@ -81,6 +84,7 @@ enum AppModelConnectionChecks {
                     scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
                     user: "user"))
             let model = makeModel(with: [connection])
+            model.preferences.remembersPasswords = true
             ConnectionKeychain.save("s3cret", for: connection.id)
             defer { ConnectionKeychain.delete(for: connection.id) }
 
@@ -100,12 +104,75 @@ enum AppModelConnectionChecks {
         }
     }
 
+    /// Typing a password and pressing Connect must use the typed one.
+    ///
+    /// The fault this pins: the read happened unconditionally, so the panel
+    /// appeared for a secret that was not needed and the stored password then
+    /// replaced what had just been typed — the form silently connected with a
+    /// password other than the one on screen.
+    private static func checkATypedPasswordIsNotOverwritten() {
+        MainActor.assumeIsolated {
+            // `connectFromForm` really does start a connection, on a background
+            // queue this check does not wait for. Port 1 on the loopback refuses
+            // at once, so nothing here resolves a name or waits for a timeout.
+            let connection = SavedConnection(
+                name: "Stored Password",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "127.0.0.1", port: "1", database: "db",
+                    user: "user"))
+            let model = makeModel(with: [connection])
+            model.preferences.remembersPasswords = true
+            ConnectionKeychain.save("stored", for: connection.id)
+            defer { ConnectionKeychain.delete(for: connection.id) }
+
+            model.selectConnection(connection.id)
+            model.connectionPassword = "typed"
+            model.connectFromForm()
+            expect(model.connectionPassword, "typed", "the typed password survived Connect")
+            expect(
+                model.hasUnreadPassword, true,
+                "and the stored one was never read, so nothing asked permission")
+        }
+    }
+
+    /// With the setting off the Keychain is not consulted at all — not read, not
+    /// asked whether an item exists, and not written by Save.
+    private static func checkTheKeychainIsUntouchedWhileTheSettingIsOff() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Stored Password",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+            let model = makeModel(with: [connection])
+            defer { ConnectionKeychain.delete(for: connection.id) }
+
+            model.selectConnection(connection.id)
+            expect(
+                model.hasUnreadPassword, false,
+                "with the setting off the form has nothing deferred")
+
+            model.connectionPassword = "typed"
+            model.saveConnection()
+            expect(
+                ConnectionKeychain.password(for: connection.id), nil,
+                "and Save wrote no password to the Keychain")
+            expect(
+                model.unsavedConnectionEdits == nil, true,
+                "yet Save still settled the form, rather than leaving a permanent unsaved mark")
+        }
+    }
+
     // MARK: - Helper
 
     /// Creates a model with stubbed alert closures and given connections
     @MainActor private static func makeModel(with connections: [SavedConnection] = []) -> AppModel {
         let history = QueryHistory(defaults: UserDefaults(suiteName: UUID().uuidString)!)
-        let preferences = Preferences()
+        // A scratch store, which is what `Preferences.init` says its argument is
+        // for. On the standard one these checks read whatever the developer has
+        // set — and a check that turns a setting on would be turning it on in
+        // their own window.
+        let preferences = Preferences(store: UserDefaults(suiteName: UUID().uuidString)!)
         let model = AppModel(history: history, preferences: preferences)
 
         // Stub alert closures to prevent modal dialogs

@@ -720,7 +720,11 @@ final class AppModel {
     private func deferPassword(of id: UUID) {
         connectionPassword = ""
         savedConnectionPassword = ""
-        deferredPassword = ConnectionKeychain.hasPassword(for: id) ? id : nil
+        // Nothing is asked of the Keychain at all while the setting is off — not
+        // even whether an item exists — so that a window opened by somebody who
+        // declined this feature touches no secret of theirs in any way.
+        deferredPassword =
+            preferences.remembersPasswords && ConnectionKeychain.hasPassword(for: id) ? id : nil
     }
 
     /// Reads the deferred password, if there is one.
@@ -730,7 +734,10 @@ final class AppModel {
     /// calling it would put the panel back in front of a person who had not
     /// asked for anything needing a secret.
     private func readDeferredPassword() {
-        guard let id = deferredPassword else { return }
+        // A field with something in it has already answered the question. Reading
+        // now would raise the panel for a secret nobody needs, and then replace
+        // what was just typed with what happened to be stored.
+        guard connectionPassword.isEmpty, let id = deferredPassword else { return }
         // An empty field rather than an error when the Keychain refuses — see
         // `ConnectionKeychain` for when that happens and why it is survivable.
         savedConnectionPassword = ConnectionKeychain.password(for: id) ?? ""
@@ -759,15 +766,24 @@ final class AppModel {
         let wasQuickConnect = editedConnection == nil
         connections.save(connectionDraft)
         ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
-        // A password left unread is left alone. Writing the empty field over it
-        // would delete somebody's stored password because they saved a change to
-        // the port — and `ConnectionKeychain.save` treats empty as "store
-        // nothing", so the deletion would be silent and total.
-        if !hasUnreadPassword || !connectionPassword.isEmpty {
+        // Nothing reaches the Keychain while the setting is off. Its owner said
+        // not to keep passwords, and Save is not the place to argue.
+        //
+        // A password left unread is left alone for a different reason: writing
+        // the empty field over it would delete somebody's stored password
+        // because they saved a change to the port, and
+        // `ConnectionKeychain.save` treats empty as "store nothing", so the
+        // deletion would be silent and total.
+        if preferences.remembersPasswords, !hasUnreadPassword || !connectionPassword.isEmpty {
             ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
-            savedConnectionPassword = connectionPassword
             deferredPassword = nil
         }
+        // Assigned either way, including when nothing was written. Save has done
+        // everything it is going to do, and leaving this behind would have the
+        // form calling the typed password an unsaved edit for the rest of the
+        // session. Where the password was left unread this is a no-op: both
+        // sides are already empty.
+        savedConnectionPassword = connectionPassword
         // The draft became a row and stays selected, so Quick connect goes back to
         // being empty rather than a second copy of what was just saved.
         if wasQuickConnect {

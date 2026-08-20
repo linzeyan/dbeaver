@@ -101,6 +101,17 @@ struct SettingsView: View {
                     + "show through the object tree as a stripe at their own height.",
                 isOn: $preferences.usesTranslucentSidebar)
 
+            SettingsToggle(
+                title: "Remember passwords",
+                explanation:
+                    "A saved connection's password is kept in your login Keychain and filled in "
+                    + "when you connect. Off, because this build is signed ad-hoc: its signature "
+                    + "changes every time it is rebuilt, so macOS treats each build as a new "
+                    + "application and asks you to authorise the read again — Always Allow does "
+                    + "not hold. While this is off nothing is written to the Keychain and "
+                    + "nothing is read from it; type the password when you connect.",
+                isOn: $preferences.remembersPasswords)
+
             SettingsChoice(
                 title: "Keep connections",
                 explanation:
