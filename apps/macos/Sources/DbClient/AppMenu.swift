@@ -28,6 +28,9 @@ enum AppMenu {
     private static var historyNavCommand: HistoryCommand?
     /// Target of the View menu's record item, held for the same reason.
     private static var recordCommand: RecordCommand?
+    /// Target of the session tab bar's menu items, held for the same reason.
+    private static var queryTabCommand: QueryTabCommand?
+
     /// Target of the View menu's three pane items, held for the same reason.
     private static var tabCommand: TabCommand?
     /// Target of the Query menu's items, held for the same reason.
@@ -69,6 +72,8 @@ enum AppMenu {
         historyNavCommand = historyNav
         let tabs = TabCommand(model: model)
         tabCommand = tabs
+        let queryTabs = QueryTabCommand(model: model)
+        queryTabCommand = queryTabs
         let query = QueryCommands(model: model)
         queryCommands = query
         let stop = StopCommand(model: model)
@@ -83,12 +88,12 @@ enum AppMenu {
         explainCommand = explain
         let main = NSMenu()
         main.addItem(appMenu(named: name, settings: settings))
-        main.addItem(fileMenu(connection: connection, export: commands))
+        main.addItem(fileMenu(connection: connection, export: commands, queryTabs: queryTabs))
         main.addItem(editMenu())
         main.addItem(
             viewMenu(
                 target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs,
-                goTo: goTo, historyNav: historyNav, record: record))
+                goTo: goTo, historyNav: historyNav, record: record, queryTabs: queryTabs))
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
@@ -158,11 +163,23 @@ enum AppMenu {
     /// panel's accessory view is spent on the one question the menu cannot ask
     /// — how much of the result to write — and only when there is more of it
     /// than the window is showing.
-    private static func fileMenu(connection: ConnectionCommand, export: ExportCommands)
-        -> NSMenuItem
-    {
+    private static func fileMenu(
+        connection: ConnectionCommand, export: ExportCommands, queryTabs: QueryTabCommand
+    ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "File")
+
+        // ⌘T, and above a rule of its own: everything below it is about which
+        // database this window is pointed at, and this is about how many places
+        // there are to write SQL in it. ⌘T rather than ⌘N because the thing it
+        // makes is a tab — the strip it appears in is on screen, and a window
+        // is not what arrives.
+        let newTab = menu.addItem(
+            withTitle: "New Query Tab",
+            action: #selector(QueryTabCommand.newQueryTab(_:)), keyEquivalent: "t")
+        newTab.keyEquivalentModifierMask = .command
+        newTab.target = queryTabs
+        menu.addItem(.separator())
 
         let connect = menu.addItem(
             withTitle: "Connect…",
@@ -329,7 +346,8 @@ enum AppMenu {
     /// second thing a menu item can do that a bare shortcut cannot.
     private static func viewMenu(
         target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand,
-        tabs: TabCommand, goTo: GoToCommand, historyNav: HistoryCommand, record: RecordCommand
+        tabs: TabCommand, goTo: GoToCommand, historyNav: HistoryCommand, record: RecordCommand,
+        queryTabs: QueryTabCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
@@ -381,6 +399,22 @@ enum AppMenu {
             keyEquivalent: "]")
         forward.keyEquivalentModifierMask = .command
         forward.target = historyNav
+
+        // ⇧⌘[ and ⇧⌘], directly under the ⌘[ and ⌘] above them, because they
+        // are the same gesture at a different scale: those two move through the
+        // tables this window has been at, these two through the buffers it is
+        // holding open. The shift is the whole difference, in the keys as well
+        // as in the menu.
+        let previousTab = menu.addItem(
+            withTitle: "Previous Query Tab",
+            action: #selector(QueryTabCommand.previousQueryTab(_:)), keyEquivalent: "[")
+        previousTab.keyEquivalentModifierMask = [.command, .shift]
+        previousTab.target = queryTabs
+        let nextTab = menu.addItem(
+            withTitle: "Next Query Tab",
+            action: #selector(QueryTabCommand.nextQueryTab(_:)), keyEquivalent: "]")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+        nextTab.target = queryTabs
 
         menu.addItem(.separator())
         // Titled for the closed state; `validateMenuItem` rewrites it.
@@ -634,6 +668,46 @@ final class NavigatorCommand: NSObject, NSMenuItemValidation {
     /// Greyed out until the tree has something in it. Focusing a field that can
     /// only ever filter nothing is a command that does nothing.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFilterObjects }
+}
+
+/// The session tab bar's menu items, as something a menu can send to.
+///
+/// Its own object rather than a fourth action on `TabCommand`: that one moves
+/// between the three panes of one buffer and this one moves between buffers,
+/// and a single target answering both would be where the two senses of the word
+/// "tab" got written down as the same thing.
+@MainActor
+final class QueryTabCommand: NSObject {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func newQueryTab(_ sender: NSMenuItem) {
+        model.addQueryBuffer()
+        model.activeTab = .query
+    }
+
+    @objc func nextQueryTab(_ sender: NSMenuItem) {
+        step(by: 1)
+    }
+
+    @objc func previousQueryTab(_ sender: NSMenuItem) {
+        step(by: -1)
+    }
+
+    /// Wrapping, unlike every arrow key in this window, which stops at the end
+    /// of its list. A tab strip is short and entirely on screen: there is no
+    /// place past the end to be lost in, and stopping would make ⇧⌘] a key that
+    /// does nothing while the tab it would go to is visible one step away.
+    private func step(by delta: Int) {
+        let count = model.queryBuffers.count
+        guard count > 1 else { return }
+        model.selectQueryBuffer(((model.activeQueryBufferIndex + delta) % count + count) % count)
+        model.activeTab = .query
+    }
 }
 
 /// The View menu's three pane items, as something a menu can send to.
