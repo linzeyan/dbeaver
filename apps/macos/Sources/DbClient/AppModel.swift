@@ -388,7 +388,66 @@ final class AppModel {
     /// would otherwise be put back on the history every single time.
     var queryPanelTab = QueryPanelTab.history
 
-    var queryText = ""
+    /// One SQL editor buffer. A session tab holds one of these; the editor
+    /// always edits the active one. The buffer owns only its text and its
+    /// name — results, history and favorites stay on the model, because they
+    /// describe the connection's work rather than one buffer's.
+    struct QueryBuffer: Identifiable {
+        let id = UUID()
+        var name: String
+        var text = ""
+    }
+
+    var queryBuffers: [QueryBuffer] = [QueryBuffer(name: "query 1")]
+    var activeQueryBufferIndex = 0
+
+    /// The active buffer's text, under the name the rest of the model has
+    /// always used, so that splitting one buffer into a list changed no caller.
+    var queryText: String {
+        get { queryBuffers[activeQueryBufferIndex].text }
+        set { queryBuffers[activeQueryBufferIndex].text = newValue }
+    }
+
+    /// Moves the editor onto another buffer.
+    ///
+    /// The caret goes to the end of the text arrived at, which is the same
+    /// answer `formatQuery` gives after it replaces the buffer wholesale — and
+    /// it is the only answer available: a selection is offsets into the text it
+    /// was made in, and carrying one across would point into a string that does
+    /// not have those characters.
+    func selectQueryBuffer(_ index: Int) {
+        guard queryBuffers.indices.contains(index), index != activeQueryBufferIndex else {
+            return
+        }
+        activeQueryBufferIndex = index
+        querySelection = TextSelection(insertionPoint: queryText.endIndex)
+    }
+
+    /// A new buffer, named for its place in the list, and opened.
+    ///
+    /// Opened rather than merely appended: a tab that appears without the
+    /// editor moving into it is a tab that did nothing.
+    func addQueryBuffer() {
+        queryBuffers.append(QueryBuffer(name: "query \(queryBuffers.count + 1)"))
+        selectQueryBuffer(queryBuffers.count - 1)
+    }
+
+    /// Closes a buffer, keeping the editor on the text somebody was typing in.
+    ///
+    /// The last buffer cannot be closed: an editor with nowhere to type is not
+    /// a state this window has. Closing one below the active index moves that
+    /// index down with the list rather than leaving it pointing at a neighbour,
+    /// which would swap the text under the caret.
+    func closeQueryBuffer(_ index: Int) {
+        guard queryBuffers.count > 1, queryBuffers.indices.contains(index) else { return }
+        queryBuffers.remove(at: index)
+        if activeQueryBufferIndex >= queryBuffers.count {
+            activeQueryBufferIndex = queryBuffers.count - 1
+        } else if index < activeQueryBufferIndex {
+            activeQueryBufferIndex -= 1
+        }
+    }
+
     /// Where the caret or selection is in the editor.
     ///
     /// Owned here rather than by the pane because the Run button lives in the
