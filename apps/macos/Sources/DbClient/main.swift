@@ -506,6 +506,16 @@ let initialSection = argument("--section").flatMap { requested in
 /// the viewer, a screenshot of the viewer, cannot be taken.
 let initialCell = argument("--cell")
 
+/// `--edit-value` opens the box on the cell `--cell` chose, instead of the
+/// reading pane.
+///
+/// Exists for the reason `--cell` does, one step further along the same path:
+/// the box is reached by clicking a pencil, and a capture cannot click. Without
+/// it the one thing that catches a `TextEditor` rendering as a white slab over
+/// this theme — a screenshot of the box — cannot be taken. Only useful with
+/// `--cell`, which is what selects the cell there is a value to edit.
+let editValue = CommandLine.arguments.contains("--edit-value")
+
 /// `--delete-row 2` marks that 1-based row of the browse to be deleted, and
 /// `--delete-row 2-4` marks a span of them. Nothing is sent: the rows are left
 /// crossed out with Save waiting, which is the state this exists to photograph.
@@ -695,6 +705,31 @@ func openValueViewer(model: AppModel, on spec: String) {
         NSApp.sendAction(action, to: item.target, from: item)
     }
 
+    /// Turns the pane into the box for `--edit-value`.
+    ///
+    /// By the flag rather than through a menu item, unlike the viewer above,
+    /// because the box has no menu item: it opens from a button in the strip,
+    /// and the whole of what this exists to photograph is what that button
+    /// produces.
+    ///
+    /// Loud for the reason the caller is loud. `ValueEdit` refuses a binary
+    /// value and one too long to lay out, and a capture that quietly got the
+    /// reading pane instead would be filed as a screenshot of the box — a
+    /// picture of the wrong thing is worse than no picture, because nobody
+    /// looks at it twice.
+    func openEditor() {
+        guard let offer = model.editedValue else {
+            fputs("no cell to edit: --edit-value needs --cell to have selected one\n", stderr)
+            exit(1)
+        }
+        if let why = offer.refusal {
+            fputs("this cell cannot be edited: \(why)\n", stderr)
+            exit(1)
+        }
+        model.isEditingValue = true
+        fputs("value editor    open\n", stderr)
+    }
+
     func poll() {
         let result = model.current
         if let index = result.table.columns.firstIndex(where: { $0.name == column }),
@@ -704,6 +739,18 @@ func openValueViewer(model: AppModel, on spec: String) {
                 row: min(max(0, row - 1), result.rowCount - 1), column: index)
             openViewerThroughMenu()
             fputs("cell selected   \(column) (column \(index)) row \(row)\n", stderr)
+            if editValue {
+                // A turn later than the selection above, deliberately. Setting
+                // the selection is what makes the inspector's `onChange` fire,
+                // and that is what ends an edit begun over a different cell;
+                // opening the box in the same turn has it closed again before
+                // it is ever drawn. Measured rather than reasoned about: the
+                // first capture taken with this flag came back showing the
+                // reading pane, twice, and came back showing the box with this.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    MainActor.assumeIsolated { openEditor() }
+                }
+            }
             return
         }
         if CFAbsoluteTimeGetCurrent() > deadline {

@@ -2032,12 +2032,16 @@ struct CellInspector: View {
         .onChange(of: identity) { editing?.isEditingValue = false }
     }
 
-    /// Which cell the pane is over, and whether it is open, as one string to
-    /// watch. Closing the viewer ends the edit as surely as moving off the cell
-    /// does: reopening it should not put anyone back inside a box they left.
+    /// Which cell the pane is over, as one string to watch.
+    ///
+    /// Not whether the pane is open, which this used to carry as well: opening
+    /// it changes the string too, so an edit begun in the same turn as the
+    /// pane — which is what `--edit-value` does, and the only way a capture can
+    /// reach the box at all — was ended before it could be drawn. Closing is
+    /// where that rule belonged, and `AppModel.toggleValueViewer` is where it
+    /// now is.
     private var identity: String {
-        guard let cell else { return "" }
-        return "\(cell.isExpanded)\u{1}\(cell.address)\u{1}\(cell.column)"
+        cell.map { $0.address + "\u{1}" + $0.column } ?? ""
     }
 
     private func strip(_ rendered: RenderedValue?, offer: ValueEdit?) -> some View {
@@ -2110,7 +2114,7 @@ struct CellInspector: View {
                         offer.isEditable ? Theme.textSecondary.color : Theme.textTertiary.color
                     )
                     .disabled(!offer.isEditable)
-                    .help(offer.refusal ?? "Edit this value")
+                    .help(offer.refusal ?? "Edit this value in a box")
                     .accessibilityLabel("Edit cell value")
                 }
 

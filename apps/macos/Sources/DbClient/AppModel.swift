@@ -1372,6 +1372,18 @@ final class AppModel {
     /// against a query result should not have to reopen it on the way across.
     var isValueViewerOpen = false
 
+    /// Opens or closes that pane, and ends any edit as it closes.
+    ///
+    /// One method rather than a `toggle()` at each of the three call sites,
+    /// because the two flags have to move together. A pane closed while the box
+    /// was open would come back as a box the next time it was opened — over
+    /// whatever cell was selected by then, seeded from that one's value, with
+    /// nothing on screen to say an edit had been resumed rather than started.
+    func toggleValueViewer() {
+        isValueViewerOpen.toggle()
+        if !isValueViewerOpen { isEditingValue = false }
+    }
+
     // MARK: - The record view
 
     /// Whether the Content pane is listing one row instead of drawing the grid.
@@ -1526,7 +1538,7 @@ final class AppModel {
                 : "row \(Self.formatted(s.row + 1))",
             rendering: rendering,
             isExpanded: isValueViewerOpen,
-            toggleExpanded: { [weak self] in self?.isValueViewerOpen.toggle() })
+            toggleExpanded: { [weak self] in self?.toggleValueViewer() })
     }
 
     /// A cell of a row that is not in the database yet.
@@ -1552,7 +1564,7 @@ final class AppModel {
             address: "new row \(Self.formatted(s.row - firstDraftRow + 1))",
             rendering: .text,
             isExpanded: isValueViewerOpen,
-            toggleExpanded: { [weak self] in self?.isValueViewerOpen.toggle() })
+            toggleExpanded: { [weak self] in self?.toggleValueViewer() })
     }
 
     // MARK: - Editing the browse result

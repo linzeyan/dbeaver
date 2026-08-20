@@ -406,6 +406,15 @@ func hexDump(_ bytes: some Collection<UInt8>) -> String {
 
 /// The pane under the inspector strip: one value, in full.
 struct CellValueViewer: View {
+    /// How tall this pane is, in both of the forms it takes.
+    ///
+    /// Shared with `CellValueEditor`, because the two have to be equal and were
+    /// not: a box that is a footer taller than the value it replaced moves the
+    /// grid every time the pencil is pressed, and takes the bottom row off it.
+    /// Two literals were two chances to change one and not the other, and the
+    /// first screenshot of the box caught exactly that.
+    static let height: CGFloat = 220
+
     let rendered: RenderedValue
 
     var body: some View {
@@ -423,7 +432,7 @@ struct CellValueViewer: View {
         // rows jump by a different distance every time. Twelve monospaced lines
         // is enough to see the shape of a document and short enough to leave the
         // grid usable at the window's minimum height.
-        .frame(height: 220)
+        .frame(height: Self.height)
         .background(Theme.background.color)
         .accessibilityLabel("Cell value")
     }
@@ -470,22 +479,53 @@ struct CellValueEditor: View {
     @State private var typed = ""
     @FocusState private var focused: Bool
 
+    /// How much of the pane the footer takes, leaving the rest for the box.
+    ///
+    /// Subtracted rather than added, so that the two together come to exactly
+    /// `CellValueViewer.height` and the grid does not move when the pencil is
+    /// pressed. See there.
+    private static let footerHeight: CGFloat = 30
+
+    /// The box, drawn the way `CompactField` draws the one-line field.
+    ///
+    /// A border, a fill and a focus ring, because without them this was
+    /// indistinguishable from the read-only pane it replaces — the complaint
+    /// `CellEditorRow` records word for word about the field it was given
+    /// instead of a proper one, reproduced here at twelve times the size. This
+    /// is a control that writes to a database, and the reader has to be able to
+    /// see that they are inside it.
+    private var box: some View {
+        TextEditor(text: $typed)
+            .font(Theme.Typography.mono)
+            .foregroundStyle(Theme.text.color)
+            // `TextEditor` draws its own opaque background, which on this theme
+            // would be the one light rectangle in the window.
+            .scrollContentBackground(.hidden)
+            .focused($focused)
+            .padding(.horizontal, Theme.Space.xs)
+            .padding(.vertical, Theme.Space.xs)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                    .fill(Theme.background.opacity(0.6).color)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                    .strokeBorder(
+                        focused ? Theme.accent.color : Theme.separator.color,
+                        lineWidth: 1)
+            )
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.sm)
+            // Applied after the padding, so the box and its inset together are
+            // the height, rather than the height plus the inset.
+            .frame(height: CellValueViewer.height - Self.footerHeight)
+            .background(Theme.background.color)
+            .accessibilityLabel("Edit cell value")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
-            TextEditor(text: $typed)
-                .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
-                // `TextEditor` draws its own opaque background, which on this
-                // theme would be the one light rectangle in the window.
-                .scrollContentBackground(.hidden)
-                .padding(.horizontal, Theme.Space.sm)
-                .padding(.vertical, Theme.Space.xs)
-                .focused($focused)
-                // The reading pane's height exactly, so pressing the pencil does
-                // not move the grid above it by a single pixel.
-                .frame(height: 220)
-                .background(Theme.background.color)
-                .accessibilityLabel("Edit cell value")
+            box
             footer
         }
         // Seeded and focused together, because a box that opens empty is
@@ -525,7 +565,7 @@ struct CellValueEditor: View {
             .help("Hold this value for the cell (⌘↩); nothing is sent until Save")
         }
         .padding(.horizontal, Theme.Space.md)
-        .padding(.vertical, Theme.Space.xs)
+        .frame(height: Self.footerHeight)
         .background(Theme.surfaceRaised.color)
     }
 }
