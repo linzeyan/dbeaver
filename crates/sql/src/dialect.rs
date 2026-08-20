@@ -95,6 +95,17 @@ pub struct Dialect {
     /// client that guessed `EXPLAIN` would offer a command that hands somebody a
     /// statement their database refuses.
     pub explain_prefix: Option<&'static str>,
+    /// The character this database's `LIKE` is told escapes a wildcard, written
+    /// after the pattern as `ESCAPE '<this>'`.
+    ///
+    /// A dialect fact for the reason `explain_prefix` is one, and `None` carries
+    /// the same meaning it does: ClickHouse's `LIKE` escapes with a backslash of
+    /// its own accord and has no `ESCAPE` clause to be told so. That makes it a
+    /// database this build cannot write a wildcard-safe `LIKE` for, rather than a
+    /// row nobody filled in — and a caller that guessed would hand somebody
+    /// either a statement that does not run or, worse, one where the `%` they
+    /// typed quietly matched anything.
+    pub like_escape: Option<&'static str>,
     /// What this dialect calls a keyword beyond [`keywords::COMMON`].
     pub(crate) extra_keywords: &'static [&'static str],
 }
@@ -205,6 +216,7 @@ const BASE: Dialect = Dialect {
     row_limit: RowLimit::Limit,
     default_row: Some("DEFAULT VALUES"),
     explain_prefix: Some("EXPLAIN"),
+    like_escape: Some("\\"),
     extra_keywords: &[],
 };
 
@@ -297,6 +309,11 @@ pub const CLICKHOUSE: Dialect = Dialect {
     // row of pure defaults is a thing this database cannot be asked for, rather
     // than a thing this table has not been told how to ask for.
     default_row: None,
+    // No `ESCAPE` clause exists here. ClickHouse's `LIKE` reads `\%` as a literal
+    // per cent already, so the escaping half is free — it is being told so in SQL
+    // that this database has no grammar for, and a client that appended the
+    // standard clause anyway would fail at the server on every filter.
+    like_escape: None,
     extra_keywords: keywords::CLICKHOUSE,
     ..BASE
 };
@@ -400,6 +417,33 @@ mod tests {
             }
         }
         assert_eq!(SQLITE.explain_prefix, Some("EXPLAIN QUERY PLAN"));
+    }
+
+    /// Every dialect that takes an `ESCAPE` clause says what it escapes with.
+    ///
+    /// The quiet failure is `explain_prefix`'s, one level further in: this goes
+    /// into a string literal, so an empty answer writes `ESCAPE ''` and a
+    /// two-character one writes an escape that is not a character — both of which
+    /// fail at the server rather than here, and only on the filters that use a
+    /// wildcard. ClickHouse is asserted by name so that a row left unfilled
+    /// cannot pass as the one database that genuinely has no clause.
+    #[test]
+    fn every_dialect_that_takes_an_escape_clause_says_what_it_escapes_with() {
+        for dialect in ALL {
+            match dialect.like_escape {
+                Some(escape) => assert_eq!(
+                    escape.chars().count(),
+                    1,
+                    "{} escapes with {escape:?}, which is not one character",
+                    dialect.name
+                ),
+                None => assert_eq!(
+                    dialect.name, "clickhouse",
+                    "{} has no escape clause and is not the one database without one",
+                    dialect.name
+                ),
+            }
+        }
     }
 
     /// The same two schemes, asked the question that does not guess.
