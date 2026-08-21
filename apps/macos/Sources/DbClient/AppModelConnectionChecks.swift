@@ -35,6 +35,7 @@ enum AppModelConnectionChecks {
         checkDeleteIsRefusedWhenNothingToDelete()
         checkSettleUnsavedConnectionEditsHonoursAnswers()
         checkFilterNarrowsByTitleAndAddress()
+        checkTheSidebarSeesTheFolders()
         checkSelectingARowDoesNotReadThePassword()
         checkSavingDoesNotWipeAnUnreadPassword()
         checkATypedPasswordIsNotOverwritten()
@@ -176,6 +177,50 @@ enum AppModelConnectionChecks {
             expect(
                 model.canDisconnect, false,
                 "with nothing for Disconnect to close")
+        }
+    }
+
+    /// The sidebar reads the same folders the file holds, and the filter reaches
+    /// through them.
+    ///
+    /// `visibleConnectionGroups` is what the sidebar draws and `visibleConnections`
+    /// is what the footer counts, so the two have to agree about how many there
+    /// are. They are computed separately — one groups, one does not — which is
+    /// exactly the arrangement that lets a header promise a row the list will not
+    /// draw.
+    private static func checkTheSidebarSeesTheFolders() {
+        MainActor.assumeIsolated {
+            func made(_ name: String, folder: String) -> SavedConnection {
+                SavedConnection(
+                    name: name, folder: folder,
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                        user: "ana"))
+            }
+            let model = makeModel(with: [
+                made("Acme prod", folder: "clients/acme"),
+                made("Scratch", folder: ""),
+                made("Bink prod", folder: "clients/bink")
+            ])
+
+            expect(
+                model.visibleConnectionGroups.map(\.path), ["", "clients/acme", "clients/bink"],
+                "the sidebar is handed the top level and then the folders")
+            expect(
+                model.visibleConnectionGroups.reduce(0) { $0 + $1.connections.count },
+                model.visibleConnections.count,
+                "and holds exactly what the footer counts")
+
+            // The filter reaches into folders rather than only over them. A search
+            // that only matched top-level rows would find nothing in a sidebar
+            // where everything has been filed.
+            model.connectionFilter = "Acme"
+            expect(
+                model.visibleConnectionGroups.map(\.path), ["clients/acme"],
+                "a filter leaves only the folders that still hold something")
+            expect(
+                model.visibleConnectionGroups.first?.connections.map(\.name), ["Acme prod"],
+                "and only what it matched inside them")
         }
     }
 

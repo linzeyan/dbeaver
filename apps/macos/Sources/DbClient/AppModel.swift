@@ -1032,6 +1032,14 @@ final class AppModel {
     /// The connections the sidebar draws.
     var visibleConnections: [SavedConnection] { connections.matching(connectionFilter) }
 
+    /// The same connections, in their folders, which is how the sidebar draws
+    /// them. Beside `visibleConnections` rather than in place of it, because the
+    /// count in the footer and the "no matches" state both ask how many there are
+    /// and neither cares where they sit.
+    var visibleConnectionGroups: [ConnectionList.Group] {
+        connections.grouped(connectionFilter)
+    }
+
     /// Asks before a connection and its password are forgotten.
     ///
     /// Injectable for the reason `confirmDeletion` is: the alert is a modal run

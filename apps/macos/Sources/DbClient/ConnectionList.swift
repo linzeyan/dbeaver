@@ -35,6 +35,57 @@ struct ConnectionList: Equatable {
         }
     }
 
+    /// One folder's worth of the list, as the sidebar draws it.
+    ///
+    /// `path` is `""` for the connections in no folder at all, which is why this
+    /// is a struct rather than a dictionary entry: the top level has to come
+    /// first and a dictionary has no first.
+    struct Group: Identifiable, Equatable {
+        var path: String
+        var connections: [SavedConnection]
+
+        var id: String { path }
+
+        /// What the header reads: the last segment, which is the folder's own
+        /// name. The path above it is the answer to "which acme", and putting the
+        /// whole of it in every header would spend the sidebar's width on the part
+        /// that is the same for every row under it.
+        var name: String { path.split(separator: "/").last.map(String.init) ?? path }
+    }
+
+    /// The connections a filter leaves, in their folders.
+    ///
+    /// The top level first and then the folders by path, which sorts a folder next
+    /// to the ones it shares a parent with — `clients/acme` beside `clients/bink`
+    /// and both before `internal`. Within a folder the file's own order is kept,
+    /// because that is the order `save` is careful not to disturb.
+    ///
+    /// A folder that the filter empties is not returned at all. A header over no
+    /// rows is a claim that a folder holds nothing, which is not what a search
+    /// found out.
+    func grouped(_ filter: String) -> [Group] {
+        var byPath: [String: [SavedConnection]] = [:]
+        for connection in matching(filter) {
+            byPath[connection.folderPath, default: []].append(connection)
+        }
+        return byPath.keys.sorted { left, right in
+            if left.isEmpty != right.isEmpty { return left.isEmpty }
+            return left.localizedStandardCompare(right) == .orderedAscending
+        }
+        .map { Group(path: $0, connections: byPath[$0] ?? []) }
+    }
+
+    /// Every folder any connection is in, for the form to offer.
+    ///
+    /// Read off the connections rather than kept as a list of its own, which is
+    /// the same decision the path on the entry is: a folder exists because
+    /// something is in it, so an empty one cannot be left behind by a connection
+    /// being moved out of it.
+    var folders: [String] {
+        let paths = Set(connections.map(\.folderPath).filter { !$0.isEmpty })
+        return paths.sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
     /// Where a connection is, or nil when it is not in the list.
     func index(of id: UUID) -> Int? {
         connections.firstIndex { $0.id == id }
@@ -83,11 +134,12 @@ struct ConnectionList: Equatable {
     /// untouched form is untouched. The colour counts: picking one is something
     /// somebody did, even before they typed a host.
     static func isWorthSaving(_ connection: SavedConnection) -> Bool {
-        // The two flags count for the reason the colour does: switching one on is
-        // something somebody did, and a form holding a decision about safety is
-        // the last one to discard as untouched.
-        guard connection.name.isEmpty, connection.color == .none, !connection.isReadOnly,
-            !connection.isProduction
+        // The folder and the two flags count for the reason the colour does:
+        // filing a connection or switching one of them on is something somebody
+        // did, and a form holding a decision about where this lives or how
+        // dangerous it is is the last one to discard as untouched.
+        guard connection.name.isEmpty, connection.color == .none, connection.folder.isEmpty,
+            !connection.isReadOnly, !connection.isProduction
         else { return true }
         // A scheme this build has no driver for arrived from a file somebody edited
         // or from `--conn`, and there is no suggestion to compare it with. Anything
