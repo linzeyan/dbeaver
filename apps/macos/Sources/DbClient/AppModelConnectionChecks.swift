@@ -49,6 +49,7 @@ enum AppModelConnectionChecks {
         checkTheBastionIsBuiltFromWhatWasTyped()
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
+        checkABastionSecretIsKeptTheWayThePasswordIs()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -651,6 +652,93 @@ enum AppModelConnectionChecks {
                 model.connectionPassword, "",
                 "and once the process has forgotten, the field is empty — which is the "
                     + "prompt on next launch")
+        }
+    }
+
+    /// A bastion's secret follows the connection's password: the same store, the
+    /// same launch, the same veto.
+    ///
+    /// Its own check rather than a line in the password one, because what it
+    /// guards against is the pair coming apart. Every branch of Save writes two
+    /// secrets now, and a branch that writes one leaves a connection that comes
+    /// back next launch with a password and no way through the bastion — which
+    /// reads as the bastion having changed, on the day somebody is trying to get
+    /// to a database rather than to debug a client.
+    private static func checkABastionSecretIsKeptTheWayThePasswordIs() {
+        MainActor.assumeIsolated {
+            let kept = SavedConnection(
+                name: "Behind a bastion",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db.internal", port: "5432", database: "sales",
+                    user: "ana", sshHost: "bastion.example", sshUser: "ana"))
+            let declined = SavedConnection(
+                name: "Not written down", savesPassword: false,
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db.internal", port: "5432", database: "sales",
+                    user: "ana", sshHost: "bastion.example", sshUser: "ana"))
+            defer {
+                for id in [kept.id, declined.id] {
+                    CredentialFile.shared.delete(for: id)
+                    ConnectionKeychain.delete(for: id)
+                    SessionPasswords.forget(id)
+                }
+            }
+
+            let model = makeModel(with: [kept])
+            model.preferences.passwordStorage = .thisMac
+            // Asked again after the setting is in place: the model selected this
+            // row while it was being built, and selecting the row it is already
+            // showing does nothing.
+            model.selectConnection(nil)
+            model.selectConnection(kept.id)
+            model.connectionPassword = "the database's own"
+            model.connectionSshSecret = "the bastion's"
+            model.saveConnection()
+
+            let next = makeModel(with: [kept])
+            next.preferences.passwordStorage = .thisMac
+            next.selectConnection(nil)
+            next.selectConnection(kept.id)
+            expect(
+                next.connectionPassword, "the database's own",
+                "the next launch has the database's password")
+            expect(
+                next.connectionSshSecret, "the bastion's",
+                "and the bastion's secret beside it, not instead of it")
+
+            // Where each one goes. This is the only place that decides which of
+            // the two the bastion is handed, and a check that stopped at the
+            // store would pass against a build that sent the database's password
+            // to the SSH server.
+            let bastion = AppModel.bastion(for: kept.settings, secret: next.connectionSshSecret)
+            expect(bastion?.password, "the bastion's", "and the bastion is handed its own")
+
+            // A secret field shows nothing either way, so somebody leaving the
+            // row after changing it would otherwise be told there was nothing to
+            // lose.
+            next.connectionSshSecret = "changed"
+            expect(
+                next.unsavedConnectionEdits?.fields, ["SSH secret"],
+                "changing it is an unsaved edit, and one with a name")
+
+            // The veto is one answer about one connection. An arrangement that
+            // kept the password out of the file and wrote the bastion's secret
+            // into it would be the flag half-honoured, on exactly the entries
+            // where somebody cared enough to turn it off.
+            let memory = makeModel(with: [declined])
+            memory.preferences.passwordStorage = .thisMac
+            memory.selectConnection(nil)
+            memory.selectConnection(declined.id)
+            memory.connectionSshSecret = "held"
+            memory.saveConnection()
+            // Written as a comparison rather than passed as `nil`, so that the
+            // check does not depend on how `expect`'s generic infers a literal.
+            expect(
+                CredentialFile.shared.sshSecret(for: declined.id) == nil, true,
+                "an entry that declined storage writes no bastion secret to disk")
+            expect(
+                SessionPasswords.password(for: declined.id, .ssh), "held",
+                "and keeps it in this process instead")
         }
     }
 
