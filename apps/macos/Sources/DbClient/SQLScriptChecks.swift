@@ -38,6 +38,7 @@ enum SQLScriptChecks {
         checkPrefixedPositionsSubtractTheWordsWeAdded()
         checkTheSchemeReachesTheDialect()
         checkOffsetsAreCountedInScalars()
+        checkDangerCrossesBack()
         if failures == 0 {
             fputs("splitter: all checks passed\n", stderr)
         } else {
@@ -267,6 +268,42 @@ enum SQLScriptChecks {
         expect(
             SQLScript.text(scanned(plain).tokenRange(at: 99), in: plain), "",
             "an offset the buffer cannot hold selects nothing")
+    }
+
+    /// The classifier's four answers survive the crossing, and a buffer with
+    /// nothing in it is not mistaken for one that could not be read.
+    ///
+    /// The rule is the core's and is tested there. What is tested here is the
+    /// path — a word made into a C string, read back, and matched against a raw
+    /// value — because every failure along it collapses to the same symptom.
+    /// `SQLScript.danger` answers `.modify` for anything it cannot read, so a
+    /// broken crossing is invisible on an ordinary connection and, on one marked
+    /// production, puts the question in front of every SELECT until nobody reads
+    /// it. That is the state in which the mark stops protecting anything.
+    private static func checkDangerCrossesBack() {
+        expect(
+            SQLScript.danger(of: "SELECT * FROM orders", scheme: "postgres"), .safe,
+            "a read crosses back as a read")
+        expect(
+            SQLScript.danger(of: "DELETE FROM orders", scheme: "postgres"), .modify,
+            "a write as a write")
+        expect(
+            SQLScript.danger(of: "TRUNCATE TABLE orders", scheme: "postgres"), .dangerous,
+            "a truncate as the thing a transaction may not hold")
+        expect(
+            SQLScript.danger(of: "DROP TABLE orders", scheme: "postgres"), .fatal,
+            "and a drop as fatal")
+
+        // The whole buffer rather than its first statement, which is the shape
+        // ⌥⌘R sends and the case a first-word rule would wave through.
+        expect(
+            SQLScript.danger(of: "SELECT 1;\nDROP TABLE orders;\nSELECT 2", scheme: "postgres"),
+            .fatal, "a script is answered by the worst thing in it")
+
+        // Distinct from an answer that could not be read, which is `.modify`.
+        expect(
+            SQLScript.danger(of: "", scheme: "postgres"), .safe,
+            "an empty buffer has nothing to ask about")
     }
 
     // MARK: - Harness
