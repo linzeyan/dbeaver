@@ -152,21 +152,48 @@ final class ResultSet {
 @Observable
 @MainActor
 final class AppModel {
-    // Navigator
-    private(set) var schemas: [SchemaInfo] = []
-    private(set) var relations: [String: [RelationInfo]] = [:]
-    var expanded: Set<String> = []
-    var selected: RelationInfo? { didSet { selectionChanged(from: oldValue) } }
+    // Navigator. The active session's, like the chrome below it: these describe
+    // one connection's database, and the same schema name means a different
+    // thing on the next server.
+    private(set) var schemas: [SchemaInfo] {
+        get { session.schemas }
+        set { session.schemas = newValue }
+    }
+    private(set) var relations: [String: [RelationInfo]] {
+        get { session.relations }
+        set { session.relations = newValue }
+    }
+    var expanded: Set<String> {
+        get { session.expanded }
+        set { session.expanded = newValue }
+    }
+    /// The `didSet` this used to carry, written out. A computed property cannot
+    /// have one, and the observer is not incidental: it is what clears the WHERE
+    /// and ORDER BY fields when a user picks a different table.
+    var selected: RelationInfo? {
+        get { session.selected }
+        set {
+            let previous = session.selected
+            session.selected = newValue
+            selectionChanged(from: previous)
+        }
+    }
     /// Set while `refresh` swaps `selected` for the freshly read value naming
     /// the same relation. The two are the same object to a user but not to
     /// `==` — `estimatedRows` moves on its own — and that assignment must not
     /// look like the user picking a table: `selectionChanged` clears the WHERE
     /// and ORDER BY fields, and a refresh that threw the filters away would be
     /// a worse answer than the stale pane it was pressed to fix.
-    private var isReselecting = false
+    private var isReselecting: Bool {
+        get { session.isReselecting }
+        set { session.isReselecting = newValue }
+    }
     /// Name filter for the navigator. A schema with hundreds of objects is the
     /// normal case, and scrolling to find one is the slowest thing a user does.
-    var navigatorFilter = ""
+    var navigatorFilter: String {
+        get { session.navigatorFilter }
+        set { session.navigatorFilter = newValue }
+    }
     /// Bumped by the View menu's Filter Objects item.
     ///
     /// Focus lives in a `@FocusState` inside the window's view tree, which an
@@ -182,35 +209,64 @@ final class AppModel {
     /// Recorded in the history on its way through, because moving between a
     /// table's structure and its rows is moving: Back from the rows should mean
     /// the description of the same table, not the table before it.
-    var activeTab: DetailTab = .content { didSet { recordVisit() } }
-    private(set) var columns: [ColumnInfo] = []
+    var activeTab: DetailTab {
+        get { session.activeTab }
+        set {
+            session.activeTab = newValue
+            recordVisit()
+        }
+    }
+    private(set) var columns: [ColumnInfo] {
+        get { session.columns }
+        set { session.columns = newValue }
+    }
     /// Which of those columns name one row, as the core decides it. Read
     /// alongside the columns, because every question about editing is a question
     /// about this one.
-    private(set) var rowIdentity: RowIdentity?
-    private(set) var indexes: [IndexInfo] = []
-    private(set) var foreignKeys: [RelationshipInfo] = []
-    private(set) var referencedBy: [RelationshipInfo] = []
-    private(set) var constraints: [ConstraintInfo] = []
-    private(set) var triggers: [TriggerInfo] = []
+    private(set) var rowIdentity: RowIdentity? {
+        get { session.rowIdentity }
+        set { session.rowIdentity = newValue }
+    }
+    private(set) var indexes: [IndexInfo] {
+        get { session.indexes }
+        set { session.indexes = newValue }
+    }
+    private(set) var foreignKeys: [RelationshipInfo] {
+        get { session.foreignKeys }
+        set { session.foreignKeys = newValue }
+    }
+    private(set) var referencedBy: [RelationshipInfo] {
+        get { session.referencedBy }
+        set { session.referencedBy = newValue }
+    }
+    private(set) var constraints: [ConstraintInfo] {
+        get { session.constraints }
+        set { session.constraints = newValue }
+    }
+    private(set) var triggers: [TriggerInfo] {
+        get { session.triggers }
+        set { session.triggers = newValue }
+    }
     /// The statements that would recreate the selected relation. Nil where the
     /// core cannot write them, which is what keeps the DDL section off a
     /// relation it would have nothing to show for.
-    private(set) var ddl: String?
+    private(set) var ddl: String? {
+        get { session.ddl }
+        set { session.ddl = newValue }
+    }
 
     // Content pane
-    let browseResult = ResultSet()
+    var browseResult: ResultSet { session.browseResult }
 
-    /// What each relation's Content tab was showing, so that leaving a table and
-    /// coming back is not the same as opening it.
-    private var browseStore = BrowseStore()
+    private var browseStore: BrowseStore {
+        get { session.browseStore }
+        set { session.browseStore = newValue }
+    }
 
-    /// The state to put back once the newly selected relation's rows arrive.
-    ///
-    /// Held rather than applied at selection time because there is nothing to
-    /// select yet: the grid is emptied and refilled by a round trip, and
-    /// `install` clears any selection made before that lands.
-    private var stateToRestore: BrowseState?
+    private var stateToRestore: BrowseState? {
+        get { session.stateToRestore }
+        set { session.stateToRestore = newValue }
+    }
 
     // Query pane
 
@@ -703,16 +759,24 @@ final class AppModel {
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
         initialFilter: String? = nil
     ) {
-        self.navigatorFilter = initialFilter ?? ""
         self.history = history
         self.favorites = favorites
         self.preferences = preferences
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
-        self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
+        // Onto the session directly, not through the forwarding properties, and
+        // down here rather than at the top. Two reasons, and the second is the
+        // one that would have been a defect rather than a compile error:
+        // reaching a computed property needs every stored one to have a value
+        // first, and `activeTab`'s setter records a visit — which the `didSet`
+        // it replaced would not have done, because Swift does not run those
+        // during initialisation. A window would have opened with a history
+        // entry nobody navigated to.
+        sessions[0].navigatorFilter = initialFilter ?? ""
+        sessions[0].activeTab = initialSQL == nil ? initialTab : .query
         // After `preferences`, which is what says where to look for the file.
         //
         // The first saved connection is selected rather than left for the user to

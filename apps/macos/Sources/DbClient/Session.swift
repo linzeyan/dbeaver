@@ -66,4 +66,68 @@ final class Session {
     /// would be a second answer with nothing to keep it honest — and the one
     /// that is drawn on screen would be the one nobody checked.
     var transaction: TransactionState = .none
+
+    // MARK: - Navigator
+
+    var schemas: [SchemaInfo] = []
+    var relations: [String: [RelationInfo]] = [:]
+    var expanded: Set<String> = []
+    var selected: RelationInfo?
+
+    /// Set while `refresh` swaps `selected` for the freshly read value naming
+    /// the same relation. The two are the same object to a user but not to
+    /// `==` — `estimatedRows` moves on its own — and that assignment must not
+    /// look like the user picking a table: `selectionChanged` clears the WHERE
+    /// and ORDER BY fields, and a refresh that threw the filters away would be
+    /// a worse answer than the stale pane it was pressed to fix.
+    var isReselecting = false
+
+    /// Name filter for the navigator. A schema with hundreds of objects is the
+    /// normal case, and scrolling to find one is the slowest thing a user does.
+    var navigatorFilter = ""
+
+    // MARK: - Detail
+
+    /// Which pane is showing.
+    ///
+    /// Recorded in the history on its way through, because moving between a
+    /// table's structure and its rows is moving: Back from the rows should mean
+    /// the description of the same table, not the table before it.
+    var activeTab: DetailTab = .content
+
+    var columns: [ColumnInfo] = []
+
+    /// Which of those columns name one row, as the core decides it. Read
+    /// alongside the columns, because every question about editing is a question
+    /// about this one.
+    var rowIdentity: RowIdentity?
+    var indexes: [IndexInfo] = []
+    var foreignKeys: [RelationshipInfo] = []
+    var referencedBy: [RelationshipInfo] = []
+    var constraints: [ConstraintInfo] = []
+    var triggers: [TriggerInfo] = []
+
+    /// The statements that would recreate the selected relation. Nil where the
+    /// core cannot write them, which is what keeps the DDL section off a
+    /// relation it would have nothing to show for.
+    var ddl: String?
+
+    // MARK: - Content pane
+
+    let browseResult = ResultSet()
+
+    /// What each relation's Content tab was showing, so that leaving a table and
+    /// coming back is not the same as opening it.
+    ///
+    /// Per session rather than per window, because its keys are `schema.name`
+    /// strings and the same string names a different table on a different
+    /// server — which is the same reason `reset` clears it.
+    var browseStore = BrowseStore()
+
+    /// The state to put back once the newly selected relation's rows arrive.
+    ///
+    /// Held rather than applied at selection time because there is nothing to
+    /// select yet: the grid is emptied and refilled by a round trip, and
+    /// `install` clears any selection made before that lands.
+    var stateToRestore: BrowseState?
 }

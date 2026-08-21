@@ -76,6 +76,23 @@ enum AppModelConnectionChecks {
                 "opening a connection writes through to the session")
             expect(model.sessions[0].isBusy, true, "and so does the flag the chrome spins on")
             expect(model.status, "Connecting…", "and the window reads back what it wrote")
+
+            // The navigator is the same claim as the label: it describes one
+            // connection's database, and the same schema name means a different
+            // thing on the next server. Written through the name the sidebar
+            // reads, so that a property put back onto the window is caught.
+            model.expanded.insert("public")
+            expect(
+                model.sessions[0].expanded.contains("public"), true,
+                "what the sidebar has open is the session's")
+            model.navigatorFilter = "orders"
+            expect(
+                model.sessions[0].navigatorFilter, "orders",
+                "and so is what it is filtered by")
+            model.activeTab = .structure
+            expect(
+                model.sessions[0].activeTab, .structure,
+                "and which detail pane is showing")
         }
     }
 
