@@ -2155,6 +2155,17 @@ final class AppLifecycle: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
+    /// Coming back to the front is the moment to find out whether the connection
+    /// survived being left alone.
+    ///
+    /// This delegate method rather than a timer, because a timer would ask over
+    /// and over while nobody was watching and would cost a round trip on every
+    /// open connection for an answer nobody had asked for. It also fires once at
+    /// launch, which is harmless: there is nothing open yet to ask about.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        MainActor.assumeIsolated { model?.probeOpenConnections() }
+    }
+
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         MainActor.assumeIsolated {
             guard mayDiscardUnsavedWork() else { return false }
