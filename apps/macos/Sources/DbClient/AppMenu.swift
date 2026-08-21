@@ -187,6 +187,16 @@ enum AppMenu {
         connect.keyEquivalentModifierMask = .command
         connect.target = connection
 
+        // ⇧⌘K, beside the item it undoes. The connections a window holds are
+        // switched between in the toolbar rather than here, because that is
+        // where the one in front is named; what belongs in the File menu is the
+        // pair that changes how many there are.
+        let disconnect = menu.addItem(
+            withTitle: "Disconnect",
+            action: #selector(ConnectionCommand.disconnect(_:)), keyEquivalent: "k")
+        disconnect.keyEquivalentModifierMask = [.command, .shift]
+        disconnect.target = connection
+
         // ⌘W, which was bound to nothing at all. That is not only a missing
         // convenience: the Settings panel is a second window with a close
         // button and no other way out, so without this item there is no
@@ -572,11 +582,20 @@ final class ConnectionCommand: NSObject, NSMenuItemValidation {
 
     @objc func presentConnection(_ sender: Any?) { model.presentConnection() }
 
-    /// Greyed out only while an attempt is in flight. Unlike every other command
-    /// here it does not need a connection — it is what a window with no
-    /// connection is for — and it stays available over a working session,
-    /// because changing database is the thing it exists to do.
-    func validateMenuItem(_ item: NSMenuItem) -> Bool { !model.isConnecting }
+    @objc func disconnect(_ sender: Any?) { model.closeSession(model.activeSession) }
+
+    /// Two items target this, and they are available in different states.
+    ///
+    /// Connect… is greyed out only while an attempt is in flight. Unlike every
+    /// other command here it does not need a connection — it is what a window
+    /// with none is for — and it stays available over a working session, because
+    /// opening another database is the thing it exists to do.
+    ///
+    /// Disconnect needs one to close, which is the whole of the difference.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(disconnect(_:)) { return model.canDisconnect }
+        return !model.isConnecting
+    }
 }
 
 /// The application menu's Settings item, as something a menu can send to.

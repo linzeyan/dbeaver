@@ -166,6 +166,16 @@ enum AppModelConnectionChecks {
             expect(model.sessions.count, 1, "a window always has a tab")
             expect(model.queryText, "", "and the one left is empty")
             expect(model.sessions[0].db == nil, true, "with nothing open on it")
+
+            // A window with nothing open shows the chooser. Closing the last
+            // connection has to reach that state, or the window is left drawing
+            // the panes of a database that has gone under a toolbar naming it.
+            expect(
+                model.isPresentingConnection, true,
+                "and the window is asking which database to open")
+            expect(
+                model.canDisconnect, false,
+                "with nothing for Disconnect to close")
         }
     }
 

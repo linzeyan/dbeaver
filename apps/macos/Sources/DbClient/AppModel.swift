@@ -894,6 +894,14 @@ final class AppModel {
     /// a session behind it to go back to.
     var canCancelConnection: Bool { db != nil }
 
+    /// Whether there is a connection to close.
+    ///
+    /// Its own property rather than a second reader of `canCancelConnection`,
+    /// which happens to test the same thing for an unrelated question — whether
+    /// the form has a session to be dismissed back to. Two questions that agree
+    /// today and have no reason to go on agreeing.
+    var canDisconnect: Bool { db != nil }
+
     /// What the session waiting behind the chooser is connected to, or nil before
     /// there is one.
     ///
@@ -1405,6 +1413,10 @@ final class AppModel {
         // Forgetting it is what stops its refusal from being reported against
         // whatever tab has taken its place.
         if sessionBeingOpened === closing { sessionBeingOpened = nil }
+        // A window showing nothing shows the chooser, which is what a window
+        // with no connection is for. Without this, closing the last one leaves
+        // the panes of a database that has gone, under a toolbar naming it.
+        if session.db == nil { isPresentingConnection = true }
         drain(closing)
     }
 
