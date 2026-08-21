@@ -858,6 +858,22 @@ final class AppModel {
     /// Empty while `deferredPassword` is set, because nothing has been read yet.
     private var savedConnectionPassword = ""
 
+    /// The form's SSH secret field: the bastion's password, or the passphrase on
+    /// its key. Which of the two it is depends on whether a key file was named,
+    /// and that is the only place the difference is decided — see
+    /// `AppModel.bastion(for:secret:)`.
+    ///
+    /// One field rather than two, because a connection has one bastion and a
+    /// bastion is reached one way. Two would make a form whose unused half is a
+    /// place to leave a secret nothing will ever send and nothing will ever
+    /// clear.
+    var connectionSshSecret = ""
+
+    /// What the store had for the connection being edited, kept for the reason
+    /// `savedConnectionPassword` is: a secret is not part of the value, so this
+    /// is the window's own answer to whether the one on screen is the one saved.
+    private var savedConnectionSshSecret = ""
+
     /// The connection whose stored password has deliberately not been read.
     ///
     /// Reading a secret is what raises the system panel asking the user to
@@ -883,6 +899,7 @@ final class AppModel {
     /// the one row with nothing on disk to restore it from.
     private var quickConnectDraft = AppModel.suggestedConnection()
     private var quickConnectPassword = ""
+    private var quickConnectSshSecret = ""
 
     /// A form with nothing in it yet: the first driver the core reports, with its
     /// own suggestion of a host and a port.
@@ -1031,7 +1048,12 @@ final class AppModel {
             // is the state it was left in, not a change to nothing.
             passwordChanged: hasUnreadPassword
                 ? !connectionPassword.isEmpty
-                : connectionPassword != savedConnectionPassword
+                : connectionPassword != savedConnectionPassword,
+            // The same rule for the same reason: the two secrets are deferred
+            // together, so one that has not been read means neither has.
+            sshSecretChanged: hasUnreadPassword
+                ? !connectionSshSecret.isEmpty
+                : connectionSshSecret != savedConnectionSshSecret
         )
     }
 
@@ -1119,11 +1141,14 @@ final class AppModel {
         if editedConnection == nil {
             quickConnectDraft = connectionDraft
             quickConnectPassword = connectionPassword
+            quickConnectSshSecret = connectionSshSecret
         }
         guard let id, let saved = connections.connection(id) else {
             connectionDraft = quickConnectDraft
             connectionPassword = quickConnectPassword
             savedConnectionPassword = ""
+            connectionSshSecret = quickConnectSshSecret
+            savedConnectionSshSecret = ""
             deferredPassword = nil
             return
         }
@@ -1140,6 +1165,12 @@ final class AppModel {
     private func deferPassword(of id: UUID) {
         connectionPassword = ""
         savedConnectionPassword = ""
+        // Both secrets move together through every branch below. They are wanted
+        // at one moment — when somebody presses Connect — so an arrangement where
+        // one is filled in and the other deferred would raise the system's panel
+        // for the second half of a single action.
+        connectionSshSecret = ""
+        savedConnectionSshSecret = ""
         // An entry that declined storage is answered from memory instead, and
         // filled in rather than deferred: there is no panel to raise and nothing
         // to authorise, so making somebody press Connect before the field showed
@@ -1148,6 +1179,8 @@ final class AppModel {
         if connections.connection(id)?.savesPassword == false {
             connectionPassword = SessionPasswords.password(for: id) ?? ""
             savedConnectionPassword = connectionPassword
+            connectionSshSecret = SessionPasswords.password(for: id, .ssh) ?? ""
+            savedConnectionSshSecret = connectionSshSecret
             deferredPassword = nil
             return
         }
@@ -1163,6 +1196,8 @@ final class AppModel {
             // nothing to wait until Connect for.
             connectionPassword = CredentialFile.shared.password(for: id) ?? ""
             savedConnectionPassword = connectionPassword
+            connectionSshSecret = CredentialFile.shared.sshSecret(for: id) ?? ""
+            savedConnectionSshSecret = connectionSshSecret
             deferredPassword = nil
         case .keychain:
             // Deferred, because this is the answer that asks. Clicking a row is
@@ -1186,6 +1221,9 @@ final class AppModel {
         // `ConnectionKeychain` for when that happens and why it is survivable.
         savedConnectionPassword = ConnectionKeychain.password(for: id) ?? ""
         connectionPassword = savedConnectionPassword
+        // In the same read, because it is the same moment and the same panel.
+        savedConnectionSshSecret = ConnectionKeychain.password(for: id, .ssh) ?? ""
+        connectionSshSecret = savedConnectionSshSecret
         deferredPassword = nil
     }
 
@@ -1194,9 +1232,12 @@ final class AppModel {
         guard settleUnsavedConnectionEdits() else { return }
         quickConnectDraft = Self.suggestedConnection()
         quickConnectPassword = ""
+        quickConnectSshSecret = ""
         connectionDraft = quickConnectDraft
         connectionPassword = ""
         savedConnectionPassword = ""
+        connectionSshSecret = ""
+        savedConnectionSshSecret = ""
         deferredPassword = nil
     }
 
@@ -1228,6 +1269,7 @@ final class AppModel {
             ConnectionKeychain.delete(for: connectionDraft.id)
             CredentialFile.shared.delete(for: connectionDraft.id)
             SessionPasswords.remember(connectionPassword, for: connectionDraft.id)
+            SessionPasswords.remember(connectionSshSecret, for: connectionDraft.id, .ssh)
             deferredPassword = nil
         } else {
             switch preferences.passwordStorage {
@@ -1241,6 +1283,7 @@ final class AppModel {
                 // fills the field in as soon as the row is clicked.
                 ConnectionKeychain.delete(for: connectionDraft.id)
                 CredentialFile.shared.save(connectionPassword, for: connectionDraft.id)
+                CredentialFile.shared.saveSshSecret(connectionSshSecret, for: connectionDraft.id)
                 deferredPassword = nil
             case .keychain:
                 CredentialFile.shared.delete(for: connectionDraft.id)
@@ -1252,6 +1295,13 @@ final class AppModel {
                 if !hasUnreadPassword || !connectionPassword.isEmpty {
                     ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
                 }
+                // The same guard, for the same reason: a secret left unread must
+                // not be written over with the empty field it is showing, or
+                // saving a change to the port would silently delete somebody's
+                // SSH passphrase.
+                if !hasUnreadPassword || !connectionSshSecret.isEmpty {
+                    ConnectionKeychain.save(connectionSshSecret, for: connectionDraft.id, .ssh)
+                }
                 deferredPassword = nil
             }
         }
@@ -1261,11 +1311,13 @@ final class AppModel {
         // session. Where the password was left unread this is a no-op: both
         // sides are already empty.
         savedConnectionPassword = connectionPassword
+        savedConnectionSshSecret = connectionSshSecret
         // The draft became a row and stays selected, so Quick connect goes back to
         // being empty rather than a second copy of what was just saved.
         if wasQuickConnect {
             quickConnectDraft = Self.suggestedConnection()
             quickConnectPassword = ""
+            quickConnectSshSecret = ""
         }
     }
 
@@ -1276,6 +1328,7 @@ final class AppModel {
         // Back to unread, rather than reading in order to restore. Revert undoes
         // what was typed, and what was typed over was an empty field.
         connectionPassword = hasUnreadPassword ? "" : savedConnectionPassword
+        connectionSshSecret = hasUnreadPassword ? "" : savedConnectionSshSecret
     }
 
     /// Puts a dragged connection above another and writes the new order down.
@@ -1303,6 +1356,8 @@ final class AppModel {
         connectionDraft = quickConnectDraft
         connectionPassword = quickConnectPassword
         savedConnectionPassword = ""
+        connectionSshSecret = quickConnectSshSecret
+        savedConnectionSshSecret = ""
         deferredPassword = nil
     }
 
@@ -1366,6 +1421,9 @@ final class AppModel {
             settings: ConnectionSettings(connectionString: connString))
         connectionPassword = ConnectionURL.password(in: connString) ?? ""
         savedConnectionPassword = ""
+        // A URL names no bastion, so there is no secret for one to carry.
+        connectionSshSecret = ""
+        savedConnectionSshSecret = ""
         deferredPassword = nil
         // No bastion, and stated rather than defaulted. `--conn` is a string and
         // nothing else: there is nowhere in it to name a bastion, and a run of

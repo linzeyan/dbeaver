@@ -551,9 +551,12 @@ struct UnsavedConnectionEdits: Equatable {
 extension SavedConnection {
     /// What is different between this saved connection and the form's current
     /// values, or nil when nothing is.
-    func unsavedEdits(against draft: SavedConnection, passwordChanged: Bool)
-        -> UnsavedConnectionEdits?
-    {
+    /// `sshSecretChanged` carries a default and `passwordChanged` does not,
+    /// because almost every caller is asking about a connection with no bastion
+    /// at all — and the ones that are not say so.
+    func unsavedEdits(
+        against draft: SavedConnection, passwordChanged: Bool, sshSecretChanged: Bool = false
+    ) -> UnsavedConnectionEdits? {
         var changedFields: [String] = []
 
         if self.name != draft.name {
@@ -623,6 +626,14 @@ extension SavedConnection {
             || self.settings.sshKeyPath != draft.settings.sshKeyPath
         {
             changedFields.append("SSH tunnel")
+        }
+
+        // Its own name rather than folded into "SSH tunnel" above. The four typed
+        // fields are on the form and a person can see for themselves what they
+        // changed; a secret field shows nothing either way, which is exactly why
+        // the sentence has to say it was touched.
+        if sshSecretChanged {
+            changedFields.append("SSH secret")
         }
 
         if passwordChanged {
