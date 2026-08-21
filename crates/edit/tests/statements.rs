@@ -8,9 +8,9 @@
 //! harness, which is where "this text is valid SQL" belongs.
 
 use dbconn::{
-    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
+    IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo,
+    TxStep, UniqueKeyInfo,
 };
 use dbedit::Edits;
 use std::collections::HashMap;
@@ -99,6 +99,10 @@ impl Driver for Fake {
                 columns: columns.iter().map(|c| c.to_string()).collect(),
             })
             .collect())
+    }
+
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
     }
 
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {

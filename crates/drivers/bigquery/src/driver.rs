@@ -8,8 +8,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 
 use crate::{BigQueryError, BigQuerySource, Rows, RowsCancel};
@@ -81,6 +82,13 @@ impl Driver for BigQuerySource {
     async fn server_info(&self) -> DbResult<ServerInfo> {
         Ok(ServerInfo::new("BigQuery", ""))
     }
+    /// A connection names one project and `schemas()` lists its datasets. The
+    /// level above a dataset is the project, and it is a connection-string
+    /// question here rather than something to browse.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(BigQuerySource::schemas(self).await?)
     }

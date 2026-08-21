@@ -13,8 +13,8 @@
 use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
-    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
+    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
     TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_duckdb::DuckSource;
@@ -98,6 +98,10 @@ impl Driver for Fixture {
     async fn server_info(&self) -> DbResult<ServerInfo> {
         unreachable!("DDL is rendered for a relation the caller already has")
     }
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         unreachable!("DDL is rendered for a relation the caller already has")
     }

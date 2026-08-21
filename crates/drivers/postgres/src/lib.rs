@@ -12,8 +12,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, RelationInfo, RelationshipInfo,
+    SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -457,6 +457,16 @@ impl PgSource {
         };
         self.session.batch_execute(&statement).await?;
         Ok(())
+    }
+
+    /// The databases on this server, for the level above the navigator root.
+    ///
+    /// List-only. PostgreSQL cannot change database within a session, so opening
+    /// one of these means opening another connection — which is what this
+    /// method's caller does with the answer.
+    pub async fn databases(&self) -> Result<Vec<DatabaseInfo>, PgError> {
+        let conn = self.acquire_connection().await?;
+        metadata::databases(&conn).await
     }
 
     /// Non-system schemas, for the navigator root.

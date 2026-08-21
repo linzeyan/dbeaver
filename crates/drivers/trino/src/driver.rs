@@ -10,9 +10,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{Rows, RowsCancel, TrinoError, TrinoSource, parts};
@@ -72,6 +72,12 @@ impl Driver for TrinoSource {
             scalar_text(self, "SELECT version()").await?,
         ))
     }
+    /// Two levels already flattened: a Trino catalog is carried in the
+    /// `SchemaInfo` name rather than drawn above it.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(TrinoSource::schemas(self).await?)
     }

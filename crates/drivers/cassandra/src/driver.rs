@@ -10,9 +10,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{CassandraError, CassandraSource, Rows, RowsCancel};
@@ -81,6 +81,11 @@ impl Driver for CassandraSource {
             scalar_text(self, "SELECT release_version FROM system.local").await?,
         ))
     }
+    /// A keyspace is Cassandra's single level and `schemas()` lists keyspaces.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(CassandraSource::schemas(self).await?)
     }

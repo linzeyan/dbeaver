@@ -14,9 +14,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ChError, ChSource, Rows, RowsCancel};
@@ -47,6 +47,12 @@ impl Driver for ChSource {
             scalar_text(self, "SELECT version()").await?,
         ))
     }
+    /// The same as MySQL: a ClickHouse database holds tables directly, and
+    /// `schemas()` reads `system.databases`. There is nothing above it.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(ChSource::schemas(self).await?)
     }

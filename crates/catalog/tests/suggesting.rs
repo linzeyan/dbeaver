@@ -8,8 +8,8 @@
 
 use dbcatalog::{Kind, Names};
 use dbconn::{
-    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
+    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
     TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use std::sync::Arc;
@@ -33,6 +33,10 @@ impl Driver for Fake {
     async fn server_info(&self) -> DbResult<ServerInfo> {
         unreachable!("completion never asks the server who it is")
     }
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(["public", "archive"]

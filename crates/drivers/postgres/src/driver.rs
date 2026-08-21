@@ -9,9 +9,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -43,6 +43,13 @@ impl Driver for PgSource {
             &scalar_text(self, "SELECT version()").await?,
         ))
     }
+    /// One of the two drivers here with a database level worth drawing: schemas
+    /// are real schemas, and the databases above them are unreachable from this
+    /// session.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(Some(PgSource::databases(self).await?))
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(PgSource::schemas(self).await?)
     }

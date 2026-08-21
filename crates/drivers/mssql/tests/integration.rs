@@ -1401,3 +1401,37 @@ fn ints(batch: &arrow::array::RecordBatch) -> impl Iterator<Item = i32> + '_ {
         .expect("id is a 32-bit integer");
     (0..column.len()).map(|i| column.value(i))
 }
+
+/// The databases that could be opened, and which one this session is on.
+///
+/// The trait's level is built from this driver's own richer `databases()`, so
+/// what is pinned here is the narrowing: offline databases dropped, and exactly
+/// one marked current. `DB_NAME()` is asked of the server rather than read out
+/// of the connection string, which is what makes the second assertion mean
+/// anything.
+#[tokio::test]
+#[ignore = "requires SQL Server; see the header of this file"]
+async fn databases_list_the_online_ones() {
+    let src = source().await;
+    let found = Driver::databases(&src)
+        .await
+        .expect("databases failed")
+        .expect("SQL Server has a database level");
+    let names: Vec<&str> = found.iter().map(|d| d.name.as_str()).collect();
+
+    assert!(names.contains(&"dbeaver_test"), "got {names:?}");
+    // `master` is online and ordinary, so it belongs here. Its presence is what
+    // shows the filter is dropping states rather than dropping system databases.
+    assert!(names.contains(&"master"), "got {names:?}");
+
+    let current: Vec<&str> = found
+        .iter()
+        .filter(|d| d.is_current)
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(
+        current,
+        ["dbeaver_test"],
+        "exactly one is the one we are on"
+    );
+}

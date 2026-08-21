@@ -13,9 +13,9 @@
 //! the constant it shows up in, with the reason.
 
 use dbconn::{
-    Browse, Capabilities, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor, DbResult,
-    Driver, IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor,
+    DatabaseInfo, DbResult, Driver, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
+    ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_postgres::PgSource;
 
@@ -192,6 +192,10 @@ impl Driver for Fixture {
     async fn server_info(&self) -> DbResult<ServerInfo> {
         unreachable!("DDL is rendered for a relation the caller already has")
     }
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         unreachable!("DDL is rendered for a relation the caller already has")
     }

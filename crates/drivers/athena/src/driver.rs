@@ -8,8 +8,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 
 use crate::{AthenaError, AthenaSource, Rows, RowsCancel};
@@ -69,6 +70,12 @@ impl Driver for AthenaSource {
     async fn server_info(&self) -> DbResult<ServerInfo> {
         Ok(ServerInfo::new("Athena", ""))
     }
+    /// A connection names one catalog and `schemas()` lists the databases in it,
+    /// so the level above is already chosen by the connection string.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(AthenaSource::schemas(self).await?)
     }

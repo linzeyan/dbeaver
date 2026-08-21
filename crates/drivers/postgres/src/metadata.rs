@@ -10,8 +10,8 @@
 //! side trivial.
 
 use dbconn::{
-    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use tokio_postgres::Client;
 
@@ -118,6 +118,34 @@ pub(crate) async fn schemas(client: &Client) -> Result<Vec<SchemaInfo>, PgError>
         )
         .await?;
     Ok(rows.iter().map(|r| SchemaInfo { name: r.get(0) }).collect())
+}
+
+/// Every database this login may open, and which one it is on.
+///
+/// `datallowconn` excludes the ones no connection is permitted to, and
+/// `datistemplate` excludes `template0` and `template1` — offering either as
+/// somewhere to open would be offering something that fails.
+///
+/// `current_database()` is asked of the server rather than read off the
+/// connection string, because a string that names no database still lands on
+/// one.
+pub(crate) async fn databases(client: &Client) -> Result<Vec<DatabaseInfo>, PgError> {
+    let rows = client
+        .query(
+            "SELECT datname, datname = current_database() \
+             FROM pg_catalog.pg_database \
+             WHERE datallowconn AND NOT datistemplate \
+             ORDER BY datname",
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|r| DatabaseInfo {
+            name: r.get(0),
+            is_current: r.get(1),
+        })
+        .collect())
 }
 
 pub(crate) async fn relations(client: &Client, schema: &str) -> Result<Vec<RelationInfo>, PgError> {
