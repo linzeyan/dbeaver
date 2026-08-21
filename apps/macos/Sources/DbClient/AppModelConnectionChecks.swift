@@ -22,6 +22,11 @@ enum AppModelConnectionChecks {
 
         // Set environment to use scratch directory for config
         setenv("XDG_CONFIG_HOME", scratch.path, 1)
+        // And for the cache, which is a second directory this suite writes to.
+        // Without this the checks below file trees under the developer's own
+        // `~/.cache`, where nothing deletes them and where a run of the checks
+        // would be indistinguishable from a connection they had actually opened.
+        setenv("XDG_CACHE_HOME", scratch.path, 1)
 
         failures = 0
         defer { ScratchDefaults.release() }
@@ -50,6 +55,8 @@ enum AppModelConnectionChecks {
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
         checkABastionSecretIsKeptTheWayThePasswordIs()
+        checkTheNavigatorCacheKeepsOneTreePerDatabase()
+        checkAReopenedConnectionDrawsLastTimesTreeAtOnce()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -652,6 +659,142 @@ enum AppModelConnectionChecks {
                 model.connectionPassword, "",
                 "and once the process has forgotten, the field is empty — which is the "
                     + "prompt on next launch")
+        }
+    }
+
+    /// Where the cache goes, and that a connection with two databases open on it
+    /// keeps two trees rather than one.
+    ///
+    /// The key is the part worth pinning. Both databases live in one file, so a
+    /// save that keyed on the connection alone would still write, still read
+    /// back, and still look right in every other check here — it would show
+    /// `sales`'s tables under `archive` for as long as it took the real ones to
+    /// arrive, which is precisely the window this cache exists to fill.
+    private static func checkTheNavigatorCacheKeepsOneTreePerDatabase() {
+        func tree(schema: String, relation: String) -> NavigatorCache.Tree {
+            NavigatorCache.Tree(
+                schemas: [SchemaInfo(name: schema)],
+                databases: [DatabaseInfo(name: "sales", isCurrent: true)],
+                relations: [
+                    schema: [
+                        RelationInfo(
+                            schema: schema, name: relation, kind: .table, estimatedRows: nil)
+                    ]
+                ])
+        }
+
+        let home = URL(filePath: "/Users/nobody")
+        expect(
+            NavigatorCache.cacheDirectory(xdgCacheHome: "/tmp/somewhere", home: home).path,
+            "/tmp/somewhere", "an absolute XDG_CACHE_HOME is where the cache goes")
+        expect(
+            NavigatorCache.cacheDirectory(xdgCacheHome: nil, home: home).path,
+            "/Users/nobody/.cache", "and unset means ~/.cache")
+        // The specification's rule, and not a detail: a relative value resolved
+        // against the working directory would give `make screenshot` a different
+        // cache from the one the application writes.
+        expect(
+            NavigatorCache.cacheDirectory(xdgCacheHome: "relative/cache", home: home).path,
+            "/Users/nobody/.cache", "while a relative one is ignored rather than resolved")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-navcache-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = NavigatorCache(directory: directory)
+
+        let connection = UUID()
+        let sales = NavigatorCacheKey(connection: connection, database: "sales")
+        let archive = NavigatorCacheKey(connection: connection, database: "archive")
+        // Written as a comparison rather than passed as `nil`, so that the check
+        // does not depend on how `expect`'s generic infers a bare literal.
+        expect(cache.load(sales) == nil, true, "nothing was filed, so nothing comes back")
+
+        cache.save(tree(schema: "public", relation: "orders"), for: sales)
+        cache.save(tree(schema: "history", relation: "invoices"), for: archive)
+        expect(
+            cache.load(sales)?.schemas.map(\.name), ["public"],
+            "each database on the connection keeps its own tree")
+        expect(
+            cache.load(archive)?.relations["history"]?.map(\.name), ["invoices"],
+            "and the second did not overwrite the first, which shares its file")
+
+        // Forgotten whole. A database left behind would be a tree filed under a
+        // uuid nothing will ever name again.
+        cache.forget(connection)
+        expect(cache.load(sales) == nil, true, "forgetting the connection takes the first")
+        expect(cache.load(archive) == nil, true, "and every other database on it")
+    }
+
+    /// Pressing Connect draws the tree from last time before the server has said
+    /// anything, and says that is what it is doing.
+    ///
+    /// The whole feature is the moment this check reads: between `open` filling
+    /// the session and the connection landing. Everything after that is the
+    /// live tree, so a check that waited would pass against a build with no
+    /// cache in it at all.
+    ///
+    /// Port 1 on the loopback for the reason `checkATypedPasswordIsNotOverwritten`
+    /// gives: the attempt is real and is refused at once, so nothing here
+    /// resolves a name or waits for a timeout.
+    private static func checkAReopenedConnectionDrawsLastTimesTreeAtOnce() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Reopened",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "127.0.0.1", port: "1", database: "sales",
+                    user: "user"))
+            defer { NavigatorCache.shared.forget(connection.id) }
+            NavigatorCache.shared.save(
+                NavigatorCache.Tree(
+                    schemas: [SchemaInfo(name: "public")],
+                    databases: [DatabaseInfo(name: "sales", isCurrent: true)],
+                    relations: [
+                        "public": [
+                            RelationInfo(
+                                schema: "public", name: "orders", kind: .table, estimatedRows: nil)
+                        ]
+                    ]),
+                for: NavigatorCacheKey(connection: connection.id, database: "sales"))
+
+            let model = makeModel(with: [connection])
+            model.selectConnection(connection.id)
+            expect(model.schemas.isEmpty, true, "a window that has not connected shows nothing")
+            expect(model.isTreeStale, false, "and has nothing to mark")
+
+            model.connectFromForm()
+            expect(
+                model.schemas.map(\.name), ["public"],
+                "pressing Connect draws last time's tree before the server has answered")
+            expect(
+                model.relations["public"]?.map(\.name), ["orders"],
+                "with the objects under it, which is the part that is worth waiting less for")
+            expect(model.isTreeStale, true, "and the window knows it is not the live one")
+            expect(
+                model.connectionRootDescription.hasSuffix(
+                    ", showing the objects from the last time it was open"), true,
+                "which is said out loud, because dimming is invisible to a screen reader")
+
+            // The same saved connection, pointed at a database nothing was filed
+            // under. This is the half a connection-only key would get wrong, and
+            // it would get it wrong silently: `sales`'s tables drawn under a tab
+            // that says `archive`.
+            let elsewhere = makeModel(with: [connection])
+            elsewhere.selectConnection(connection.id)
+            elsewhere.connectionDraft.settings.database = "archive"
+            elsewhere.connectFromForm()
+            expect(elsewhere.schemas.isEmpty, true, "another database on it starts empty")
+            expect(elsewhere.isTreeStale, false, "and is not marked as showing anything")
+
+            // Deleting the connection takes the tree with it, for the reason the
+            // password beside it goes: an entry nothing will ever show again
+            // should leave nothing behind that names somebody's tables.
+            let owner = makeModel(with: [connection])
+            owner.selectConnection(connection.id)
+            owner.deleteConnection()
+            expect(
+                NavigatorCache.shared.load(
+                    NavigatorCacheKey(connection: connection.id, database: "sales")) == nil, true,
+                "and forgetting the connection takes its tree off the disk")
         }
     }
 

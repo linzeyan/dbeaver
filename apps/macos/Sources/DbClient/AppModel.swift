@@ -172,6 +172,10 @@ final class AppModel {
     /// things in `NavigatorView` and a condition written four times is one that
     /// will one day be written three times.
     var hasDatabaseLevel: Bool { !(databases ?? []).isEmpty }
+    var isTreeStale: Bool {
+        get { session.isTreeStale }
+        set { session.isTreeStale = newValue }
+    }
     private(set) var relations: [String: [RelationInfo]] {
         get { session.relations }
         set { session.relations = newValue }
@@ -600,6 +604,22 @@ final class AppModel {
     private(set) var connectionState: StatusDot.State {
         get { session.connectionState }
         set { session.connectionState = newValue }
+    }
+
+    /// What the navigator's root row is called out loud.
+    ///
+    /// The stale mark is a dimmed tree, and dimming is not a thing a screen
+    /// reader can report — so the one fact the sighted reading carries has to be
+    /// said in words here, or a tree that came off disk is announced to some
+    /// people as the live one.
+    ///
+    /// On the model rather than inside the row, so that a check can read it. A
+    /// sentence built in a view body is one nothing but a person looking at the
+    /// screen can see, and this is the half of the mark no screenshot shows.
+    var connectionRootDescription: String {
+        let named = "Connection \(connectionLabel), \(connectionState.label)"
+        guard isTreeStale else { return named }
+        return named + ", showing the objects from the last time it was open"
     }
     private(set) var connectionColor: ConnectionColor {
         get { session.connectionColor }
@@ -1353,6 +1373,11 @@ final class AppModel {
         ConnectionKeychain.delete(for: saved.id)
         CredentialFile.shared.delete(for: saved.id)
         SessionPasswords.forget(saved.id)
+        // Not a secret, and deleted all the same. What is left otherwise is a
+        // list of somebody's table names filed under a uuid nothing will ever
+        // name again — which is the same shape of leftover as the passwords
+        // above, and no easier to find years later.
+        NavigatorCache.shared.forget(saved.id)
         connectionDraft = quickConnectDraft
         connectionPassword = quickConnectPassword
         savedConnectionPassword = ""
@@ -1492,6 +1517,23 @@ final class AppModel {
         (NSHomeDirectory() as NSString).appendingPathComponent(".ssh/known_hosts")
     }
 
+    /// Which database a connection string opens, as the cache keys on it.
+    ///
+    /// The path with its leading slash off, which for a file-shaped database is
+    /// the file itself — one tree per file is the same rule as one tree per
+    /// database, spelled the way that driver spells it.
+    ///
+    /// Nil rather than the empty string for something that is not a URL at all.
+    /// An empty key would file every unparseable string under one entry, and the
+    /// first one's tree would be handed to the second.
+    nonisolated static func database(in connString: String) -> String? {
+        guard let parts = URLComponents(string: connString), parts.scheme != nil else {
+            return nil
+        }
+        let path = parts.path
+        return path.hasPrefix("/") ? String(path.dropFirst()) : path
+    }
+
     /// The same connection string, pointed at a different database.
     ///
     /// `URLComponents` rather than string surgery, because the password in that
@@ -1561,6 +1603,23 @@ final class AppModel {
         // connection still answering queries while this one is in the air.
         filling.connString = connString
         filling.bastion = bastion
+        // Keyed now, while the draft is still the row being opened. By the time
+        // the connection lands the chooser may be showing something else, and a
+        // tree filed under the wrong connection is worse than no tree at all.
+        filling.cacheKey = Self.database(in: connString).map {
+            NavigatorCacheKey(connection: connectionDraft.id, database: $0)
+        }
+        // The tree as it was, drawn at once and marked stale. What this saves is
+        // the part of opening a connection somebody actually waits through — the
+        // metadata round trips, which across a tunnel are most of it — and what
+        // it costs is a tree that may name a table somebody dropped yesterday.
+        // That trade only works because it is announced: see `isTreeStale`.
+        if let key = filling.cacheKey, let tree = NavigatorCache.shared.load(key) {
+            filling.schemas = tree.schemas
+            filling.databases = tree.databases
+            filling.relations = tree.relations
+            filling.isTreeStale = true
+        }
         filling.connectionLabel = Self.label(for: connString)
         filling.connectionState = .connecting
         filling.status = "Connecting…"
@@ -1594,6 +1653,8 @@ final class AppModel {
         schemas = inventory.schemas
         databases = inventory.databases
         relations = inventory.relations
+        isTreeStale = false
+        remember(inventory)
         connectionLabel = Self.label(for: connString)
         connectionColor = connectionDraft.color
         safety = ConnectionSafety(of: connectionDraft)
@@ -1749,6 +1810,24 @@ final class AppModel {
             capabilities: (try? db.capabilities()) ?? .unknown)
     }
 
+    /// Files the tree just read, so that the next connection to this database
+    /// can draw it before the server has answered.
+    ///
+    /// Only for a connection that is in the list. Quick connect and `--conn`
+    /// have an id minted for this window, which nothing will ever ask about
+    /// again — a file under it would be one nothing reads and nothing deletes,
+    /// left behind once per one-off connection for as long as the machine lives.
+    private func remember(_ inventory: Inventory) {
+        guard let key = session.cacheKey, connections.connection(key.connection) != nil else {
+            return
+        }
+        NavigatorCache.shared.save(
+            NavigatorCache.Tree(
+                schemas: inventory.schemas, databases: inventory.databases,
+                relations: inventory.relations),
+            for: key)
+    }
+
     private struct Inventory: Sendable {
         let schemas: [SchemaInfo]
         /// The level above the schemas, where the engine has one.
@@ -1802,6 +1881,12 @@ final class AppModel {
             // kind of change somebody presses refresh for.
             databases = inventory.databases
             relations = inventory.relations
+            // Refresh is the one thing somebody presses *because* the tree is
+            // wrong, so what it read is the best answer anything has — and the
+            // next launch should start from it rather than from whatever was
+            // filed the last time this connection opened.
+            isTreeStale = false
+            remember(inventory)
             // A dropped schema should not come back already open if one of the
             // same name is created later; the user never expanded that one.
             expanded.formIntersection(inventory.schemas.map(\.name))

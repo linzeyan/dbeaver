@@ -30,7 +30,7 @@ struct ServerInfo: Decodable, Hashable {
 /// what a *statement* did and not for finding out what a *database is*, because
 /// the answer arrives after the control has already been drawn — and a control
 /// that is drawn and then apologises has already made a promise.
-struct Capabilities: Decodable, Hashable {
+struct Capabilities: Codable, Hashable {
     /// Whether this connection can be taken out of autocommit at all.
     let transactional: Bool
 
@@ -62,7 +62,7 @@ struct Capabilities: Decodable, Hashable {
 /// SQLite has one file and nothing above it. The absence is `nil` rather than an
 /// empty array, so the navigator can tell "no such level here" from "this login
 /// can see none of them".
-struct DatabaseInfo: Decodable, Hashable, Identifiable {
+struct DatabaseInfo: Codable, Hashable, Identifiable {
     let name: String
     /// Whether this is the one the open connection is on. Not derivable from the
     /// connection string: an engine may have sent the session somewhere else at
@@ -77,12 +77,12 @@ struct DatabaseInfo: Decodable, Hashable, Identifiable {
     }
 }
 
-struct SchemaInfo: Decodable, Hashable, Identifiable {
+struct SchemaInfo: Codable, Hashable, Identifiable {
     let name: String
     var id: String { name }
 }
 
-enum RelationKind: String, Decodable, Hashable {
+enum RelationKind: String, Codable, Hashable {
     case table
     case view
     case materializedView = "materializedview"
@@ -113,7 +113,7 @@ enum RelationKind: String, Decodable, Hashable {
     }
 }
 
-struct RelationInfo: Decodable, Hashable, Identifiable {
+struct RelationInfo: Codable, Hashable, Identifiable {
     let schema: String
     let name: String
     let kind: RelationKind
