@@ -43,12 +43,30 @@ final class Database: @unchecked Sendable {
     /// export itself belongs on the cursor beside the formats that do not.
     fileprivate var rawHandle: OpaquePointer { handle }
 
-    init(connString: String) throws {
+    /// Ten seconds by default, which is the number this application picks rather
+    /// than one any database suggests. It is long enough that a loaded server on
+    /// a slow link still opens and short enough that a wrong host is a wrong host
+    /// rather than a window that never comes back.
+    init(connString: String, timeoutSeconds: UInt32 = 10) throws {
         var err: UnsafeMutablePointer<CChar>?
-        guard let h = db_connect(connString, &err) else {
+        guard let h = db_connect(connString, timeoutSeconds, &err) else {
             throw DbError(description: Database.take(&err) ?? "connect failed")
         }
         handle = h
+    }
+
+    /// Whether the database is still on the other end.
+    ///
+    /// A round trip, so it belongs off the main actor with everything else here.
+    /// It queues behind whatever this connection is running, which is why the
+    /// caller asks only when the session is idle — a ping that waited out a slow
+    /// statement would report the connection healthy at the moment it finally
+    /// stopped being interesting.
+    func ping() -> Bool {
+        var err: UnsafeMutablePointer<CChar>?
+        let ok = db_ping(handle, &err) == 0
+        if !ok { _ = Database.take(&err) }
+        return ok
     }
 
     deinit { db_free(handle) }
