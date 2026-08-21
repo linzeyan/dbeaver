@@ -104,6 +104,11 @@ PGTLS_URL      := postgres://bench:bench@127.0.0.1:$(PGTLS_PORT)/bench?sslmode=r
 MONGO_URL      := mongodb://127.0.0.1:$(MONGO_PORT)
 REDIS_URL      := redis://127.0.0.1:$(REDIS_PORT)/0
 CASSANDRA_URL  := cassandra://127.0.0.1:$(CASSANDRA_PORT)
+# The password is percent-encoded because it holds a `!`; which database it
+# names is explained where it is checked. Here rather than written out at each
+# use, now that starting this server and checking it both need it: two copies of
+# a login string are two places for it to drift.
+MSSQL_URL      := sqlserver://sa:Str0ng%21Passw0rd@127.0.0.1:$(MSSQL_PORT)/master?TrustServerCertificate=true
 TRINO_URL      := trino://127.0.0.1:$(TRINO_PORT)
 FLIGHTSQL_URL  := flightsql://flight_username:$(FLIGHTSQL_PASSWORD)@127.0.0.1:$(FLIGHTSQL_PORT)/
 
@@ -663,8 +668,15 @@ db-check-mysql: ## Fail unless the MySQL test container is reachable
 db-up-mssql: ## Start the SQL Server test container
 	@docker compose up -d mssql
 	@echo "waiting for sql server (emulated; this takes a while)..."
+# Waited for by logging in rather than with `nc -z`, for the reason `db-up-ssh`
+# gives at greater length: SQL Server listens a long time before it will accept
+# `sa`, so a port that answers is not a server that is up. What the `-z` loop
+# bought was a `db-check-mssql` failing with `Login failed for user 'sa'` against
+# a container that was half a minute from being fine — a message that reads like
+# a wrong password, on the one server here whose password has to be spelled
+# twice.
 	@for i in $$(seq 1 180); do \
-		nc -z 127.0.0.1 $(MSSQL_PORT) >/dev/null 2>&1 && break; \
+		$(DBCHECK) "$(MSSQL_URL)" $(DBCHECK_TIMEOUT) >/dev/null 2>&1 && break; \
 		sleep 1; \
 	done
 
@@ -682,8 +694,7 @@ db-check-mssql: ## Fail unless the SQL Server test container is reachable
 # `master` rather than `dbclient_contract`, which the contract suite creates:
 # see the note on `db-check-mysql`. Reaching for it on a fresh container did not
 # even fail clearly — the missing database surfaced as a TDS read error.
-	@$(DBCHECK) "sqlserver://sa:Str0ng%21Passw0rd@127.0.0.1:$(MSSQL_PORT)/master?TrustServerCertificate=true" \
-		$(DBCHECK_TIMEOUT)
+	@$(DBCHECK) "$(MSSQL_URL)" $(DBCHECK_TIMEOUT)
 
 # Alone among these targets this one only starts a server, because ClickHouse's
 # HTTP interface refuses a body holding more than one statement. seed.sql can
