@@ -22,6 +22,7 @@ use session::Session;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::ptr;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::runtime::Runtime;
 
 fn runtime() -> &'static Runtime {
@@ -99,11 +100,20 @@ pub struct DbCursor {
 /// client that guesses between them is one that connects to the wrong database
 /// without saying so.
 ///
+/// `timeout_secs` bounds the whole attempt, not the TCP connection inside it.
+/// That is the case worth bounding: a server that accepts the socket and then
+/// never finishes the handshake is indistinguishable, from here, from one that
+/// is merely slow, and the driver beneath has no reason of its own to stop
+/// waiting. 0 means wait as long as it takes, which is not a mode the
+/// application asks for — it is here so that a caller with its own limit is not
+/// made to invent a second one.
+///
 /// # Safety
 /// `conn_str` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_connect(
     conn_str: *const c_char,
+    timeout_secs: u32,
     err: *mut *mut c_char,
 ) -> *mut DbHandle {
     if conn_str.is_null() {
@@ -117,7 +127,24 @@ pub unsafe extern "C" fn db_connect(
             return ptr::null_mut();
         }
     };
-    match runtime().block_on(registry::connect(s)) {
+    let opened = runtime().block_on(async {
+        let attempt = registry::connect(s);
+        if timeout_secs == 0 {
+            return attempt.await;
+        }
+        match tokio::time::timeout(Duration::from_secs(u64::from(timeout_secs)), attempt).await {
+            Ok(outcome) => outcome,
+            // Deliberately without the connection string, for the reason the
+            // parse failure above is: it holds a password, and this message is
+            // certain to be shown on screen. What is worth saying is that the
+            // limit was reached rather than that the database refused, because
+            // those two send somebody to different places to look.
+            Err(_) => Err(dbconn::DbError::new(format!(
+                "the database did not answer within {timeout_secs}s"
+            ))),
+        }
+    });
+    match opened {
         Ok(driver) => {
             let driver: Arc<dyn Driver> = Arc::from(driver);
             let scheme = registry::scheme_of(s);
@@ -274,6 +301,39 @@ pub unsafe extern "C" fn db_capabilities_json(
     }
     let h = unsafe { &*handle };
     json_result(&h.driver.capabilities(), err)
+}
+
+/// Asks the database whether this connection is still good. 0 if it is, -1 if
+/// it is not, with `err` set.
+///
+/// A real round trip on the session's own connection, which is the only thing
+/// that answers the question being asked: a TCP socket stays open long after the
+/// server behind it has stopped, and the operating system will not say so until
+/// something is written. `server_info` is what it sends, because every driver
+/// already has one and each has already chosen the cheapest thing its database
+/// will answer.
+///
+/// It queues behind whatever the session is running, since that connection is
+/// serial. A caller that pings while a statement is in flight will therefore
+/// wait for the statement — so ask when the connection is idle, which is also
+/// the only time the answer means anything.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_ping(handle: *mut DbHandle, err: *mut *mut c_char) -> c_int {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.driver.server_info()) {
+        Ok(_) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
 }
 
 /// Everything an editor asks about one buffer of SQL, in one answer.

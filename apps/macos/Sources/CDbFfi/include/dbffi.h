@@ -56,7 +56,15 @@ typedef struct DbCursor DbCursor;
 // All calls block. Do not call from the main thread.
 // Any `err` out-parameter, when set, must be released with db_string_free.
 
-DbHandle* db_connect(const char* conn_str, char** err);
+// timeout_secs bounds the whole attempt rather than the TCP connection inside
+// it: a server that accepts the socket and never finishes the handshake looks,
+// from here, exactly like a slow one. 0 waits as long as it takes.
+DbHandle* db_connect(const char* conn_str, uint32_t timeout_secs, char** err);
+
+// Whether this connection is still good: 0 yes, -1 no with err set. A real round
+// trip, because an open socket says nothing about the server behind it. Queues
+// behind whatever the session is running, so ask when it is idle.
+int db_ping(DbHandle* handle, char** err);
 void db_free(DbHandle* handle);
 
 // Asks the server to abandon what this handle is running. Returns 0 when the
