@@ -153,6 +153,24 @@ enum ConnectionChecks {
             DriverCatalog.named("oracle") == nil, true,
             "the form cannot offer a database this build has no driver for")
 
+        // The picker's order and the default are two different questions, and
+        // the tempting fix — sorting `all` — answers both with one answer. It
+        // would move what a new connection opens on from PostgreSQL to whichever
+        // name sorts first, which is a change nobody asked for and one that no
+        // other check here would notice.
+        expect(
+            DriverCatalog.inNameOrder.map(\.label),
+            DriverCatalog.all.map(\.label).sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending
+            },
+            "the picker offers every database, by name")
+        expect(
+            DriverCatalog.inNameOrder.count, DriverCatalog.all.count,
+            "and offers all of them, not a subset that happened to sort")
+        expect(
+            DriverCatalog.first?.scheme, DriverCatalog.all.first?.scheme,
+            "while the empty form still opens on the one the core put first")
+
         // The answer has to cross the FFI as itself. A decoder that quietly read
         // a missing key as `false` would take the SSL section off the one form
         // that has it, and nothing else in the window would contradict that.

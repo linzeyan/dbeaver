@@ -53,6 +53,22 @@ enum DriverCatalog {
     /// named here, so the core decides which database is the obvious default.
     static var first: DriverInfo? { all.first }
 
+    /// The same list, by name, for anything that shows all of them at once.
+    ///
+    /// The catalog's own order is the registry's, which is neither alphabetical
+    /// nor anything a reader can infer — so a menu of fifteen in that order is a
+    /// menu you have to read from the top every time. Sorted here rather than in
+    /// `all` because `first` reads the catalog's order on purpose: sorting the
+    /// list everything shares would quietly move the default a new connection
+    /// opens on from PostgreSQL to whatever sorts first.
+    ///
+    /// `localizedStandardCompare` rather than `<`, so the order is the one the
+    /// reader's own language puts things in and digits in a name sort the way
+    /// somebody counting would.
+    static let inNameOrder: [DriverInfo] = all.sorted {
+        $0.label.localizedStandardCompare($1.label) == .orderedAscending
+    }
+
     static func named(_ scheme: String) -> DriverInfo? {
         all.first { $0.scheme == scheme }
     }

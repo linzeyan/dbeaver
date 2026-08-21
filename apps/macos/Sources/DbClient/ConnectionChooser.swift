@@ -470,7 +470,7 @@ struct ConnectionChooser: View {
             // what an object is (`RelationKind`).
             label("Kind")
             Picker("", selection: driverBinding) {
-                ForEach(DriverCatalog.all) { driver in
+                ForEach(DriverCatalog.inNameOrder) { driver in
                     Text(driver.label).tag(driver.scheme)
                 }
                 // A connection string naming a driver this build does not have
