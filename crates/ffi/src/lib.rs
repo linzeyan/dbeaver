@@ -709,6 +709,35 @@ pub unsafe extern "C" fn db_names_forget(handle: *mut DbHandle) {
     runtime().block_on(h.names.forget());
 }
 
+/// The databases on this server as a JSON array, or JSON `null` where the
+/// engine has no level above schemas. Release with `db_string_free`.
+///
+/// `null` and `[]` are different answers and both are reachable: SQLite has no
+/// database level at all, while a SQL Server login that can see none of them
+/// has the level and an empty list. A front end that collapsed the two would
+/// draw a level with nothing under it, or hide one that exists.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_databases_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.driver.databases()) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Non-system schemas as a JSON array. Release with `db_string_free`.
 ///
 /// # Safety

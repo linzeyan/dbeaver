@@ -46,7 +46,7 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
-    db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
+    db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
     db_foreign_keys_json, db_free, db_import, db_indexes_json, db_names_forget, db_query,
     db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format,
@@ -132,6 +132,43 @@ fn test_cancel_null_handle() {
     assert_eq!(result, -1);
     assert!(!err.is_null(), "db_cancel must say why it failed");
     unsafe { db_string_free(err) };
+}
+
+#[test]
+fn test_databases_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_databases_json(ptr::null_mut(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_databases_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// The `null` half of the contract, on the one driver that needs no server. A
+// front end reads this to decide whether to draw a database level at all, so
+// "no such level" arriving as `[]` would be a level with nothing under it.
+#[test]
+fn an_engine_without_a_database_level_answers_null() {
+    let path = std::env::temp_dir().join("dbffi-databases-null.db");
+    // Zero bytes is a valid SQLite database, and this driver refuses a path that
+    // is not already a file.
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = std::ffi::CString::new(format!("sqlite://{}", path.display())).unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let raw = unsafe { db_databases_json(handle, &mut err) };
+    assert!(!raw.is_null(), "db_databases_json should answer");
+    let json = unsafe { std::ffi::CStr::from_ptr(raw) }
+        .to_str()
+        .unwrap()
+        .to_string();
+    unsafe { db_string_free(raw) };
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+
+    assert_eq!(json, "null", "SQLite has no level above schemas");
 }
 
 // Test db_schemas_json with null handle

@@ -111,6 +111,12 @@ final class Database: @unchecked Sendable {
 
     // MARK: - Metadata
 
+    /// `nil` where this engine has no database level, which a JSON `null`
+    /// carries across as an absent optional rather than an empty array.
+    func databases() throws -> [DatabaseInfo]? {
+        try decodeJSON(db_databases_json(handle, &errOut), as: [DatabaseInfo]?.self)
+    }
+
     func schemas() throws -> [SchemaInfo] {
         try decodeJSON(db_schemas_json(handle, &errOut), as: [SchemaInfo].self)
     }

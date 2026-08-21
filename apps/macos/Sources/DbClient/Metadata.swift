@@ -55,6 +55,28 @@ struct Capabilities: Decodable, Hashable {
     }
 }
 
+/// One database on the server this connection reached.
+///
+/// Only some engines have this level: MySQL and SQL Server put databases above
+/// schemas, PostgreSQL can list them but cannot switch within a session, and
+/// SQLite has one file and nothing above it. The absence is `nil` rather than an
+/// empty array, so the navigator can tell "no such level here" from "this login
+/// can see none of them".
+struct DatabaseInfo: Decodable, Hashable, Identifiable {
+    let name: String
+    /// Whether this is the one the open connection is on. Not derivable from the
+    /// connection string: an engine may have sent the session somewhere else at
+    /// login, and a default database that is missing leaves the server to pick.
+    let isCurrent: Bool
+
+    var id: String { name }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case isCurrent = "is_current"
+    }
+}
+
 struct SchemaInfo: Decodable, Hashable, Identifiable {
     let name: String
     var id: String { name }
