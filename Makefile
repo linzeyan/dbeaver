@@ -52,6 +52,11 @@ export PGTLS_CA := $(PGTLS_CERTS)/ca.crt
 # reason as PGTLS_CA above: the tests read the file from where the Makefile put
 # it, rather than from a path compiled into them.
 export SSH_KNOWN_HOSTS := $(CURDIR)/target/ssh/known_hosts
+# Where `db-up-ssh` generates the fixture's key pairs, exported for the same
+# reason. Three of them, because the three answers a key can produce need three
+# different keys to produce them: one the server knows, one behind a passphrase,
+# and one nobody has authorised.
+export SSH_KEY_DIR := $(CURDIR)/target/ssh
 
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
@@ -767,6 +772,27 @@ db-up-ssh: ## Start the SSH server the tunnel tests connect through
 # stale file would fail as a changed key — which is the one failure here that
 # is supposed to mean something.
 	@mkdir -p $(dir $(SSH_KNOWN_HOSTS))
+# Generated once and kept, because `ssh-keygen` will not overwrite and because
+# there is nothing here worth regenerating: these live under target/, which is
+# already ignored, and they authorise a container bound to the loopback address.
+# `dbclient_stranger` is deliberately never installed — a key the server has
+# never heard of is the only way to check that a refusal reads as a refusal.
+	@test -f $(SSH_KEY_DIR)/dbclient_test \
+		|| ssh-keygen -q -t ed25519 -N "" -C dbclient-test -f $(SSH_KEY_DIR)/dbclient_test
+	@test -f $(SSH_KEY_DIR)/dbclient_locked \
+		|| ssh-keygen -q -t ed25519 -N hunter2 -C dbclient-locked -f $(SSH_KEY_DIR)/dbclient_locked
+	@test -f $(SSH_KEY_DIR)/dbclient_stranger \
+		|| ssh-keygen -q -t ed25519 -N "" -C dbclient-stranger -f $(SSH_KEY_DIR)/dbclient_stranger
+# Installed with `docker exec` rather than through the image's PUBLIC_KEY, for
+# the same reason the forwarding fix above is: the image builds this file on
+# first start, so a value passed at create time is one a recreated container
+# silently loses. Rewritten whole every time, which is what keeps a regenerated
+# key from stacking up beside the one it replaced.
+	@cat $(SSH_KEY_DIR)/dbclient_test.pub $(SSH_KEY_DIR)/dbclient_locked.pub \
+		| docker exec -i $(SSH_CONTAINER) sh -c \
+			'mkdir -p /config/.ssh && cat >/config/.ssh/authorized_keys \
+				&& chown -R $(SSH_USER) /config/.ssh \
+				&& chmod 700 /config/.ssh && chmod 600 /config/.ssh/authorized_keys'
 	@ssh-keyscan -p $(SSH_PORT) -H 127.0.0.1 >$(SSH_KNOWN_HOSTS) 2>/dev/null
 	@test -s $(SSH_KNOWN_HOSTS) \
 		|| { echo "ssh-keyscan wrote nothing to $(SSH_KNOWN_HOSTS)"; exit 1; }

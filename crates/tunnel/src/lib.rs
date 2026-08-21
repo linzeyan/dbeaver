@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh::client;
-use russh::keys::PublicKey;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -47,12 +47,31 @@ pub enum TunnelError {
         port: u16,
         file: String,
     },
-    #[error("the server refused the password for {0}")]
+    #[error("the server refused the credentials for {0}")]
     Rejected(String),
+    #[error("the key in {file} could not be read: {why}")]
+    Key { file: String, why: String },
     #[error("{0}")]
     Ssh(#[from] russh::Error),
     #[error("{0}")]
     Io(#[from] std::io::Error),
+}
+
+/// How to prove who is connecting.
+///
+/// Kept apart from `TunnelConfig` rather than being two optional fields on it,
+/// because exactly one of these is used and a struct with both would have a
+/// state — neither set, or both — that has no meaning and would have to be
+/// refused somewhere at run time.
+pub enum Credential {
+    Password(String),
+    /// A private key on disk, and the passphrase it may be under. `None` for a
+    /// key that is not encrypted; the wrong answer either way fails to load
+    /// rather than failing to authenticate, which is why that is its own error.
+    Key {
+        path: PathBuf,
+        passphrase: Option<String>,
+    },
 }
 
 /// Where the bastion is and who to log in as.
@@ -65,7 +84,7 @@ pub struct TunnelConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
-    pub password: String,
+    pub credential: Credential,
     pub known_hosts: PathBuf,
 }
 
@@ -151,11 +170,34 @@ impl Tunnel {
             gate,
         )
         .await?;
-        if !session
-            .authenticate_password(&config.user, &config.password)
-            .await?
-            .success()
-        {
+        let accepted = match config.credential {
+            Credential::Password(password) => session
+                .authenticate_password(&config.user, &password)
+                .await?
+                .success(),
+            Credential::Key { path, passphrase } => {
+                let key = russh::keys::load_secret_key(&path, passphrase.as_deref()).map_err(
+                    |error| TunnelError::Key {
+                        file: path.display().to_string(),
+                        why: error.to_string(),
+                    },
+                )?;
+                // Asked rather than assumed. For RSA the server decides which
+                // SHA it will accept, and russh's default for `None` is the
+                // legacy SHA-1 — which a hardened sshd will refuse, producing a
+                // rejection that looks like the wrong key. Ignored for every
+                // other algorithm.
+                let hash = session.best_supported_rsa_hash().await?.flatten();
+                session
+                    .authenticate_publickey(
+                        &config.user,
+                        PrivateKeyWithHashAlg::new(Arc::new(key), hash),
+                    )
+                    .await?
+                    .success()
+            }
+        };
+        if !accepted {
             return Err(TunnelError::Rejected(config.user));
         }
 
