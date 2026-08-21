@@ -13,9 +13,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ChError, ChSource, Rows, RowsCancel};
@@ -115,8 +116,14 @@ impl Driver for ChSource {
     /// cover one INSERT rather than a session's worth of statements. Answering
     /// yes here would put a Commit button on screen for something that is not
     /// one.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the statement: one `KILL QUERY` naming every live statement
+    /// of this session.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open

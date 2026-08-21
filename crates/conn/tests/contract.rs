@@ -1325,13 +1325,13 @@ async fn controls_a_transaction(subject: &Subject) {
     let driver = subject.driver.as_ref();
     let Some(scratch) = subject.scratch.as_ref() else {
         assert!(
-            !driver.transactional(),
+            !driver.capabilities().transactional,
             "this driver offers transaction control, so the subject needs somewhere to write"
         );
         return;
     };
     assert!(
-        driver.transactional(),
+        driver.capabilities().transactional,
         "the subject has a fixture for transactions the driver says it cannot control"
     );
 

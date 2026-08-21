@@ -908,7 +908,8 @@ async fn asking_about_a_relation_that_is_not_there_is_an_empty_answer() {
 #[ignore = "requires a Trino coordinator"]
 async fn transaction_control_is_refused_by_name() {
     let src = source().await;
-    assert!(!src.transactional());
+    assert!(!src.capabilities().transactional);
+    assert!(src.capabilities().cancel_stops_the_statement);
     for step in [
         TxStep::Begin,
         TxStep::Commit,

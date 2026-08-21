@@ -10,9 +10,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MongoError, MongoSource};
@@ -137,8 +137,16 @@ impl Driver for MongoSource {
     /// means threading a `ClientSession` through every operation and running
     /// against a replica set or a sharded cluster — a standalone `mongod`,
     /// which is what a laptop runs, refuses them outright.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the operation: `$currentOp` finds the ones carrying this
+    /// session's comments and `killOp` stops them. It needs `admin` permissions,
+    /// and on an account without them it fails with that error rather than
+    /// pretending — which is a failure of the call, not of this answer.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open

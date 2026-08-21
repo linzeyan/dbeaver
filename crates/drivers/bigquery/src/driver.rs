@@ -7,9 +7,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{BigQueryError, BigQuerySource, Rows, RowsCancel};
@@ -177,8 +177,15 @@ impl Driver for BigQuerySource {
     /// return nothing until the user committed, and an editor's Cancel button
     /// would have nothing to cancel. A front end that hides the two buttons is
     /// telling the truth; one that offered them would not be.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the statement, in whichever of its two states it is in: a
+    /// job still running is stopped by `jobs.cancel`, and rows still being read
+    /// are stopped on this side.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open

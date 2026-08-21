@@ -13,9 +13,9 @@
 use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_duckdb::DuckSource;
 use std::path::PathBuf;
@@ -167,8 +167,11 @@ impl Driver for Fixture {
         unreachable!("nothing here is long enough to cancel")
     }
 
-    fn transactional(&self) -> bool {
-        false
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: false,
+        }
     }
 
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

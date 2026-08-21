@@ -200,6 +200,58 @@ impl ServerInfo {
     }
 }
 
+/// What a driver can do, as data rather than as a refusal to be caught.
+///
+/// Every field here is a question a front end was answering by trying: offering
+/// Commit and reporting whatever came back, drawing a Cancel button and hoping.
+/// Trying is a fine way to find out what a *statement* does and a bad way to find
+/// out what a *database* is, because the answer arrives after the control has
+/// already been drawn — and a control that is drawn and then apologises has
+/// already made a promise.
+///
+/// Read off the open session rather than off a static table, which is why it
+/// takes `&self`. It costs no I/O: everything here is settled by the time a
+/// connection is open. But it is not always the same for one driver — the MySQL
+/// driver reaches StarRocks and Doris as well as MySQL, and those two are not
+/// transactional — so a table keyed by scheme would be wrong for exactly the
+/// products the scheme cannot tell apart.
+///
+/// Small on purpose. A field belongs here when something reads it; the rest of
+/// what a driver knows about itself is in its module docs, where it is being read
+/// by people rather than by programs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Capabilities {
+    /// Whether statements on this session can be wrapped in a transaction.
+    ///
+    /// False means two quite different things, and both deserve a sentence where
+    /// the driver is: a database with no transactions, and a driver whose
+    /// statements do not yet share one connection to hold one. A transaction is a
+    /// property of a connection, so this is really a question about the
+    /// arrangement inside the driver rather than about the database. It does not
+    /// cover cursors: a cursor runs on a connection of its own and is outside
+    /// whatever the session has open.
+    ///
+    /// The front end hides Commit and Rollback rather than offering buttons that
+    /// fail.
+    pub transactional: bool,
+
+    /// Whether `cancel` reaches the statement, or only this side's reading of it.
+    ///
+    /// True everywhere the database is told to stop — by naming a backend, a
+    /// query id, a job, or by interrupting an embedded engine. False where the
+    /// request has nowhere to be delivered: the fetch in flight resolves as
+    /// cancelled and nothing further is asked for, while the server finishes the
+    /// page nobody will read.
+    ///
+    /// The trait's contract is that success means the request was delivered, so a
+    /// driver in the second case succeeds too and is telling the truth. This is
+    /// the difference that contract deliberately does not carry, and it is worth
+    /// carrying separately because it is the difference between a Cancel button
+    /// that stops the work and one that stops the waiting — which is not what
+    /// somebody pressing it after four minutes believes it does.
+    pub cancel_stops_the_statement: bool,
+}
+
 /// One session against one database.
 ///
 /// A session, not a connection: an implementation is free to hold several, and
@@ -336,20 +388,17 @@ pub trait Driver: Send + Sync {
 
     // ---- Transactions ---------------------------------------------------
 
-    /// Whether statements on this session can be wrapped in a transaction.
+    /// What this driver can do, as `Capabilities` describes it.
     ///
-    /// No default. A driver that cannot has to say so out loud, because the
-    /// front end hides Commit and Rollback rather than offering buttons that
-    /// fail — and because "false" here means two quite different things that
-    /// both deserve a sentence in the implementation: a database with no
-    /// transactions, and a driver whose statements do not yet share one
-    /// connection to hold one.
+    /// No default, for the reason `server_info` and `unique_keys` have none. Each
+    /// field's answer is a sentence about this database, and a sentence inherited
+    /// from the trait would be a sentence nobody wrote about the driver it is
+    /// being read for. Whoever adds a field here adds fifteen answers with it,
+    /// which is the cost that keeps the type small.
     ///
-    /// A transaction is a property of a connection, so this is really a question
-    /// about the arrangement inside the driver rather than about the database.
-    /// It does not cover cursors: a cursor runs on a connection of its own and
-    /// is outside whatever the session has open.
-    fn transactional(&self) -> bool;
+    /// No I/O. Everything here is settled by the time a session is open, so this
+    /// may be called from anywhere and as often as anything likes.
+    fn capabilities(&self) -> Capabilities;
 
     /// Take one step of transaction control, on the connection statements run
     /// on.

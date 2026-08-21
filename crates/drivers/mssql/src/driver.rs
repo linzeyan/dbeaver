@@ -8,9 +8,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MsSqlError, MsSqlSource};
@@ -110,8 +111,14 @@ impl Driver for MsSqlSource {
 
     /// Statements share one connection here, which is what a transaction needs
     /// in order to span them.
-    fn transactional(&self) -> bool {
-        true
+    ///
+    /// Cancel reaches the statement: `KILL` aimed at the connections that are
+    /// actually busy.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: true,
+            cancel_stops_the_statement: true,
+        }
     }
 
     async fn transaction(&self, step: &TxStep) -> DbResult<()> {

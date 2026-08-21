@@ -9,9 +9,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, SqliteError, SqliteSource};
@@ -107,8 +108,15 @@ impl Driver for SqliteSource {
 
     /// Statements run on the session connection, which is what a transaction
     /// needs in order to span two of them.
-    fn transactional(&self) -> bool {
-        true
+    ///
+    /// Cancel reaches the statement. There is no server to ask — the engine is in
+    /// this process — and interrupting it is the same thing: the statement stops
+    /// and reports that it was cancelled.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: true,
+            cancel_stops_the_statement: true,
+        }
     }
 
     async fn transaction(&self, step: &TxStep) -> DbResult<()> {

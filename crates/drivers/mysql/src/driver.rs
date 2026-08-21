@@ -8,9 +8,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -131,8 +132,18 @@ impl Driver for MySqlSource {
     /// `BEGIN` and `COMMIT`, and which of the three is on the other end of the
     /// socket is asked at connect rather than assumed. `metadata::probe` has the
     /// evidence and the reasoning.
-    fn transactional(&self) -> bool {
-        MySqlSource::transactional(self)
+    ///
+    /// This is also the driver that makes `Capabilities` a question for the open
+    /// session rather than for the scheme: the answer above is read off what
+    /// answered, and StarRocks and Doris arrive down the same wire as MySQL.
+    ///
+    /// Cancel reaches the statement — `KILL QUERY` naming the connection it is
+    /// running on.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: MySqlSource::transactional(self),
+            cancel_stops_the_statement: true,
+        }
     }
 
     async fn transaction(&self, step: &TxStep) -> DbResult<()> {

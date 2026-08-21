@@ -9,9 +9,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{CassandraError, CassandraSource, Rows, RowsCancel};
@@ -172,8 +173,16 @@ impl Driver for CassandraSource {
     /// is atomic across partitions but is written whole and sent whole, so there
     /// is no moment between opening it and committing it in which a client could
     /// run a `SELECT` and look. `BEGIN` has nothing to name.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel does not reach the statement, and this is one of the two drivers
+    /// here where it does not. CQL has no cancel: `cancel` stops this side's
+    /// reads, the fetch in flight resolves as cancelled, and the coordinator goes
+    /// on assembling the page it was asked for and drops it on the floor.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: false,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open
