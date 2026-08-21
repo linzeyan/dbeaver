@@ -767,13 +767,6 @@ enum ConnectionChecks {
             "and names no certificate")
     }
 
-    /// A folder is a path on the entry, tidied on the way in and on the way out,
-    /// and the list hands the connections over grouped by it.
-    ///
-    /// The tidying is the half that would be found by a user rather than by this:
-    /// the file is meant to be hand-edited, so `"/clients/"` and `"clients"` will
-    /// both appear in one, and a sidebar that drew two folders would be reporting
-    /// its own parsing back as their mistake.
     /// The absent key reads as `true`, and that is the whole of this check.
     ///
     /// Every entry in every existing `connections.json` is missing this key, so
@@ -815,6 +808,13 @@ enum ConnectionChecks {
             "and changing it is an unsaved edit")
     }
 
+    /// A folder is a path on the entry, tidied on the way in and on the way out,
+    /// and the list hands the connections over grouped by it.
+    ///
+    /// The tidying is the half that would be found by a user rather than by this:
+    /// the file is meant to be hand-edited, so `"/clients/"` and `"clients"` will
+    /// both appear in one, and a sidebar that drew two folders would be reporting
+    /// its own parsing back as their mistake.
     private static func checkFoldersGroupTheList() {
         func made(_ name: String, folder: String) -> SavedConnection {
             SavedConnection(
