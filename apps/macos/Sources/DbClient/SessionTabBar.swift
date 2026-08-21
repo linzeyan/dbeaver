@@ -92,7 +92,14 @@ private struct SessionTabItem: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 32)
-        .background(isActive ? Theme.surface.color : Theme.background.color)
+        // `ignoresSafeAreaEdges` defaults to `.all`, and this strip sits directly
+        // under the titlebar — so the active tab's raised surface was filling the
+        // 52pt above it as well, putting a lighter patch behind the connection
+        // chip that appeared only while the Query view was up. The fill belongs
+        // to the tab, not to the window's top edge.
+        .background(
+            isActive ? Theme.surface.color : Theme.background.color, ignoresSafeAreaEdges: []
+        )
         .overlay(alignment: .top) {
             if isActive {
                 Rectangle().fill(Theme.accent.color).frame(height: 2)
