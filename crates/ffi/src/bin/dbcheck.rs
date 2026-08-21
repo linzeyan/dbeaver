@@ -46,7 +46,7 @@ fn main() -> ExitCode {
     };
 
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { dbffi::db_connect(c_url.as_ptr(), seconds, &mut err) };
+    let handle = unsafe { dbffi::db_connect(c_url.as_ptr(), std::ptr::null(), seconds, &mut err) };
     if handle.is_null() {
         eprintln!("dbcheck: could not connect: {}", take(&mut err));
         return ExitCode::FAILURE;

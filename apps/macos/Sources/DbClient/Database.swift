@@ -23,6 +23,27 @@ struct DbError: Error, CustomStringConvertible {
     }
 }
 
+/// An SSH bastion to reach a database through.
+///
+/// A type of this side's own rather than the C struct passed around directly,
+/// because that struct holds pointers and something has to own the strings they
+/// point at for the length of the call. Swift `String`s here, C strings only
+/// inside `Database.init`, which is the one place the lifetime is short enough
+/// to see.
+struct SshConfig {
+    var host: String
+    var port: UInt16
+    var user: String
+    /// Exactly one of these two. The core refuses both and neither rather than
+    /// picking one, so a form that can produce either state hears about it.
+    var password: String?
+    var keyPath: String?
+    /// Nil for a key that is not encrypted.
+    var passphrase: String?
+    /// The file the bastion's identity is checked against, in full.
+    var knownHosts: String
+}
+
 /// Swift wrapper over the core's C surface.
 ///
 /// Every call blocks, so nothing here may run on the main thread. Phase 1
@@ -47,9 +68,40 @@ final class Database: @unchecked Sendable {
     /// than one any database suggests. It is long enough that a loaded server on
     /// a slow link still opens and short enough that a wrong host is a wrong host
     /// rather than a window that never comes back.
-    init(connString: String, timeoutSeconds: UInt32 = 10) throws {
+    init(connString: String, ssh: SshConfig? = nil, timeoutSeconds: UInt32 = 10) throws {
         var err: UnsafeMutablePointer<CChar>?
-        guard let h = db_connect(connString, timeoutSeconds, &err) else {
+
+        // The C struct holds pointers, so the strings have to outlive the call.
+        // Copied with `strdup` and freed on the way out, rather than threaded
+        // through seven nested `withCString` closures: that is the same lifetime
+        // written in a shape nobody can read.
+        var owned: [UnsafeMutablePointer<CChar>?] = []
+        defer { owned.forEach { free($0) } }
+        func borrow(_ value: String?) -> UnsafePointer<CChar>? {
+            guard let value else { return nil }
+            let copy = strdup(value)
+            owned.append(copy)
+            return UnsafePointer(copy)
+        }
+
+        let opened: OpaquePointer?
+        if let ssh {
+            var config = DbSshConfig(
+                host: borrow(ssh.host),
+                port: ssh.port,
+                user: borrow(ssh.user),
+                password: borrow(ssh.password),
+                key_path: borrow(ssh.keyPath),
+                passphrase: borrow(ssh.passphrase),
+                known_hosts: borrow(ssh.knownHosts))
+            opened = withUnsafePointer(to: &config) {
+                db_connect(connString, $0, timeoutSeconds, &err)
+            }
+        } else {
+            opened = db_connect(connString, nil, timeoutSeconds, &err)
+        }
+
+        guard let h = opened else {
             throw DbError(description: Database.take(&err) ?? "connect failed")
         }
         handle = h
