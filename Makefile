@@ -228,7 +228,15 @@ test-integration: db-check db-check-compatible db-check-mongo db-check-clickhous
 # five refused connections.
 .PHONY: test-postgres
 test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests behind PostgreSQL and the servers read through its driver
-	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored
+# The skips are not tidiness. `-p dbffi` sweeps every target in that package,
+# and two of its lib tests open a connection through an SSH bastion — they want
+# a server this target has no reason to start, and they belong to `test-tunnel`,
+# which does start one. Named one by one rather than matched on a substring, so
+# that what this target does not run is readable here rather than being whatever
+# a pattern happens to catch.
+	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored \
+		--skip a_connection_opened_through_a_bastion_still_answers \
+		--skip a_driver_opens_on_a_host_only_the_bastion_can_reach
 	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		postgres_satisfies_the_contract \
