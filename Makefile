@@ -103,6 +103,46 @@ FLIGHTSQL_PASSWORD  := flight
 # driver, and there is deliberately no fallback for a string that names none.
 PG_CONN := postgres://bench:bench@127.0.0.1:$(PG_PORT)/bench
 
+# What every `db-check-*` target asks with, on top of whatever it already asked.
+#
+# The existing checks answer whether the server has finished starting, and most
+# of them answer it from inside the container. That is worth knowing and it is
+# not what a test needs to know: a client running in the container never crosses
+# the port forward, so a gate built only on it reports a healthy server while
+# every test fails to reach one. `nc -z` has the opposite problem — Docker's
+# forwarder accepts the connection itself, so it succeeds whether or not
+# anything is behind it.
+#
+# `dbcheck` opens the database through the same registry the application uses
+# and then makes a round trip, from this process on this machine. Both halves
+# stay: keeping the readiness check means "not started yet" and "started, but
+# you cannot get to it from here" arrive as different failures.
+#
+# Ten seconds, which is more than a ready server needs and is not the number
+# being defended against. On macOS the first connection a fresh process makes to
+# a Docker-forwarded port costs seconds — measured at about four here, against
+# well under a millisecond for every connection after it — so a limit chosen for
+# how fast a ready database answers would be a limit that fires on the forwarder
+# instead, and the gate would fail on a server that is fine.
+DBCHECK := cargo run -q -p dbffi --bin dbcheck --
+DBCHECK_TIMEOUT := 10
+
+# One URL per server, beside the port it is built from. Written here rather than
+# in each target so that the address a gate checks and the address the tests use
+# have one place to disagree, and so moving a port moves both.
+#
+# These are the strings the registry parses, which are not always the strings the
+# drivers' own tests pass: ClickHouse and Trino are reached as `clickhouse://`
+# and `trino://` here and rewritten to HTTP inside the registry, while those
+# tests build their sources directly and hand them `http://`.
+PG_URL         := $(PG_CONN)
+PGTLS_URL      := postgres://bench:bench@127.0.0.1:$(PGTLS_PORT)/bench?sslmode=require
+MONGO_URL      := mongodb://127.0.0.1:$(MONGO_PORT)
+REDIS_URL      := redis://127.0.0.1:$(REDIS_PORT)/0
+CASSANDRA_URL  := cassandra://127.0.0.1:$(CASSANDRA_PORT)
+TRINO_URL      := trino://127.0.0.1:$(TRINO_PORT)
+FLIGHTSQL_URL  := flightsql://flight_username:$(FLIGHTSQL_PASSWORD)@127.0.0.1:$(FLIGHTSQL_PORT)/
+
 TOOLS := tools
 BASELINE := $(TOOLS)/baseline
 
@@ -477,6 +517,7 @@ db-check-redis: ## Fail unless the Redis test container is reachable
 	@docker exec $(REDIS_CONTAINER) redis-cli ping \
 		>/dev/null 2>&1 \
 		|| { echo "redis not running; run 'make db-up-redis'"; exit 1; }
+	@$(DBCHECK) "$(REDIS_URL)" $(DBCHECK_TIMEOUT)
 
 .PHONY: db-up-cassandra
 db-up-cassandra: ## Start the Cassandra test container
@@ -500,6 +541,7 @@ db-check-cassandra: ## Fail unless the Cassandra test container is reachable
 	@docker exec $(CASSANDRA_CONTAINER) cqlsh -e "describe keyspaces" \
 		>/dev/null 2>&1 \
 		|| { echo "cassandra not running; run 'make db-up-cassandra'"; exit 1; }
+	@$(DBCHECK) "$(CASSANDRA_URL)" $(DBCHECK_TIMEOUT)
 
 # Readiness is asked over HTTP rather than through a client in the image,
 # because the thing being waited for is the coordinator answering requests —
@@ -525,6 +567,7 @@ db-down-trino: ## Stop and remove the Trino test container
 db-check-trino: ## Fail unless the Trino test container is reachable
 	@curl -sf http://127.0.0.1:$(TRINO_PORT)/v1/info | grep -q '"starting":false' \
 		|| { echo "trino not running; run 'make db-up-trino'"; exit 1; }
+	@$(DBCHECK) "$(TRINO_URL)" $(DBCHECK_TIMEOUT)
 
 .PHONY: db-up-flightsql
 db-up-flightsql: ## Start the Arrow Flight SQL test container
@@ -556,6 +599,7 @@ db-check-flightsql: ## Fail unless the Arrow Flight SQL test container is reacha
 		--password $(FLIGHTSQL_PASSWORD) --host localhost --port 31337 \
 		>/dev/null 2>&1 \
 		|| { echo "flight sql not running; run 'make db-up-flightsql'"; exit 1; }
+	@$(DBCHECK) "$(FLIGHTSQL_URL)" $(DBCHECK_TIMEOUT)
 
 # The two databases that exist to prove protocol compatibility rather than to
 # be supported: they are read by the PostgreSQL driver and no code of their own,
@@ -603,6 +647,8 @@ db-check-compatible: ## Fail unless the PostgreSQL-compatible containers are rea
 		|| { echo "cockroachdb not running; run 'make db-up-compatible'"; exit 1; }
 	@nc -z 127.0.0.1 $(GREPTIME_PORT) >/dev/null 2>&1 \
 		|| { echo "greptimedb not running; run 'make db-up-compatible'"; exit 1; }
+	@$(DBCHECK) "postgres://root@127.0.0.1:$(COCKROACH_PORT)/defaultdb" $(DBCHECK_TIMEOUT)
+	@$(DBCHECK) "postgres://greptime@127.0.0.1:$(GREPTIME_PORT)/public" $(DBCHECK_TIMEOUT)
 
 # The same argument on the other protocol: TiDB and StarRocks are read by the
 # MySQL driver and no code of their own. Both take `root` with no password,
@@ -631,6 +677,7 @@ db-down-tidb: ## Stop and remove the TiDB test container
 db-check-tidb: ## Fail unless the TiDB test container is reachable
 	@nc -z 127.0.0.1 $(TIDB_PORT) >/dev/null 2>&1 \
 		|| { echo "tidb not running; run 'make db-up-tidb'"; exit 1; }
+	@$(DBCHECK) "mysql://root@127.0.0.1:$(TIDB_PORT)/" $(DBCHECK_TIMEOUT)
 
 # StarRocks brings up a frontend and a backend inside one container and will not
 # answer until both have registered with each other. Measured here: ready about
@@ -666,6 +713,7 @@ db-check-starrocks: ## Fail unless the StarRocks test container is reachable
 	@docker exec $(STARROCKS_CONTAINER) \
 		mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null 2>&1 \
 		|| { echo "starrocks not running; run 'make db-up-starrocks'"; exit 1; }
+	@$(DBCHECK) "mysql://root@127.0.0.1:$(STARROCKS_PORT)/" $(DBCHECK_TIMEOUT)
 
 # MySQL. No seeding here: the driver's own tests build the fixture themselves,
 # because a fixture kept in a Makefile drifts away from the assertions that read
@@ -695,6 +743,7 @@ db-down-mysql: ## Stop and remove the MySQL test container
 db-check-mysql: ## Fail unless the MySQL test container is reachable
 	@docker exec $(MYSQL_CONTAINER) mysqladmin ping -uroot -ptest --silent >/dev/null 2>&1 \
 		|| { echo "mysql not running; run 'make db-up-mysql'"; exit 1; }
+	@$(DBCHECK) "mysql://root:test@127.0.0.1:$(MYSQL_PORT)/bench" $(DBCHECK_TIMEOUT)
 
 # SQL Server. Microsoft publishes no ARM64 build — not for 2019, 2022 or 2025 —
 # so on Apple silicon this runs under Rosetta and needs `--platform`. Azure SQL
@@ -726,6 +775,11 @@ db-down-mssql: ## Stop and remove the SQL Server test container
 db-check-mssql: ## Fail unless the SQL Server test container is reachable
 	@nc -z 127.0.0.1 $(MSSQL_PORT) >/dev/null 2>&1 \
 		|| { echo "sql server not running; run 'make db-up-mssql'"; exit 1; }
+	# `TrustServerCertificate` because the image signs its own certificate with
+	# one nothing here has a reason to trust — the same parameter the contract
+	# suite connects with, for the same reason.
+	@$(DBCHECK) "sqlserver://sa:Str0ng%21Passw0rd@127.0.0.1:$(MSSQL_PORT)/dbclient_contract?TrustServerCertificate=true" \
+		$(DBCHECK_TIMEOUT)
 
 # ClickHouse, whose fixture is a seed script rather than a few inserts: the
 # driver's argument is about types, so the table has to contain the types it
@@ -761,21 +815,24 @@ db-down-clickhouse: ## Stop and remove the ClickHouse test container
 db-check-clickhouse: ## Fail unless the ClickHouse test container is reachable
 	@curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/?query=SELECT+1" >/dev/null 2>&1 \
 		|| { echo "clickhouse not running; run 'make db-up-clickhouse'"; exit 1; }
+	@$(DBCHECK) "clickhouse://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/bench" $(DBCHECK_TIMEOUT)
 
 .PHONY: db-check
 db-check: ## Fail unless the benchmark database is reachable
 	@docker exec $(PG_CONTAINER) pg_isready -U bench -d bench >/dev/null 2>&1 \
 		|| { echo "benchmark database not running; run 'make db-seed'"; exit 1; }
+	@$(DBCHECK) "$(PG_URL)" $(DBCHECK_TIMEOUT)
 
 # Its own check rather than a line in `db-check`, because it is a second server
-# on a second port and the first one's answer says nothing about it. `pg_isready`
-# would answer here too, and `nc` is used instead for the reason
-# `db-check-compatible` uses it: what is being asked is whether anything is
-# listening, and a server refusing plaintext is not going to say more than that.
+# on a second port and the first one's answer says nothing about it. `nc` asks
+# only whether anything is listening; the round trip after it asks in the one
+# way that suits this container, with `sslmode=require` — a plaintext connection
+# is what this server exists to refuse.
 .PHONY: db-check-pgtls
 db-check-pgtls: ## Fail unless the TLS-only PostgreSQL container is reachable
 	@nc -z 127.0.0.1 $(PGTLS_PORT) >/dev/null 2>&1 \
 		|| { echo "tls postgres not running; run 'make db-up-pgtls'"; exit 1; }
+	@$(DBCHECK) "$(PGTLS_URL)" $(DBCHECK_TIMEOUT)
 
 # Separate from db-check because the benchmarks want PostgreSQL and nothing
 # else: making every `make bench` depend on a MongoDB container would be asking
@@ -785,6 +842,7 @@ db-check-mongo: ## Fail unless the MongoDB test container is reachable
 	@docker exec $(MONGO_CONTAINER) mongosh --quiet --eval 'db.runCommand({ping:1})' \
 		>/dev/null 2>&1 \
 		|| { echo "mongodb not running; run 'make db-up-mongo'"; exit 1; }
+	@$(DBCHECK) "$(MONGO_URL)" $(DBCHECK_TIMEOUT)
 
 ##@ Benchmarks
 
