@@ -244,6 +244,9 @@ void db_names_forget(DbHandle* handle);
 
 // Metadata crosses as JSON, not Arrow: it is small, and Arrow buys nothing for
 // a few thousand short rows. Returned strings are released with db_string_free.
+// Null where the engine has no level above schemas, which is not the same as an
+// empty array — see db_databases_json in crates/ffi.
+char* db_databases_json(DbHandle* handle, char** err);
 char* db_schemas_json(DbHandle* handle, char** err);
 char* db_relations_json(DbHandle* handle, const char* schema, char** err);
 char* db_columns_json(DbHandle* handle, const char* schema, const char* relation,
