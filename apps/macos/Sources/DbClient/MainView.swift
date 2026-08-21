@@ -35,6 +35,14 @@ enum FocusArea: Hashable {
     /// draws its focus ring from a `FocusArea` and two fields answering to one
     /// would both light up.
     case connectRootCert
+    /// The bastion's five fields. One case each for the reason above, and worth
+    /// saying again here: these sit directly under the database's own host, port
+    /// and user, so a shared case would ring the wrong half of the form.
+    case connectSshHost
+    case connectSshPort
+    case connectSshUser
+    case connectSshKey
+    case connectSshSecret
     /// The chooser's own filter field. Separate from `navigatorFilter` because the
     /// two are never on screen together and each draws its own ring.
     case connectionFilter

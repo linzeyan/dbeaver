@@ -333,6 +333,13 @@ struct ConnectionChooser: View {
                             "public roots only")
                     }
                 }
+                // Below the address and above Safety, with SSL, because it
+                // answers the same question those do: how to reach this
+                // database. Not for a file, which is on this disk and has no
+                // server to be behind anything.
+                if model.connectionDraft.settings.driver?.shape != .file {
+                    sshRows
+                }
                 // Outside the branch above, because both answers to it can be
                 // marked: a SQLite file somebody is not to write to is as real a
                 // thing as a production server.
@@ -550,6 +557,76 @@ struct ConnectionChooser: View {
                 .foregroundStyle(Theme.textSecondary.color)
                 .lineLimit(1)
             Spacer(minLength: 0)
+        }
+        .font(Theme.Typography.body)
+        .foregroundStyle(Theme.text.color)
+    }
+
+    /// The SSH bastion, if there is one.
+    ///
+    /// The host field is the switch. The rows below it appear once there is
+    /// somewhere to connect to and go again when it is cleared, so there is no
+    /// checkbox — a checkbox would be a second answer to the question this field
+    /// already answers, and the states it would make possible are a tunnel
+    /// switched on with nowhere to go and one switched off with a bastion still
+    /// filled in underneath it.
+    ///
+    /// Always on screen for a server rather than behind a disclosure triangle. A
+    /// database that cannot be reached any other way is not an advanced case for
+    /// the person who has one, and a control nobody finds is a feature nobody
+    /// has.
+    ///
+    /// "Login" rather than a second "User", which is what this field is: the
+    /// form already has one four rows up, about the database, and two rows
+    /// reading `User` under labels that differ only by what is above them is a
+    /// form somebody fills in wrong once and does not trust afterwards. The
+    /// screen-reader names spell all five out.
+    private var sshRows: some View {
+        Group {
+            HStack(spacing: Theme.Space.sm) {
+                label("SSH")
+                field(
+                    $model.connectionDraft.settings.sshHost, .connectSshHost, "no tunnel",
+                    named: "SSH host")
+                label("Port", width: 32)
+                field(
+                    $model.connectionDraft.settings.sshPort, .connectSshPort, "22",
+                    named: "SSH port"
+                )
+                .frame(width: 56)
+            }
+            if !model.connectionDraft.settings.sshHost.isEmpty {
+                HStack(spacing: Theme.Space.sm) {
+                    label("Login")
+                    field(
+                        $model.connectionDraft.settings.sshUser, .connectSshUser, "",
+                        named: "SSH user")
+                }
+                // A path typed in rather than a file picker. The key is under
+                // `~/.ssh`, and a macOS open panel does not show a hidden
+                // directory without being told twice — which is more steps than
+                // pasting a path somebody already knows.
+                HStack(spacing: Theme.Space.sm) {
+                    label("Key")
+                    field(
+                        $model.connectionDraft.settings.sshKeyPath, .connectSshKey,
+                        "password instead", named: "SSH key file")
+                }
+                // One field for two things, named for what it is used for rather
+                // than for whichever of them it happens to be. "Passphrase" over
+                // a bastion that takes a password is a label that has stopped
+                // being true, and the placeholder says which one is wanted.
+                HStack(spacing: Theme.Space.sm) {
+                    label("Secret")
+                    field(
+                        $model.connectionSshSecret, .connectSshSecret,
+                        model.hasUnreadPassword
+                            ? "Saved"
+                            : (model.connectionDraft.settings.sshKeyPath.isEmpty
+                                ? "bastion password" : "key passphrase"),
+                        named: "SSH secret", isSecure: true)
+                }
+            }
         }
         .font(Theme.Typography.body)
         .foregroundStyle(Theme.text.color)
