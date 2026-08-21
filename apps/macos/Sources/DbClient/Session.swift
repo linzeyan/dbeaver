@@ -39,6 +39,15 @@ final class Session: Identifiable {
     /// The string this connection was opened with.
     var connString = ""
 
+    /// The bastion it was opened through, or nil for one dialled directly.
+    ///
+    /// Here rather than looked up again from the form, because by the time it is
+    /// wanted the form has moved on. Opening another database on this server is
+    /// a second connection to the *same* bastion, and the row the chooser is
+    /// showing by then may be a different connection with a different one — or
+    /// with none, which would quietly dial a host only the bastion can reach.
+    var bastion: SshConfig?
+
     var connectionLabel = "Not connected"
     var connectionState: StatusDot.State = .connecting
 
