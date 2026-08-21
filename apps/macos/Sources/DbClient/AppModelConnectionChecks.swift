@@ -112,6 +112,17 @@ enum AppModelConnectionChecks {
             expect(
                 model.sessions[0].whereClause, "id > 10",
                 "and what the browse is filtered by")
+
+            // A cursor is a connection the server holds open on this session's
+            // behalf, so it is the one property here whose leaking is not a
+            // cosmetic defect. Nothing can open one without a server, so what is
+            // pinned is that the session is where it would be looked for.
+            expect(model.sessions[0].browseCursor == nil, true, "no cursor is open yet")
+            expect(model.sessions[0].isExporting, false, "and nothing is being written to a file")
+            model.isValueViewerOpen = true
+            expect(
+                model.sessions[0].isValueViewerOpen, true,
+                "and the viewer over a cell belongs to the session that has the cell")
         }
     }
 

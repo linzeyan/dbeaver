@@ -207,4 +207,112 @@ final class Session {
     /// The last statement `selectionChanged` put in the editor, so a later
     /// selection can tell "untouched suggestion" from "the user's work".
     var suggestedQueryText = ""
+
+    // MARK: - Cursors
+
+    /// The cursor the Content tab is reading through, and whether a page of it
+    /// is in the air right now.
+    ///
+    /// Held here rather than on `ResultSet` because a cursor is a database
+    /// connection, not a property of the rows on screen: the query pane's
+    /// results never have one and `current` can hand back a `ResultSet` that
+    /// never did. Letting go of it is what closes that connection, so every
+    /// path that abandons a browse goes through `discardBrowse`.
+    ///
+    /// The most load-bearing thing on this object. A cursor is a connection the
+    /// server is holding open on this session's behalf; one left behind when a
+    /// session goes is a connection nothing will ever close.
+    var browseCursor: Cursor?
+
+    /// The statement `browseCursor` was opened over, so an export can ask the
+    /// server the same question through a cursor of its own.
+    var browseStatementText = ""
+
+    /// The cursor an export is draining, so Stop can reach it. Nil except
+    /// while one is running.
+    var exportCursor: Cursor?
+    var browseFetchInFlight = false
+
+    /// What the pages fetched so far say about which browse columns are empty.
+    ///
+    /// The evidence, kept whether or not anything acts on it, so that switching
+    /// the setting on acts on the result already on screen rather than on the
+    /// next one: a checkbox that appears to do nothing until you reload is a
+    /// checkbox nobody believes. Gathering it costs one null check per column
+    /// per page for every column that holds anything, which is nearly all of
+    /// them.
+    var emptyColumns = EmptyColumns()
+
+    // MARK: - Back and forward
+
+    /// Where this session has been, and where Back and Forward go.
+    var browseHistory = BrowseHistory()
+
+    /// Set while Back or Forward is doing the moving.
+    ///
+    /// Without it the arrival that Back performs would be recorded as a new
+    /// place, which appends to the path and throws away everything ahead — so
+    /// Back would work once and Forward would never have anywhere to go.
+    var isNavigatingHistory = false
+
+    // MARK: - Editing
+
+    /// Changes made to the browse result and not yet sent.
+    ///
+    /// Held here rather than in the grid because they outlive the view and are
+    /// what Save reads. Cleared whenever the result is re-read, which is the same
+    /// moment the database's own answer replaces what was typed.
+    var staged = StagedChanges()
+
+    /// Whether the value viewer under the inspector strip is open.
+    ///
+    /// It survives moving between the detail tabs, because somebody comparing a
+    /// long value against a query result should not have to reopen it on the way
+    /// across. It does not survive changing connection, because the cell it was
+    /// opened over does not either.
+    var isValueViewerOpen = false
+
+    /// Whether the viewer is in its editing mode.
+    var isEditingValue = false
+
+    // MARK: - Transfers
+
+    /// Set while a result is being written to a file. The write happens off the
+    /// main thread, so without this the window would sit looking idle for
+    /// however long a million rows take to reach the disk.
+    var isExporting = false
+
+    /// What the status bar reads while that write is in progress.
+    ///
+    /// A property of its own rather than a sentence in `status`, and it was worth
+    /// re-deriving why once `status` stopped being left on "Running…" for the
+    /// rest of a session. Two reasons, both still true, and neither is the one
+    /// that used to be written here:
+    ///
+    /// Precedence. `statusLine` prefers the pane's own `current.summary` and
+    /// falls back to `status`, so a sentence put in `status` would not be read
+    /// out at all over a result that has a summary — which is every result an
+    /// export can be taken from.
+    ///
+    /// Interleaving. `exportQueue` is separate from the core queue on purpose, so
+    /// the window stays usable while a million rows go to disk: `canRun` and the
+    /// navigator are both live, and a query started mid-export writes `status`
+    /// twice — "Running…", then the settled sentence. The export's own line would
+    /// be gone while the export was still running.
+    ///
+    /// Reading it through `isExporting` is what makes it self-clearing: the flag
+    /// going false restores whatever the tab was saying, so no stale "Exported…"
+    /// can outlive the write it described.
+    var exportStatus = ""
+
+    /// Set while a file is being read into a table, for the reason above and one
+    /// more: an import ends by refreshing the table it wrote to, and the refresh
+    /// puts its own sentence in `status` immediately. Without a flag of its own,
+    /// "1,000 rows read into orders" is overwritten before it is legible.
+    var isImporting = false
+    var importStatus = ""
+
+    /// Whether `--where` / `--order` have been spent. One session's worth: they
+    /// describe the database the window opened against.
+    var appliedInitialFilters = false
 }

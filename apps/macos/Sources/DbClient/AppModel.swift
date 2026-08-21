@@ -594,38 +594,22 @@ final class AppModel {
         get { session.isBusy }
         set { session.isBusy = newValue }
     }
-    /// Set while a result is being written to a file. The write happens off the
-    /// main thread, so without this the window would sit looking idle for
-    /// however long a million rows take to reach the disk.
-    private(set) var isExporting = false
-    /// What the status bar reads while that write is in progress.
-    ///
-    /// A property of its own rather than a sentence in `status`, and it was worth
-    /// re-deriving why once `status` stopped being left on "Running…" for the
-    /// rest of a session. Two reasons, both still true, and neither is the one
-    /// that used to be written here:
-    ///
-    /// Precedence. `statusLine` prefers the pane's own `current.summary` and
-    /// falls back to `status`, so a sentence put in `status` would not be read
-    /// out at all over a result that has a summary — which is every result an
-    /// export can be taken from.
-    ///
-    /// Interleaving. `exportQueue` is separate from the core queue on purpose, so
-    /// the window stays usable while a million rows go to disk: `canRun` and the
-    /// navigator are both live, and a query started mid-export writes `status`
-    /// twice — "Running…", then the settled sentence. The export's own line would
-    /// be gone while the export was still running.
-    ///
-    /// Reading it through `isExporting` is what makes it self-clearing: the flag
-    /// going false restores whatever the tab was saying, so no stale "Exported…"
-    /// can outlive the write it described.
-    private(set) var exportStatus = ""
-    /// Set while a file is being read into a table, for the reason above and one
-    /// more: an import ends by refreshing the table it wrote to, and the refresh
-    /// puts its own sentence in `status` immediately. Without a flag of its own,
-    /// "1,000 rows read into orders" is overwritten before it is legible.
-    private(set) var isImporting = false
-    private(set) var importStatus = ""
+    private(set) var isExporting: Bool {
+        get { session.isExporting }
+        set { session.isExporting = newValue }
+    }
+    private(set) var exportStatus: String {
+        get { session.exportStatus }
+        set { session.exportStatus = newValue }
+    }
+    private(set) var isImporting: Bool {
+        get { session.isImporting }
+        set { session.isImporting = newValue }
+    }
+    private(set) var importStatus: String {
+        get { session.importStatus }
+        set { session.importStatus = newValue }
+    }
     var errorMessage: String? {
         get { session.errorMessage }
         set { session.errorMessage = newValue }
@@ -650,32 +634,27 @@ final class AppModel {
     /// scrolled off the top has to still be there when they scroll back up.
     private let browseResultBound = 1_000_000
 
-    /// The cursor the Content tab is reading through, and whether a page of it
-    /// is in the air right now.
-    ///
-    /// Held here rather than on `ResultSet` because a cursor is a database
-    /// connection, not a property of the rows on screen: the query pane's
-    /// results never have one and `current` can hand back a `ResultSet` that
-    /// never did. Letting go of it is what closes that connection, so every
-    /// path that abandons a browse goes through `discardBrowse`.
-    private var browseCursor: Cursor?
-    /// The statement `browseCursor` was opened over, so an export can ask the
-    /// server the same question through a cursor of its own.
-    private var browseStatementText = ""
-    /// The cursor an export is draining, so Stop can reach it. Nil except
-    /// while one is running.
-    private var exportCursor: Cursor?
-    private var browseFetchInFlight = false
+    private var browseCursor: Cursor? {
+        get { session.browseCursor }
+        set { session.browseCursor = newValue }
+    }
+    private var browseStatementText: String {
+        get { session.browseStatementText }
+        set { session.browseStatementText = newValue }
+    }
+    private var exportCursor: Cursor? {
+        get { session.exportCursor }
+        set { session.exportCursor = newValue }
+    }
+    private var browseFetchInFlight: Bool {
+        get { session.browseFetchInFlight }
+        set { session.browseFetchInFlight = newValue }
+    }
 
-    /// What the pages fetched so far say about which browse columns are empty.
-    ///
-    /// The evidence, kept whether or not anything acts on it, so that switching
-    /// the setting on acts on the result already on screen rather than on the
-    /// next one: a checkbox that appears to do nothing until you reload is a
-    /// checkbox nobody believes. Gathering it costs one null check per column
-    /// per page for every column that holds anything, which is nearly all of
-    /// them.
-    private var emptyColumns = EmptyColumns()
+    private var emptyColumns: EmptyColumns {
+        get { session.emptyColumns }
+        set { session.emptyColumns = newValue }
+    }
 
     /// Columns the browse grid should not draw.
     ///
@@ -736,7 +715,10 @@ final class AppModel {
     /// Browse filters to open with, from `--where` / `--order`. Applied by the
     /// first browse rather than as a second query.
     private let initialFilters: (where: String?, order: String?)
-    private var appliedInitialFilters = false
+    private var appliedInitialFilters: Bool {
+        get { session.appliedInitialFilters }
+        set { session.appliedInitialFilters = newValue }
+    }
 
     /// Set by `--run-script`: the opening `--sql` is a whole script, and nothing
     /// here runs it. main.swift sends the Query menu's own item once the window
@@ -1617,15 +1599,15 @@ final class AppModel {
 
     // MARK: - Back and forward
 
-    /// Where this window has been, and where Back and Forward go.
-    private var browseHistory = BrowseHistory()
+    private var browseHistory: BrowseHistory {
+        get { session.browseHistory }
+        set { session.browseHistory = newValue }
+    }
 
-    /// Set while Back or Forward is doing the moving.
-    ///
-    /// Without it the arrival that Back performs would be recorded as a new
-    /// place, which appends to the path and throws away everything ahead — so
-    /// Back would work once and Forward would never have anywhere to go.
-    private var isNavigatingHistory = false
+    private var isNavigatingHistory: Bool {
+        get { session.isNavigatingHistory }
+        set { session.isNavigatingHistory = newValue }
+    }
 
     var canGoBack: Bool { browseHistory.canGoBack }
     var canGoForward: Bool { browseHistory.canGoForward }
@@ -1748,11 +1730,10 @@ final class AppModel {
         let toggleExpanded: @MainActor () -> Void
     }
 
-    /// Whether the value viewer under the inspector strip is open.
-    ///
-    /// Window state rather than pane state: someone comparing a long value
-    /// against a query result should not have to reopen it on the way across.
-    var isValueViewerOpen = false
+    var isValueViewerOpen: Bool {
+        get { session.isValueViewerOpen }
+        set { session.isValueViewerOpen = newValue }
+    }
 
     /// Opens or closes that pane, and ends any edit as it closes.
     ///
@@ -1987,12 +1968,10 @@ final class AppModel {
 
     // MARK: - Editing the browse result
 
-    /// Changes made to the browse result and not yet sent.
-    ///
-    /// Held here rather than in the grid because they outlive the view and are
-    /// what Save reads. Cleared whenever the result is re-read, which is the same
-    /// moment the database's own answer replaces what was typed.
-    private(set) var staged = StagedChanges()
+    private(set) var staged: StagedChanges {
+        get { session.staged }
+        set { session.staged = newValue }
+    }
 
     /// The cells the grid should mark as changed.
     var pendingCells: Set<GridCell> { Set(staged.updates.keys) }
@@ -2217,7 +2196,10 @@ final class AppModel {
     /// white slab. A mode reachable only by a click is a mode no capture can
     /// reach — synthetic events need accessibility permission this environment
     /// does not grant.
-    var isEditingValue = false
+    var isEditingValue: Bool {
+        get { session.isEditingValue }
+        set { session.isEditingValue = newValue }
+    }
 
     /// Why the selected cell cannot be edited in the value pane, or nil where it
     /// can.
