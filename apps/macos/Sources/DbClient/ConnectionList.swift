@@ -134,11 +134,12 @@ struct ConnectionList: Equatable {
     /// untouched form is untouched. The colour counts: picking one is something
     /// somebody did, even before they typed a host.
     static func isWorthSaving(_ connection: SavedConnection) -> Bool {
-        // The two flags count for the reason the colour does: switching one on is
-        // something somebody did, and a form holding a decision about safety is
-        // the last one to discard as untouched.
-        guard connection.name.isEmpty, connection.color == .none, !connection.isReadOnly,
-            !connection.isProduction
+        // The folder and the two flags count for the reason the colour does:
+        // filing a connection or switching one of them on is something somebody
+        // did, and a form holding a decision about where this lives or how
+        // dangerous it is is the last one to discard as untouched.
+        guard connection.name.isEmpty, connection.color == .none, connection.folder.isEmpty,
+            !connection.isReadOnly, !connection.isProduction
         else { return true }
         // A scheme this build has no driver for arrived from a file somebody edited
         // or from `--conn`, and there is no suggestion to compare it with. Anything

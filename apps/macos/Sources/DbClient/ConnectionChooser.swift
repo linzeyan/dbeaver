@@ -47,6 +47,15 @@ struct ConnectionChooser: View {
     @Bindable var model: AppModel
     @FocusState private var focus: FocusArea?
 
+    /// Which folders are shut.
+    ///
+    /// `@State` and nothing else, which is the whole of "local, not synced": it
+    /// is not in `connections.json`, so a file carried to another machine does
+    /// not carry one person's idea of which folders are interesting. The cost is
+    /// that it resets when the chooser is put away — opening it is a deliberate
+    /// act and every folder open is the right thing to see on the way in.
+    @State private var shutFolders: Set<String> = []
+
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -132,16 +141,38 @@ struct ConnectionChooser: View {
         } else {
             ScrollView {
                 LazyVStack(spacing: 2) {
-                    ForEach(model.visibleConnections) { connection in
-                        ConnectionRow(
-                            connection: connection,
-                            isSelected: model.selectedConnectionID == connection.id,
-                            isOpen: isOpen(connection),
-                            hasUnsavedEdits: model.selectedConnectionID == connection.id
-                                && model.unsavedConnectionEdits != nil,
-                            select: { model.selectConnection(connection.id) },
-                            connect: model.connectFromForm
-                        )
+                    ForEach(model.visibleConnectionGroups) { group in
+                        // The top level has no header. A heading over the
+                        // connections nobody filed would be naming a folder that
+                        // does not exist, and it would be the first thing in a
+                        // sidebar where most people never make a folder at all.
+                        if !group.path.isEmpty {
+                            FolderHeader(
+                                name: group.name,
+                                count: group.connections.count,
+                                isShut: shutFolders.contains(group.path),
+                                toggle: {
+                                    if shutFolders.contains(group.path) {
+                                        shutFolders.remove(group.path)
+                                    } else {
+                                        shutFolders.insert(group.path)
+                                    }
+                                }
+                            )
+                        }
+                        if group.path.isEmpty || !shutFolders.contains(group.path) {
+                            ForEach(group.connections) { connection in
+                                ConnectionRow(
+                                    connection: connection,
+                                    isSelected: model.selectedConnectionID == connection.id,
+                                    isOpen: isOpen(connection),
+                                    hasUnsavedEdits: model.selectedConnectionID == connection.id
+                                        && model.unsavedConnectionEdits != nil,
+                                    select: { model.selectConnection(connection.id) },
+                                    connect: model.connectFromForm
+                                )
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal, Theme.Space.xs)
@@ -242,6 +273,13 @@ struct ConnectionChooser: View {
                 // the answer to a different question: not which database this is,
                 // but which one it is to the person opening it.
                 row("Name", $model.connectionDraft.name, .connectName, "optional")
+                // Beside the name rather than down with the address, because it
+                // answers the same kind of question: not which database this is,
+                // but where the person opening it keeps it. Typed as a path —
+                // there is no folder to pick from until somebody has made one, and
+                // a picker that is empty on a fresh install is a control that
+                // teaches nothing.
+                row("Folder", $model.connectionDraft.folder, .connectFolder, "top level")
                 colourRow
                 driverRow
                 // The fields a database actually needs. A file has no host, no
@@ -616,6 +654,48 @@ struct ConnectionChooser: View {
 }
 
 // MARK: - Rows
+
+/// A folder's name, and the disclosure that shuts it.
+///
+/// A row rather than SwiftUI's `DisclosureGroup`, which draws its own indentation
+/// and its own chevron at its own size — and this sidebar's rows are already a
+/// fixed height with a colour stripe down the left. Two conventions in one column
+/// is the thing a reader has to work out instead of reading.
+///
+/// The count is on the header because a shut folder is otherwise a line that says
+/// nothing about what shutting it hid.
+private struct FolderHeader: View {
+    let name: String
+    let count: Int
+    let isShut: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: Theme.Space.xs) {
+                Image(systemName: isShut ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .frame(width: 10)
+                Text(name)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+                Spacer(minLength: Theme.Space.xs)
+                Text("\(count)")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .monospacedDigit()
+            }
+            .padding(.horizontal, Theme.Space.sm)
+            .frame(height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(name), \(count) connections")
+        .accessibilityAddTraits(isShut ? [] : [.isSelected])
+    }
+}
 
 /// One saved connection.
 ///

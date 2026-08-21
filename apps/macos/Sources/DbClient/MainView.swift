@@ -27,6 +27,10 @@ enum FocusArea: Hashable {
     case connectDatabase
     case connectUser
     case connectPassword
+    /// The folder path. Its own case for the reason `connectRootCert` has one:
+    /// `CompactField` draws its focus ring from a `FocusArea`, and two fields
+    /// answering to one would both light up.
+    case connectFolder
     /// The CA path. Its own case rather than sharing one, because `CompactField`
     /// draws its focus ring from a `FocusArea` and two fields answering to one
     /// would both light up.
