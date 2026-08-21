@@ -40,12 +40,143 @@ enum AppModelConnectionChecks {
         checkATypedPasswordIsNotOverwritten()
         checkTheKeychainIsUntouchedWhileTheSettingIsOff()
         checkProductionQuestion()
+        checkTheSessionHoldsTheConnection()
+        checkAWindowHoldsAListOfConnections()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
             fputs("connection-chooser: \(failures) check(s) failed\n", stderr)
         }
         return failures == 0
+    }
+
+    /// A connection's state is the session's, reached through the window.
+    ///
+    /// The forwarding is the whole of this step and is also the thing a later
+    /// edit can undo without anything complaining: a property put back to being
+    /// stored on the window would still compile, still pass every other check,
+    /// and leak one connection's state into the next one. So this writes through
+    /// the name the panes use and reads the session underneath.
+    private static func checkTheSessionHoldsTheConnection() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(model.sessions.count, 1, "a window opens holding one session")
+            expect(model.activeSession, 0, "and shows it")
+            expect(model.sessions[0].db == nil, true, "with nothing open on it yet")
+            expect(
+                model.sessions[0].connectionLabel, model.connectionLabel,
+                "the label the chrome reads is the session's own")
+
+            // A port nothing listens on, so the attempt is refused on the core
+            // queue while this check reads what the main actor was left with.
+            // Everything asserted below is written before the dispatch, which is
+            // what makes it safe to read here.
+            model.connect(using: "postgres://nobody@127.0.0.1:1/none")
+            expect(
+                model.sessions[0].status, "Connecting…",
+                "opening a connection writes through to the session")
+            expect(model.sessions[0].isBusy, true, "and so does the flag the chrome spins on")
+            expect(model.status, "Connecting…", "and the window reads back what it wrote")
+
+            // The navigator is the same claim as the label: it describes one
+            // connection's database, and the same schema name means a different
+            // thing on the next server. Written through the name the sidebar
+            // reads, so that a property put back onto the window is caught.
+            model.expanded.insert("public")
+            expect(
+                model.sessions[0].expanded.contains("public"), true,
+                "what the sidebar has open is the session's")
+            model.navigatorFilter = "orders"
+            expect(
+                model.sessions[0].navigatorFilter, "orders",
+                "and so is what it is filtered by")
+            model.activeTab = .structure
+            expect(
+                model.sessions[0].activeTab, .structure,
+                "and which detail pane is showing")
+
+            // The editor's text is written against one database's dialect and
+            // the filters against one relation's columns, so both are the
+            // session's. `queryText` reaches the active buffer, which now lives
+            // there too — this is the check that the whole chain still lands in
+            // one place.
+            model.queryText = "select 1"
+            expect(
+                model.sessions[0].queryBuffers[0].text, "select 1",
+                "what is typed in the editor is the session's")
+            model.addQueryBuffer()
+            expect(model.sessions[0].queryBuffers.count, 2, "and so is a second buffer")
+            expect(
+                model.sessions[0].activeQueryBufferIndex, 1,
+                "and which of them the editor is in")
+            model.whereClause = "id > 10"
+            expect(
+                model.sessions[0].whereClause, "id > 10",
+                "and what the browse is filtered by")
+
+            // A cursor is a connection the server holds open on this session's
+            // behalf, so it is the one property here whose leaking is not a
+            // cosmetic defect. Nothing can open one without a server, so what is
+            // pinned is that the session is where it would be looked for.
+            expect(model.sessions[0].browseCursor == nil, true, "no cursor is open yet")
+            expect(model.sessions[0].isExporting, false, "and nothing is being written to a file")
+            model.isValueViewerOpen = true
+            expect(
+                model.sessions[0].isValueViewerOpen, true,
+                "and the viewer over a cell belongs to the session that has the cell")
+        }
+    }
+
+    /// A window is a list of connections, and a refused attempt leaves no tab.
+    ///
+    /// Everything here happens without a server, which bounds what it can pin: a
+    /// second tab needs a connection that opened. What it does pin is the rule
+    /// that decides whether there is a second tab at all, and the rule is where
+    /// the mistakes are — a window that gained a dead tab per mistyped password
+    /// would be asking the user to clean up after a refusal.
+    private static func checkAWindowHoldsAListOfConnections() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(model.sessions.count, 1, "a window opens with one tab")
+
+            // A port nothing listens on. The refusal arrives on the core queue
+            // and is applied on a later turn of the run loop, so what is read
+            // here is what the attempt did on its way out.
+            model.connect(using: "postgres://nobody@127.0.0.1:1/none")
+            expect(
+                model.sessions.count, 1,
+                "the first connection fills the tab that is already there")
+            model.connect(using: "postgres://nobody@127.0.0.1:1/other")
+            expect(
+                model.sessions.count, 1,
+                "and so does the next, because nothing opened in it")
+            expect(
+                model.sessions[0].connectionLabel.isEmpty, false,
+                "the tab names what it is reaching for while it reaches")
+
+            // Out of range is a no-op rather than a crash. The strip is drawn
+            // from the same list, but a menu item can outlive the tab it names.
+            model.selectSession(7)
+            expect(model.activeSession, 0, "there is no tab seven to go to")
+
+            // Closing the only one leaves a window with a tab, and an empty one:
+            // what was typed against the connection being closed goes with it.
+            model.queryText = "select 1"
+            model.closeSession(0)
+            expect(model.sessions.count, 1, "a window always has a tab")
+            expect(model.queryText, "", "and the one left is empty")
+            expect(model.sessions[0].db == nil, true, "with nothing open on it")
+
+            // A window with nothing open shows the chooser. Closing the last
+            // connection has to reach that state, or the window is left drawing
+            // the panes of a database that has gone under a toolbar naming it.
+            expect(
+                model.isPresentingConnection, true,
+                "and the window is asking which database to open")
+            expect(
+                model.canDisconnect, false,
+                "with nothing for Disconnect to close")
+        }
     }
 
     /// Clicking a row is looking, not connecting, and must not raise the panel

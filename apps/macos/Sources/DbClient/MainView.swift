@@ -65,27 +65,66 @@ struct MainView: View {
             model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? model.connectionLabel)
     }
 
+    /// The window's connections, then the two commands that change how many
+    /// there are.
+    ///
+    /// A `Toggle` per connection rather than a `Picker`, which would render the
+    /// same checkmarks and take away the ability to say what a row means beyond
+    /// its title. Turning one on selects it; turning one off would leave the
+    /// window showing nothing, so the off case is ignored rather than disabled —
+    /// a control that refuses the click on the row already selected reads as
+    /// broken, where one that does nothing reads as already done.
+    @ViewBuilder
+    private var connectionMenuItems: some View {
+        ForEach(Array(model.sessions.enumerated()), id: \.element.id) { entry in
+            Toggle(
+                isOn: Binding(
+                    get: { entry.offset == model.activeSession },
+                    set: { if $0 { model.selectSession(entry.offset) } })
+            ) {
+                Text(entry.element.connectionLabel)
+            }
+        }
+        Divider()
+        Button("Connect…") { model.presentConnection() }
+        Button("Disconnect") { model.closeSession(model.activeSession) }
+            .disabled(!model.canDisconnect)
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // The chip that names the connection, and the menu that lists the
+        // others. One control rather than a second strip of tabs above the
+        // query buffers': a window with two rows of tabs makes the reader work
+        // out which row means what, and the thing being switched between here is
+        // already named in the toolbar. Pressing what names the current one to
+        // get to the rest is how every switcher on this platform behaves.
         ToolbarItem(placement: .navigation) {
-            HStack(spacing: Theme.Space.xs + 2) {
-                // The mark the chooser was given, where it is of use: leading the
-                // chip that names the connection, at the top of the window holding
-                // the rows it would change. Absent rather than grey when no colour
-                // was picked — a bar in every session would train the eye to stop
-                // seeing the one that means something.
-                if let tone = model.connectionColor.tone {
-                    RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                        .fill(tone.color)
-                        .frame(width: 3, height: 12)
-                        .accessibilityLabel("\(model.connectionColor.label) connection")
+            Menu {
+                connectionMenuItems
+            } label: {
+                HStack(spacing: Theme.Space.xs + 2) {
+                    // The mark the chooser was given, where it is of use: leading
+                    // the chip that names the connection, at the top of the window
+                    // holding the rows it would change. Absent rather than grey
+                    // when no colour was picked — a bar in every session would
+                    // train the eye to stop seeing the one that means something.
+                    if let tone = model.connectionColor.tone {
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .fill(tone.color)
+                            .frame(width: 3, height: 12)
+                            .accessibilityLabel("\(model.connectionColor.label) connection")
+                    }
+                    StatusDot(state: model.connectionState)
+                    Text(model.connectionLabel)
+                        .font(Theme.Typography.bodyEmphasis)
+                        .foregroundStyle(Theme.textSecondary.color)
                 }
-                StatusDot(state: model.connectionState)
-                Text(model.connectionLabel)
-                    .font(Theme.Typography.bodyEmphasis)
-                    .foregroundStyle(Theme.textSecondary.color)
             }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             .help("\(model.connectionState.label) — \(model.connectionLabel)")
+            .accessibilityLabel("Connections")
         }
 
         // Back and Forward at the navigation end, where every window that has

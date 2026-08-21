@@ -152,21 +152,48 @@ final class ResultSet {
 @Observable
 @MainActor
 final class AppModel {
-    // Navigator
-    private(set) var schemas: [SchemaInfo] = []
-    private(set) var relations: [String: [RelationInfo]] = [:]
-    var expanded: Set<String> = []
-    var selected: RelationInfo? { didSet { selectionChanged(from: oldValue) } }
+    // Navigator. The active session's, like the chrome below it: these describe
+    // one connection's database, and the same schema name means a different
+    // thing on the next server.
+    private(set) var schemas: [SchemaInfo] {
+        get { session.schemas }
+        set { session.schemas = newValue }
+    }
+    private(set) var relations: [String: [RelationInfo]] {
+        get { session.relations }
+        set { session.relations = newValue }
+    }
+    var expanded: Set<String> {
+        get { session.expanded }
+        set { session.expanded = newValue }
+    }
+    /// The `didSet` this used to carry, written out. A computed property cannot
+    /// have one, and the observer is not incidental: it is what clears the WHERE
+    /// and ORDER BY fields when a user picks a different table.
+    var selected: RelationInfo? {
+        get { session.selected }
+        set {
+            let previous = session.selected
+            session.selected = newValue
+            selectionChanged(from: previous)
+        }
+    }
     /// Set while `refresh` swaps `selected` for the freshly read value naming
     /// the same relation. The two are the same object to a user but not to
     /// `==` — `estimatedRows` moves on its own — and that assignment must not
     /// look like the user picking a table: `selectionChanged` clears the WHERE
     /// and ORDER BY fields, and a refresh that threw the filters away would be
     /// a worse answer than the stale pane it was pressed to fix.
-    private var isReselecting = false
+    private var isReselecting: Bool {
+        get { session.isReselecting }
+        set { session.isReselecting = newValue }
+    }
     /// Name filter for the navigator. A schema with hundreds of objects is the
     /// normal case, and scrolling to find one is the slowest thing a user does.
-    var navigatorFilter = ""
+    var navigatorFilter: String {
+        get { session.navigatorFilter }
+        set { session.navigatorFilter = newValue }
+    }
     /// Bumped by the View menu's Filter Objects item.
     ///
     /// Focus lives in a `@FocusState` inside the window's view tree, which an
@@ -182,49 +209,76 @@ final class AppModel {
     /// Recorded in the history on its way through, because moving between a
     /// table's structure and its rows is moving: Back from the rows should mean
     /// the description of the same table, not the table before it.
-    var activeTab: DetailTab = .content { didSet { recordVisit() } }
-    private(set) var columns: [ColumnInfo] = []
+    var activeTab: DetailTab {
+        get { session.activeTab }
+        set {
+            session.activeTab = newValue
+            recordVisit()
+        }
+    }
+    private(set) var columns: [ColumnInfo] {
+        get { session.columns }
+        set { session.columns = newValue }
+    }
     /// Which of those columns name one row, as the core decides it. Read
     /// alongside the columns, because every question about editing is a question
     /// about this one.
-    private(set) var rowIdentity: RowIdentity?
-    private(set) var indexes: [IndexInfo] = []
-    private(set) var foreignKeys: [RelationshipInfo] = []
-    private(set) var referencedBy: [RelationshipInfo] = []
-    private(set) var constraints: [ConstraintInfo] = []
-    private(set) var triggers: [TriggerInfo] = []
+    private(set) var rowIdentity: RowIdentity? {
+        get { session.rowIdentity }
+        set { session.rowIdentity = newValue }
+    }
+    private(set) var indexes: [IndexInfo] {
+        get { session.indexes }
+        set { session.indexes = newValue }
+    }
+    private(set) var foreignKeys: [RelationshipInfo] {
+        get { session.foreignKeys }
+        set { session.foreignKeys = newValue }
+    }
+    private(set) var referencedBy: [RelationshipInfo] {
+        get { session.referencedBy }
+        set { session.referencedBy = newValue }
+    }
+    private(set) var constraints: [ConstraintInfo] {
+        get { session.constraints }
+        set { session.constraints = newValue }
+    }
+    private(set) var triggers: [TriggerInfo] {
+        get { session.triggers }
+        set { session.triggers = newValue }
+    }
     /// The statements that would recreate the selected relation. Nil where the
     /// core cannot write them, which is what keeps the DDL section off a
     /// relation it would have nothing to show for.
-    private(set) var ddl: String?
+    private(set) var ddl: String? {
+        get { session.ddl }
+        set { session.ddl = newValue }
+    }
 
     // Content pane
-    let browseResult = ResultSet()
+    var browseResult: ResultSet { session.browseResult }
 
-    /// What each relation's Content tab was showing, so that leaving a table and
-    /// coming back is not the same as opening it.
-    private var browseStore = BrowseStore()
+    private var browseStore: BrowseStore {
+        get { session.browseStore }
+        set { session.browseStore = newValue }
+    }
 
-    /// The state to put back once the newly selected relation's rows arrive.
-    ///
-    /// Held rather than applied at selection time because there is nothing to
-    /// select yet: the grid is emptied and refilled by a round trip, and
-    /// `install` clears any selection made before that lands.
-    private var stateToRestore: BrowseState?
+    private var stateToRestore: BrowseState? {
+        get { session.stateToRestore }
+        set { session.stateToRestore = newValue }
+    }
 
     // Query pane
 
-    /// The statements the pane last ran, in order, each with what it did.
-    ///
-    /// A run of one is what ⌘R makes and a run of five is what ⌥⌘R makes. Five
-    /// statements produce five outcomes and this pane has one grid, so the list
-    /// is where the other four go: showing one and saying nothing about the rest
-    /// is the class of lie the status bar's "first 100,000 of ~1,000,000 rows"
-    /// exists to prevent.
-    private(set) var scriptSteps: [ScriptStep] = []
+    private(set) var scriptSteps: [ScriptStep] {
+        get { session.scriptSteps }
+        set { session.scriptSteps = newValue }
+    }
 
-    /// Which step the pane is showing, as an index into `scriptSteps`.
-    var selectedStep = 0
+    var selectedStep: Int {
+        get { session.selectedStep }
+        set { session.selectedStep = newValue }
+    }
 
     var selectedScriptStep: ScriptStep? {
         scriptSteps.indices.contains(selectedStep) ? scriptSteps[selectedStep] : nil
@@ -237,10 +291,7 @@ final class AppModel {
     /// holds the batches it was handed until the next run replaces the lot.
     var queryResult: ResultSet { selectedScriptStep?.result ?? pristine }
 
-    /// Stands in before anything has run here. A result that has never run is a
-    /// different state from a statement that returned nothing, and the pane
-    /// draws them differently.
-    private let pristine = ResultSet()
+    private var pristine: ResultSet { session.pristine }
 
     /// The result the chrome is currently describing. Structure has no result of
     /// its own, so it borrows the browse's — the status bar overrides what it
@@ -248,33 +299,29 @@ final class AppModel {
     var current: ResultSet { activeTab == .query ? queryResult : browseResult }
 
     // Content pane filters
-    var whereClause = ""
-    var orderClause = ""
+    var whereClause: String {
+        get { session.whereClause }
+        set { session.whereClause = newValue }
+    }
+    var orderClause: String {
+        get { session.orderClause }
+        set { session.orderClause = newValue }
+    }
 
-    /// The filter rows, in the order they are drawn.
-    ///
-    /// Read from anywhere and written only through the three functions beside
-    /// `applyFilters`. That is what holds the one invariant this pair has: these
-    /// and `whereClause` are never both filled, because they are two ways of
-    /// saying one thing and a browse can only send one WHERE.
-    private(set) var filterRules: [FilterRule] = []
+    private(set) var filterRules: [FilterRule] {
+        get { session.filterRules }
+        set { session.filterRules = newValue }
+    }
 
-    /// The WHERE those rows last compiled to, as the core wrote it.
-    ///
-    /// Somewhere other than `whereClause` on purpose. Writing it there would put
-    /// the rows and a text saying the same thing in two editable places, and the
-    /// next keystroke in either would make them disagree with nothing on screen
-    /// saying which one the grid is showing.
-    private(set) var compiledClause = ""
+    private(set) var compiledClause: String {
+        get { session.compiledClause }
+        set { session.compiledClause = newValue }
+    }
 
-    /// What each column of the selected relation may be asked, as the core
-    /// answers it.
-    ///
-    /// Empty until a relation's columns have arrived, and empty for good against
-    /// a database this build writes no statements for. The rows are drawn from
-    /// this, so empty is also how the *Filters* disclosure knows not to offer
-    /// itself — an offer this side cannot compile is not one.
-    private(set) var filterColumns: [FilterColumn] = []
+    private(set) var filterColumns: [FilterColumn] {
+        get { session.filterColumns }
+        set { session.filterColumns = newValue }
+    }
 
     /// Whether the Custom field may be typed into.
     ///
@@ -347,12 +394,10 @@ final class AppModel {
     /// sent them.
     var showsAllStatements = false
 
-    /// What the history list is being narrowed by.
-    ///
-    /// Matched against the whole statement rather than the one-line preview, so
-    /// a table named in the fifteenth line of a script is still findable by
-    /// name — which is how somebody looks for "the one that touched orders".
-    var historyFilter = ""
+    var historyFilter: String {
+        get { session.historyFilter }
+        set { session.historyFilter = newValue }
+    }
 
     /// The entries the panel draws, in the store's own order.
     ///
@@ -398,8 +443,14 @@ final class AppModel {
         var text = ""
     }
 
-    var queryBuffers: [QueryBuffer] = [QueryBuffer(name: "query 1")]
-    var activeQueryBufferIndex = 0
+    var queryBuffers: [QueryBuffer] {
+        get { session.queryBuffers }
+        set { session.queryBuffers = newValue }
+    }
+    var activeQueryBufferIndex: Int {
+        get { session.activeQueryBufferIndex }
+        set { session.activeQueryBufferIndex = newValue }
+    }
 
     /// The active buffer's text, under the name the rest of the model has
     /// always used, so that splitting one buffer into a list changed no caller.
@@ -448,16 +499,14 @@ final class AppModel {
         }
     }
 
-    /// Where the caret or selection is in the editor.
-    ///
-    /// Owned here rather than by the pane because the Run button lives in the
-    /// window's toolbar, which has no view of the editor. ⌘R has to know which
-    /// statement the user is standing in, and this is the only place both ends
-    /// can see.
-    var querySelection: TextSelection?
-    /// The last statement `selectionChanged` put in the editor, so a later
-    /// selection can tell "untouched suggestion" from "the user's work".
-    private var suggestedQueryText = ""
+    var querySelection: TextSelection? {
+        get { session.querySelection }
+        set { session.querySelection = newValue }
+    }
+    private var suggestedQueryText: String {
+        get { session.suggestedQueryText }
+        set { session.suggestedQueryText = newValue }
+    }
 
     /// A statement the Query pane sent, carried alongside its result so a server
     /// error position can be turned back into a place in the editor.
@@ -488,28 +537,69 @@ final class AppModel {
         let sent: SentStatement
     }
 
-    // Chrome
-    private(set) var connectionLabel = "Not connected"
-    private(set) var connectionState: StatusDot.State = .connecting
-
-    /// The colour of the connection now open.
+    /// The connections this window holds, and which one it is showing.
     ///
-    /// Carried out of the chooser into the session, because the colour is not there
-    /// to decorate the sidebar: somebody marks a connection red so that they can
-    /// tell, while looking at a grid of rows, which server they are about to change.
-    /// A mark that stopped at the moment of connecting would be a mark shown only
-    /// when it does not matter yet.
-    private(set) var connectionColor: ConnectionColor = .none
+    /// A window is a list of connections and a pointer into it. Everything a
+    /// pane draws is read from the one the pointer names, which is why switching
+    /// tabs is one assignment and needs no saving or putting back: the state
+    /// never left the connection it describes.
+    private(set) var sessions: [Session] = [Session()]
+    private(set) var activeSession = 0
 
-    /// What the connection now open is allowed to do.
+    /// The session an arriving result belongs to, while it is being applied.
     ///
-    /// Carried out of the chooser into the session for the reason `connectionColor`
-    /// above is, and answering a sharper question than the colour does: a mark
-    /// that stopped at the moment of connecting would be a mark that applied only
-    /// while nothing could go wrong.
-    private(set) var safety = ConnectionSafety()
+    /// Set only by `dispatch`, and only across the synchronous body of one apply
+    /// block. Those blocks write through the forwarding properties below, which
+    /// otherwise resolve to whatever tab is in front — and the tab in front is
+    /// not necessarily the one that asked the question. A page fetched for a
+    /// connection somebody has since switched away from has to land in that
+    /// connection's grid, not in the one they are looking at now.
+    ///
+    /// Dynamic scope rather than a session parameter threaded through two hundred
+    /// apply blocks. It is sound because those blocks are synchronous and on the
+    /// main actor: nothing can run between the two assignments that bracket one.
+    ///
+    /// `@ObservationIgnored` deliberately. It is put back before the run loop
+    /// gets its turn, so a view that tracked it would be invalidated twice per
+    /// arriving result over a value it can never see.
+    @ObservationIgnored private var applyingTo: Session?
 
-    private(set) var status = "Connecting…"
+    /// The session a connection attempt is filling, while it is in flight.
+    ///
+    /// Nil at rest. Held rather than searched for again: which tab an attempt
+    /// made has one answer, and finding it a second time by identity is a second
+    /// answer that can disagree with the first.
+    private var sessionBeingOpened: Session?
+
+    /// The session everything below reaches: the one a result is being applied
+    /// into, or else the one in front.
+    private var session: Session { applyingTo ?? sessions[activeSession] }
+
+    // Chrome. Each of these is the active session's, kept under the name it has
+    // always had so that no pane and no check has to learn a new one. The
+    // forwarding is what lets a second session exist without a second copy of
+    // the state: there is one place a connection's label is written, and it is
+    // the session that connected.
+    private(set) var connectionLabel: String {
+        get { session.connectionLabel }
+        set { session.connectionLabel = newValue }
+    }
+    private(set) var connectionState: StatusDot.State {
+        get { session.connectionState }
+        set { session.connectionState = newValue }
+    }
+    private(set) var connectionColor: ConnectionColor {
+        get { session.connectionColor }
+        set { session.connectionColor = newValue }
+    }
+    private(set) var safety: ConnectionSafety {
+        get { session.safety }
+        set { session.safety = newValue }
+    }
+    private(set) var status: String {
+        get { session.status }
+        set { session.status = newValue }
+    }
 
     /// What `status` says when the connection is not doing anything.
     ///
@@ -527,49 +617,35 @@ final class AppModel {
     /// neither. See the note on `exportStatus`.
     private var settledStatus: String { Self.pluralized(schemas.count, "schema") }
 
-    private(set) var isBusy = false
-    /// Set while a result is being written to a file. The write happens off the
-    /// main thread, so without this the window would sit looking idle for
-    /// however long a million rows take to reach the disk.
-    private(set) var isExporting = false
-    /// What the status bar reads while that write is in progress.
-    ///
-    /// A property of its own rather than a sentence in `status`, and it was worth
-    /// re-deriving why once `status` stopped being left on "Running…" for the
-    /// rest of a session. Two reasons, both still true, and neither is the one
-    /// that used to be written here:
-    ///
-    /// Precedence. `statusLine` prefers the pane's own `current.summary` and
-    /// falls back to `status`, so a sentence put in `status` would not be read
-    /// out at all over a result that has a summary — which is every result an
-    /// export can be taken from.
-    ///
-    /// Interleaving. `exportQueue` is separate from the core queue on purpose, so
-    /// the window stays usable while a million rows go to disk: `canRun` and the
-    /// navigator are both live, and a query started mid-export writes `status`
-    /// twice — "Running…", then the settled sentence. The export's own line would
-    /// be gone while the export was still running.
-    ///
-    /// Reading it through `isExporting` is what makes it self-clearing: the flag
-    /// going false restores whatever the tab was saying, so no stale "Exported…"
-    /// can outlive the write it described.
-    private(set) var exportStatus = ""
-    /// Set while a file is being read into a table, for the reason above and one
-    /// more: an import ends by refreshing the table it wrote to, and the refresh
-    /// puts its own sentence in `status` immediately. Without a flag of its own,
-    /// "1,000 rows read into orders" is overwritten before it is legible.
-    private(set) var isImporting = false
-    private(set) var importStatus = ""
-    var errorMessage: String?
+    private(set) var isBusy: Bool {
+        get { session.isBusy }
+        set { session.isBusy = newValue }
+    }
+    private(set) var isExporting: Bool {
+        get { session.isExporting }
+        set { session.isExporting = newValue }
+    }
+    private(set) var exportStatus: String {
+        get { session.exportStatus }
+        set { session.exportStatus = newValue }
+    }
+    private(set) var isImporting: Bool {
+        get { session.isImporting }
+        set { session.isImporting = newValue }
+    }
+    private(set) var importStatus: String {
+        get { session.importStatus }
+        set { session.importStatus = newValue }
+    }
+    var errorMessage: String? {
+        get { session.errorMessage }
+        set { session.errorMessage = newValue }
+    }
 
-    /// What the connection's transaction is doing, as of the last thing that
-    /// could have changed it.
-    ///
-    /// Read back from the core after each of those rather than predicted here.
-    /// The core is the side that sent the BEGIN, so a copy kept in the window
-    /// would be a second answer with nothing to keep it honest — and the one
-    /// that is drawn on screen would be the one nobody checked.
-    private(set) var transaction: TransactionState = .none
+    private(set) var transaction: TransactionState {
+        get { session.transaction }
+        set { session.transaction = newValue }
+    }
 
     /// Rows fetched per browse page. A grid shows a window onto the data;
     /// pulling a million rows to display forty is what makes other clients feel
@@ -585,32 +661,27 @@ final class AppModel {
     /// scrolled off the top has to still be there when they scroll back up.
     private let browseResultBound = 1_000_000
 
-    /// The cursor the Content tab is reading through, and whether a page of it
-    /// is in the air right now.
-    ///
-    /// Held here rather than on `ResultSet` because a cursor is a database
-    /// connection, not a property of the rows on screen: the query pane's
-    /// results never have one and `current` can hand back a `ResultSet` that
-    /// never did. Letting go of it is what closes that connection, so every
-    /// path that abandons a browse goes through `discardBrowse`.
-    private var browseCursor: Cursor?
-    /// The statement `browseCursor` was opened over, so an export can ask the
-    /// server the same question through a cursor of its own.
-    private var browseStatementText = ""
-    /// The cursor an export is draining, so Stop can reach it. Nil except
-    /// while one is running.
-    private var exportCursor: Cursor?
-    private var browseFetchInFlight = false
+    private var browseCursor: Cursor? {
+        get { session.browseCursor }
+        set { session.browseCursor = newValue }
+    }
+    private var browseStatementText: String {
+        get { session.browseStatementText }
+        set { session.browseStatementText = newValue }
+    }
+    private var exportCursor: Cursor? {
+        get { session.exportCursor }
+        set { session.exportCursor = newValue }
+    }
+    private var browseFetchInFlight: Bool {
+        get { session.browseFetchInFlight }
+        set { session.browseFetchInFlight = newValue }
+    }
 
-    /// What the pages fetched so far say about which browse columns are empty.
-    ///
-    /// The evidence, kept whether or not anything acts on it, so that switching
-    /// the setting on acts on the result already on screen rather than on the
-    /// next one: a checkbox that appears to do nothing until you reload is a
-    /// checkbox nobody believes. Gathering it costs one null check per column
-    /// per page for every column that holds anything, which is nearly all of
-    /// them.
-    private var emptyColumns = EmptyColumns()
+    private var emptyColumns: EmptyColumns {
+        get { session.emptyColumns }
+        set { session.emptyColumns = newValue }
+    }
 
     /// Columns the browse grid should not draw.
     ///
@@ -626,16 +697,25 @@ final class AppModel {
     var pageSize: Int { browsePage }
     private let batchRows = 8192
 
-    private var db: Database?
-    private let queue = DispatchQueue(label: "dev.dbclient.core", qos: .userInitiated)
+    private var db: Database? {
+        get { session.db }
+        set { session.db = newValue }
+    }
+    private var queue: DispatchQueue { session.queue }
     /// Exports get a queue of their own. The core queue is serial because one
     /// connection cannot service two statements; an export holds no connection,
     /// and parking a million-row write in front of the next query would make
     /// clicking a table in the navigator wait on a file.
+    ///
+    /// One for the window rather than one per session, which is the opposite of
+    /// the core queue above and for the same reason: what this protects is the
+    /// next query from a file write parked in front of it, and that is as true
+    /// across two connections as within one.
     private let exportQueue = DispatchQueue(label: "dev.dbclient.export", qos: .userInitiated)
-    /// The string the live connection was opened with. A `var` because the
-    /// window outlives any one database: File ▸ Connect… replaces it.
-    private var connString = ""
+    private var connString: String {
+        get { session.connString }
+        set { session.connString = newValue }
+    }
 
     /// Which database the editor is writing SQL for, as the scheme the core
     /// picks a dialect by.
@@ -662,7 +742,10 @@ final class AppModel {
     /// Browse filters to open with, from `--where` / `--order`. Applied by the
     /// first browse rather than as a second query.
     private let initialFilters: (where: String?, order: String?)
-    private var appliedInitialFilters = false
+    private var appliedInitialFilters: Bool {
+        get { session.appliedInitialFilters }
+        set { session.appliedInitialFilters = newValue }
+    }
 
     /// Set by `--run-script`: the opening `--sql` is a whole script, and nothing
     /// here runs it. main.swift sends the Query menu's own item once the window
@@ -678,16 +761,24 @@ final class AppModel {
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
         initialFilter: String? = nil
     ) {
-        self.navigatorFilter = initialFilter ?? ""
         self.history = history
         self.favorites = favorites
         self.preferences = preferences
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
-        self.activeTab = initialSQL == nil ? initialTab : .query
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
+        // Onto the session directly, not through the forwarding properties, and
+        // down here rather than at the top. Two reasons, and the second is the
+        // one that would have been a defect rather than a compile error:
+        // reaching a computed property needs every stored one to have a value
+        // first, and `activeTab`'s setter records a visit — which the `didSet`
+        // it replaced would not have done, because Swift does not run those
+        // during initialisation. A window would have opened with a history
+        // entry nobody navigated to.
+        sessions[0].navigatorFilter = initialFilter ?? ""
+        sessions[0].activeTab = initialSQL == nil ? initialTab : .query
         // After `preferences`, which is what says where to look for the file.
         //
         // The first saved connection is selected rather than left for the user to
@@ -802,6 +893,14 @@ final class AppModel {
     /// Whether the form can be dismissed without connecting. Only once there is
     /// a session behind it to go back to.
     var canCancelConnection: Bool { db != nil }
+
+    /// Whether there is a connection to close.
+    ///
+    /// Its own property rather than a second reader of `canCancelConnection`,
+    /// which happens to test the same thing for an unrelated question — whether
+    /// the form has a session to be dismissed back to. Two questions that agree
+    /// today and have no reason to go on agreeing.
+    var canDisconnect: Bool { db != nil }
 
     /// What the session waiting behind the chooser is connected to, or nil before
     /// there is one.
@@ -1164,8 +1263,8 @@ final class AppModel {
     ///
     /// Leaves the live connection alone: it is still the one answering queries
     /// until another one opens, so a mistyped password costs nothing but the
-    /// retyping. The session is replaced in `adopt`, once there is something to
-    /// replace it with.
+    /// retyping. What opens arrives in a tab of its own, and `adopt` is what puts
+    /// that tab in front.
     func presentConnection() {
         connectionError = nil
         isPresentingConnection = true
@@ -1181,29 +1280,55 @@ final class AppModel {
         connectionState = .connected
     }
 
-    private func open(_ connString: String) {
-        isConnecting = true
-        isBusy = true
-        connectionError = nil
-        connectionState = .connecting
-        status = "Connecting…"
-        run {
-            let db = try Database(connString: connString)
-            return (db, try Self.inventory(of: db))
-        } then: { [self] result in
-            self.connString = connString
-            adopt(result.0, inventory: result.1)
-        }
+    /// The session an attempt should fill: the tab in front when nothing is open
+    /// on it, and a new tab otherwise.
+    ///
+    /// Three behaviours out of one rule. A window's first connection fills the
+    /// tab that is already there; a retry after a refusal reuses the tab the
+    /// refusal left; File ▸ Connect… over a live connection opens a second tab
+    /// beside it. The new tab is appended and not selected — `adopt` is what puts
+    /// it in front, once there is something in it to show.
+    private func sessionToFill() -> Session {
+        if session.db == nil { return session }
+        let added = Session()
+        sessions.append(added)
+        return added
     }
 
-    /// Installs a connection that opened, in place of whatever was here.
+    private func open(_ connString: String) {
+        let filling = sessionToFill()
+        sessionBeingOpened = filling
+        // Onto that session directly rather than through the forwarding
+        // properties, which reach the tab in front — and the tab in front is the
+        // connection still answering queries while this one is in the air.
+        filling.connString = connString
+        filling.connectionLabel = Self.label(for: connString)
+        filling.connectionState = .connecting
+        filling.status = "Connecting…"
+        filling.isBusy = true
+        isConnecting = true
+        connectionError = nil
+        dispatch(
+            on: filling.queue, applyingInto: filling,
+            {
+                let db = try Database(connString: connString)
+                return (db, try Self.inventory(of: db))
+            },
+            then: { [self] result in
+                adopt(result.0, inventory: result.1)
+            })
+    }
+
+    /// Installs a connection that opened, into the session that was opening it.
+    ///
+    /// Nothing is cleared on the way in. There used to be a `reset` here that
+    /// emptied every pane, because a new connection arrived into the window that
+    /// was showing the previous one; now it arrives into a session of its own,
+    /// which has never held anything. The list of what to clear was the kind of
+    /// list that goes wrong by omission — one property left off it is a fragment
+    /// of the previous database shown under the name of this one — and it is
+    /// gone, replaced by `Session`'s own stored properties.
     private func adopt(_ connection: Database, inventory: Inventory) {
-        // Now rather than when the form opened: an attempt that fails has to
-        // leave the session it was launched from exactly as it was, and one
-        // that succeeds has to leave nothing of it behind. Skipped on the first
-        // connection, where there is nothing to drop and where dropping it
-        // would take the editor's `--sql` with it.
-        if db != nil { reset() }
         db = connection
         isConnecting = false
         isPresentingConnection = false
@@ -1246,57 +1371,88 @@ final class AppModel {
         // then the menu item is what runs it.
         if !appliedLaunchOptions, initialSQL != nil, !initialSQLIsScript { runCurrentQuery() }
         appliedLaunchOptions = true
+        // In front now, and not a moment sooner. Until this line the window went
+        // on showing the connection that was already answering, which is the
+        // promise `presentConnection` makes: a mistyped password costs the
+        // retyping and nothing else.
+        if let index = sessions.firstIndex(where: { $0 === session }) { activeSession = index }
+        sessionBeingOpened = nil
     }
 
-    /// Drops everything the previous connection put on screen.
+    /// Puts another of this window's connections in front.
     ///
-    /// Every property a pane reads is listed here. One left behind is a
-    /// fragment of the previous database shown under the name of this one, and
-    /// nothing else in the window would contradict it.
-    private func reset() {
-        // Releases the previous connection, which closes it.
-        db = nil
-        schemas = []
-        relations = [:]
-        expanded = []
-        selected = nil
-        navigatorFilter = ""
-        // The needle almost certainly names a table of the database being left,
-        // and a panel that opened onto "no statement here matches that" would be
-        // reporting a filter nobody remembers typing.
-        historyFilter = ""
-        columns = []
-        clearRelationDetail()
-        browseResult.discard()
-        discardBrowse()
-        scriptSteps = []
-        selectedStep = 0
-        whereClause = ""
-        orderClause = ""
-        filterRules = []
-        compiledClause = ""
-        // Not merely stale: these say which operators a column can be asked, and
-        // the answer is the previous database's dialect.
-        filterColumns = []
-        // The store's keys are `schema.name` strings, and the same string names
-        // a different table on a different server.
-        browseStore.clear()
-        stateToRestore = nil
-        browseHistory.clear()
-        queryText = ""
-        suggestedQueryText = ""
-        querySelection = nil
-        isValueViewerOpen = false
-        isEditingValue = false
-        errorMessage = nil
-        staged = StagedChanges()
-        // The mode belonged to the connection being dropped, not to the window.
-        transaction = .none
-        // As did the marks. A window that kept the previous connection's
-        // read-only mark would refuse writes to a database nobody marked, and
-        // one that kept a cleared mark would allow them to a database somebody
-        // did — the second is the direction that costs data.
-        safety = ConnectionSafety()
+    /// One assignment, because there is nothing to save and nothing to put back.
+    /// Everything a pane reads is the session's, so moving the pointer moves the
+    /// navigator, the grid, the editor, the transaction state and the status bar
+    /// together — and a statement still running on the tab being left goes on
+    /// running, and lands in it.
+    func selectSession(_ index: Int) {
+        guard sessions.indices.contains(index) else { return }
+        activeSession = index
+    }
+
+    /// Closes a connection and takes its tab with it.
+    ///
+    /// A window always has a tab. Closing the only one leaves an empty session
+    /// rather than a window with nothing in it — which is also what Disconnect
+    /// is: there is no separate command, because a connection nobody is looking
+    /// at and a closed connection are the same thing.
+    func closeSession(_ index: Int) {
+        guard sessions.indices.contains(index) else { return }
+        let closing = sessions[index]
+        sessions.remove(at: index)
+        if sessions.isEmpty {
+            sessions = [Session()]
+            activeSession = 0
+        } else if activeSession >= sessions.count {
+            activeSession = sessions.count - 1
+        } else if index < activeSession {
+            activeSession -= 1
+        }
+        // An attempt still in the air belongs to a tab that no longer exists.
+        // Forgetting it is what stops its refusal from being reported against
+        // whatever tab has taken its place.
+        if sessionBeingOpened === closing { sessionBeingOpened = nil }
+        // A window showing nothing shows the chooser, which is what a window
+        // with no connection is for. Without this, closing the last one leaves
+        // the panes of a database that has gone, under a toolbar naming it.
+        if session.db == nil { isPresentingConnection = true }
+        drain(closing)
+    }
+
+    /// Lets go of a connection in the order the server needs it let go of.
+    ///
+    /// The cursors first. Each is a connection of its own that the server is
+    /// holding open on this session's behalf, and freeing the session's handle
+    /// would not touch them — a cursor left behind is a connection nothing will
+    /// ever close.
+    ///
+    /// Then an open transaction is rolled back by name rather than left for the
+    /// socket to decide. A server that is told releases its locks now; a server
+    /// that is not may hold them until it notices the client has gone, and the
+    /// rows are locked against everybody else in the meantime.
+    ///
+    /// All of it on that session's own queue and not on the main actor, so it
+    /// queues behind whatever is still running there: a statement in flight
+    /// finishes against a connection that is still open, rather than one pulled
+    /// out from under it. The handle is freed when the closure returns, which is
+    /// after the rollback rather than racing it.
+    private func drain(_ closing: Session) {
+        closing.browseCursor = nil
+        closing.exportCursor = nil
+        closing.browseFetchInFlight = false
+        guard let db = closing.db else { return }
+        let hadTransaction = closing.transaction.open
+        closing.db = nil
+        closing.queue.async {
+            // Nowhere to report a failure to — the tab it would be reported in
+            // is gone — and nothing to do about one either: the handle going out
+            // of scope closes the socket, which rolls back whatever this could
+            // not. The closure holding the last reference is what makes that
+            // happen here, after the rollback, rather than on the main actor
+            // while the rollback was still in the air.
+            if hadTransaction { try? db.rollback() }
+        }
     }
 
     /// The navigator's whole contents, read in one pass.
@@ -1535,15 +1691,15 @@ final class AppModel {
 
     // MARK: - Back and forward
 
-    /// Where this window has been, and where Back and Forward go.
-    private var browseHistory = BrowseHistory()
+    private var browseHistory: BrowseHistory {
+        get { session.browseHistory }
+        set { session.browseHistory = newValue }
+    }
 
-    /// Set while Back or Forward is doing the moving.
-    ///
-    /// Without it the arrival that Back performs would be recorded as a new
-    /// place, which appends to the path and throws away everything ahead — so
-    /// Back would work once and Forward would never have anywhere to go.
-    private var isNavigatingHistory = false
+    private var isNavigatingHistory: Bool {
+        get { session.isNavigatingHistory }
+        set { session.isNavigatingHistory = newValue }
+    }
 
     var canGoBack: Bool { browseHistory.canGoBack }
     var canGoForward: Bool { browseHistory.canGoForward }
@@ -1666,11 +1822,10 @@ final class AppModel {
         let toggleExpanded: @MainActor () -> Void
     }
 
-    /// Whether the value viewer under the inspector strip is open.
-    ///
-    /// Window state rather than pane state: someone comparing a long value
-    /// against a query result should not have to reopen it on the way across.
-    var isValueViewerOpen = false
+    var isValueViewerOpen: Bool {
+        get { session.isValueViewerOpen }
+        set { session.isValueViewerOpen = newValue }
+    }
 
     /// Opens or closes that pane, and ends any edit as it closes.
     ///
@@ -1905,12 +2060,10 @@ final class AppModel {
 
     // MARK: - Editing the browse result
 
-    /// Changes made to the browse result and not yet sent.
-    ///
-    /// Held here rather than in the grid because they outlive the view and are
-    /// what Save reads. Cleared whenever the result is re-read, which is the same
-    /// moment the database's own answer replaces what was typed.
-    private(set) var staged = StagedChanges()
+    private(set) var staged: StagedChanges {
+        get { session.staged }
+        set { session.staged = newValue }
+    }
 
     /// The cells the grid should mark as changed.
     var pendingCells: Set<GridCell> { Set(staged.updates.keys) }
@@ -2135,7 +2288,10 @@ final class AppModel {
     /// white slab. A mode reachable only by a click is a mode no capture can
     /// reach — synthetic events need accessibility permission this environment
     /// does not grant.
-    var isEditingValue = false
+    var isEditingValue: Bool {
+        get { session.isEditingValue }
+        set { session.isEditingValue = newValue }
+    }
 
     /// Why the selected cell cannot be edited in the value pane, or nil where it
     /// can.
@@ -3911,18 +4067,26 @@ final class AppModel {
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
         guard let db else { return }
-        dispatch(on: queue, { try work(db) }, then: apply)
+        dispatch(on: queue, applyingInto: session, { try work(db) }, then: apply)
     }
 
     private func run<T>(
         _ work: @escaping @Sendable () throws -> T,
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
-        dispatch(on: queue, work, then: apply)
+        dispatch(on: queue, applyingInto: session, work, then: apply)
     }
 
+    /// Runs `work` off the main actor and applies its result into `asked`.
+    ///
+    /// `asked` is read at the call, not at the arrival. That is the whole of what
+    /// makes several connections in one window safe: an apply block writes
+    /// through properties that reach whichever tab is in front, and by the time a
+    /// slow statement answers, the tab in front may be a different database
+    /// entirely. The question and its answer have to name the same session.
     private func dispatch<T>(
         on queue: DispatchQueue,
+        applyingInto asked: Session,
         _ work: @escaping @Sendable () throws -> T,
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
@@ -3930,14 +4094,38 @@ final class AppModel {
             do {
                 let value = try work()
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { apply(value) }
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.applying(to: asked) { apply(value) }
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.fail(with: error) }
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.applying(to: asked) { self.fail(with: error) }
+                    }
                 }
             }
         }
+    }
+
+    /// Puts `session` in front of the forwarding properties for the length of
+    /// `body`, and puts back whatever was there.
+    ///
+    /// Nested rather than assigned flat, because an apply block starts work of
+    /// its own — the transaction read after a connection lands is exactly that —
+    /// and the dispatch inside it has to name the session being applied into
+    /// rather than the tab on screen.
+    ///
+    /// A session that has since been closed is written into all the same, and
+    /// nothing reads it: the object outlives the closure and is then let go.
+    /// Checking for that would be a branch with no observable difference.
+    private func applying(to session: Session, _ body: () -> Void) {
+        let previous = applyingTo
+        applyingTo = session
+        defer { applyingTo = previous }
+        body()
     }
 
     /// Whether there is a statement running for Cancel to stop.
@@ -4074,9 +4262,25 @@ final class AppModel {
         // still open — and that connection is not what went wrong.
         if isConnecting {
             isConnecting = false
-            connectionState = .failed
             connectionError = message
-            if db == nil { status = "Not connected" }
+            // The tab the attempt made goes with it. A window that kept one dead
+            // tab per mistyped password would be asking the user to clean up
+            // after a refusal — and the connection they were working in is still
+            // there, in front, untouched.
+            //
+            // Except where the attempt filled the tab the window already had.
+            // There is nothing behind that one, so it stays and says so, which is
+            // the state a window opens in.
+            if let opened = sessionBeingOpened, sessions.count > 1,
+                let index = sessions.firstIndex(where: { $0 === opened })
+            {
+                sessions.remove(at: index)
+                if index < activeSession { activeSession -= 1 }
+            } else {
+                connectionState = .failed
+                status = "Not connected"
+            }
+            sessionBeingOpened = nil
             return
         }
 

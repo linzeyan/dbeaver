@@ -41,11 +41,17 @@ let connArgument = argument("--conn")
 /// Exists for the reason `--refresh-after` does: Connect… is reachable only
 /// from a menu item, and the form's own Connect button only from a click —
 /// synthetic events need accessibility permission this environment does not
-/// grant. The two reports are the whole claim: opening a second database has to
-/// leave nothing of the first on screen, and launching straight into that
-/// database would show the same window while proving nothing about switching.
-/// Pointed at a connection that fails, it also leaves the form up over a live
-/// session, which is the one state a capture cannot otherwise reach.
+/// grant. The two reports are the whole claim: what the window shows after has
+/// to be the second database and nothing of the first, and launching straight
+/// into that database would show the same window while proving nothing about
+/// getting there. Pointed at a connection that fails, it also leaves the form up
+/// over a live session, which is the one state a capture cannot otherwise reach.
+///
+/// What "and nothing of the first" means changed when a window learned to hold
+/// several connections. It used to mean the first connection's state had been
+/// cleared; it now means the second arrived in a tab of its own, which the first
+/// one's state was never in. `--sessions-probe` is what checks the first
+/// connection is still there behind it — this one photographs the front.
 let reconnectTo = argument("--reconnect")
 
 // `--verify-splitter`, `--verify-connection`, `--verify-completion`,
@@ -399,6 +405,13 @@ if historyProbe {
         exit(1)
     }
 }
+
+/// `--sessions-probe` opens a second connection to `--conn` beside the first.
+///
+/// No fixture, unlike `--history-probe`: it reads nothing but `pg_sleep`, so it
+/// writes nothing and leaves nothing behind. Point it at any database that
+/// answers.
+let sessionsProbe = CommandLine.arguments.contains("--sessions-probe")
 
 /// `--transaction` drives one manual-commit transaction against `--conn` and
 /// prints what the connection says at each step.
@@ -1018,6 +1031,163 @@ func probeHistory(model: AppModel) {
             fputs("history: nothing arrived within the deadline\n", stderr)
             tidy()
             exit(1)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// Drives `--sessions-probe`: opens a second connection beside the first and
+/// proves the two do not touch each other.
+///
+/// This is the only test of multi-connection there is, and it needs a server for
+/// a reason no arrangement of the code could remove. Every claim item 1 makes is
+/// about two live handles — that a tab keeps its own editor, that a result lands
+/// in the connection that asked for it rather than the one on screen, that
+/// closing one leaves the other working — and a model with nothing open has one
+/// session, no cursors and no results, so it can be asked none of them. The
+/// checks in `--verify-connection-chooser` pin the rules that decide whether a
+/// second tab appears; this pins what happens once it has.
+///
+/// The middle phase is the load-bearing one. It starts a statement that sleeps
+/// on the second connection, switches to the first while that statement is still
+/// in the air, and then reports which session's list of steps it arrived in. A
+/// build that resolved the target when the answer came back instead of when the
+/// question was asked prints the result under `one`, and a person looking at the
+/// first connection would have watched another database's rows appear in it.
+///
+/// It exits, and prints to stderr, for the reasons `probeHistory` does. It
+/// writes nothing: `pg_sleep` and `select 1` leave no fixture to clean up.
+@MainActor
+func probeSessions(model: AppModel) {
+    guard let conn = connArgument else {
+        fputs("sessions: --sessions-probe needs --conn\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    let marker = "select 'kept' as marker"
+
+    /// One line per session plus the pointer, which together are the whole
+    /// claim. Printed rather than asserted so that a wrong answer is legible as
+    /// a wrong answer rather than as a line number.
+    func report(_ what: String) {
+        fputs(
+            "sessions \(what): \(model.sessions.count) open, showing \(model.activeSession)\n",
+            stderr)
+        for (index, session) in model.sessions.enumerated() {
+            let editor = session.queryBuffers[session.activeQueryBufferIndex].text
+            let steps = session.scriptSteps.map(\.summary).joined(separator: " | ")
+            fputs(
+                "  [\(index)] open=\(session.db != nil)"
+                    + " editor=\(editor.isEmpty ? "(empty)" : editor)"
+                    + " steps=\(steps.isEmpty ? "(none)" : steps)"
+                    + " error=\(session.errorMessage ?? "(none)")\n", stderr)
+        }
+    }
+
+    func fail(_ why: String) -> Never {
+        fputs("sessions FAIL: \(why)\n", stderr)
+        report("at the failure")
+        exit(1)
+    }
+
+    /// A session that has answered and is not in the middle of anything.
+    func settled(_ index: Int) -> Bool {
+        guard model.sessions.indices.contains(index) else { return false }
+        let session = model.sessions[index]
+        return session.db != nil && !session.isBusy
+    }
+
+    enum Phase { case first, second, away, landed }
+    var phase = Phase.first
+
+    func poll() {
+        switch phase {
+        case .first:
+            guard settled(0) else { return again() }
+            report("one")
+            guard model.sessions.count == 1 else {
+                fail("the first connection did not fill the tab that was already there")
+            }
+            // Typed into the first connection's editor, and never typed again.
+            // Everything after this reads it back: a buffer that is shared
+            // between connections shows this text under the second one, and a
+            // buffer that is thrown away shows nothing under the first.
+            model.queryText = marker
+            model.connect(using: conn)
+            phase = .second
+            return again()
+
+        case .second:
+            guard model.sessions.count == 2, settled(1), model.activeSession == 1 else {
+                return again()
+            }
+            report("two")
+            guard model.sessions[0].queryBuffers[0].text == marker else {
+                fail("the first connection's editor did not survive the second opening")
+            }
+            guard model.sessions[1].queryBuffers[0].text.isEmpty else {
+                fail("the second connection opened holding the first one's text")
+            }
+            // A statement that takes long enough to still be running after the
+            // switch below. One second rather than a tenth, because what is
+            // being timed is a person's hand moving between tabs.
+            //
+            // The tab has to be the Query one: ⌘R means "run what I am looking
+            // at", and on the Content tab that is the browse.
+            // `::text` because `pg_sleep` answers `void`, which is not a column
+            // type this client reads — the statement has to succeed, or what
+            // arrives proves only that failures route correctly.
+            model.activeTab = .query
+            model.queryText = "select pg_sleep(1)::text, 'landed' as where_it_went"
+            model.runCurrentQuery()
+            model.selectSession(0)
+            report("away")
+            guard model.activeSession == 0 else { fail("switching back did not take") }
+            guard model.queryText == marker else {
+                fail("switching back showed the wrong editor")
+            }
+            phase = .away
+            return again()
+
+        case .away:
+            guard !model.sessions[1].scriptSteps.isEmpty else { return again() }
+            report("landed")
+            guard model.sessions[0].scriptSteps.isEmpty else {
+                fail(
+                    "the result landed in the connection that was on screen, "
+                        + "not the one that asked")
+            }
+            guard model.sessions[1].scriptSteps[0].result.rowCount == 1 else {
+                fail("the statement did not succeed, so where its rows went proves nothing")
+            }
+            guard model.sessions[0].errorMessage == nil else {
+                fail("the connection on screen was given the other one's banner")
+            }
+            // Closing the one that is not in front. The pointer has to stay on
+            // the connection somebody is looking at, which is the case a
+            // by-position pointer gets wrong.
+            model.closeSession(1)
+            phase = .landed
+            return again()
+
+        case .landed:
+            report("closed")
+            guard model.sessions.count == 1, model.activeSession == 0 else {
+                fail("closing the second connection left the window pointing somewhere else")
+            }
+            guard model.sessions[0].db != nil, model.queryText == marker else {
+                fail("closing one connection disturbed the other")
+            }
+            exit(0)
+        }
+    }
+
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fail("nothing arrived within the deadline")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -2174,6 +2344,7 @@ if benchMode {
         }
         if preferencesProbe { probePreferences(model: model) }
         if historyProbe { probeHistory(model: model) }
+        if sessionsProbe { probeSessions(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
