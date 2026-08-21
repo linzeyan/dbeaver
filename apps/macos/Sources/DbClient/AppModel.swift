@@ -488,28 +488,42 @@ final class AppModel {
         let sent: SentStatement
     }
 
-    // Chrome
-    private(set) var connectionLabel = "Not connected"
-    private(set) var connectionState: StatusDot.State = .connecting
-
-    /// The colour of the connection now open.
+    /// The connections this window holds, and which one it is showing.
     ///
-    /// Carried out of the chooser into the session, because the colour is not there
-    /// to decorate the sidebar: somebody marks a connection red so that they can
-    /// tell, while looking at a grid of rows, which server they are about to change.
-    /// A mark that stopped at the moment of connecting would be a mark shown only
-    /// when it does not matter yet.
-    private(set) var connectionColor: ConnectionColor = .none
+    /// Exactly one for now — every path that opens a connection still replaces
+    /// the one already here. What has changed is where a connection's state
+    /// lives, which is the thing a second entry needs before it can exist.
+    private(set) var sessions: [Session] = [Session()]
+    private(set) var activeSession = 0
 
-    /// What the connection now open is allowed to do.
-    ///
-    /// Carried out of the chooser into the session for the reason `connectionColor`
-    /// above is, and answering a sharper question than the colour does: a mark
-    /// that stopped at the moment of connecting would be a mark that applied only
-    /// while nothing could go wrong.
-    private(set) var safety = ConnectionSafety()
+    /// The session in front, and what every forwarding property below reaches.
+    private var session: Session { sessions[activeSession] }
 
-    private(set) var status = "Connecting…"
+    // Chrome. Each of these is the active session's, kept under the name it has
+    // always had so that no pane and no check has to learn a new one. The
+    // forwarding is what lets a second session exist without a second copy of
+    // the state: there is one place a connection's label is written, and it is
+    // the session that connected.
+    private(set) var connectionLabel: String {
+        get { session.connectionLabel }
+        set { session.connectionLabel = newValue }
+    }
+    private(set) var connectionState: StatusDot.State {
+        get { session.connectionState }
+        set { session.connectionState = newValue }
+    }
+    private(set) var connectionColor: ConnectionColor {
+        get { session.connectionColor }
+        set { session.connectionColor = newValue }
+    }
+    private(set) var safety: ConnectionSafety {
+        get { session.safety }
+        set { session.safety = newValue }
+    }
+    private(set) var status: String {
+        get { session.status }
+        set { session.status = newValue }
+    }
 
     /// What `status` says when the connection is not doing anything.
     ///
@@ -527,7 +541,10 @@ final class AppModel {
     /// neither. See the note on `exportStatus`.
     private var settledStatus: String { Self.pluralized(schemas.count, "schema") }
 
-    private(set) var isBusy = false
+    private(set) var isBusy: Bool {
+        get { session.isBusy }
+        set { session.isBusy = newValue }
+    }
     /// Set while a result is being written to a file. The write happens off the
     /// main thread, so without this the window would sit looking idle for
     /// however long a million rows take to reach the disk.
@@ -560,16 +577,15 @@ final class AppModel {
     /// "1,000 rows read into orders" is overwritten before it is legible.
     private(set) var isImporting = false
     private(set) var importStatus = ""
-    var errorMessage: String?
+    var errorMessage: String? {
+        get { session.errorMessage }
+        set { session.errorMessage = newValue }
+    }
 
-    /// What the connection's transaction is doing, as of the last thing that
-    /// could have changed it.
-    ///
-    /// Read back from the core after each of those rather than predicted here.
-    /// The core is the side that sent the BEGIN, so a copy kept in the window
-    /// would be a second answer with nothing to keep it honest — and the one
-    /// that is drawn on screen would be the one nobody checked.
-    private(set) var transaction: TransactionState = .none
+    private(set) var transaction: TransactionState {
+        get { session.transaction }
+        set { session.transaction = newValue }
+    }
 
     /// Rows fetched per browse page. A grid shows a window onto the data;
     /// pulling a million rows to display forty is what makes other clients feel
@@ -626,16 +642,25 @@ final class AppModel {
     var pageSize: Int { browsePage }
     private let batchRows = 8192
 
-    private var db: Database?
-    private let queue = DispatchQueue(label: "dev.dbclient.core", qos: .userInitiated)
+    private var db: Database? {
+        get { session.db }
+        set { session.db = newValue }
+    }
+    private var queue: DispatchQueue { session.queue }
     /// Exports get a queue of their own. The core queue is serial because one
     /// connection cannot service two statements; an export holds no connection,
     /// and parking a million-row write in front of the next query would make
     /// clicking a table in the navigator wait on a file.
+    ///
+    /// One for the window rather than one per session, which is the opposite of
+    /// the core queue above and for the same reason: what this protects is the
+    /// next query from a file write parked in front of it, and that is as true
+    /// across two connections as within one.
     private let exportQueue = DispatchQueue(label: "dev.dbclient.export", qos: .userInitiated)
-    /// The string the live connection was opened with. A `var` because the
-    /// window outlives any one database: File ▸ Connect… replaces it.
-    private var connString = ""
+    private var connString: String {
+        get { session.connString }
+        set { session.connString = newValue }
+    }
 
     /// Which database the editor is writing SQL for, as the scheme the core
     /// picks a dialect by.

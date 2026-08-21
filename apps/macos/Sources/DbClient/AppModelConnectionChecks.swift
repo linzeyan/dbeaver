@@ -40,12 +40,43 @@ enum AppModelConnectionChecks {
         checkATypedPasswordIsNotOverwritten()
         checkTheKeychainIsUntouchedWhileTheSettingIsOff()
         checkProductionQuestion()
+        checkTheSessionHoldsTheConnection()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
             fputs("connection-chooser: \(failures) check(s) failed\n", stderr)
         }
         return failures == 0
+    }
+
+    /// A connection's state is the session's, reached through the window.
+    ///
+    /// The forwarding is the whole of this step and is also the thing a later
+    /// edit can undo without anything complaining: a property put back to being
+    /// stored on the window would still compile, still pass every other check,
+    /// and leak one connection's state into the next one. So this writes through
+    /// the name the panes use and reads the session underneath.
+    private static func checkTheSessionHoldsTheConnection() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(model.sessions.count, 1, "a window opens holding one session")
+            expect(model.activeSession, 0, "and shows it")
+            expect(model.sessions[0].db == nil, true, "with nothing open on it yet")
+            expect(
+                model.sessions[0].connectionLabel, model.connectionLabel,
+                "the label the chrome reads is the session's own")
+
+            // A port nothing listens on, so the attempt is refused on the core
+            // queue while this check reads what the main actor was left with.
+            // Everything asserted below is written before the dispatch, which is
+            // what makes it safe to read here.
+            model.connect(using: "postgres://nobody@127.0.0.1:1/none")
+            expect(
+                model.sessions[0].status, "Connecting…",
+                "opening a connection writes through to the session")
+            expect(model.sessions[0].isBusy, true, "and so does the flag the chrome spins on")
+            expect(model.status, "Connecting…", "and the window reads back what it wrote")
+        }
     }
 
     /// Clicking a row is looking, not connecting, and must not raise the panel
