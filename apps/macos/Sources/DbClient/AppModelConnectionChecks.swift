@@ -44,6 +44,7 @@ enum AppModelConnectionChecks {
         checkTheSessionHoldsTheConnection()
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
+        checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
         if failures == 0 {
@@ -401,6 +402,42 @@ enum AppModelConnectionChecks {
             let long = AppModel.ProductionRun(
                 count: 1, worst: String(repeating: "x", count: 900), danger: .fatal, label: "db")
             expect(long.detail.count < 500, true, "a long statement is cut rather than shown whole")
+        }
+    }
+
+    /// The one question the navigator asks, and the two different answers that
+    /// both come back as no.
+    ///
+    /// nil and empty are not the same fact — an engine with no level above
+    /// schemas against a login that can see none of them — and the difference is
+    /// worth keeping in the session, which is why it is kept there. What the
+    /// view needs is neither of those: it needs to know whether to draw a level,
+    /// and both of these mean it does not. A check that only covered nil would
+    /// pass against `databases != nil`, which is the wrong condition and the one
+    /// somebody would reach for.
+    private static func checkADatabaseLevelIsDrawnOnlyWhenThereIsOne() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(
+                model.hasDatabaseLevel, false,
+                "a session that has read nothing yet draws no database level")
+
+            model.sessions[0].databases = []
+            expect(
+                model.hasDatabaseLevel, false,
+                "nor does a login that can see none of them")
+
+            model.sessions[0].databases = [
+                DatabaseInfo(name: "bench", isCurrent: true),
+                DatabaseInfo(name: "archive", isCurrent: false)
+            ]
+            expect(model.hasDatabaseLevel, true, "and a server with databases draws one")
+            expect(
+                model.databases?.count, 2,
+                "which the window reads from the session it is showing")
+            expect(
+                model.databases?.first?.isCurrent, true,
+                "keeping which one the connection is open on")
         }
     }
 

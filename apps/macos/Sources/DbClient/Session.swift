@@ -82,6 +82,15 @@ final class Session: Identifiable {
     // MARK: - Navigator
 
     var schemas: [SchemaInfo] = []
+    /// The databases on this server, or nil where the engine has no level above
+    /// schemas.
+    ///
+    /// Not flattened to an empty array. Nil and empty are different answers —
+    /// no such level, against a login that can see none of them — and
+    /// `Metadata.swift` is where that difference is written down. A session that
+    /// has not read them yet is nil too, which is the same as "nothing to draw"
+    /// and is the right thing to draw before the first answer arrives.
+    var databases: [DatabaseInfo]?
     var relations: [String: [RelationInfo]] = [:]
     var expanded: Set<String> = []
     var selected: RelationInfo?
