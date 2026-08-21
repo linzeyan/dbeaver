@@ -970,11 +970,16 @@ final class AppModel {
         guard canTestConnection else { return }
         readDeferredPassword()
         let connString = connectionDraft.settings.connectionString(password: connectionPassword)
+        // Through the bastion as well, or the one thing Test proves is that a
+        // host only the bastion can reach cannot be reached from here.
+        let bastion = Self.bastion(
+            for: connectionDraft.settings,
+            secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? "")
         connectionTest = .running
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome: ConnectionTest
             do {
-                outcome = .reached(try Database(connString: connString).serverInfo())
+                outcome = .reached(try Database(connString: connString, ssh: bastion).serverInfo())
             } catch {
                 outcome = .failed("\(error)")
             }
@@ -1341,7 +1346,11 @@ final class AppModel {
         if !connectionDraft.savesPassword {
             SessionPasswords.remember(connectionPassword, for: connectionDraft.id)
         }
-        open(connectionDraft.settings.connectionString(password: connectionPassword))
+        open(
+            connectionDraft.settings.connectionString(password: connectionPassword),
+            through: Self.bastion(
+                for: connectionDraft.settings,
+                secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? ""))
     }
 
     /// Connects to a raw connection URL, from `--conn`.
@@ -1358,7 +1367,12 @@ final class AppModel {
         connectionPassword = ConnectionURL.password(in: connString) ?? ""
         savedConnectionPassword = ""
         deferredPassword = nil
-        open(connString)
+        // No bastion, and stated rather than defaulted. `--conn` is a string and
+        // nothing else: there is nowhere in it to name a bastion, and a run of
+        // `make screenshot` reaching a database through somebody's SSH key would
+        // be this application deciding on its own to use a credential it was
+        // never handed.
+        open(connString, through: nil)
     }
 
     /// Opens another database on this server, in a tab of its own.
@@ -1371,7 +1385,53 @@ final class AppModel {
     /// again and nothing new is stored.
     func openDatabase(_ name: String) {
         guard let rewritten = Self.connString(connString, onDatabase: name) else { return }
-        open(rewritten)
+        // This session's bastion rather than the form's: the tab this was
+        // started from is the one being copied, and the chooser may since have
+        // moved to a row with a different bastion or none at all.
+        open(rewritten, through: session.bastion)
+    }
+
+    /// The bastion these settings describe, or nothing when they describe none.
+    ///
+    /// `nonisolated` and static because it is values in and a value out: it
+    /// touches nothing on the model, and a check asking about four strings would
+    /// otherwise have to hop to the main actor to do it.
+    ///
+    /// Exactly one of the password and the key is filled in here rather than
+    /// left to the core to sort out. The core refuses both at once — deliberately
+    /// — so a form that sent both would be reporting its own indecision as a
+    /// connection error.
+    nonisolated static func bastion(for settings: ConnectionSettings, secret: String)
+        -> SshConfig?
+    {
+        func trimmed(_ value: String) -> String { value.trimmingCharacters(in: .whitespaces) }
+        let host = trimmed(settings.sshHost)
+        guard !host.isEmpty else { return nil }
+        let key = trimmed(settings.sshKeyPath)
+        return SshConfig(
+            host: host,
+            // 22 for a field nobody filled in, which is what sshd listens on and
+            // what `ssh` itself would have used.
+            port: UInt16(trimmed(settings.sshPort)) ?? 22,
+            user: trimmed(settings.sshUser),
+            password: key.isEmpty ? secret : nil,
+            keyPath: key.isEmpty ? nil : key,
+            // The same secret either way, because it is the same field on the
+            // form: what it means is decided by whether a key was named.
+            passphrase: key.isEmpty ? nil : secret,
+            knownHosts: knownHostsFile)
+    }
+
+    /// The user's own `~/.ssh/known_hosts`.
+    ///
+    /// This side's decision rather than a field on the form, for the reason the
+    /// tunnel crate gives: a password is about to be sent to whatever answers,
+    /// and the file that already knows every bastion this person uses is a
+    /// better record than a private list they would have to be taught to fill
+    /// in. Expanded here because the core opens it as a path, and nothing
+    /// between here and there would expand a tilde.
+    nonisolated static var knownHostsFile: String {
+        (NSHomeDirectory() as NSString).appendingPathComponent(".ssh/known_hosts")
     }
 
     /// The same connection string, pointed at a different database.
@@ -1435,13 +1495,14 @@ final class AppModel {
         return added
     }
 
-    private func open(_ connString: String) {
+    private func open(_ connString: String, through bastion: SshConfig?) {
         let filling = sessionToFill()
         sessionBeingOpened = filling
         // Onto that session directly rather than through the forwarding
         // properties, which reach the tab in front — and the tab in front is the
         // connection still answering queries while this one is in the air.
         filling.connString = connString
+        filling.bastion = bastion
         filling.connectionLabel = Self.label(for: connString)
         filling.connectionState = .connecting
         filling.status = "Connecting…"
@@ -1451,7 +1512,7 @@ final class AppModel {
         dispatch(
             on: filling.queue, applyingInto: filling,
             {
-                let db = try Database(connString: connString)
+                let db = try Database(connString: connString, ssh: bastion)
                 return (db, try Self.inventory(of: db))
             },
             then: { [self] result in

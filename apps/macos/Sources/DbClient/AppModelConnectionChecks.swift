@@ -46,6 +46,7 @@ enum AppModelConnectionChecks {
         checkOnlyIdleOpenConnectionsAreProbed()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
+        checkTheBastionIsBuiltFromWhatWasTyped()
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
         if failures == 0 {
@@ -404,6 +405,75 @@ enum AppModelConnectionChecks {
                 count: 1, worst: String(repeating: "x", count: 900), danger: .fatal, label: "db")
             expect(long.detail.count < 500, true, "a long statement is cut rather than shown whole")
         }
+    }
+
+    /// What four typed fields and one secret become on the way to the core.
+    ///
+    /// Worth its own check because every mistake available here is silent. A
+    /// secret sent as a password when a key was named is refused by the bastion
+    /// and reads as the wrong key; a port left empty and passed on as 0 is
+    /// refused by the core with a message about a field the form does not show;
+    /// and a host left empty that still produced a bastion would send every
+    /// connection in the application through a tunnel to nowhere.
+    private static func checkTheBastionIsBuiltFromWhatWasTyped() {
+        func settings(
+            sshHost: String = "bastion.example", sshPort: String = "", sshUser: String = "ana",
+            sshKeyPath: String = ""
+        ) -> ConnectionSettings {
+            ConnectionSettings(
+                scheme: "postgres", host: "db.internal", port: "5432", database: "sales",
+                user: "ana", sshHost: sshHost, sshPort: sshPort, sshUser: sshUser,
+                sshKeyPath: sshKeyPath)
+        }
+
+        // Written as comparisons rather than passed as `nil`, so that the check
+        // does not depend on how `expect`'s generic infers a bare literal.
+        expect(
+            AppModel.bastion(for: settings(sshHost: ""), secret: "s") == nil, true,
+            "no host named is no bastion at all")
+        expect(
+            AppModel.bastion(for: settings(sshHost: "   "), secret: "s") == nil, true,
+            "and neither is a host somebody typed a space into")
+
+        let withPassword = AppModel.bastion(for: settings(), secret: "hunter2")
+        expect(withPassword?.host, "bastion.example", "the host is what was typed")
+        expect(withPassword?.user, "ana", "and so is the user")
+        expect(withPassword?.port, 22, "a port nobody filled in is 22")
+        expect(withPassword?.password, "hunter2", "with no key named, the secret is a password")
+        expect(withPassword?.keyPath == nil, true, "and there is no key file")
+        expect(withPassword?.passphrase == nil, true, "and nothing to unlock")
+
+        let withKey = AppModel.bastion(
+            for: settings(sshPort: "2222", sshKeyPath: "/Users/ana/.ssh/id_ed25519"),
+            secret: "hunter2")
+        expect(withKey?.port, 2222, "a port that was filled in is used")
+        expect(
+            withKey?.keyPath, "/Users/ana/.ssh/id_ed25519", "the key file is what was typed")
+        expect(withKey?.password == nil, true, "and the secret is not also sent as a password")
+        expect(withKey?.passphrase, "hunter2", "it unlocks the key instead")
+
+        // A key with no passphrase is the ordinary case, and the empty string is
+        // what an untouched field holds. The core reads empty as absent, so this
+        // is the same as saying nothing — but it has to arrive as the empty
+        // string rather than as something invented here.
+        let unlocked = AppModel.bastion(
+            for: settings(sshKeyPath: "/Users/ana/.ssh/id_ed25519"), secret: "")
+        expect(unlocked?.passphrase, "", "a key with no passphrase says so with nothing")
+
+        // Trimmed for the reason the connection string's fields are: a host
+        // pasted with a trailing space is the commonest way to spend five
+        // minutes on a connection error.
+        let padded = AppModel.bastion(
+            for: settings(sshHost: " bastion.example ", sshUser: " ana "), secret: "s")
+        expect(padded?.host, "bastion.example", "a pasted host is trimmed")
+        expect(padded?.user, "ana", "and so is the user")
+
+        // The user's own record of which servers are which, not a list this
+        // application keeps. Checked as a suffix because the home directory is
+        // whoever is running the checks.
+        expect(
+            AppModel.knownHostsFile.hasSuffix("/.ssh/known_hosts"), true,
+            "the host keys come from the user's own known_hosts")
     }
 
     /// Everything except the database has to survive being pointed somewhere
