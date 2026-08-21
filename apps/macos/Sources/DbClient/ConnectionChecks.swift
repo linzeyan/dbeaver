@@ -36,6 +36,8 @@ enum ConnectionChecks {
         checkWriteRefusal()
         checkSslParameters()
         checkSslSurvivesTheFile()
+        checkTheBastionSurvivesTheFile()
+        checkTheBastionSecretIsFiledBesideTheOther()
         checkFoldersGroupTheList()
         checkDroppingARowOrdersItAndFilesIt()
         checkAnEntryWithoutTheKeyStillSavesItsPassword()
@@ -766,6 +768,73 @@ enum ConnectionChecks {
         expect(
             decoded?.toSavedConnection().settings.sslRootCert, "",
             "and names no certificate")
+    }
+
+    /// A bastion is four typed settings, and all four have to come back off disk
+    /// as they went in.
+    ///
+    /// Its own check rather than a line in the SSL one, because what goes wrong
+    /// here is a different shape. SSL is one word this build knows the meanings
+    /// of; a bastion is four strings that mean nothing unless all four arrive.
+    /// A key path that survived beside a user name that did not is a connection
+    /// asking the bastion to log in as whoever happens to be running this.
+    private static func checkTheBastionSurvivesTheFile() {
+        let behind = SavedConnection(
+            id: UUID(uuidString: "77777777-7777-7777-7777-777777777777")!,
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.internal", port: "5432", database: "sales",
+                user: "ana", sshHost: "bastion.example", sshPort: "2222", sshUser: "ana",
+                sshKeyPath: "/Users/ana/.ssh/id_ed25519"))
+        let back = SavedConnection.Raw(from: behind).toSavedConnection()
+        expect(back.settings.sshHost, "bastion.example", "the bastion survives the file")
+        expect(back.settings.sshPort, "2222", "and the port it answers on")
+        expect(back.settings.sshUser, "ana", "and who logs in to it")
+        expect(back.settings.sshKeyPath, "/Users/ana/.ssh/id_ed25519", "and the key that does")
+
+        var elsewhere = behind
+        elsewhere.settings.sshUser = "bob"
+        expect(
+            behind.unsavedEdits(against: elsewhere, passwordChanged: false)?.fields,
+            ["SSH tunnel"],
+            "changing who logs in to the bastion is an unsaved edit, named once")
+
+        // An entry written before any of this existed reaches its database
+        // directly, which is what it has always done.
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(
+            decoded?.toSavedConnection().settings.sshHost, "",
+            "an entry written before this reaches its database directly")
+
+        var nameless = behind.settings
+        nameless.sshUser = ""
+        expect(nameless.isComplete, false, "a bastion with nobody to log in as is not complete")
+
+        var direct = behind.settings
+        direct.sshHost = ""
+        direct.sshUser = ""
+        expect(direct.isComplete, true, "and no bastion at all is complete, as it always was")
+    }
+
+    /// The bastion's secret is filed beside the database's rather than on top of
+    /// it, and forgetting the connection takes both.
+    ///
+    /// One store, two keys. The failure worth checking for is the quiet one: a
+    /// second secret keyed by a uuid that has been deleted from the list is one
+    /// nothing will ever ask about again, and so one nothing will ever clear.
+    private static func checkTheBastionSecretIsFiledBesideTheOther() {
+        let id = UUID()
+        let file = CredentialFile.shared
+        file.save("the database's own", for: id)
+        file.saveSshSecret("the bastion's", for: id)
+        expect(file.password(for: id), "the database's own", "the database's password is its own")
+        expect(file.sshSecret(for: id), "the bastion's", "and the bastion's secret is too")
+
+        file.delete(for: id)
+        // Written as comparisons rather than passed as `nil`, so that the check
+        // does not depend on how `expect`'s generic infers a bare literal.
+        expect(file.password(for: id) == nil, true, "forgetting the connection takes the password")
+        expect(file.sshSecret(for: id) == nil, true, "and the bastion's secret with it")
     }
 
     /// What a drag means, which is two answers from one gesture.

@@ -80,6 +80,28 @@ struct ConnectionSettings: Equatable, Codable {
     /// that connected before this existed stops connecting: prefer falls back.
     var sslMode: SslMode
 
+    /// Where the SSH bastion is, or `""` for a database this machine can dial.
+    ///
+    /// Empty is the whole switch. There is no separate "use a tunnel" flag,
+    /// because two sources of truth for one question is a form that can be
+    /// switched on with nowhere to connect to, and switched off with a bastion
+    /// still filled in underneath it.
+    var sshHost: String
+
+    /// A string for the reason `port` is one: it is what a text field holds, and
+    /// a number here would have to invent a value for a field somebody is
+    /// half-way through typing. Empty is 22, which is what sshd listens on.
+    var sshPort: String
+
+    var sshUser: String
+
+    /// The private key to log in to the bastion with, or `""` for a password.
+    ///
+    /// A path rather than the key itself. Somebody's key already exists and is
+    /// already looked after — copying it into this application's own storage
+    /// would be a second copy to keep in step and a second copy to lose.
+    var sshKeyPath: String
+
     /// A PEM file holding a CA to trust in addition to the public ones.
     ///
     /// Empty for the ordinary case, which is a server whose certificate comes
@@ -91,7 +113,8 @@ struct ConnectionSettings: Equatable, Codable {
     init(
         scheme: String, host: String = "", port: String = "", database: String = "",
         user: String = "", path: String = "", sslMode: SslMode = .prefer,
-        sslRootCert: String = ""
+        sslRootCert: String = "", sshHost: String = "", sshPort: String = "",
+        sshUser: String = "", sshKeyPath: String = ""
     ) {
         self.scheme = scheme
         self.host = host
@@ -101,6 +124,10 @@ struct ConnectionSettings: Equatable, Codable {
         self.path = path
         self.sslMode = sslMode
         self.sslRootCert = sslRootCert
+        self.sshHost = sshHost
+        self.sshPort = sshPort
+        self.sshUser = sshUser
+        self.sshKeyPath = sshKeyPath
     }
 
     var driver: DriverInfo? { DriverCatalog.named(scheme) }
@@ -145,6 +172,7 @@ struct ConnectionSettings: Equatable, Codable {
     /// nothing else — there is no server to authenticate to, and requiring a
     /// user name for SQLite would be asking for something that does not exist.
     var isComplete: Bool {
+        guard hasWhatTheBastionNeeds else { return false }
         switch driver?.shape {
         case .file: return !path.trimmingCharacters(in: .whitespaces).isEmpty
         case .server, nil:
@@ -152,6 +180,18 @@ struct ConnectionSettings: Equatable, Codable {
                 $0.trimmingCharacters(in: .whitespaces).isEmpty
             }
         }
+    }
+
+    /// Whether the bastion, if there is one at all, has what it needs.
+    ///
+    /// Only the user name, because that is the one field with no answer to fall
+    /// back on: the port is 22 unless somebody says otherwise, and a key file
+    /// left empty means a password. A bastion with nobody to log in as is
+    /// refused by the core too, but only after a connection attempt has spent a
+    /// timeout finding out — and a disabled button is a faster answer than that.
+    private var hasWhatTheBastionNeeds: Bool {
+        guard !sshHost.trimmingCharacters(in: .whitespaces).isEmpty else { return true }
+        return !sshUser.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
     /// The connection URL these settings and that password describe.
@@ -250,6 +290,15 @@ struct ConnectionSettings: Equatable, Codable {
         }
         sslMode = SslMode(rawValue: parameter("sslmode") ?? "") ?? .prefer
         sslRootCert = parameter("sslrootcert") ?? ""
+
+        // A URL names no bastion, and this is the automation path: `--conn`
+        // reaches a database this process can already dial. Up here with the two
+        // above rather than beside the fields they belong with, because the file
+        // branch below returns before it gets there.
+        sshHost = ""
+        sshPort = ""
+        sshUser = ""
+        sshKeyPath = ""
 
         if shape == .file {
             // A relative path parses as the authority, so it has to be put back
