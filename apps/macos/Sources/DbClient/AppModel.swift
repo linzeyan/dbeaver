@@ -1361,6 +1361,44 @@ final class AppModel {
         open(connString)
     }
 
+    /// Opens another database on this server, in a tab of its own.
+    ///
+    /// A second connection rather than a switch. PostgreSQL cannot change
+    /// database in session at all, and on the engines that can it would mean the
+    /// tab in front quietly becoming a different database — with a result set
+    /// still on screen that came from the old one. The credentials are the ones
+    /// already in this session's connection string, so nothing is asked for
+    /// again and nothing new is stored.
+    func openDatabase(_ name: String) {
+        guard let rewritten = Self.connString(connString, onDatabase: name) else { return }
+        open(rewritten)
+    }
+
+    /// The same connection string, pointed at a different database.
+    ///
+    /// `URLComponents` rather than string surgery, because the password in that
+    /// string is percent-encoded and re-encoding it by hand is how `p%40ss`
+    /// becomes `p@ss` and stops opening anything. Setting `path` encodes the
+    /// name on the way in too, which is what a database with a space in it
+    /// needs.
+    ///
+    /// The scheme test is not belt and braces. `URLComponents` accepts a libpq
+    /// keyword string like `host=127.0.0.1 dbname=bench` as a *relative path*
+    /// and hands back `/archive` — a connection string turned into nothing at
+    /// all, silently. Requiring a scheme is what makes an unparseable string
+    /// come back nil, and nil is the caller's cue to leave the tree alone.
+    ///
+    /// `nonisolated` because it is a string going in and a string coming out and
+    /// touches no part of the model. The main-actor isolation it would otherwise
+    /// inherit from the class is an accident of where it is written, and paying
+    /// for it would mean every caller — the checks included — hopping to the
+    /// main actor to rewrite some text.
+    nonisolated static func connString(_ original: String, onDatabase name: String) -> String? {
+        guard var parts = URLComponents(string: original), parts.scheme != nil else { return nil }
+        parts.path = "/" + name
+        return parts.string
+    }
+
     /// Opens the connection form over the session, for File ▸ Connect….
     ///
     /// Leaves the live connection alone: it is still the one answering queries

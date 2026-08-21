@@ -45,6 +45,7 @@ enum AppModelConnectionChecks {
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
+        checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
         if failures == 0 {
@@ -403,6 +404,45 @@ enum AppModelConnectionChecks {
                 count: 1, worst: String(repeating: "x", count: 900), danger: .fatal, label: "db")
             expect(long.detail.count < 500, true, "a long statement is cut rather than shown whole")
         }
+    }
+
+    /// Everything except the database has to survive being pointed somewhere
+    /// else, and the password is the part that survives least willingly.
+    ///
+    /// It is percent-encoded in the string, so a rewrite that decodes and
+    /// re-encodes it turns `p%40ss` into `p@ss` — which is not a parse error
+    /// anywhere, it is a connection that is simply refused, on a tab the user
+    /// opened by double-clicking a name. The query string matters for the same
+    /// reason: `sslmode=require` dropped on the way through is a tab that
+    /// silently connects in plaintext.
+    private static func checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection() {
+        expect(
+            AppModel.connString(
+                "postgres://bench:bench@127.0.0.1:55432/bench", onDatabase: "archive"),
+            "postgres://bench:bench@127.0.0.1:55432/archive",
+            "the database is the only part that changes")
+        expect(
+            AppModel.connString(
+                "postgres://bench:p%40ss%2Fword@db.internal:5432/bench?sslmode=require",
+                onDatabase: "archive"),
+            "postgres://bench:p%40ss%2Fword@db.internal:5432/archive?sslmode=require",
+            "an encoded password and the query survive unchanged")
+        expect(
+            AppModel.connString("mysql://root@10.0.0.5:3306/", onDatabase: "reporting"),
+            "mysql://root@10.0.0.5:3306/reporting",
+            "a string with no database named gains one")
+        expect(
+            AppModel.connString("postgres://u:p@h:5432/bench", onDatabase: "my db"),
+            "postgres://u:p@h:5432/my%20db",
+            "and a name that needs encoding is encoded on the way in")
+        // Written as a comparison rather than passed as `nil`, so that the
+        // check does not depend on how `expect`'s generic infers a bare literal.
+        expect(
+            AppModel.connString("host=127.0.0.1 dbname=bench", onDatabase: "archive") == nil, true,
+            "a libpq keyword string comes back nil rather than as a bare /archive")
+        expect(
+            AppModel.connString("", onDatabase: "archive") == nil, true,
+            "and so does an empty one")
     }
 
     /// The one question the navigator asks, and the two different answers that

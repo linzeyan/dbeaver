@@ -352,6 +352,21 @@ struct NavigatorView: View {
                                     // nothing would read as an empty database
                                     // rather than an unread one.
                                     DatabaseLabel(name: database.name, isCurrent: false)
+                                        // The whole row, not just the words:
+                                        // a label is as wide as its text, and a
+                                        // double-click that only counts over
+                                        // the name reads as a row that
+                                        // sometimes works.
+                                        .contentShape(Rectangle())
+                                        .onTapGesture(count: 2) {
+                                            model.openDatabase(database.name)
+                                        }
+                                        .contextMenu {
+                                            Button("Open in New Tab") {
+                                                model.openDatabase(database.name)
+                                            }
+                                        }
+                                        .help("Double-click to open \(database.name) in a new tab")
                                 }
                             }
                         } else {
