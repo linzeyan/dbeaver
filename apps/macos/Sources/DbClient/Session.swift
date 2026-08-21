@@ -130,4 +130,81 @@ final class Session {
     /// select yet: the grid is emptied and refilled by a round trip, and
     /// `install` clears any selection made before that lands.
     var stateToRestore: BrowseState?
+
+    /// Stands in before anything has run here. A result that has never run is a
+    /// different state from a statement that returned nothing, and the pane
+    /// draws them differently.
+    let pristine = ResultSet()
+
+    // MARK: - Content pane filters
+
+    var whereClause = ""
+    var orderClause = ""
+
+    /// The filter rows, in the order they are drawn.
+    ///
+    /// Read from anywhere and written only through the three functions beside
+    /// `applyFilters`. That is what holds the one invariant this pair has: these
+    /// and `whereClause` are never both filled, because they are two ways of
+    /// saying one thing and a browse can only send one WHERE.
+    var filterRules: [FilterRule] = []
+
+    /// The WHERE those rows last compiled to, as the core wrote it.
+    ///
+    /// Somewhere other than `whereClause` on purpose. Writing it there would put
+    /// the rows and a text saying the same thing in two editable places, and the
+    /// next keystroke in either would make them disagree with nothing on screen
+    /// saying which one the grid is showing.
+    var compiledClause = ""
+
+    /// What each column of the selected relation may be asked, as the core
+    /// answers it.
+    ///
+    /// Empty until a relation's columns have arrived, and empty for good against
+    /// a database this build writes no statements for. The rows are drawn from
+    /// this, so empty is also how the *Filters* disclosure knows not to offer
+    /// itself — an offer this side cannot compile is not one.
+    ///
+    /// Per session because the answers are the dialect's: the same column name
+    /// on the next server may be asked different things.
+    var filterColumns: [FilterColumn] = []
+
+    // MARK: - Query pane
+
+    /// The statements the pane last ran, in order, each with what it did.
+    ///
+    /// A run of one is what ⌘R makes and a run of five is what ⌥⌘R makes. Five
+    /// statements produce five outcomes and this pane has one grid, so the list
+    /// is where the other four go: showing one and saying nothing about the rest
+    /// is the class of lie the status bar's "first 100,000 of ~1,000,000 rows"
+    /// exists to prevent.
+    var scriptSteps: [ScriptStep] = []
+
+    /// Which step the pane is showing, as an index into `scriptSteps`.
+    var selectedStep = 0
+
+    /// What the history list is being narrowed by.
+    ///
+    /// Matched against the whole statement rather than the one-line preview, so
+    /// a table named in the fifteenth line of a script is still findable by
+    /// name — which is how somebody looks for "the one that touched orders".
+    ///
+    /// Per session, unlike the store it narrows: the needle almost certainly
+    /// names a table of the database it was typed against.
+    var historyFilter = ""
+
+    var queryBuffers: [AppModel.QueryBuffer] = [AppModel.QueryBuffer(name: "query 1")]
+    var activeQueryBufferIndex = 0
+
+    /// Where the caret or selection is in the editor.
+    ///
+    /// Owned here rather than by the pane because the Run button lives in the
+    /// window's toolbar, which has no view of the editor. ⌘R has to know which
+    /// statement the user is standing in, and this is the only place both ends
+    /// can see.
+    var querySelection: TextSelection?
+
+    /// The last statement `selectionChanged` put in the editor, so a later
+    /// selection can tell "untouched suggestion" from "the user's work".
+    var suggestedQueryText = ""
 }

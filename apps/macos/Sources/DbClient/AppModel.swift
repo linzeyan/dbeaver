@@ -270,17 +270,15 @@ final class AppModel {
 
     // Query pane
 
-    /// The statements the pane last ran, in order, each with what it did.
-    ///
-    /// A run of one is what ⌘R makes and a run of five is what ⌥⌘R makes. Five
-    /// statements produce five outcomes and this pane has one grid, so the list
-    /// is where the other four go: showing one and saying nothing about the rest
-    /// is the class of lie the status bar's "first 100,000 of ~1,000,000 rows"
-    /// exists to prevent.
-    private(set) var scriptSteps: [ScriptStep] = []
+    private(set) var scriptSteps: [ScriptStep] {
+        get { session.scriptSteps }
+        set { session.scriptSteps = newValue }
+    }
 
-    /// Which step the pane is showing, as an index into `scriptSteps`.
-    var selectedStep = 0
+    var selectedStep: Int {
+        get { session.selectedStep }
+        set { session.selectedStep = newValue }
+    }
 
     var selectedScriptStep: ScriptStep? {
         scriptSteps.indices.contains(selectedStep) ? scriptSteps[selectedStep] : nil
@@ -293,10 +291,7 @@ final class AppModel {
     /// holds the batches it was handed until the next run replaces the lot.
     var queryResult: ResultSet { selectedScriptStep?.result ?? pristine }
 
-    /// Stands in before anything has run here. A result that has never run is a
-    /// different state from a statement that returned nothing, and the pane
-    /// draws them differently.
-    private let pristine = ResultSet()
+    private var pristine: ResultSet { session.pristine }
 
     /// The result the chrome is currently describing. Structure has no result of
     /// its own, so it borrows the browse's — the status bar overrides what it
@@ -304,33 +299,29 @@ final class AppModel {
     var current: ResultSet { activeTab == .query ? queryResult : browseResult }
 
     // Content pane filters
-    var whereClause = ""
-    var orderClause = ""
+    var whereClause: String {
+        get { session.whereClause }
+        set { session.whereClause = newValue }
+    }
+    var orderClause: String {
+        get { session.orderClause }
+        set { session.orderClause = newValue }
+    }
 
-    /// The filter rows, in the order they are drawn.
-    ///
-    /// Read from anywhere and written only through the three functions beside
-    /// `applyFilters`. That is what holds the one invariant this pair has: these
-    /// and `whereClause` are never both filled, because they are two ways of
-    /// saying one thing and a browse can only send one WHERE.
-    private(set) var filterRules: [FilterRule] = []
+    private(set) var filterRules: [FilterRule] {
+        get { session.filterRules }
+        set { session.filterRules = newValue }
+    }
 
-    /// The WHERE those rows last compiled to, as the core wrote it.
-    ///
-    /// Somewhere other than `whereClause` on purpose. Writing it there would put
-    /// the rows and a text saying the same thing in two editable places, and the
-    /// next keystroke in either would make them disagree with nothing on screen
-    /// saying which one the grid is showing.
-    private(set) var compiledClause = ""
+    private(set) var compiledClause: String {
+        get { session.compiledClause }
+        set { session.compiledClause = newValue }
+    }
 
-    /// What each column of the selected relation may be asked, as the core
-    /// answers it.
-    ///
-    /// Empty until a relation's columns have arrived, and empty for good against
-    /// a database this build writes no statements for. The rows are drawn from
-    /// this, so empty is also how the *Filters* disclosure knows not to offer
-    /// itself — an offer this side cannot compile is not one.
-    private(set) var filterColumns: [FilterColumn] = []
+    private(set) var filterColumns: [FilterColumn] {
+        get { session.filterColumns }
+        set { session.filterColumns = newValue }
+    }
 
     /// Whether the Custom field may be typed into.
     ///
@@ -403,12 +394,10 @@ final class AppModel {
     /// sent them.
     var showsAllStatements = false
 
-    /// What the history list is being narrowed by.
-    ///
-    /// Matched against the whole statement rather than the one-line preview, so
-    /// a table named in the fifteenth line of a script is still findable by
-    /// name — which is how somebody looks for "the one that touched orders".
-    var historyFilter = ""
+    var historyFilter: String {
+        get { session.historyFilter }
+        set { session.historyFilter = newValue }
+    }
 
     /// The entries the panel draws, in the store's own order.
     ///
@@ -454,8 +443,14 @@ final class AppModel {
         var text = ""
     }
 
-    var queryBuffers: [QueryBuffer] = [QueryBuffer(name: "query 1")]
-    var activeQueryBufferIndex = 0
+    var queryBuffers: [QueryBuffer] {
+        get { session.queryBuffers }
+        set { session.queryBuffers = newValue }
+    }
+    var activeQueryBufferIndex: Int {
+        get { session.activeQueryBufferIndex }
+        set { session.activeQueryBufferIndex = newValue }
+    }
 
     /// The active buffer's text, under the name the rest of the model has
     /// always used, so that splitting one buffer into a list changed no caller.
@@ -504,16 +499,14 @@ final class AppModel {
         }
     }
 
-    /// Where the caret or selection is in the editor.
-    ///
-    /// Owned here rather than by the pane because the Run button lives in the
-    /// window's toolbar, which has no view of the editor. ⌘R has to know which
-    /// statement the user is standing in, and this is the only place both ends
-    /// can see.
-    var querySelection: TextSelection?
-    /// The last statement `selectionChanged` put in the editor, so a later
-    /// selection can tell "untouched suggestion" from "the user's work".
-    private var suggestedQueryText = ""
+    var querySelection: TextSelection? {
+        get { session.querySelection }
+        set { session.querySelection = newValue }
+    }
+    private var suggestedQueryText: String {
+        get { session.suggestedQueryText }
+        set { session.suggestedQueryText = newValue }
+    }
 
     /// A statement the Query pane sent, carried alongside its result so a server
     /// error position can be turned back into a place in the editor.

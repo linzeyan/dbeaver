@@ -93,6 +93,25 @@ enum AppModelConnectionChecks {
             expect(
                 model.sessions[0].activeTab, .structure,
                 "and which detail pane is showing")
+
+            // The editor's text is written against one database's dialect and
+            // the filters against one relation's columns, so both are the
+            // session's. `queryText` reaches the active buffer, which now lives
+            // there too — this is the check that the whole chain still lands in
+            // one place.
+            model.queryText = "select 1"
+            expect(
+                model.sessions[0].queryBuffers[0].text, "select 1",
+                "what is typed in the editor is the session's")
+            model.addQueryBuffer()
+            expect(model.sessions[0].queryBuffers.count, 2, "and so is a second buffer")
+            expect(
+                model.sessions[0].activeQueryBufferIndex, 1,
+                "and which of them the editor is in")
+            model.whereClause = "id > 10"
+            expect(
+                model.sessions[0].whereClause, "id > 10",
+                "and what the browse is filtered by")
         }
     }
 
