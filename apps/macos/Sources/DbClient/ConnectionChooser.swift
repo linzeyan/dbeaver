@@ -311,6 +311,7 @@ struct ConnectionChooser: View {
                     row(
                         "Password", $model.connectionPassword, .connectPassword,
                         model.hasUnreadPassword ? "Saved" : "", isSecure: true)
+                    passwordStorageRow
                 }
                 // Only for a driver that reads them, which is what keeps this
                 // from being a control with no effect — and the effect it would
@@ -547,6 +548,26 @@ struct ConnectionChooser: View {
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.textSecondary.color)
                 .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(Theme.Typography.body)
+        .foregroundStyle(Theme.text.color)
+    }
+
+    /// Whether this password may be written down at all.
+    ///
+    /// Directly under the field it governs rather than in Safety, because it is
+    /// a fact about this secret and not about what may be done to the database.
+    ///
+    /// Phrased as what is kept rather than what is refused: a box labelled
+    /// "Don't save" makes the ordinary case the one that has to be read twice,
+    /// and a checkbox whose unticked state is the safe one is a checkbox people
+    /// tick by reflex.
+    private var passwordStorageRow: some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("Storage")
+            Toggle("Save password", isOn: $model.connectionDraft.savesPassword)
+                .help("Off: the password is held until you quit, then asked for again")
             Spacer(minLength: 0)
         }
         .font(Theme.Typography.body)

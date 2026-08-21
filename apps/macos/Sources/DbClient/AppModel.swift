@@ -1122,6 +1122,17 @@ final class AppModel {
     private func deferPassword(of id: UUID) {
         connectionPassword = ""
         savedConnectionPassword = ""
+        // An entry that declined the Keychain is answered from memory instead,
+        // and filled in rather than deferred: there is no panel to raise and
+        // nothing to authorise, so making somebody press Connect before the
+        // field showed what this process already knows would only make the form
+        // look emptier than it is.
+        if connections.connection(id)?.savesPassword == false {
+            connectionPassword = SessionPasswords.password(for: id) ?? ""
+            savedConnectionPassword = connectionPassword
+            deferredPassword = nil
+            return
+        }
         // Nothing is asked of the Keychain at all while the setting is off — not
         // even whether an item exists — so that a window opened by somebody who
         // declined this feature touches no secret of theirs in any way.
@@ -1176,7 +1187,18 @@ final class AppModel {
         // because they saved a change to the port, and
         // `ConnectionKeychain.save` treats empty as "store nothing", so the
         // deletion would be silent and total.
-        if preferences.remembersPasswords, !hasUnreadPassword || !connectionPassword.isEmpty {
+        if !connectionDraft.savesPassword {
+            // Off means off for what is already stored, not only for what is
+            // being typed now. Leaving the old item behind would have the file
+            // saying this password is not kept while the Keychain still held it,
+            // and the entry somebody turned the flag off *for* is exactly the one
+            // with a password already in there.
+            ConnectionKeychain.delete(for: connectionDraft.id)
+            SessionPasswords.remember(connectionPassword, for: connectionDraft.id)
+            deferredPassword = nil
+        } else if preferences.remembersPasswords,
+            !hasUnreadPassword || !connectionPassword.isEmpty
+        {
             ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
             deferredPassword = nil
         }
@@ -1212,6 +1234,7 @@ final class AppModel {
         connections.remove(saved.id)
         ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
         ConnectionKeychain.delete(for: saved.id)
+        SessionPasswords.forget(saved.id)
         connectionDraft = quickConnectDraft
         connectionPassword = quickConnectPassword
         savedConnectionPassword = ""
@@ -1251,6 +1274,13 @@ final class AppModel {
         // The one moment the secret is actually needed, and so the one moment
         // worth asking the user to authorise reading it.
         readDeferredPassword()
+        // Held for the rest of this launch where the entry declined the Keychain.
+        // Without this the flag's promise — typed once, kept until you quit —
+        // would hold only for connections somebody also pressed Save on, and
+        // nowhere else in this form does connecting mean saving.
+        if !connectionDraft.savesPassword {
+            SessionPasswords.remember(connectionPassword, for: connectionDraft.id)
+        }
         open(connectionDraft.settings.connectionString(password: connectionPassword))
     }
 

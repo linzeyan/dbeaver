@@ -44,6 +44,7 @@ enum AppModelConnectionChecks {
         checkTheSessionHoldsTheConnection()
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
+        checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -448,6 +449,60 @@ enum AppModelConnectionChecks {
                 model.connectionsWorthProbing.isEmpty, true,
                 "and a busy session is not asked, because the answer would arrive about a "
                     + "moment that had passed")
+        }
+    }
+
+    /// What "don't save this password" costs and what it buys, in one pass.
+    ///
+    /// The global setting is switched **on** here on purpose. With it off the
+    /// Keychain is untouched anyway — `checkTheKeychainIsUntouchedWhileTheSettingIsOff`
+    /// is that check — so leaving it off would let this one pass whether or not
+    /// the per-connection flag did anything at all.
+    private static func checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "No Keychain", savesPassword: false,
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+            let model = makeModel(with: [connection])
+            model.preferences.remembersPasswords = true
+            defer {
+                ConnectionKeychain.delete(for: connection.id)
+                SessionPasswords.forget(connection.id)
+            }
+
+            model.selectConnection(connection.id)
+            model.connectionPassword = "hunter2"
+            model.saveConnection()
+
+            expect(
+                ConnectionKeychain.password(for: connection.id), nil,
+                "the password of an entry that declined storage never reaches the Keychain, "
+                    + "even with the global setting on")
+            expect(
+                SessionPasswords.password(for: connection.id), "hunter2",
+                "it is held in memory instead")
+
+            // Away and back, which is the whole of what memory buys: the form
+            // fills itself in again without anybody retyping, and without a
+            // Keychain panel.
+            model.selectConnection(nil)
+            expect(model.connectionPassword, "", "leaving the entry clears the field")
+            model.selectConnection(connection.id)
+            expect(
+                model.connectionPassword, "hunter2",
+                "and coming back fills it from memory rather than asking again")
+
+            // What quitting does, since the store is the only thing that would
+            // have survived it.
+            SessionPasswords.forget(connection.id)
+            model.selectConnection(nil)
+            model.selectConnection(connection.id)
+            expect(
+                model.connectionPassword, "",
+                "and once the process has forgotten, the field is empty — which is the "
+                    + "prompt on next launch")
         }
     }
 
