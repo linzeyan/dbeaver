@@ -169,7 +169,8 @@ struct ConnectionChooser: View {
                                     hasUnsavedEdits: model.selectedConnectionID == connection.id
                                         && model.unsavedConnectionEdits != nil,
                                     select: { model.selectConnection(connection.id) },
-                                    connect: model.connectFromForm
+                                    connect: model.connectFromForm,
+                                    accept: { model.moveConnection($0, above: connection.id) }
                                 )
                             }
                         }
@@ -731,8 +732,11 @@ private struct ConnectionRow: View {
     let hasUnsavedEdits: Bool
     let select: () -> Void
     let connect: () -> Void
+    /// Takes the dragged connection and puts it directly above this one.
+    let accept: (UUID) -> Void
 
     @State private var isHovering = false
+    @State private var isDropTarget = false
 
     var body: some View {
         Button(action: select) {
@@ -768,6 +772,37 @@ private struct ConnectionRow: View {
         .help("\(connection.title) — \(connection.subtitle)")
         .accessibilityLabel(accessibilityLabel)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
+        // Dragging a row is how its place is chosen, and its folder with it: the
+        // drop lands the dragged connection directly above this one, in this
+        // one's folder. One gesture rather than a reorder command and a separate
+        // "move to folder", which would be the same thing said twice.
+        .draggable(connection.id.uuidString) {
+            // What follows the pointer. The row itself is a sidebar's width of
+            // chrome to drag across a window that is mostly grid, so this is the
+            // name and nothing else.
+            Text(connection.title)
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(Theme.text.color)
+        }
+        .dropDestination(for: String.self) { items, _ in
+            // Anything else arriving here is somebody dragging text out of the
+            // editor and missing. Refusing it is how the pointer says so.
+            guard let dragged = items.first.flatMap(UUID.init(uuidString:)) else { return false }
+            accept(dragged)
+            return true
+        } isTargeted: {
+            isDropTarget = $0
+        }
+        .overlay(alignment: .top) {
+            // A line where the row would land, rather than a highlight on the row
+            // it would land above: a filled row reads as "drop into this", and
+            // there is no into — every drop is between two rows.
+            if isDropTarget {
+                Rectangle()
+                    .fill(Theme.accent.color)
+                    .frame(height: 2)
+            }
+        }
     }
 
     /// Reserved whether or not there is a colour, so that the names in a list of

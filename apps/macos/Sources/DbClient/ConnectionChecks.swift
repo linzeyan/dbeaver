@@ -37,6 +37,7 @@ enum ConnectionChecks {
         checkSslParameters()
         checkSslSurvivesTheFile()
         checkFoldersGroupTheList()
+        checkDroppingARowOrdersItAndFilesIt()
         checkAnEntryWithoutTheKeyStillSavesItsPassword()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
@@ -765,6 +766,51 @@ enum ConnectionChecks {
         expect(
             decoded?.toSavedConnection().settings.sslRootCert, "",
             "and names no certificate")
+    }
+
+    /// What a drag means, which is two answers from one gesture.
+    ///
+    /// Both directions, because they are not the same code path: taking the
+    /// dragged row out moves everything after it up by one, so a drop below
+    /// where the row started and a drop above it land at different indices from
+    /// the same arithmetic. Getting that wrong is off-by-one in a list somebody
+    /// arranged on purpose.
+    ///
+    /// And the four drops that are not moves. A gesture that changed nothing but
+    /// rewrote the file would put a diff in somebody's dotfiles for having
+    /// twitched the pointer.
+    private static func checkDroppingARowOrdersItAndFilesIt() {
+        func made(_ name: String, folder: String = "") -> SavedConnection {
+            SavedConnection(
+                name: name, folder: folder,
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                    user: "ana"))
+        }
+        let a = made("a")
+        let b = made("b")
+        let c = made("c", folder: "clients")
+        var list = ConnectionList([a, b, c])
+
+        expect(list.move(a.id, above: c.id), true, "a row can be dropped below where it was")
+        expect(
+            list.connections.map(\.name), ["b", "a", "c"],
+            "and lands directly above the row it was dropped on")
+        expect(
+            list.connections[1].folder, "clients",
+            "taking the folder of the row it was dropped on")
+
+        expect(list.move(a.id, above: b.id), true, "and it can be dragged back up")
+        expect(list.connections.map(\.name), ["a", "b", "c"], "landing above that one instead")
+        expect(list.connections[0].folder, "", "and out of the folder again")
+
+        expect(list.move(a.id, above: a.id), false, "a row dropped on itself is not a move")
+        expect(list.move(a.id, above: b.id), false, "nor is a drop that changes nothing")
+        expect(list.move(a.id, above: UUID()), false, "nor is a drop onto a row that is gone")
+        expect(list.move(UUID(), above: a.id), false, "nor is a drop of something not in the list")
+        expect(
+            list.connections.map(\.name), ["a", "b", "c"],
+            "and none of those four disturbed the order")
     }
 
     /// A folder is a path on the entry, tidied on the way in and on the way out,
