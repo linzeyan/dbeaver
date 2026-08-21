@@ -42,6 +42,13 @@ final class Session: Identifiable {
     var connectionLabel = "Not connected"
     var connectionState: StatusDot.State = .connecting
 
+    /// What the open connection can do, read once when it is adopted.
+    ///
+    /// On the session rather than on the window because it describes one
+    /// connection: a window holding a PostgreSQL tab and a Cassandra tab has two
+    /// different answers to the same question, and one of them says Cancel works.
+    var capabilities: Capabilities = .unknown
+
     /// The colour of the connection now open.
     ///
     /// Carried out of the chooser into the session, because the colour is not there

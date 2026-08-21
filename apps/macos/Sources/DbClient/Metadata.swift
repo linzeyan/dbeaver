@@ -23,6 +23,38 @@ struct ServerInfo: Decodable, Hashable {
     }
 }
 
+/// What a connection can do, asked once rather than discovered by being refused.
+///
+/// The alternative is what this replaces: draw the control, send the request,
+/// and read the answer out of whatever comes back. That works for finding out
+/// what a *statement* did and not for finding out what a *database is*, because
+/// the answer arrives after the control has already been drawn — and a control
+/// that is drawn and then apologises has already made a promise.
+struct Capabilities: Decodable, Hashable {
+    /// Whether this connection can be taken out of autocommit at all.
+    let transactional: Bool
+
+    /// Whether Cancel reaches the statement, or only this side's reading of it.
+    ///
+    /// False for Cassandra and Flight SQL, where there is nowhere to deliver the
+    /// request: the fetch in flight resolves as cancelled and the server goes on
+    /// assembling a page nobody will read. The window says so rather than
+    /// claiming the work stopped.
+    let cancelStopsTheStatement: Bool
+
+    /// What a window has before it has asked.
+    ///
+    /// Both false, which is the cautious reading in both directions: it offers no
+    /// transaction control it might not have, and it promises no cancel it might
+    /// not be able to deliver.
+    static let unknown = Capabilities(transactional: false, cancelStopsTheStatement: false)
+
+    private enum CodingKeys: String, CodingKey {
+        case transactional
+        case cancelStopsTheStatement = "cancel_stops_the_statement"
+    }
+}
+
 struct SchemaInfo: Decodable, Hashable, Identifiable {
     let name: String
     var id: String { name }

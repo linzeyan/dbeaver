@@ -29,6 +29,7 @@ enum MetadataChecks {
         checkATriggerWithAFunctionReadsAsACall()
         checkEveryOptionalFieldArrivesNull()
         checkARenamedFieldIsRefusedRatherThanGuessed()
+        checkCapabilitiesDecodeTheKeysTheCoreWrites()
         if failures == 0 {
             fputs("metadata: all checks passed\n", stderr)
         } else {
@@ -116,6 +117,37 @@ enum MetadataChecks {
             #"{"name":"t","timing":null,"level":null,"function":null,"enabled":true,"definition":null}"#
         )
         expect(missingEvents == nil, true, "a missing `events` is refused")
+    }
+
+    /// The two spellings have to agree, and nothing else makes them.
+    ///
+    /// The core writes Rust field names and Swift reads Swift ones, so
+    /// `cancel_stops_the_statement` is bridged by a `CodingKeys` entry — one line
+    /// whose deletion compiles, passes every other check, and silently decodes
+    /// nothing. What it decodes to is `false`, which reads as a real answer: the
+    /// window would tell somebody on PostgreSQL that Cancel does not reach the
+    /// server, and it would be wrong in the direction that sounds cautious.
+    private static func checkCapabilitiesDecodeTheKeysTheCoreWrites() {
+        let both: Capabilities? = decode(
+            #"{"transactional":true,"cancel_stops_the_statement":true}"#)
+        expect(both?.transactional, true, "a transactional connection says so")
+        expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
+
+        // Cassandra's answer, which is the one the new field exists to carry.
+        let neither: Capabilities? = decode(
+            #"{"transactional":false,"cancel_stops_the_statement":false}"#)
+        expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
+
+        // A field the core stopped writing is refused rather than read as false,
+        // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
+        // exists: a default here is an answer nobody gave.
+        let renamed: Capabilities? = decode(
+            #"{"transactional":true,"cancel_stops_statement":true}"#)
+        expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
+
+        expect(
+            Capabilities.unknown.cancelStopsTheStatement, false,
+            "and before asking, no promise is made")
     }
 
     // MARK: - Harness

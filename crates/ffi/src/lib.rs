@@ -251,6 +251,31 @@ pub unsafe extern "C" fn db_server_info_json(
     }
 }
 
+/// What this connection can do, as a JSON object. Release with `db_string_free`.
+///
+/// Takes a handle rather than a scheme, which is the whole reason it is a call
+/// and not a table: the MySQL driver reaches StarRocks and Doris as well as
+/// MySQL, and those two are not transactional. A front end keyed on `mysql://`
+/// would be wrong for exactly the products the scheme cannot tell apart.
+///
+/// No I/O — everything in it was settled when the connection opened — so this is
+/// priced like an accessor and may be asked whenever it is convenient.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_capabilities_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    json_result(&h.driver.capabilities(), err)
+}
+
 /// Everything an editor asks about one buffer of SQL, in one answer.
 ///
 /// The three questions — what to paint, where the statements are, and which one

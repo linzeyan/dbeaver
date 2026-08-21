@@ -84,6 +84,13 @@ final class Database: @unchecked Sendable {
         try decodeJSON(db_server_info_json(handle, &errOut), as: ServerInfo.self)
     }
 
+    /// What this connection can do. Unlike `serverInfo` this is not a round trip
+    /// — the core settled it when the connection opened — so it is priced like
+    /// an accessor and asked once, when the session adopts the connection.
+    func capabilities() throws -> Capabilities {
+        try decodeJSON(db_capabilities_json(handle, &errOut), as: Capabilities.self)
+    }
+
     // MARK: - Metadata
 
     func schemas() throws -> [SchemaInfo] {
