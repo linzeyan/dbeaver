@@ -52,6 +52,18 @@ async fn source() -> ChSource {
 /// ClickHouse's HTTP interface takes one statement per request, so the file is
 /// split on a line of `;;` rather than on `;` — splitting on the semicolon would
 /// cut the multi-row `INSERT`s apart at every value.
+///
+/// The page size is a real number and not the 1 that "these statements answer
+/// with nothing" invites, because in this driver the page size is
+/// `max_block_size`: a setting on the server's own pipeline rather than a
+/// request for one row at a time. At 1, `INSERT … SELECT … FROM
+/// numbers(1000000)` is processed as a million blocks. Measured against
+/// ClickHouse 24.10: 2.1s and 1.17GiB at a page size of 1, 171ms and 119MiB at
+/// this one — which is the difference between a fixture that applies and one
+/// that is stopped by the server's memory tracker and reported as a broken
+/// driver.
+const SEED_PAGE: usize = 65536;
+
 async fn seed() {
     let admin = ChSource::connect(ADMIN_URL)
         .await
@@ -62,7 +74,7 @@ async fn seed() {
             continue;
         }
         admin
-            .query(statement, 1)
+            .query(statement, SEED_PAGE)
             .await
             .unwrap_or_else(|e| panic!("seeding failed on `{}`: {e}", head(statement)));
     }
