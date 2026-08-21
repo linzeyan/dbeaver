@@ -43,6 +43,7 @@ enum AppModelConnectionChecks {
         checkProductionQuestion()
         checkTheSessionHoldsTheConnection()
         checkAWindowHoldsAListOfConnections()
+        checkOnlyIdleOpenConnectionsAreProbed()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -398,6 +399,55 @@ enum AppModelConnectionChecks {
             let long = AppModel.ProductionRun(
                 count: 1, worst: String(repeating: "x", count: 900), danger: .fatal, label: "db")
             expect(long.detail.count < 500, true, "a long statement is cut rather than shown whole")
+        }
+    }
+
+    /// Which sessions a health probe would ask, which is the whole of the rule
+    /// that can be checked without a server.
+    ///
+    /// Both exclusions are the kind that look like tidiness and are not. Asking a
+    /// session with nothing open would ping through a nil connection; asking a
+    /// busy one would queue a round trip behind the statement it is running, on
+    /// the one connection that statement is using, and answer about a moment that
+    /// has passed. Neither shows up as a crash — they show up as a dot that is
+    /// wrong, which is the one thing this feature exists to stop.
+    private static func checkOnlyIdleOpenConnectionsAreProbed() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(
+                model.connectionsWorthProbing.isEmpty, true,
+                "a window with nothing open has no connection to ask about")
+
+            // A real open connection, because the busy exclusion says nothing on
+            // a session that has nothing to ping — checking it against a failed
+            // connection attempt would pass whether or not the exclusion existed.
+            // SQLite is the one driver here that opens without a server.
+            let file = FileManager.default.temporaryDirectory
+                .appending(path: "dbclient-probe-\(UUID().uuidString).db")
+            defer { try? FileManager.default.removeItem(at: file) }
+            // Made here rather than left to the driver, which refuses a path that
+            // is not already a file: opening a name that does not exist is how a
+            // typo becomes an empty database instead of an error. Zero bytes is a
+            // valid SQLite database.
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+            guard let db = try? Database(connString: "sqlite://\(file.path)") else {
+                failures += 1
+                fputs("connection-chooser FAIL: a SQLite file would not open\n", stderr)
+                return
+            }
+            let session = model.sessions[0]
+            session.db = db
+            expect(
+                model.connectionsWorthProbing.count, 1,
+                "an idle session with a connection open is asked")
+
+            // The flag the chrome spins on while a statement runs, on the one
+            // connection a ping would go down.
+            session.isBusy = true
+            expect(
+                model.connectionsWorthProbing.isEmpty, true,
+                "and a busy session is not asked, because the answer would arrive about a "
+                    + "moment that had passed")
         }
     }
 

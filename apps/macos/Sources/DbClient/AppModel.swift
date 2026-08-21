@@ -4188,6 +4188,47 @@ final class AppModel {
         }
     }
 
+    // MARK: - Health
+
+    /// The open connections it is worth asking about.
+    ///
+    /// Two exclusions, and both are the difference between a useful answer and a
+    /// misleading one. A session with nothing open has no connection to have
+    /// lost. A session that is busy is running a statement on the one connection
+    /// a ping would go down, and that connection is serial — so the ping would
+    /// queue behind the statement and report the connection healthy at the
+    /// moment it finally stopped being interesting. A statement in flight is also
+    /// its own health check: if the connection is gone, the statement is about to
+    /// say so.
+    var connectionsWorthProbing: [Session] {
+        sessions.filter { $0.db != nil && !$0.isBusy }
+    }
+
+    /// Asks each open connection whether it is still there.
+    ///
+    /// Called when the application comes back to the front, which is when this is
+    /// worth knowing: the connection that was fine when somebody switched away
+    /// may have been closed by a server timeout, a laptop lid, or a network that
+    /// moved. Until now the first anyone heard of it was a statement failing.
+    ///
+    /// Nothing is closed and nothing is reopened. This moves the dot and stops —
+    /// deciding on somebody's behalf to tear down a session, or to silently
+    /// reconnect one, are both larger decisions than "the light went red".
+    func probeOpenConnections() {
+        for session in connectionsWorthProbing {
+            guard let db = session.db else { continue }
+            dispatch(
+                on: session.queue, applyingInto: session, { db.ping() },
+                then: { [weak self] alive in
+                    guard let self else { return }
+                    // Only ever downgrades. A session already showing a failure it
+                    // reported for its own reasons is not talked out of it by a
+                    // ping that happened to succeed afterwards.
+                    if !alive { self.connectionState = .failed }
+                })
+        }
+    }
+
     // MARK: - Transactions
 
     /// Whether this connection can be taken out of autocommit at all.
