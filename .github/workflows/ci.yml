@@ -98,6 +98,18 @@ jobs:
           - name: Arrow Flight SQL
             up: db-up-flightsql
             test: test-flightsql
+          # Not a database family: an SSH bastion, and the PostgreSQL above it
+          # reached through one. `test-tunnel` declares both containers itself,
+          # and they are named here anyway so this row reads like the others.
+          #
+          # Worth a runner because a tunnel is the one thing in this tree that
+          # cannot be tested without a second machine's worth of moving parts —
+          # a listener, a forward, and an sshd with its own opinions about how
+          # often it will answer. It has already been broken by one of those
+          # opinions rather than by our code.
+          - name: SSH tunnel
+            up: db-up-ssh db-up
+            test: test-tunnel
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
