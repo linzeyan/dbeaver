@@ -26,7 +26,11 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio_postgres::error::{ErrorPosition, SqlState};
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{CancelToken, Client, NoTls, RowStream};
+use tokio_postgres::{CancelToken, Client, RowStream};
+
+mod tls;
+pub use tls::SslMode;
+use tls::Tls;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PgError {
@@ -40,6 +44,12 @@ pub enum PgError {
     Arrow(#[from] arrow::error::ArrowError),
     #[error("connection pool exhausted")]
     PoolExhausted,
+    #[error("sslmode={0} is not one of disable, allow, prefer, require, verify-ca or verify-full")]
+    UnknownSslMode(String),
+    #[error("the CA certificate at {path} could not be read: {reason}")]
+    RootCertificate { path: String, reason: String },
+    #[error("TLS could not be set up: {0}")]
+    Tls(String),
 }
 
 impl PgError {
@@ -140,6 +150,10 @@ pub struct PgSource {
     pool: Arc<Mutex<Vec<Client>>>,
     semaphore: Arc<Semaphore>,
     conn_str: String,
+    /// What was decided about the wire, kept because every later connection has
+    /// to make the same decision — the pool's, the cursor's, and the one a
+    /// cancel opens for itself.
+    tls: Tls,
     /// The connections a statement is on right now, by checkout.
     ///
     /// `cancel` has to name a backend and the one running the statement may be
@@ -272,17 +286,15 @@ impl Drop for Busy {
 
 impl PgSource {
     pub async fn connect(conn_str: &str) -> Result<Self, PgError> {
+        // Taken out of the string before tokio-postgres is handed it: two of
+        // libpq's five spellings are ones it refuses to parse, and `sslrootcert`
+        // is an option it has never heard of. `tls::split_ssl` says more.
+        let (conn_str, mode, root_cert) = tls::split_ssl(conn_str)?;
+        let tls = Tls::new(mode, root_cert.as_deref())?;
         // Open one connection eagerly to ensure connection errors are caught early
         // This maintains the existing behavior where connection failures are reported
         // immediately rather than at first query time
-        let (session, connection) = tokio_postgres::connect(conn_str, NoTls).await?;
-        // The connection future drives the socket and must outlive us. Phase 0
-        // has no reconnect story; a dropped connection surfaces as a query error.
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("postgres connection closed: {e}");
-            }
-        });
+        let session = tls.connect(&conn_str, "connection").await?;
 
         // Start the pool empty. The session connection is already open, so a bad
         // password still fails at connect, which is the property that mattered.
@@ -299,7 +311,8 @@ impl PgSource {
             session,
             pool,
             semaphore,
-            conn_str: conn_str.to_string(),
+            conn_str,
+            tls,
             busy,
             next_checkout: AtomicU64::new(0),
             cancellations,
@@ -355,14 +368,7 @@ impl PgSource {
         }
 
         // If no connection available, create a new one
-        let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls).await?;
-        // The connection future drives the socket and must outlive us. Phase 0
-        // has no reconnect story; a dropped connection surfaces as a query error.
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("postgres connection closed: {e}");
-            }
-        });
+        let client = self.tls.connect(&self.conn_str, "connection").await?;
 
         // Registered before it is handed out, so a statement can never be running
         // on a connection `cancel` does not know about.
@@ -419,7 +425,7 @@ impl PgSource {
         // Every connection is asked before the first refusal is reported, so one
         // dropped connection cannot spare the rest.
         let results =
-            futures_util::future::join_all(tokens.iter().map(|t| t.cancel_query(NoTls))).await;
+            futures_util::future::join_all(tokens.iter().map(|t| self.tls.cancel(t))).await;
         for result in results {
             result?;
         }
@@ -617,13 +623,10 @@ impl PgSource {
     /// committed.
     pub async fn cursor(&self, sql: &str, batch_rows: usize) -> Result<Cursor, PgError> {
         // Create a fresh connection for the cursor
-        let (client, connection) = tokio_postgres::connect(&self.conn_str, NoTls).await?;
-        // The connection future drives the socket and must outlive us.
-        tokio::spawn(async move {
-            if let Err(e) = connection.await {
-                eprintln!("postgres cursor connection closed: {e}");
-            }
-        });
+        let client = self
+            .tls
+            .connect(&self.conn_str, "cursor connection")
+            .await?;
 
         // Create a unique cursor name using atomic counter
         static CURSOR_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -661,6 +664,7 @@ impl PgSource {
             types,
             batch_rows,
             cursor_name,
+            tls: self.tls.clone(),
         })
     }
 }
@@ -686,6 +690,9 @@ pub struct Cursor {
     types: Vec<ColumnType>,
     batch_rows: usize,
     cursor_name: String,
+    /// Carried so that `canceller` can hand it on. The cursor itself never
+    /// opens another socket.
+    tls: Tls,
 }
 
 /// Asks the server to stop what a cursor is fetching.
@@ -695,6 +702,11 @@ pub struct Cursor {
 /// connection of its own because the protocol cannot interleave one.
 pub struct CursorCancel {
     token: CancelToken,
+    /// The cancel opens a connection of its own, so it has to know what the
+    /// cursor's connection negotiated. Sent in the clear to a server that
+    /// requires TLS it is refused, and the fetch it was meant to stop runs on
+    /// while the window reports it cancelled.
+    tls: Tls,
 }
 
 impl CursorCancel {
@@ -702,8 +714,7 @@ impl CursorCancel {
     /// nothing to stop and this still succeeds; what actually happened shows up
     /// as the fetch failing with `is_cancelled`.
     pub async fn cancel(&self) -> Result<(), PgError> {
-        self.token.cancel_query(NoTls).await?;
-        Ok(())
+        self.tls.cancel(&self.token).await
     }
 }
 
@@ -769,6 +780,7 @@ impl Cursor {
     pub fn canceller(&self) -> CursorCancel {
         CursorCancel {
             token: self.client.cancel_token(),
+            tls: self.tls.clone(),
         }
     }
 

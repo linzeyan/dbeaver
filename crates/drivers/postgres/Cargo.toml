@@ -17,6 +17,21 @@ tokio-postgres = { workspace = true, features = [
     "with-uuid-1",
     "with-serde_json-1",
 ] }
+# TLS for the one driver that had none. `rustls` rather than `native-tls`, for
+# the reason the SQL Server driver's own comment gives: native-tls drags
+# async-native-tls and a second async runtime into a tokio-only application.
+# Every other driver here is already on rustls, so this adds a backend to no
+# build that did not have one.
+tokio-postgres-rustls = { version = "0.14", default-features = false }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+# The Mozilla bundle, which is already in the lock behind the HTTP drivers. A
+# private CA is named by `sslrootcert` instead — see `tls.rs`.
+webpki-roots = "1"
+percent-encoding = "2"
 futures-util.workspace = true
 thiserror.workspace = true
 uuid = "1"
