@@ -38,6 +38,7 @@ enum ConnectionChecks {
         checkSslSurvivesTheFile()
         checkTheBastionSurvivesTheFile()
         checkTheBastionSecretIsFiledBesideTheOther()
+        checkTheKeychainKeepsTheTwoSecretsApart()
         checkFoldersGroupTheList()
         checkDroppingARowOrdersItAndFilesIt()
         checkAnEntryWithoutTheKeyStillSavesItsPassword()
@@ -768,6 +769,45 @@ enum ConnectionChecks {
         expect(
             decoded?.toSavedConnection().settings.sslRootCert, "",
             "and names no certificate")
+    }
+
+    /// Two secrets under one connection's id, and neither one standing on the
+    /// other.
+    ///
+    /// The failure this is written against is the one that cannot be seen from
+    /// the form: a bastion secret saved over the database password looks like
+    /// nothing at all until the next connection, when the database refuses a
+    /// password that is somebody's SSH passphrase.
+    ///
+    /// Against the real Keychain rather than a stand-in, because the thing being
+    /// checked is what the account attribute does — and a stand-in that keyed a
+    /// dictionary the way this code intends to would agree with itself whatever
+    /// the Keychain did.
+    private static func checkTheKeychainKeepsTheTwoSecretsApart() {
+        let id = UUID()
+        defer { ConnectionKeychain.delete(for: id) }
+
+        ConnectionKeychain.save("the database's own", for: id)
+        ConnectionKeychain.save("the bastion's", for: id, .ssh)
+        expect(
+            ConnectionKeychain.password(for: id), "the database's own",
+            "the database's password is still its own")
+        expect(
+            ConnectionKeychain.password(for: id, .ssh), "the bastion's",
+            "and the bastion's secret is beside it")
+        expect(
+            ConnectionKeychain.hasPassword(for: id, .ssh), true,
+            "and can be asked about without being read")
+
+        ConnectionKeychain.delete(for: id)
+        // Written as comparisons rather than passed as `nil`, so that the check
+        // does not depend on how `expect`'s generic infers a bare literal.
+        expect(
+            ConnectionKeychain.password(for: id) == nil, true,
+            "forgetting the connection takes the password")
+        expect(
+            ConnectionKeychain.password(for: id, .ssh) == nil, true,
+            "and the bastion's secret with it")
     }
 
     /// A bastion is four typed settings, and all four have to come back off disk
