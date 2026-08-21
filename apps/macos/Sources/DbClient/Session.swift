@@ -48,6 +48,20 @@ final class Session: Identifiable {
     /// with none, which would quietly dial a host only the bastion can reach.
     var bastion: SshConfig?
 
+    /// Which entry in the navigator cache this session's tree is, or nil where
+    /// there is nothing to file it under — a connection string that is not a URL
+    /// names no database to key on.
+    var cacheKey: NavigatorCacheKey?
+
+    /// Whether what the navigator is drawing came off disk rather than off the
+    /// server.
+    ///
+    /// True only for the moment between a connection being asked for and its
+    /// tree arriving, and only where there was something cached to draw. The
+    /// navigator dims itself while it is set: rows that may since have gone are
+    /// worth showing, and worth showing as provisional.
+    var isTreeStale = false
+
     var connectionLabel = "Not connected"
     var connectionState: StatusDot.State = .connecting
 

@@ -386,6 +386,17 @@ struct NavigatorView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // Dimmed rather than hidden behind a spinner. What somebody
+                // reopening a connection wants is usually one table they were
+                // already looking at, and a progress view would cover exactly
+                // that. Dimming says the tree is provisional without taking it
+                // away.
+                .opacity(model.isTreeStale ? 0.5 : 1)
+                // And not clickable while it is. Picking a relation starts a
+                // browse, and there is no connection yet for one to run down —
+                // the row would answer with an empty grid and no reason for it,
+                // which is a worse answer than a row that waits.
+                .disabled(model.isTreeStale)
             }
         }
         // Opaque by default, which costs the sidebar its system translucency and
@@ -457,9 +468,15 @@ struct NavigatorView: View {
     private var countLabel: String {
         let matched = model.matchedRelationCount
         let total = model.totalRelationCount
-        return matched == total
+        let counted =
+            matched == total
             ? AppModel.pluralized(total, "object")
             : "\(matched) of \(AppModel.pluralized(total, "object"))"
+        // Words for what the dimming means, because dimming on its own reads as
+        // a control that is switched off. The difference between "you may not
+        // touch this" and "this is what was here last time" is the whole of what
+        // somebody needs before trusting a table name they can see.
+        return model.isTreeStale ? "\(counted) · from last time" : counted
     }
 
     private func expansion(for schema: String) -> Binding<Bool> {
@@ -542,7 +559,7 @@ private struct ConnectionRootRow: View {
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Connection \(model.connectionLabel), \(model.connectionState.label)")
+        .accessibilityLabel(model.connectionRootDescription)
     }
 }
 
