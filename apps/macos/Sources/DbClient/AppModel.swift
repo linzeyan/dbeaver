@@ -539,14 +539,41 @@ final class AppModel {
 
     /// The connections this window holds, and which one it is showing.
     ///
-    /// Exactly one for now — every path that opens a connection still replaces
-    /// the one already here. What has changed is where a connection's state
-    /// lives, which is the thing a second entry needs before it can exist.
+    /// A window is a list of connections and a pointer into it. Everything a
+    /// pane draws is read from the one the pointer names, which is why switching
+    /// tabs is one assignment and needs no saving or putting back: the state
+    /// never left the connection it describes.
     private(set) var sessions: [Session] = [Session()]
     private(set) var activeSession = 0
 
-    /// The session in front, and what every forwarding property below reaches.
-    private var session: Session { sessions[activeSession] }
+    /// The session an arriving result belongs to, while it is being applied.
+    ///
+    /// Set only by `dispatch`, and only across the synchronous body of one apply
+    /// block. Those blocks write through the forwarding properties below, which
+    /// otherwise resolve to whatever tab is in front — and the tab in front is
+    /// not necessarily the one that asked the question. A page fetched for a
+    /// connection somebody has since switched away from has to land in that
+    /// connection's grid, not in the one they are looking at now.
+    ///
+    /// Dynamic scope rather than a session parameter threaded through two hundred
+    /// apply blocks. It is sound because those blocks are synchronous and on the
+    /// main actor: nothing can run between the two assignments that bracket one.
+    ///
+    /// `@ObservationIgnored` deliberately. It is put back before the run loop
+    /// gets its turn, so a view that tracked it would be invalidated twice per
+    /// arriving result over a value it can never see.
+    @ObservationIgnored private var applyingTo: Session?
+
+    /// The session a connection attempt is filling, while it is in flight.
+    ///
+    /// Nil at rest. Held rather than searched for again: which tab an attempt
+    /// made has one answer, and finding it a second time by identity is a second
+    /// answer that can disagree with the first.
+    private var sessionBeingOpened: Session?
+
+    /// The session everything below reaches: the one a result is being applied
+    /// into, or else the one in front.
+    private var session: Session { applyingTo ?? sessions[activeSession] }
 
     // Chrome. Each of these is the active session's, kept under the name it has
     // always had so that no pane and no check has to learn a new one. The
@@ -1228,8 +1255,8 @@ final class AppModel {
     ///
     /// Leaves the live connection alone: it is still the one answering queries
     /// until another one opens, so a mistyped password costs nothing but the
-    /// retyping. The session is replaced in `adopt`, once there is something to
-    /// replace it with.
+    /// retyping. What opens arrives in a tab of its own, and `adopt` is what puts
+    /// that tab in front.
     func presentConnection() {
         connectionError = nil
         isPresentingConnection = true
@@ -1245,29 +1272,55 @@ final class AppModel {
         connectionState = .connected
     }
 
-    private func open(_ connString: String) {
-        isConnecting = true
-        isBusy = true
-        connectionError = nil
-        connectionState = .connecting
-        status = "Connecting…"
-        run {
-            let db = try Database(connString: connString)
-            return (db, try Self.inventory(of: db))
-        } then: { [self] result in
-            self.connString = connString
-            adopt(result.0, inventory: result.1)
-        }
+    /// The session an attempt should fill: the tab in front when nothing is open
+    /// on it, and a new tab otherwise.
+    ///
+    /// Three behaviours out of one rule. A window's first connection fills the
+    /// tab that is already there; a retry after a refusal reuses the tab the
+    /// refusal left; File ▸ Connect… over a live connection opens a second tab
+    /// beside it. The new tab is appended and not selected — `adopt` is what puts
+    /// it in front, once there is something in it to show.
+    private func sessionToFill() -> Session {
+        if session.db == nil { return session }
+        let added = Session()
+        sessions.append(added)
+        return added
     }
 
-    /// Installs a connection that opened, in place of whatever was here.
+    private func open(_ connString: String) {
+        let filling = sessionToFill()
+        sessionBeingOpened = filling
+        // Onto that session directly rather than through the forwarding
+        // properties, which reach the tab in front — and the tab in front is the
+        // connection still answering queries while this one is in the air.
+        filling.connString = connString
+        filling.connectionLabel = Self.label(for: connString)
+        filling.connectionState = .connecting
+        filling.status = "Connecting…"
+        filling.isBusy = true
+        isConnecting = true
+        connectionError = nil
+        dispatch(
+            on: filling.queue, applyingInto: filling,
+            {
+                let db = try Database(connString: connString)
+                return (db, try Self.inventory(of: db))
+            },
+            then: { [self] result in
+                adopt(result.0, inventory: result.1)
+            })
+    }
+
+    /// Installs a connection that opened, into the session that was opening it.
+    ///
+    /// Nothing is cleared on the way in. There used to be a `reset` here that
+    /// emptied every pane, because a new connection arrived into the window that
+    /// was showing the previous one; now it arrives into a session of its own,
+    /// which has never held anything. The list of what to clear was the kind of
+    /// list that goes wrong by omission — one property left off it is a fragment
+    /// of the previous database shown under the name of this one — and it is
+    /// gone, replaced by `Session`'s own stored properties.
     private func adopt(_ connection: Database, inventory: Inventory) {
-        // Now rather than when the form opened: an attempt that fails has to
-        // leave the session it was launched from exactly as it was, and one
-        // that succeeds has to leave nothing of it behind. Skipped on the first
-        // connection, where there is nothing to drop and where dropping it
-        // would take the editor's `--sql` with it.
-        if db != nil { reset() }
         db = connection
         isConnecting = false
         isPresentingConnection = false
@@ -1310,57 +1363,84 @@ final class AppModel {
         // then the menu item is what runs it.
         if !appliedLaunchOptions, initialSQL != nil, !initialSQLIsScript { runCurrentQuery() }
         appliedLaunchOptions = true
+        // In front now, and not a moment sooner. Until this line the window went
+        // on showing the connection that was already answering, which is the
+        // promise `presentConnection` makes: a mistyped password costs the
+        // retyping and nothing else.
+        if let index = sessions.firstIndex(where: { $0 === session }) { activeSession = index }
+        sessionBeingOpened = nil
     }
 
-    /// Drops everything the previous connection put on screen.
+    /// Puts another of this window's connections in front.
     ///
-    /// Every property a pane reads is listed here. One left behind is a
-    /// fragment of the previous database shown under the name of this one, and
-    /// nothing else in the window would contradict it.
-    private func reset() {
-        // Releases the previous connection, which closes it.
-        db = nil
-        schemas = []
-        relations = [:]
-        expanded = []
-        selected = nil
-        navigatorFilter = ""
-        // The needle almost certainly names a table of the database being left,
-        // and a panel that opened onto "no statement here matches that" would be
-        // reporting a filter nobody remembers typing.
-        historyFilter = ""
-        columns = []
-        clearRelationDetail()
-        browseResult.discard()
-        discardBrowse()
-        scriptSteps = []
-        selectedStep = 0
-        whereClause = ""
-        orderClause = ""
-        filterRules = []
-        compiledClause = ""
-        // Not merely stale: these say which operators a column can be asked, and
-        // the answer is the previous database's dialect.
-        filterColumns = []
-        // The store's keys are `schema.name` strings, and the same string names
-        // a different table on a different server.
-        browseStore.clear()
-        stateToRestore = nil
-        browseHistory.clear()
-        queryText = ""
-        suggestedQueryText = ""
-        querySelection = nil
-        isValueViewerOpen = false
-        isEditingValue = false
-        errorMessage = nil
-        staged = StagedChanges()
-        // The mode belonged to the connection being dropped, not to the window.
-        transaction = .none
-        // As did the marks. A window that kept the previous connection's
-        // read-only mark would refuse writes to a database nobody marked, and
-        // one that kept a cleared mark would allow them to a database somebody
-        // did — the second is the direction that costs data.
-        safety = ConnectionSafety()
+    /// One assignment, because there is nothing to save and nothing to put back.
+    /// Everything a pane reads is the session's, so moving the pointer moves the
+    /// navigator, the grid, the editor, the transaction state and the status bar
+    /// together — and a statement still running on the tab being left goes on
+    /// running, and lands in it.
+    func selectSession(_ index: Int) {
+        guard sessions.indices.contains(index) else { return }
+        activeSession = index
+    }
+
+    /// Closes a connection and takes its tab with it.
+    ///
+    /// A window always has a tab. Closing the only one leaves an empty session
+    /// rather than a window with nothing in it — which is also what Disconnect
+    /// is: there is no separate command, because a connection nobody is looking
+    /// at and a closed connection are the same thing.
+    func closeSession(_ index: Int) {
+        guard sessions.indices.contains(index) else { return }
+        let closing = sessions[index]
+        sessions.remove(at: index)
+        if sessions.isEmpty {
+            sessions = [Session()]
+            activeSession = 0
+        } else if activeSession >= sessions.count {
+            activeSession = sessions.count - 1
+        } else if index < activeSession {
+            activeSession -= 1
+        }
+        // An attempt still in the air belongs to a tab that no longer exists.
+        // Forgetting it is what stops its refusal from being reported against
+        // whatever tab has taken its place.
+        if sessionBeingOpened === closing { sessionBeingOpened = nil }
+        drain(closing)
+    }
+
+    /// Lets go of a connection in the order the server needs it let go of.
+    ///
+    /// The cursors first. Each is a connection of its own that the server is
+    /// holding open on this session's behalf, and freeing the session's handle
+    /// would not touch them — a cursor left behind is a connection nothing will
+    /// ever close.
+    ///
+    /// Then an open transaction is rolled back by name rather than left for the
+    /// socket to decide. A server that is told releases its locks now; a server
+    /// that is not may hold them until it notices the client has gone, and the
+    /// rows are locked against everybody else in the meantime.
+    ///
+    /// All of it on that session's own queue and not on the main actor, so it
+    /// queues behind whatever is still running there: a statement in flight
+    /// finishes against a connection that is still open, rather than one pulled
+    /// out from under it. The handle is freed when the closure returns, which is
+    /// after the rollback rather than racing it.
+    private func drain(_ closing: Session) {
+        closing.browseCursor = nil
+        closing.exportCursor = nil
+        closing.browseFetchInFlight = false
+        guard let db = closing.db else { return }
+        let hadTransaction = closing.transaction.open
+        closing.db = nil
+        closing.queue.async {
+            // Nowhere to report a failure to — the tab it would be reported in
+            // is gone — and nothing to do about one either: the handle going out
+            // of scope closes the socket, which rolls back whatever this could
+            // not. The closure holding the last reference is what makes that
+            // happen here, after the rollback, rather than on the main actor
+            // while the rollback was still in the air.
+            if hadTransaction { try? db.rollback() }
+        }
     }
 
     /// The navigator's whole contents, read in one pass.
@@ -3975,18 +4055,26 @@ final class AppModel {
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
         guard let db else { return }
-        dispatch(on: queue, { try work(db) }, then: apply)
+        dispatch(on: queue, applyingInto: session, { try work(db) }, then: apply)
     }
 
     private func run<T>(
         _ work: @escaping @Sendable () throws -> T,
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
-        dispatch(on: queue, work, then: apply)
+        dispatch(on: queue, applyingInto: session, work, then: apply)
     }
 
+    /// Runs `work` off the main actor and applies its result into `asked`.
+    ///
+    /// `asked` is read at the call, not at the arrival. That is the whole of what
+    /// makes several connections in one window safe: an apply block writes
+    /// through properties that reach whichever tab is in front, and by the time a
+    /// slow statement answers, the tab in front may be a different database
+    /// entirely. The question and its answer have to name the same session.
     private func dispatch<T>(
         on queue: DispatchQueue,
+        applyingInto asked: Session,
         _ work: @escaping @Sendable () throws -> T,
         then apply: @escaping @MainActor (T) -> Void
     ) where T: Sendable {
@@ -3994,14 +4082,38 @@ final class AppModel {
             do {
                 let value = try work()
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { apply(value) }
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.applying(to: asked) { apply(value) }
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self?.fail(with: error) }
+                    MainActor.assumeIsolated {
+                        guard let self else { return }
+                        self.applying(to: asked) { self.fail(with: error) }
+                    }
                 }
             }
         }
+    }
+
+    /// Puts `session` in front of the forwarding properties for the length of
+    /// `body`, and puts back whatever was there.
+    ///
+    /// Nested rather than assigned flat, because an apply block starts work of
+    /// its own — the transaction read after a connection lands is exactly that —
+    /// and the dispatch inside it has to name the session being applied into
+    /// rather than the tab on screen.
+    ///
+    /// A session that has since been closed is written into all the same, and
+    /// nothing reads it: the object outlives the closure and is then let go.
+    /// Checking for that would be a branch with no observable difference.
+    private func applying(to session: Session, _ body: () -> Void) {
+        let previous = applyingTo
+        applyingTo = session
+        defer { applyingTo = previous }
+        body()
     }
 
     /// Whether there is a statement running for Cancel to stop.
@@ -4138,9 +4250,25 @@ final class AppModel {
         // still open — and that connection is not what went wrong.
         if isConnecting {
             isConnecting = false
-            connectionState = .failed
             connectionError = message
-            if db == nil { status = "Not connected" }
+            // The tab the attempt made goes with it. A window that kept one dead
+            // tab per mistyped password would be asking the user to clean up
+            // after a refusal — and the connection they were working in is still
+            // there, in front, untouched.
+            //
+            // Except where the attempt filled the tab the window already had.
+            // There is nothing behind that one, so it stays and says so, which is
+            // the state a window opens in.
+            if let opened = sessionBeingOpened, sessions.count > 1,
+                let index = sessions.firstIndex(where: { $0 === opened })
+            {
+                sessions.remove(at: index)
+                if index < activeSession { activeSession -= 1 }
+            } else {
+                connectionState = .failed
+                status = "Not connected"
+            }
+            sessionBeingOpened = nil
             return
         }
 

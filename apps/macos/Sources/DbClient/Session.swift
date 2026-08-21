@@ -18,7 +18,12 @@ import SwiftUI
 /// arrived at it.
 @Observable
 @MainActor
-final class Session {
+final class Session: Identifiable {
+    /// Its own, so a strip of tabs can be drawn from the list without using a
+    /// position as a name. Two connections to the same server have the same
+    /// label and a position moves when a tab to the left of it closes.
+    let id = UUID()
+
     /// The live connection. Nil before one opens and after one is dropped;
     /// letting go of it is what closes it.
     var db: Database?

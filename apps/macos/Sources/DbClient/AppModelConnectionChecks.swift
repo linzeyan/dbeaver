@@ -41,6 +41,7 @@ enum AppModelConnectionChecks {
         checkTheKeychainIsUntouchedWhileTheSettingIsOff()
         checkProductionQuestion()
         checkTheSessionHoldsTheConnection()
+        checkAWindowHoldsAListOfConnections()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -123,6 +124,48 @@ enum AppModelConnectionChecks {
             expect(
                 model.sessions[0].isValueViewerOpen, true,
                 "and the viewer over a cell belongs to the session that has the cell")
+        }
+    }
+
+    /// A window is a list of connections, and a refused attempt leaves no tab.
+    ///
+    /// Everything here happens without a server, which bounds what it can pin: a
+    /// second tab needs a connection that opened. What it does pin is the rule
+    /// that decides whether there is a second tab at all, and the rule is where
+    /// the mistakes are — a window that gained a dead tab per mistyped password
+    /// would be asking the user to clean up after a refusal.
+    private static func checkAWindowHoldsAListOfConnections() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            expect(model.sessions.count, 1, "a window opens with one tab")
+
+            // A port nothing listens on. The refusal arrives on the core queue
+            // and is applied on a later turn of the run loop, so what is read
+            // here is what the attempt did on its way out.
+            model.connect(using: "postgres://nobody@127.0.0.1:1/none")
+            expect(
+                model.sessions.count, 1,
+                "the first connection fills the tab that is already there")
+            model.connect(using: "postgres://nobody@127.0.0.1:1/other")
+            expect(
+                model.sessions.count, 1,
+                "and so does the next, because nothing opened in it")
+            expect(
+                model.sessions[0].connectionLabel.isEmpty, false,
+                "the tab names what it is reaching for while it reaches")
+
+            // Out of range is a no-op rather than a crash. The strip is drawn
+            // from the same list, but a menu item can outlive the tab it names.
+            model.selectSession(7)
+            expect(model.activeSession, 0, "there is no tab seven to go to")
+
+            // Closing the only one leaves a window with a tab, and an empty one:
+            // what was typed against the connection being closed goes with it.
+            model.queryText = "select 1"
+            model.closeSession(0)
+            expect(model.sessions.count, 1, "a window always has a tab")
+            expect(model.queryText, "", "and the one left is empty")
+            expect(model.sessions[0].db == nil, true, "with nothing open on it")
         }
     }
 
