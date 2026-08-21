@@ -38,6 +38,16 @@ PG_CONTAINER := pg-bench
 PG_PORT      := 55432
 PG_IMAGE     := postgres:17
 
+# PostgreSQL again, with TLS on and plaintext refused. Its own container rather
+# than a flag on the one above, because the whole point of it is that a
+# connection asking for `sslmode=disable` is turned away — and that is how every
+# other test in this tree reaches the benchmark database.
+PGTLS_CONTAINER := pg-tls
+PGTLS_PORT      := 55434
+# Under target/ because it is generated, disposable and already ignored. The
+# tests read the CA from the same place by a path relative to their crate.
+PGTLS_CERTS     := $(CURDIR)/target/pgtls
+
 # MongoDB, for the driver's own tests and for its pass through the shared
 # contract. Non-default port for the same reason as PostgreSQL's. It holds no
 # benchmark data — every test seeds and drops the database it uses, so this
@@ -354,6 +364,40 @@ db-down: ## Stop and remove the benchmark container
 .PHONY: db-seed
 db-seed: db-up ## Create the 1M-row benchmark table
 	$(TOOLS)/seed-bench-db.sh
+
+.PHONY: db-up-pgtls
+db-up-pgtls: ## Start the TLS-only PostgreSQL container
+	@$(TOOLS)/make-pgtls-certs.sh $(PGTLS_CERTS)
+# The key has to be 0600 and owned by the server's own user, and a bind mount
+# from this Mac is neither. Copied in rather than mounted into place, which also
+# keeps the running container on the certificate it was started with.
+	@docker start $(PGTLS_CONTAINER) 2>/dev/null \
+		|| docker run -d --name $(PGTLS_CONTAINER) \
+			-e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench -e POSTGRES_USER=bench \
+			-p $(PGTLS_PORT):5432 -v $(PGTLS_CERTS):/certs:ro $(PG_IMAGE) \
+			bash -c 'install -o postgres -g postgres -m 600 /certs/server.key /tmp/server.key \
+				&& install -o postgres -g postgres -m 644 /certs/server.crt /tmp/server.crt \
+				&& install -o postgres -g postgres -m 644 /certs/pg_hba.conf /tmp/pg_hba.conf \
+				&& exec docker-entrypoint.sh postgres -c ssl=on \
+					-c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key \
+					-c hba_file=/tmp/pg_hba.conf'
+	@echo "waiting for the TLS postgres..."
+	@for i in $$(seq 1 180); do \
+		if docker exec $(PGTLS_CONTAINER) pg_isready -U bench -d bench 2>/dev/null; then exit 0; fi; \
+		sleep 1; \
+	done; \
+	echo "the TLS postgres never accepted connections; its last words were:" >&2; \
+	docker logs --tail 30 $(PGTLS_CONTAINER) >&2; \
+	exit 1
+
+.PHONY: db-down-pgtls
+db-down-pgtls: ## Stop and remove the TLS container, and its certificates
+	-docker rm -f $(PGTLS_CONTAINER)
+	-rm -rf $(PGTLS_CERTS)
+
+.PHONY: test-pgtls
+test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
+	cargo test -p driver-postgres --test tls -- --include-ignored
 
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container
