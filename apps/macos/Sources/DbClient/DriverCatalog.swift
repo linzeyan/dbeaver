@@ -15,6 +15,14 @@ struct DriverInfo: Decodable, Identifiable, Hashable {
     let shape: Shape
     let defaultPort: UInt16?
 
+    /// Whether an SSL section on this driver's form would mean anything.
+    ///
+    /// Asked of the core rather than decided here, for the reason `shape` is: a
+    /// form that hardcoded "PostgreSQL has SSL settings" would be a second copy
+    /// of the driver table, and the copy that drifts is always the one in the
+    /// front end.
+    let honoursSslMode: Bool
+
     var id: String { scheme }
 
     /// What a connection to this kind of database is made of.
@@ -30,6 +38,7 @@ struct DriverInfo: Decodable, Identifiable, Hashable {
     enum CodingKeys: String, CodingKey {
         case scheme, label, shape
         case defaultPort = "default_port"
+        case honoursSslMode = "honours_sslmode"
     }
 }
 

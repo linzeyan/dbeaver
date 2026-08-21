@@ -274,6 +274,25 @@ struct ConnectionChooser: View {
                         "Password", $model.connectionPassword, .connectPassword,
                         model.hasUnreadPassword ? "Saved" : "", isSecure: true)
                 }
+                // Only for a driver that reads them, which is what keeps this
+                // from being a control with no effect — and the effect it would
+                // appear to be claiming is whether anybody on the network can
+                // read the wire.
+                //
+                // Above Safety and below the address, because it belongs with
+                // them: those fields say which database this is and this says
+                // how to reach it, where Safety says what may be done to it.
+                if model.connectionDraft.settings.driver?.honoursSslMode == true {
+                    sslRow
+                    // Only where naming one would change something. Under
+                    // Require the field would sit there taking a path that is
+                    // never read, which reads as a certificate being checked.
+                    if model.connectionDraft.settings.sslMode.verifiesCertificate {
+                        row(
+                            "CA", $model.connectionDraft.settings.sslRootCert, .connectRootCert,
+                            "public roots only")
+                    }
+                }
                 // Outside the branch above, because both answers to it can be
                 // marked: a SQLite file somebody is not to write to is as real a
                 // thing as a production server.
@@ -462,6 +481,38 @@ struct ConnectionChooser: View {
         }
         .font(Theme.Typography.caption)
         .accessibilityElement(children: .combine)
+    }
+
+    /// How much of the server's identity to insist on.
+    ///
+    /// A picker rather than a checkbox, because the answer is not on or off. The
+    /// two useful middles — encrypt without proving anything, and prove the
+    /// chain without the name — are exactly the ones a checkbox cannot say, and
+    /// the second is the only way to reach a server by address or through a
+    /// tunnel without turning verification off altogether.
+    ///
+    /// The sentence beside it is not decoration. "Require" sounds like the strict
+    /// setting and is the one that accepts any certificate at all; a form that
+    /// showed libpq's word without saying what it does would be handing on the
+    /// most misread option in every PostgreSQL client there is.
+    private var sslRow: some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("SSL")
+            Picker("", selection: $model.connectionDraft.settings.sslMode) {
+                ForEach(SslMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 120)
+            Text(model.connectionDraft.settings.sslMode.summary)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+        }
+        .font(Theme.Typography.body)
+        .foregroundStyle(Theme.text.color)
     }
 
     /// What this connection is allowed to be.

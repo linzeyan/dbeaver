@@ -228,12 +228,19 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         /// the flags above it are: a key that appears only sometimes is one
         /// nobody reading the file can rely on being told about.
         var server: String
+        /// libpq's word for how much of the server's identity to insist on, and
+        /// the CA file to insist on it with. Kept as the word rather than as a
+        /// number, because this file is one somebody opens and reads, and
+        /// `"verify-ca"` says what `3` does not.
+        var sslMode: String
+        var sslRootCert: String
         var user: String
 
         init(
             color: String, database: String, host: String, id: String, name: String, path: String,
             port: String, production: Bool = false, readOnly: Bool = false, scheme: String,
-            server: String = "", user: String
+            server: String = "", sslMode: String = "prefer", sslRootCert: String = "",
+            user: String
         ) {
             self.color = color
             self.database = database
@@ -246,6 +253,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.readOnly = readOnly
             self.scheme = scheme
             self.server = server
+            self.sslMode = sslMode
+            self.sslRootCert = sslRootCert
             self.user = user
         }
 
@@ -261,6 +270,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.readOnly = connection.isReadOnly
             self.scheme = connection.settings.scheme
             self.server = connection.server
+            self.sslMode = connection.settings.sslMode.rawValue
+            self.sslRootCert = connection.settings.sslRootCert
             self.user = connection.settings.user
         }
 
@@ -295,6 +306,14 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             // it in, and until then the row says only where it points.
             self.server = try container.decodeIfPresent(String.self, forKey: .server) ?? ""
 
+            // `prefer` for an entry written before this key existed, which is
+            // what that entry has been connecting with all along: it is the
+            // driver's own default, so reading it this way changes nothing about
+            // a connection somebody saved and has been using.
+            self.sslMode = try container.decodeIfPresent(String.self, forKey: .sslMode) ?? "prefer"
+            self.sslRootCert =
+                try container.decodeIfPresent(String.self, forKey: .sslRootCert) ?? ""
+
             // An entry somebody typed has no id, and one is minted here rather than
             // at the call site: an entry that arrived without an identity still has
             // to have one before anything can keep its password.
@@ -304,7 +323,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
 
         private enum CodingKeys: String, CodingKey {
             case color, database, host, id, name, path, port, production, readOnly, scheme, server,
-                user
+                sslMode, sslRootCert, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -316,7 +335,13 @@ struct SavedConnection: Identifiable, Equatable, Codable {
                 port: self.port,
                 database: self.database,
                 user: self.user,
-                path: self.path
+                path: self.path,
+                // A word this build does not have is read as the default rather
+                // than throwing: one throw anywhere empties the whole list, and
+                // losing every saved connection over one unrecognised setting is
+                // a worse answer than connecting the way libpq would.
+                sslMode: SslMode(rawValue: self.sslMode) ?? .prefer,
+                sslRootCert: self.sslRootCert
             )
             return SavedConnection(
                 id: id, name: self.name, color: color, isReadOnly: self.readOnly,
@@ -449,6 +474,14 @@ extension SavedConnection {
 
         if self.settings.path != draft.settings.path {
             changedFields.append("File")
+        }
+
+        if self.settings.sslMode != draft.settings.sslMode {
+            changedFields.append("SSL")
+        }
+
+        if self.settings.sslRootCert != draft.settings.sslRootCert {
+            changedFields.append("CA")
         }
 
         if passwordChanged {

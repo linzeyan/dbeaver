@@ -58,6 +58,16 @@ pub struct Catalogued {
     /// The port to offer before the user has typed one, for a `Server`. `None`
     /// for a file.
     pub default_port: Option<u16>,
+    /// Whether this driver reads libpq's `sslmode` and `sslrootcert` out of the
+    /// connection string it is handed.
+    ///
+    /// Narrower than "speaks TLS", on purpose. Several drivers here negotiate
+    /// TLS from spellings of their own; what this answers is only whether the
+    /// two parameters the connection form knows how to write mean anything to
+    /// them. A form that offered an SSL section over a driver that ignored it
+    /// would be showing a control with no effect, and the effect it would appear
+    /// to be claiming is whether anybody on the network can read the wire.
+    pub honours_sslmode: bool,
 }
 
 /// Every database this build can open.
@@ -77,60 +87,74 @@ pub const CATALOG: &[Catalogued] = &[
         label: "PostgreSQL",
         shape: Shape::Server,
         default_port: Some(5432),
+        // The only one so far. The others are not refusals of TLS — most of them
+        // negotiate it from their own URL spellings — but a `true` here is a
+        // promise that these two parameter names reach that driver's client,
+        // and that promise is made one driver at a time.
+        honours_sslmode: true,
     },
     Catalogued {
         scheme: "mongodb",
         label: "MongoDB",
         shape: Shape::Server,
         default_port: Some(27017),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "sqlserver",
         label: "SQL Server",
         shape: Shape::Server,
         default_port: Some(1433),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "mysql",
         label: "MySQL",
         shape: Shape::Server,
         default_port: Some(3306),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "clickhouse",
         label: "ClickHouse",
         shape: Shape::Server,
         default_port: Some(8123),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "cassandra",
         label: "Cassandra",
         shape: Shape::Server,
         default_port: Some(9042),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "duckdb",
         label: "DuckDB",
         shape: Shape::File,
         default_port: None,
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "sqlite",
         label: "SQLite",
         shape: Shape::File,
         default_port: None,
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "redis",
         label: "Redis",
         shape: Shape::Server,
         default_port: Some(6379),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "trino",
         label: "Trino",
         shape: Shape::Server,
         default_port: Some(8080),
+        honours_sslmode: false,
     },
     // The one entry that names a protocol rather than a database. What is behind
     // an Arrow Flight SQL endpoint is not knowable from the connection string,
@@ -140,6 +164,7 @@ pub const CATALOG: &[Catalogued] = &[
         label: "Arrow Flight SQL",
         shape: Shape::Server,
         default_port: Some(31337),
+        honours_sslmode: false,
     },
     // 443, because the host is an account name under `snowflakecomputing.com`
     // and there is no other port to reach it on — Snowflake publishes no
@@ -150,6 +175,7 @@ pub const CATALOG: &[Catalogued] = &[
         label: "Snowflake",
         shape: Shape::Server,
         default_port: Some(443),
+        honours_sslmode: false,
     },
     // 443 again, and for the same reason: a workspace is an HTTPS host and the
     // warehouse is named by a query parameter rather than by a port.
@@ -158,6 +184,7 @@ pub const CATALOG: &[Catalogued] = &[
         label: "Databricks",
         shape: Shape::Server,
         default_port: Some(443),
+        honours_sslmode: false,
     },
     // The two cloud databases, and the two entries this table fits worst.
     //
@@ -183,12 +210,14 @@ pub const CATALOG: &[Catalogued] = &[
         label: "BigQuery",
         shape: Shape::Server,
         default_port: Some(443),
+        honours_sslmode: false,
     },
     Catalogued {
         scheme: "athena",
         label: "Athena",
         shape: Shape::Server,
         default_port: Some(443),
+        honours_sslmode: false,
     },
 ];
 

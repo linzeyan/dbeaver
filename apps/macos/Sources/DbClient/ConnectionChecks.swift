@@ -34,6 +34,8 @@ enum ConnectionChecks {
         checkSafetyFlags()
         checkServerRecord()
         checkWriteRefusal()
+        checkSslParameters()
+        checkSslSurvivesTheFile()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -148,6 +150,16 @@ enum ConnectionChecks {
         expect(
             DriverCatalog.named("oracle") == nil, true,
             "the form cannot offer a database this build has no driver for")
+
+        // The answer has to cross the FFI as itself. A decoder that quietly read
+        // a missing key as `false` would take the SSL section off the one form
+        // that has it, and nothing else in the window would contradict that.
+        expect(
+            DriverCatalog.named("postgres")?.honoursSslMode, true,
+            "PostgreSQL reads sslmode out of the connection string")
+        expect(
+            DriverCatalog.named("sqlite")?.honoursSslMode, false,
+            "and a file on this disk has no wire for anybody to read")
     }
 
     /// A file-shaped database has no host, no port and nobody to authenticate
@@ -617,6 +629,122 @@ enum ConnectionChecks {
                     user: "ana")))
         expect(opened.isReadOnly, true, "a session's safety is the entry it was opened from")
         expect(opened.isProduction, true, "both marks, not only the one that refuses")
+    }
+
+    /// The two SSL parameters are written for the driver that reads them, left
+    /// off the drivers that do not, and survive the round trip through a URL.
+    ///
+    /// The round trip is the half that would be found late. `--conn` puts a
+    /// string somebody could not connect with back into the form, and a form
+    /// that dropped the SSL settings on the way in would show a connection it
+    /// was not about to make — then write that weaker connection back out when
+    /// they pressed Save.
+    private static func checkSslParameters() {
+        var pg = ConnectionSettings(
+            scheme: "postgres", host: "db.example", port: "5432", database: "sales", user: "ana")
+
+        // The default writes nothing. Every connection string this application
+        // has ever produced has to keep its exact shape, and `prefer` is what
+        // the driver does when nobody says otherwise anyway.
+        expect(
+            pg.connectionString(password: ""), "postgres://ana@db.example:5432/sales",
+            "the default asks for nothing, so it writes nothing")
+
+        pg.sslMode = .verifyFull
+        expect(
+            pg.connectionString(password: ""),
+            "postgres://ana@db.example:5432/sales?sslmode=verify-full",
+            "a mode that was chosen is written as libpq spells it")
+
+        // Left out until it would mean something. A path carried under `require`
+        // reads as a certificate being checked, which under `require` it is not.
+        pg.sslMode = .require
+        pg.sslRootCert = "/etc/ssl/ca.pem"
+        expect(
+            pg.connectionString(password: ""),
+            "postgres://ana@db.example:5432/sales?sslmode=require",
+            "a CA is not written for a mode that verifies nothing")
+
+        pg.sslMode = .verifyCa
+        expect(
+            pg.connectionString(password: ""),
+            "postgres://ana@db.example:5432/sales?sslmode=verify-ca&sslrootcert=/etc/ssl/ca.pem",
+            "and is written for one that does")
+
+        // The driver that does not read them is not handed them. This is the
+        // check that fails if the catalogue's answer stops crossing the FFI.
+        var sqlite = ConnectionSettings(scheme: "sqlite", path: "/tmp/notes.db")
+        sqlite.sslMode = .verifyFull
+        expect(
+            sqlite.connectionString(password: ""), "sqlite:///tmp/notes.db",
+            "a database that is a file on this disk is asked nothing about TLS")
+
+        let back = ConnectionSettings(
+            connectionString: "postgres://ana@db.example:5432/sales?sslmode=verify-ca"
+                + "&sslrootcert=/etc/ssl/ca.pem")
+        expect(back.sslMode, .verifyCa, "a URL's mode lands back in the form")
+        expect(back.sslRootCert, "/etc/ssl/ca.pem", "and so does its CA")
+
+        // A word this build does not offer must not empty the form. `allow` is
+        // libpq's and is read as the neighbour the driver reads it as; a typo is
+        // read the same way, because `--conn` exists to be corrected rather than
+        // to be refused.
+        expect(
+            ConnectionSettings(connectionString: "postgres://h/d?sslmode=allow").sslMode, .prefer,
+            "libpq's allow is read as the mode it behaves as")
+        expect(
+            ConnectionSettings(connectionString: "postgres://h/d?sslmode=verify_full").sslMode,
+            .prefer, "and so is a word nothing has")
+
+        // The host is still the host. A query on the end must not be read as
+        // part of the database name.
+        let noisy = ConnectionSettings(
+            connectionString: "postgres://ana@db.example:5432/sales?sslmode=require")
+        expect(noisy.database, "sales", "the database survives a query being on the end")
+        expect(noisy.host, "db.example", "and so does the host")
+    }
+
+    /// The SSL settings survive the file, are edits when they change, and an
+    /// entry written before they existed still loads.
+    ///
+    /// The last of those is the one that costs everything if it is wrong: one
+    /// throw anywhere in the list empties the whole list, so an older
+    /// `connections.json` meeting a decoder that insists on the new keys would
+    /// take every saved connection with it.
+    private static func checkSslSurvivesTheFile() {
+        let strict = SavedConnection(
+            id: UUID(uuidString: "66666666-6666-6666-6666-666666666666")!,
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana", sslMode: .verifyCa, sslRootCert: "/etc/ssl/ca.pem"))
+        let back = SavedConnection.Raw(from: strict).toSavedConnection()
+        expect(back.settings.sslMode, .verifyCa, "the mode survives the file")
+        expect(back.settings.sslRootCert, "/etc/ssl/ca.pem", "and so does the CA")
+
+        // Both are typed settings rather than records of what happened, so
+        // changing either has to stop the form from being left silently.
+        var relaxed = strict
+        relaxed.settings.sslMode = .require
+        expect(
+            strict.unsavedEdits(against: relaxed, passwordChanged: false)?.fields, ["SSL"],
+            "turning verification off is an unsaved edit, named")
+
+        var moved = strict
+        moved.settings.sslRootCert = "/etc/ssl/other.pem"
+        expect(
+            strict.unsavedEdits(against: moved, passwordChanged: false)?.fields, ["CA"],
+            "and so is pointing at another certificate")
+
+        // An entry from before either key existed connects the way it always
+        // has, which is `prefer` — the driver's own default.
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(
+            decoded?.toSavedConnection().settings.sslMode, .prefer,
+            "an entry written before this connects the way it always did")
+        expect(
+            decoded?.toSavedConnection().settings.sslRootCert, "",
+            "and names no certificate")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
