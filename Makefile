@@ -430,9 +430,12 @@ test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
 	cargo test -p driver-postgres --test tls -- --include-ignored
 
 .PHONY: test-tunnel
+# Both crates, because the tunnel is only half tested by the crate that opens
+# one: what the FFI adds is keeping it alive for as long as the connection, and
+# that is visible only from the entry point the application actually calls.
 test-tunnel: db-up-ssh db-up ## Run the SSH tunnel tests against that container
 	cargo test -p dbtunnel -- --include-ignored
-	cargo test -p dbffi --lib -- --include-ignored registry::tests
+	cargo test -p dbffi --lib -- --include-ignored
 
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container
@@ -752,9 +755,19 @@ db-up-ssh: ## Start the SSH server the tunnel tests connect through
 # generates this file on first start and would overwrite a bind mount; guarded
 # by the grep so that starting an already-corrected container does not restart
 # it for nothing.
-	@docker exec $(SSH_CONTAINER) grep -q '^AllowTcpForwarding yes' /config/sshd/sshd_config \
-		|| { docker exec $(SSH_CONTAINER) \
-				sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config \
+#
+# `PerSourcePenalties` goes with it, and for a sharper reason. OpenSSH 10 turns
+# it on by default: a source address that fails to authenticate is blocked for a
+# few seconds, and the block lengthens as failures accumulate. Half the tunnel
+# tests exist to fail authentication, so the suite poisons its own address and
+# the *next* test is dropped before it says anything — which arrives as
+# `Disconnected`, and reads as the tunnel being broken rather than as the server
+# refusing to talk to this machine. Measured: four refusals in a row, and a
+# connection with a key the server knows is closed on sight.
+	@docker exec $(SSH_CONTAINER) grep -q '^PerSourcePenalties no' /config/sshd/sshd_config \
+		|| { docker exec $(SSH_CONTAINER) sh -c \
+				"sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config \
+					&& echo 'PerSourcePenalties no' >>/config/sshd/sshd_config" \
 			&& docker restart $(SSH_CONTAINER) >/dev/null; }
 # Waited for by reading the banner rather than with `nc -z`, which Docker's own
 # forwarder answers whether or not sshd is behind it yet: the port is open the

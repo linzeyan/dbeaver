@@ -59,7 +59,7 @@ use dbffi::{
 #[test]
 fn test_connect_null_connection() {
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(ptr::null(), 10, &mut err) };
+    let handle = unsafe { db_connect(ptr::null(), ptr::null(), 10, &mut err) };
     assert!(handle.is_null());
     assert!(!err.is_null(), "db_connect must say why it failed");
     unsafe { db_string_free(err) };
@@ -70,7 +70,7 @@ fn test_connect_null_connection() {
 fn test_connect_invalid_utf8_connection() {
     let invalid_cstring = CString::new(vec![b'v', b'a', b'l', b'i', b'd', 0xff, 0xfe]).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(invalid_cstring.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(invalid_cstring.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(handle.is_null());
     assert!(!err.is_null(), "db_connect must say why it failed");
     unsafe { db_string_free(err) };
@@ -99,7 +99,7 @@ fn a_server_that_accepts_and_never_answers_is_given_up_on() {
     let conn = CString::new(format!("postgres://someone@127.0.0.1:{port}/whatever")).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let began = std::time::Instant::now();
-    let handle = unsafe { db_connect(conn.as_ptr(), 1, &mut err) };
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 1, &mut err) };
     let took = began.elapsed();
 
     assert!(handle.is_null(), "nothing answered, so nothing was opened");
@@ -155,7 +155,7 @@ fn an_engine_without_a_database_level_answers_null() {
     let conn = std::ffi::CString::new(format!("sqlite://{}", path.display())).unwrap();
 
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null(), "the scratch SQLite file should open");
 
     let raw = unsafe { db_databases_json(handle, &mut err) };
@@ -539,7 +539,7 @@ fn test_query_schema_null_query() {
 fn test_query_schema_null_out() {
     // We need a valid handle to test this properly
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(ptr::null(), 10, &mut err) };
+    let handle = unsafe { db_connect(ptr::null(), ptr::null(), 10, &mut err) };
     assert!(handle.is_null());
     assert!(!err.is_null(), "db_connect must say why it failed");
     unsafe { db_string_free(err) };
@@ -561,7 +561,7 @@ fn test_query_next_null_query() {
 fn test_query_next_null_out() {
     // We need a valid handle to test this properly
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(ptr::null(), 10, &mut err) };
+    let handle = unsafe { db_connect(ptr::null(), ptr::null(), 10, &mut err) };
     assert!(handle.is_null());
     assert!(!err.is_null(), "db_connect must say why it failed");
     unsafe { db_string_free(err) };
@@ -817,7 +817,7 @@ fn test_cursor_schema_null_cursor() {
 fn test_connect_and_free() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -829,7 +829,7 @@ fn test_connect_and_free() {
 fn test_schemas_json() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -853,7 +853,7 @@ fn test_schemas_json() {
 fn test_relations_json() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -878,7 +878,7 @@ fn test_relations_json() {
 fn test_columns_json() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -911,7 +911,7 @@ fn test_columns_json() {
 fn test_query_and_drain() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -975,7 +975,7 @@ fn test_query_and_drain() {
 fn test_query_syntax_error() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1007,7 +1007,7 @@ fn test_query_syntax_error() {
 fn test_query_syntax_error_with_position() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1048,7 +1048,7 @@ fn test_cursor_cancel_stops_a_fetch_in_flight() {
     // test is about the session.
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     // pg_sleep rather than a large scan: a scan the server finishes early makes
@@ -1105,7 +1105,7 @@ fn test_cursor_cancel_stops_a_fetch_in_flight() {
 fn test_cursor_schema() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1136,7 +1136,7 @@ fn test_cursor_schema() {
 fn test_cursor_pages_result_and_ends() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1198,7 +1198,7 @@ fn test_cursor_free_without_close() {
     // a correct one never holds more than a single cursor's worth at a time.
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1235,7 +1235,7 @@ fn test_cursor_free_without_close() {
 fn test_cursor_syntax_error_with_position() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1268,7 +1268,7 @@ fn test_cursor_next_null_out() {
     // A real cursor, so the null out-parameter is what fails rather than the null cursor.
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql_cstring = CString::new("SELECT * FROM bench_wide LIMIT 10").unwrap();
@@ -1293,7 +1293,7 @@ fn test_cursor_null_sql() {
     // unreachable and the test would pass with the sql check deleted.
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -1310,7 +1310,7 @@ fn test_cursor_null_sql() {
 fn test_cursor_invalid_utf8_sql() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
     assert!(err.is_null(), "db_connect should not set err on success");
 
@@ -1394,7 +1394,7 @@ fn a_completion_stops_at_the_cap_however_many_names_the_schema_has() {
     // is something to build rather than something to find.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null(), "duckdb in memory must open");
 
     for i in 0..1_100 {
@@ -1433,7 +1433,7 @@ fn a_field_the_driver_annotated_still_carries_its_annotation_across_the_abi() {
     // `duckdb.rendered_from`.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null(), "duckdb in memory must open");
 
     let sql = CString::new("SELECT [1, 2, 3] AS items").unwrap();
@@ -1464,7 +1464,7 @@ fn a_field_the_driver_annotated_still_carries_its_annotation_across_the_abi() {
 fn a_completion_offers_the_columns_of_what_the_statement_selects_from() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     // The relation is named after the caret, which is the case completion exists
@@ -1487,7 +1487,7 @@ fn a_completion_offers_the_columns_of_what_the_statement_selects_from() {
 fn a_completion_names_the_characters_accepting_it_replaces() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     // `bench_w` occupies characters 14 to 21, and accepting `bench_wide` has to
@@ -1507,7 +1507,7 @@ fn a_completion_names_the_characters_accepting_it_replaces() {
 fn a_qualified_name_is_answered_from_the_schema_it_names() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let json = complete(handle, "SELECT * FROM reporting.", 24);
@@ -1529,7 +1529,7 @@ fn a_qualified_name_is_answered_from_the_schema_it_names() {
 fn a_refresh_the_user_asked_for_is_answered_from_the_server_again() {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let before = complete(handle, "SELECT * FROM bench_w", 21);
@@ -1550,7 +1550,7 @@ fn a_refresh_the_user_asked_for_is_answered_from_the_server_again() {
 fn connected() -> *mut dbffi::DbHandle {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null(), "benchmark database unreachable");
     handle
 }
@@ -2162,7 +2162,7 @@ fn an_export_writes_every_row_the_cursor_had_not_only_the_first_page() {
     // real export.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null(), "duckdb in memory must open");
 
     let sql = CString::new("SELECT i AS n FROM range(2500) t(i)").unwrap();
@@ -2193,7 +2193,7 @@ fn an_export_names_a_format_it_cannot_write_rather_than_writing_something_else()
     // see until whatever they feed it refuses to open it.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql = CString::new("SELECT 1 AS n").unwrap();
@@ -2231,7 +2231,7 @@ fn an_export_to_a_location_it_cannot_open_fails_before_it_runs_the_query() {
     // out of the server to discover at the end that it had nowhere to go.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql = CString::new("SELECT 1 AS n").unwrap();
@@ -2278,7 +2278,7 @@ fn a_parquet_export_is_a_parquet_file_and_not_merely_a_file() {
     // is what a reader checks first, at both ends, so it is what this checks.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql = CString::new("SELECT i AS n FROM range(300) t(i)").unwrap();
@@ -2311,7 +2311,7 @@ fn a_row_limit_stops_the_export_where_it_was_told_to_and_not_at_a_batch_edge() {
     // only arrangement that catches that, which is why 64 and 250.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql = CString::new("SELECT i AS n FROM range(5000) t(i)").unwrap();
@@ -2340,7 +2340,7 @@ fn a_limit_larger_than_the_result_is_not_an_error() {
     // there would fail an export that had already written everything there was.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql = CString::new("SELECT i AS n FROM range(10) t(i)").unwrap();
@@ -2363,7 +2363,7 @@ fn a_sql_export_writes_statements_the_source_database_would_accept() {
     // build that reached for a default would still produce a plausible file.
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let sql = CString::new("SELECT 1 AS id, 'O''Brien' AS name").unwrap();
@@ -2396,12 +2396,12 @@ fn a_transfer_puts_the_source_rows_in_the_target_table() {
     // a real database-to-database transfer with no server to start.
     let src = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_src = unsafe { db_connect(src.as_ptr(), 10, &mut err) };
+    let handle_src = unsafe { db_connect(src.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_src.is_null());
 
     let tgt = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), 10, &mut err) };
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_tgt.is_null());
 
     ran(handle_tgt, "CREATE TABLE people (id INTEGER, name VARCHAR)");
@@ -2446,7 +2446,7 @@ fn a_transfer_puts_the_source_rows_in_the_target_table() {
 fn a_transfer_without_a_cursor_says_so_instead_of_crashing() {
     let tgt = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), 10, &mut err) };
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_tgt.is_null());
 
     let table = CString::new("people").unwrap();
@@ -2462,7 +2462,7 @@ fn a_transfer_without_a_cursor_says_so_instead_of_crashing() {
 fn a_transfer_without_a_target_says_so_instead_of_crashing() {
     let src = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_src = unsafe { db_connect(src.as_ptr(), 10, &mut err) };
+    let handle_src = unsafe { db_connect(src.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_src.is_null());
 
     let sql = CString::new("SELECT 1 AS id").unwrap();
@@ -2484,7 +2484,7 @@ fn a_transfer_without_a_target_says_so_instead_of_crashing() {
 fn a_transfer_without_a_table_name_says_so_instead_of_crashing() {
     let src = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_src = unsafe { db_connect(src.as_ptr(), 10, &mut err) };
+    let handle_src = unsafe { db_connect(src.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_src.is_null());
 
     let sql = CString::new("SELECT 1 AS id").unwrap();
@@ -2494,7 +2494,7 @@ fn a_transfer_without_a_table_name_says_so_instead_of_crashing() {
 
     let tgt = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), 10, &mut err) };
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_tgt.is_null());
 
     let mut err: *mut c_char = ptr::null_mut();
@@ -2513,7 +2513,7 @@ fn a_transfer_without_a_table_name_says_so_instead_of_crashing() {
 fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     let src = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_src = unsafe { db_connect(src.as_ptr(), 10, &mut err) };
+    let handle_src = unsafe { db_connect(src.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_src.is_null());
 
     let sql = CString::new("SELECT 1 AS id").unwrap();
@@ -2523,7 +2523,7 @@ fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
 
     let tgt = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), 10, &mut err) };
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle_tgt.is_null());
 
     // Do NOT create the table — the INSERT will fail on the server.
@@ -2551,7 +2551,7 @@ fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
 fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let path = std::env::temp_dir().join(format!("dbffi-import-{}.csv", std::process::id()));
@@ -2618,7 +2618,7 @@ fn an_import_without_a_target_says_so_instead_of_crashing() {
 fn an_import_without_a_format_says_so_instead_of_crashing() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let path = std::env::temp_dir().join("dbffi-import-null-format.csv");
@@ -2647,7 +2647,7 @@ fn an_import_without_a_format_says_so_instead_of_crashing() {
 fn an_import_without_a_path_says_so_instead_of_crashing() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let format = CString::new("csv").unwrap();
@@ -2673,7 +2673,7 @@ fn an_import_without_a_path_says_so_instead_of_crashing() {
 fn an_import_without_a_table_name_says_so_instead_of_crashing() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let format = CString::new("csv").unwrap();
@@ -2702,7 +2702,7 @@ fn an_import_without_a_table_name_says_so_instead_of_crashing() {
 fn an_import_of_a_format_nothing_reads_names_the_format() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let path = std::env::temp_dir().join("dbffi-import-unknown.fmt");
@@ -2739,7 +2739,7 @@ fn an_import_of_a_format_nothing_reads_names_the_format() {
 fn an_import_of_a_file_that_is_not_there_says_so_before_touching_the_server() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let format = CString::new("csv").unwrap();
@@ -2767,7 +2767,7 @@ fn an_import_of_a_file_that_is_not_there_says_so_before_touching_the_server() {
 fn an_import_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), 10, &mut err) };
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
     let path = std::env::temp_dir().join("dbffi-import-no-table.csv");

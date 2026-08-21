@@ -18,8 +18,10 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbcatalog::{Kind, Names};
 use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
 use dbsql::{Dialect, Origin, TokenKind};
+use dbtunnel::{Credential, Tunnel, TunnelConfig};
 use session::Session;
 use std::ffi::{CStr, CString, c_char, c_int};
+use std::path::PathBuf;
 use std::ptr;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -76,6 +78,19 @@ pub struct DbHandle {
     /// a PostgreSQL `CREATE TABLE`, which is the failure `dbddl::for_dialect`
     /// exists to refuse and cannot see coming from one level up.
     dialect: Option<&'static Dialect>,
+    /// The forward this connection was opened through, or `None` when the
+    /// database was dialled directly.
+    ///
+    /// Never read, and here for its `Drop`: closing the forward is what the
+    /// tunnel's lifetime means. What that costs is worth writing down, because
+    /// it is what makes the failure hard to place. The socket the driver
+    /// already dialled goes on working — what closes is the forward, not the
+    /// connection through it — so the session keeps answering. It is the *next*
+    /// connection that cannot be made, which for this driver is the first
+    /// metadata call, and it arrives as a refusal from 127.0.0.1 that explains
+    /// nothing.
+    #[allow(dead_code)]
+    tunnel: Option<Tunnel>,
 }
 
 pub struct DbQuery {
@@ -90,6 +105,96 @@ pub struct DbQuery {
 pub struct DbCursor {
     cursor: Box<dyn Cursor>,
     cancel: Box<dyn CursorCancel>,
+}
+
+/// An SSH bastion to reach the database through, as the caller fills it in.
+///
+/// Flat fields rather than a tagged union, because this struct is written by
+/// hand on the other side of the ABI and a union is a shape that can be filled
+/// in half-way without a compiler anywhere noticing. What flatness costs is a
+/// pair of fields that must not both be set, and that is checked here rather
+/// than trusted — see `bastion_of`.
+#[repr(C)]
+pub struct DbSshConfig {
+    pub host: *const c_char,
+    pub port: u16,
+    pub user: *const c_char,
+    /// Exactly one of these two is set.
+    pub password: *const c_char,
+    pub key_path: *const c_char,
+    /// Null for a key that is not encrypted.
+    pub passphrase: *const c_char,
+    /// The file the bastion's identity is checked against, in full. Named by
+    /// the caller rather than found here: which `known_hosts` applies is a
+    /// question about whose account is running, and this crate cannot see that.
+    pub known_hosts: *const c_char,
+}
+
+/// Reads one of that struct's strings.
+///
+/// Null and empty are both "not filled in". A form hands over the empty string
+/// for a field nobody typed in, and a bastion configured with an empty user is
+/// not a different thing from one configured with no user at all.
+///
+/// # Safety
+/// `p` is null or a valid NUL-terminated C string.
+unsafe fn ssh_field<'a>(p: *const c_char, name: &str) -> Result<Option<&'a str>, String> {
+    if p.is_null() {
+        return Ok(None);
+    }
+    match unsafe { CStr::from_ptr(p) }.to_str() {
+        Ok("") => Ok(None),
+        Ok(s) => Ok(Some(s)),
+        Err(_) => Err(format!("the SSH {name} is not valid text")),
+    }
+}
+
+/// Turns the caller's struct into what the tunnel takes, or nothing at all when
+/// there is no bastion.
+///
+/// Every failure here is a struct filled in wrong rather than a server that
+/// said no, and each gets its own sentence. The alternative — quietly dialling
+/// the database directly when the bastion is half-configured — is the failure
+/// worth spending the words on: it succeeds on the one network where the
+/// database was reachable anyway and fails everywhere else, which is the
+/// hardest kind of fault to be told about.
+///
+/// # Safety
+/// `ssh` is null, or points at a `DbSshConfig` whose strings are valid.
+unsafe fn bastion_of(ssh: *const DbSshConfig) -> Result<Option<TunnelConfig>, String> {
+    if ssh.is_null() {
+        return Ok(None);
+    }
+    let ssh = unsafe { &*ssh };
+    let host =
+        unsafe { ssh_field(ssh.host, "host")? }.ok_or("an SSH bastion needs a host to reach")?;
+    let user = unsafe { ssh_field(ssh.user, "user")? }
+        .ok_or("an SSH bastion needs a user to log in as")?;
+    let known_hosts = unsafe { ssh_field(ssh.known_hosts, "known_hosts file")? }
+        .ok_or("an SSH bastion needs a known_hosts file to check its identity against")?;
+    if ssh.port == 0 {
+        return Err("an SSH bastion needs a port".into());
+    }
+    let password = unsafe { ssh_field(ssh.password, "password")? };
+    let key_path = unsafe { ssh_field(ssh.key_path, "key file")? };
+    let credential = match (password, key_path) {
+        (Some(password), None) => Credential::Password(password.to_owned()),
+        (None, Some(path)) => Credential::Key {
+            path: PathBuf::from(path),
+            passphrase: unsafe { ssh_field(ssh.passphrase, "passphrase")? }.map(str::to_owned),
+        },
+        (Some(_), Some(_)) => {
+            return Err("an SSH bastion takes a password or a key file, not both".into());
+        }
+        (None, None) => return Err("an SSH bastion needs a password or a key file".into()),
+    };
+    Ok(Some(TunnelConfig {
+        host: host.to_owned(),
+        port: ssh.port,
+        user: user.to_owned(),
+        credential,
+        known_hosts: PathBuf::from(known_hosts),
+    }))
 }
 
 /// Opens the database `conn_str` names.
@@ -108,11 +213,17 @@ pub struct DbCursor {
 /// application asks for — it is here so that a caller with its own limit is not
 /// made to invent a second one.
 ///
+/// `ssh` is a bastion to reach the database through, or null to dial it
+/// directly — which is what almost every connection does. The forward it opens
+/// belongs to the handle that comes back and closes when that handle is freed.
+///
 /// # Safety
-/// `conn_str` must be a valid NUL-terminated C string.
+/// `conn_str` must be a valid NUL-terminated C string, and `ssh` must be null
+/// or point at a `DbSshConfig` whose strings are the same.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_connect(
     conn_str: *const c_char,
+    ssh: *const DbSshConfig,
     timeout_secs: u32,
     err: *mut *mut c_char,
 ) -> *mut DbHandle {
@@ -127,13 +238,22 @@ pub unsafe extern "C" fn db_connect(
             return ptr::null_mut();
         }
     };
-    let opened = runtime().block_on(async {
-        // Through `connect_through` even though there is no bastion to hand it
-        // yet. This is the one door every connection in the application goes
-        // through, so it has to be the door the tunnel is tested behind — a
-        // second entry point reached only by tests is a path that works only in
-        // tests.
-        let attempt = registry::connect_through(s, None);
+    // Before anything is dialled, so that a bastion filled in wrong is answered
+    // here rather than by a connection that quietly went straight to the
+    // database instead.
+    let bastion = match unsafe { bastion_of(ssh) } {
+        Ok(bastion) => bastion,
+        Err(message) => {
+            unsafe { set_err(err, message) };
+            return ptr::null_mut();
+        }
+    };
+    let opened = runtime().block_on(async move {
+        // The one door every connection in the application goes through, with a
+        // bastion or without one. A second entry point for the tunnelled case
+        // would be a path exercised only by the connections somebody remembered
+        // to send through it.
+        let attempt = registry::connect_through(s, bastion);
         if timeout_secs == 0 {
             return attempt.await;
         }
@@ -150,12 +270,7 @@ pub unsafe extern "C" fn db_connect(
         }
     });
     match opened {
-        // The forward is dropped here, which is right only because `None` was
-        // asked for above and so there is never one to drop. The day a bastion
-        // reaches this call, the handle has to grow somewhere to keep the
-        // tunnel alive or it will close under the connection that just opened
-        // through it.
-        Ok((driver, _)) => {
+        Ok((driver, tunnel)) => {
             let driver: Arc<dyn Driver> = Arc::from(driver);
             let scheme = registry::scheme_of(s);
             let names = Names::new(driver.clone(), dbsql::for_scheme(scheme));
@@ -164,6 +279,7 @@ pub unsafe extern "C" fn db_connect(
                 names,
                 session: Session::new(),
                 dialect: dbsql::of_scheme(scheme),
+                tunnel,
             }))
         }
         Err(e) => {
@@ -2196,6 +2312,158 @@ pub unsafe extern "C" fn db_import(
             let cancelled = e.is_cancelled();
             unsafe { set_err(err, e) };
             if cancelled { -2 } else { -1 }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where `make db-up-ssh` wrote the fixture's host keys.
+    ///
+    /// From the environment first, with a compile-time fallback, for the reason
+    /// the tunnel crate's own copy gives: one `target/` shared between git
+    /// worktrees hands back a test binary naming whichever worktree built it.
+    fn known_hosts() -> CString {
+        let path = std::env::var("SSH_KNOWN_HOSTS").unwrap_or_else(|_| {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/ssh/known_hosts").to_owned()
+        });
+        CString::new(path).expect("a path with no NUL in it")
+    }
+
+    /// Whatever the core wrote into `err`, freed the way a caller would.
+    fn taken(err: &mut *mut c_char) -> String {
+        if err.is_null() {
+            return "no message".to_owned();
+        }
+        let message = unsafe { CStr::from_ptr(*err) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { db_string_free(*err) };
+        *err = ptr::null_mut();
+        message
+    }
+
+    /// A connection made the way the application makes it, through a bastion,
+    /// and then asked a question.
+    ///
+    /// The question is the test, and it is the schemas rather than a ping.
+    /// Opening through a tunnel and stopping there would pass against a build
+    /// that dropped the forward on the way out of `db_connect` — the driver has
+    /// already dialled by then, and closing the local listener does not disturb
+    /// the socket it dialled through. What a dropped forward actually kills is
+    /// every connection opened *after* it, and this driver's pool starts empty:
+    /// the session answers `SELECT version()` from the socket it already has,
+    /// and the first metadata call is the one that has to dial. Measured both
+    /// ways — `db_ping` still answers through a forward that is gone.
+    #[test]
+    #[ignore = "requires the SSH server and the benchmark database (make db-up-ssh db-up)"]
+    fn a_connection_opened_through_a_bastion_still_answers() {
+        // `pg` resolves on the compose network and nowhere else, so a forward
+        // ending anywhere but the far side of the bastion could not reach it.
+        // No port written down, so the driver's own default is what is
+        // forwarded to.
+        let conn = CString::new("postgres://bench:bench@pg/bench").unwrap();
+        let host = CString::new("127.0.0.1").unwrap();
+        let user = CString::new("bench").unwrap();
+        let password = CString::new("bench").unwrap();
+        let hosts = known_hosts();
+        let ssh = DbSshConfig {
+            host: host.as_ptr(),
+            port: 52222,
+            user: user.as_ptr(),
+            password: password.as_ptr(),
+            key_path: ptr::null(),
+            passphrase: ptr::null(),
+            known_hosts: hosts.as_ptr(),
+        };
+        let mut err: *mut c_char = ptr::null_mut();
+        let handle = unsafe { db_connect(conn.as_ptr(), &ssh, 30, &mut err) };
+        assert!(
+            !handle.is_null(),
+            "the connection did not open: {}",
+            taken(&mut err)
+        );
+        let schemas = unsafe { db_schemas_json(handle, &mut err) };
+        assert!(
+            !schemas.is_null(),
+            "the connection stopped answering after it was opened: {}",
+            taken(&mut err)
+        );
+        let listed = unsafe { CStr::from_ptr(schemas) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { db_string_free(schemas) };
+        assert!(
+            listed.contains("public"),
+            "expected the benchmark database's schemas, got {listed}"
+        );
+        unsafe { db_free(handle) };
+    }
+
+    /// A bastion filled in wrong is refused before anything is dialled, and the
+    /// message says which part.
+    ///
+    /// Not ignored, because none of these reaches a network: a struct that
+    /// cannot be read is a fault this build answers on its own, and a check that
+    /// needed a container to prove it is one nobody would run.
+    #[test]
+    fn a_bastion_filled_in_wrong_says_which_part() {
+        let conn = CString::new("postgres://bench:bench@pg/bench").unwrap();
+        let host = CString::new("127.0.0.1").unwrap();
+        let user = CString::new("bench").unwrap();
+        let password = CString::new("bench").unwrap();
+        let key = CString::new("/dev/null").unwrap();
+        let hosts = known_hosts();
+        let config =
+            |host: *const c_char, port: u16, password: *const c_char, key: *const c_char| {
+                DbSshConfig {
+                    host,
+                    port,
+                    user: user.as_ptr(),
+                    password,
+                    key_path: key,
+                    passphrase: ptr::null(),
+                    known_hosts: hosts.as_ptr(),
+                }
+            };
+
+        let cases = [
+            (
+                "no host",
+                config(ptr::null(), 52222, password.as_ptr(), ptr::null()),
+                "host",
+            ),
+            (
+                "no port",
+                config(host.as_ptr(), 0, password.as_ptr(), ptr::null()),
+                "port",
+            ),
+            (
+                "a password and a key",
+                config(host.as_ptr(), 52222, password.as_ptr(), key.as_ptr()),
+                "not both",
+            ),
+            (
+                "neither",
+                config(host.as_ptr(), 52222, ptr::null(), ptr::null()),
+                "password or a key file",
+            ),
+        ];
+
+        for (label, ssh, expected) in cases {
+            let mut err: *mut c_char = ptr::null_mut();
+            let handle = unsafe { db_connect(conn.as_ptr(), &ssh, 30, &mut err) };
+            assert!(
+                handle.is_null(),
+                "{label}: a bastion filled in wrong must not open a connection"
+            );
+            let message = taken(&mut err);
+            assert!(
+                message.contains(expected),
+                "{label}: expected a message about {expected}, got {message}"
+            );
         }
     }
 }

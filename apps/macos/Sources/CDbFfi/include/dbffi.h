@@ -56,10 +56,30 @@ typedef struct DbCursor DbCursor;
 // All calls block. Do not call from the main thread.
 // Any `err` out-parameter, when set, must be released with db_string_free.
 
+// An SSH bastion to reach the database through. Pass NULL to db_connect to dial
+// the database directly, which is what almost every connection does.
+//
+// Exactly one of password and key_path is set; both, or neither, is refused
+// rather than guessed. passphrase is NULL for a key that is not encrypted.
+// Everything else is required, and an empty string counts as absent.
+typedef struct {
+  const char* host;
+  uint16_t port;
+  const char* user;
+  const char* password;
+  const char* key_path;
+  const char* passphrase;
+  const char* known_hosts;
+} DbSshConfig;
+
 // timeout_secs bounds the whole attempt rather than the TCP connection inside
 // it: a server that accepts the socket and never finishes the handshake looks,
 // from here, exactly like a slow one. 0 waits as long as it takes.
-DbHandle* db_connect(const char* conn_str, uint32_t timeout_secs, char** err);
+//
+// The forward the bastion opens belongs to the handle that comes back: it stays
+// up until db_free, and the connection stops working the moment it does not.
+DbHandle* db_connect(const char* conn_str, const DbSshConfig* ssh,
+                     uint32_t timeout_secs, char** err);
 
 // Whether this connection is still good: 0 yes, -1 no with err set. A real round
 // trip, because an open socket says nothing about the server behind it. Queues
