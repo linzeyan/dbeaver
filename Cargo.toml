@@ -23,6 +23,7 @@ members = [
     "crates/ffi",
     "crates/sql",
     "crates/transfer",
+    "crates/tunnel",
 ]
 # The vendored tiberius is built as a dependency, never as one of ours. Excluding
 # it keeps `--workspace` meaning "code this repository wrote": upstream's source
@@ -40,6 +41,11 @@ arrow = "58"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
 tokio-postgres = "0.7"
 futures-util = "0.3"
+# Pure Rust SSH, chosen over bindings to libssh2 so that the core stays one
+# binary with no C dependency and no sidecar — the same rule the rest of this
+# tree is built on. `russh-keys` was folded in and is reached as `russh::keys`,
+# so there is no second crate to add.
+russh = "0.62"
 thiserror = "2"
 async-trait = "0.1"
 lax-sql = "0.3"

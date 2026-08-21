@@ -48,6 +48,11 @@ PGTLS_CERTS := $(CURDIR)/target/pgtls
 # be gone.
 export PGTLS_CA := $(PGTLS_CERTS)/ca.crt
 
+# Where `db-up-ssh` writes the SSH fixture's host keys, exported for the same
+# reason as PGTLS_CA above: the tests read the file from where the Makefile put
+# it, rather than from a path compiled into them.
+export SSH_KNOWN_HOSTS := $(CURDIR)/target/ssh/known_hosts
+
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
 # waits for someone to type into it, which no script can do. Derived from
@@ -419,6 +424,10 @@ db-down-pgtls: ## Stop and remove the TLS container, and its certificates
 test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
 	cargo test -p driver-postgres --test tls -- --include-ignored
 
+.PHONY: test-tunnel
+test-tunnel: db-up-ssh db-up ## Run the SSH tunnel tests against that container
+	cargo test -p dbtunnel -- --include-ignored
+
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container
 	@docker compose up -d mongo
@@ -749,6 +758,17 @@ db-up-ssh: ## Start the SSH server the tunnel tests connect through
 		nc -w 5 127.0.0.1 $(SSH_PORT) </dev/null 2>/dev/null | grep -q '^SSH-2\.0' && break; \
 		sleep 1; \
 	done
+# The host keys are written down here rather than left to whoever runs the
+# tests, for the same reason the TLS certificates are: the tunnel refuses to
+# send a password to a server it has no record of, so a fixture with no
+# known_hosts file is a fixture that cannot be used at all. Rewritten every
+# time, because `docker rm` throws the host keys away with the container and a
+# stale file would fail as a changed key — which is the one failure here that
+# is supposed to mean something.
+	@mkdir -p $(dir $(SSH_KNOWN_HOSTS))
+	@ssh-keyscan -p $(SSH_PORT) -H 127.0.0.1 >$(SSH_KNOWN_HOSTS) 2>/dev/null
+	@test -s $(SSH_KNOWN_HOSTS) \
+		|| { echo "ssh-keyscan wrote nothing to $(SSH_KNOWN_HOSTS)"; exit 1; }
 	@$(MAKE) --no-print-directory db-check-ssh
 
 .PHONY: db-down-ssh
