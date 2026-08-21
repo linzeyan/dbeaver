@@ -307,8 +307,17 @@ test-history: release db-check ## Prove a browse and a Save reach the statement 
 	./$(APP_BIN) --history-probe --conn "$(PG_CONN)" --relation history_probe \
 		--history-store dev.dbclient.historyprobe
 
+# The only proof that a window can hold two connections at once. The `--verify-*`
+# suites ask what can be asked without a server, which reaches the rules deciding
+# whether a second tab appears and stops there: two live handles is the claim,
+# and a claim about handles needs a server holding them.
+.PHONY: test-sessions
+test-sessions: release db-check ## Prove two connections in one window do not touch each other
+	./$(APP_BIN) --sessions-probe --conn "$(PG_CONN)" \
+		--history-store dev.dbclient.sessionsprobe
+
 .PHONY: test-all
-test-all: test test-integration test-swift test-preferences test-history ## Every test
+test-all: test test-integration test-swift test-preferences test-history test-sessions ## Every test
 
 ##@ Quality
 
