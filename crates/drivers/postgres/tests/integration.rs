@@ -11,7 +11,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::{ConstraintKind, RelationKind, TxStep};
+use dbconn::{ConstraintKind, Driver, RelationKind, TxStep};
 use driver_postgres::{PgError, PgSource};
 use std::sync::Arc;
 
@@ -1462,4 +1462,34 @@ async fn two_sessions_do_not_see_each_others_uncommitted_work() {
     );
 
     run(&src_a, "DROP SCHEMA isolation_test CASCADE").await;
+}
+
+/// The databases the connection could be opened on, including the one it is on.
+///
+/// `is_current` is asked of the server rather than parsed out of the connection
+/// string, and this is the check that would catch it being done the other way:
+/// the string says `bench`, and so does `current_database()`, but only one of
+/// them stays right when a string names no database at all.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn databases_list_what_could_be_opened() {
+    let src = connect().await;
+    let found = Driver::databases(&src)
+        .await
+        .expect("databases failed")
+        .expect("PostgreSQL has a database level");
+    let names: Vec<&str> = found.iter().map(|d| d.name.as_str()).collect();
+
+    assert!(names.contains(&"bench"), "got {names:?}");
+    // Templates are excluded because opening one fails. Listing somewhere that
+    // cannot be opened is the one thing this list must not do.
+    assert!(!names.contains(&"template0"), "got {names:?}");
+    assert!(!names.contains(&"template1"), "got {names:?}");
+
+    let current: Vec<&str> = found
+        .iter()
+        .filter(|d| d.is_current)
+        .map(|d| d.name.as_str())
+        .collect();
+    assert_eq!(current, ["bench"], "exactly one is the one we are on");
 }

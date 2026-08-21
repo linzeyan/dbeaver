@@ -10,9 +10,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, SqliteError, SqliteSource};
@@ -38,6 +38,14 @@ impl Driver for SqliteSource {
             scalar_text(self, "SELECT sqlite_version()").await?,
         ))
     }
+    /// `schemas()` reports the databases attached to this connection, which is
+    /// SQLite's only level. They arrive by `ATTACH` on the connection that is
+    /// already open, so listing them for something to go and open separately
+    /// would be answering a question nobody here can act on.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(SqliteSource::schemas(self).await?)
     }

@@ -47,8 +47,8 @@
 mod metadata;
 
 pub use metadata::{
-    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 
 use arrow::array::RecordBatch;
@@ -279,6 +279,20 @@ pub trait Driver: Send + Sync {
     /// The navigator root. A database with no schema layer of its own answers
     /// with the one container it has rather than with an empty list, so that the
     /// navigator has the same shape everywhere.
+    /// Every database on this server, or `None` where there is no level to draw.
+    ///
+    /// `None` is not "this failed" and not "there are none". It is "the question
+    /// does not apply here", and thirteen of the fifteen drivers answer it that
+    /// way — see `DatabaseInfo` for the two shapes that produce it, and each
+    /// driver's own implementation for which of them it is.
+    ///
+    /// What a caller does with `Some` is open a *new* connection on the database
+    /// it picked. That is the contract rather than an implementation detail:
+    /// PostgreSQL cannot change database within a session at all, so a method
+    /// that promised to switch would be a promise one of the two drivers that
+    /// answers here could not keep.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>>;
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>>;
 
     async fn relations(&self, schema: &str) -> DbResult<Vec<RelationInfo>>;

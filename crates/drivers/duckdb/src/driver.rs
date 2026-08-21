@@ -11,9 +11,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, DuckError, DuckSource};
@@ -38,6 +38,15 @@ impl Driver for DuckSource {
             scalar_text(self, "SELECT version()").await?,
         ))
     }
+    /// DuckDB has two levels and this driver already reports both, flattened
+    /// into `database.schema` — see `metadata.rs` for why that is the shape it
+    /// takes. A second level would also be the wrong answer to this method's
+    /// question: an attached database is on the connection that is already open,
+    /// not somewhere to open another one.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(DuckSource::schemas(self).await?)
     }

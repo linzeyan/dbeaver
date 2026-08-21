@@ -9,8 +9,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 
 use crate::{FlightSqlError, FlightSqlSource, Rows, RowsCancel};
@@ -67,6 +68,12 @@ impl Driver for FlightSqlSource {
     async fn server_info(&self) -> DbResult<ServerInfo> {
         Ok(ServerInfo::new("Arrow Flight SQL", ""))
     }
+    /// Two levels already flattened, the way DuckDB flattens its own: the
+    /// catalog is carried in the `SchemaInfo` name.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        Ok(None)
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(FlightSqlSource::schemas(self).await?)
     }

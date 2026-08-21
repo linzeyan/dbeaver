@@ -17,6 +17,33 @@ pub struct SchemaInfo {
     pub name: String,
 }
 
+/// One database on the server this connection reached.
+///
+/// A level above `SchemaInfo`, and only some databases have one. Most of the
+/// drivers here have nothing to put in it, for one of two reasons that are worth
+/// telling apart: either the engine has a single level and `schemas()` already
+/// is it — MySQL's schema is its database, Cassandra's is a keyspace, BigQuery's
+/// is a dataset — or the engine has two levels and the driver already reports
+/// both, flattened into a qualified `SchemaInfo` name the way DuckDB reports
+/// `warehouse.main`. Neither wants a second level drawn above it.
+///
+/// What is left is the case this exists for: PostgreSQL and SQL Server report
+/// bare schema names and have a database above them that a connection cannot
+/// reach. Listing them is the only way a front end can offer to open one without
+/// asking somebody to edit a connection string by hand.
+#[derive(Debug, Clone, Serialize)]
+pub struct DatabaseInfo {
+    pub name: String,
+
+    /// Whether this is the one the connection is already on.
+    ///
+    /// Answered by the server rather than by comparing against the connection
+    /// string, which is not the same question: a string may name no database at
+    /// all and still land on one, and the name it does carry may differ from the
+    /// server's own spelling of it.
+    pub is_current: bool,
+}
+
 /// What kind of relation a navigator entry is.
 ///
 /// A closed set rather than the database's own word for it. A free string would

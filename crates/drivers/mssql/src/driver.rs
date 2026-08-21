@@ -9,9 +9,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MsSqlError, MsSqlSource};
@@ -46,6 +46,36 @@ impl Driver for MsSqlSource {
         .await?;
         Ok(ServerInfo::new("SQL Server", version))
     }
+    /// The other driver here with a database level worth drawing.
+    ///
+    /// Built from this driver's own `databases()`, which already reads
+    /// `sys.databases` and is already tested. That one carries a state and a
+    /// collation the trait's level has no room for, so what crosses is the name
+    /// and whether it is the one this session is on.
+    ///
+    /// Online ones only. A database that is restoring, offline or recovering is
+    /// still in `sys.databases`, and offering one as somewhere to open would be
+    /// offering something that cannot answer.
+    ///
+    /// SQL Server can change database within a session with `USE`. This does not:
+    /// opening one of these means another connection, which is what the
+    /// PostgreSQL driver has no choice about and what keeps one session meaning
+    /// one database on both.
+    async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
+        let current = scalar_text(self, "SELECT DB_NAME()").await?;
+        Ok(Some(
+            MsSqlSource::databases(self)
+                .await?
+                .into_iter()
+                .filter(|d| d.state == "ONLINE")
+                .map(|d| DatabaseInfo {
+                    is_current: d.name == current,
+                    name: d.name,
+                })
+                .collect(),
+        ))
+    }
+
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
         Ok(MsSqlSource::schemas(self).await?)
     }
