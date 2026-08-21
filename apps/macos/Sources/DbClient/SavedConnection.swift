@@ -299,13 +299,23 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         /// `"verify-ca"` says what `3` does not.
         var sslMode: String
         var sslRootCert: String
+        /// The bastion, as four keys rather than a nested object, because this
+        /// file is flat by decision — see the type's own comment. No version
+        /// bump goes with them, for the reason the folder key carries none: an
+        /// entry written before these existed means exactly what it means now,
+        /// which is a database this machine dials for itself.
+        var sshHost: String
+        var sshPort: String
+        var sshUser: String
+        var sshKeyPath: String
         var user: String
 
         init(
             color: String, database: String, folder: String = "", savesPassword: Bool = true,
             host: String, id: String, name: String, path: String, port: String,
             production: Bool = false, readOnly: Bool = false, scheme: String, server: String = "",
-            sslMode: String = "prefer", sslRootCert: String = "", user: String
+            sslMode: String = "prefer", sslRootCert: String = "", sshHost: String = "",
+            sshPort: String = "", sshUser: String = "", sshKeyPath: String = "", user: String
         ) {
             self.color = color
             self.database = database
@@ -322,6 +332,10 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.server = server
             self.sslMode = sslMode
             self.sslRootCert = sslRootCert
+            self.sshHost = sshHost
+            self.sshPort = sshPort
+            self.sshUser = sshUser
+            self.sshKeyPath = sshKeyPath
             self.user = user
         }
 
@@ -344,6 +358,10 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.server = connection.server
             self.sslMode = connection.settings.sslMode.rawValue
             self.sslRootCert = connection.settings.sslRootCert
+            self.sshHost = connection.settings.sshHost
+            self.sshPort = connection.settings.sshPort
+            self.sshUser = connection.settings.sshUser
+            self.sshKeyPath = connection.settings.sshKeyPath
             self.user = connection.settings.user
         }
 
@@ -398,6 +416,17 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.sslRootCert =
                 try container.decodeIfPresent(String.self, forKey: .sslRootCert) ?? ""
 
+            // Nothing, for an entry written before a tunnel was on offer — and
+            // nothing is what says "dial the database directly", which is what
+            // that entry has been doing all along. Optional like everything
+            // else here because one throw fails the whole document, and a file
+            // somebody hand-edited into three keys instead of four would empty
+            // their sidebar over a connection they were not even opening.
+            self.sshHost = try container.decodeIfPresent(String.self, forKey: .sshHost) ?? ""
+            self.sshPort = try container.decodeIfPresent(String.self, forKey: .sshPort) ?? ""
+            self.sshUser = try container.decodeIfPresent(String.self, forKey: .sshUser) ?? ""
+            self.sshKeyPath = try container.decodeIfPresent(String.self, forKey: .sshKeyPath) ?? ""
+
             // An entry somebody typed has no id, and one is minted here rather than
             // at the call site: an entry that arrived without an identity still has
             // to have one before anything can keep its password.
@@ -407,7 +436,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
 
         private enum CodingKeys: String, CodingKey {
             case color, database, folder, savesPassword, host, id, name, path, port, production,
-                readOnly, scheme, server, sslMode, sslRootCert, user
+                readOnly, scheme, server, sslMode, sslRootCert, sshHost, sshPort, sshUser,
+                sshKeyPath, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -425,7 +455,11 @@ struct SavedConnection: Identifiable, Equatable, Codable {
                 // losing every saved connection over one unrecognised setting is
                 // a worse answer than connecting the way libpq would.
                 sslMode: SslMode(rawValue: self.sslMode) ?? .prefer,
-                sslRootCert: self.sslRootCert
+                sslRootCert: self.sslRootCert,
+                sshHost: self.sshHost,
+                sshPort: self.sshPort,
+                sshUser: self.sshUser,
+                sshKeyPath: self.sshKeyPath
             )
             return SavedConnection(
                 id: id, name: self.name, color: color, folder: self.folder,
@@ -576,6 +610,19 @@ extension SavedConnection {
 
         if self.settings.sslRootCert != draft.settings.sslRootCert {
             changedFields.append("CA")
+        }
+
+        // Four fields under one name, unlike SSL and CA above. The sentence this
+        // builds is read once, by somebody deciding whether to lose what they
+        // typed, and "Host, Port, User and Key would go back" — about the
+        // bastion, next to the four fields of the same name about the database —
+        // is a list rather than a sentence.
+        if self.settings.sshHost != draft.settings.sshHost
+            || self.settings.sshPort != draft.settings.sshPort
+            || self.settings.sshUser != draft.settings.sshUser
+            || self.settings.sshKeyPath != draft.settings.sshKeyPath
+        {
+            changedFields.append("SSH tunnel")
         }
 
         if passwordChanged {

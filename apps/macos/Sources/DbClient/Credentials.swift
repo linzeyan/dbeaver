@@ -58,10 +58,45 @@ struct CredentialFile {
         write(held)
     }
 
+    /// The secret for this connection's bastion: its password, or the passphrase
+    /// on its key.
+    ///
+    /// Filed under the connection's own id with a suffix rather than in a file
+    /// of its own, because it is the same secret in every way that matters — the
+    /// same owner, the same veto, the same moment it stops being needed. A
+    /// second file would be a second thing to remember to delete, and the one
+    /// nobody remembers is the one holding a password.
+    func sshSecret(for id: UUID) -> String? {
+        read()[Self.sshKey(id)]
+    }
+
+    /// Empty forgets rather than stores, as `save` does and for the same reason.
+    func saveSshSecret(_ secret: String, for id: UUID) {
+        var held = read()
+        if secret.isEmpty {
+            held.removeValue(forKey: Self.sshKey(id))
+        } else {
+            held[Self.sshKey(id)] = secret
+        }
+        write(held)
+    }
+
+    /// Both secrets, because a connection being forgotten and one of its
+    /// passwords staying behind is the worst of the three possible outcomes:
+    /// what is left is keyed by a uuid nothing will ever ask about again, so
+    /// nothing will ever clear it either.
     func delete(for id: UUID) {
         var held = read()
-        guard held.removeValue(forKey: id.uuidString) != nil else { return }
+        let hadPassword = held.removeValue(forKey: id.uuidString) != nil
+        let hadSecret = held.removeValue(forKey: Self.sshKey(id)) != nil
+        guard hadPassword || hadSecret else { return }
         write(held)
+    }
+
+    /// A suffix rather than a separator that could occur in a uuid, so the two
+    /// keys cannot collide however many connections there are.
+    private static func sshKey(_ id: UUID) -> String {
+        "\(id.uuidString)/ssh"
     }
 
     private func read() -> [String: String] {
