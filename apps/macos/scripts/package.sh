@@ -35,6 +35,17 @@ echo "==> Assembling $BUNDLE"
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
 cp "$BINARY" "$BUNDLE/Contents/MacOS/$BIN_NAME"
+
+# The Rust staticlib arrives with a symbol table for ~95k functions, most of
+# them internal to DuckDB and Arrow. Linked in, that is 18 MB of __LINKEDIT the
+# shipped app never reads — 23% of the binary. Stripped here, on the bundle's
+# copy, so `.build/release/DbClient` stays symbolised for local debugging; and
+# before `codesign`, because stripping a signed binary invalidates the
+# signature. Crash reports off the shipped build still symbolicate: `strip`
+# preserves LC_UUID, so `atos` matches them against the unstripped build product
+# and its .dSYM.
+strip "$BUNDLE/Contents/MacOS/$BIN_NAME"
+
 cp "$APP_DIR/Resources/Info.plist" "$BUNDLE/Contents/Info.plist"
 # Optional icon: drop an AppIcon.icns into Resources/ to brand the app.
 if [ -f "$APP_DIR/Resources/AppIcon.icns" ]; then

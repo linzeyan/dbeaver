@@ -118,21 +118,40 @@ help: ## Show available targets
 # Not theoretical. The window could not open a Redis connection for as long as no
 # Swift file had changed since the driver was added: `make release` rebuilt the
 # library, SwiftPM linked nothing, and the binary went on carrying a registry
-# that had never heard of the scheme. Deleting the product when the library is
-# newer than it is what makes these two targets mean what they say.
-RELINK = [ ! -e $(1) ] || [ $(1) -nt $(2) ] || rm -f $(1)
+# that had never heard of the scheme. Deleting the product when the library
+# changes is what makes these two targets mean what they say.
+#
+# "Changes" cannot be read off a timestamp. Cargo keeps one artifact per profile
+# fingerprint and swaps a cached one back into `target/` when a profile knob
+# moves — restoring its original mtime with it, in 0.2s. So flipping `lto` and
+# flipping it back leaves a library that is *older* than the product but was not
+# what the product was linked against, and `-nt` answers "no relink needed" while
+# the app still carries the other profile's code. That misread produced a whole
+# round of size measurements attributed to the wrong profile.
+#
+# Recorded identity instead of ordering, so a swap in either time direction is
+# caught. Size and mtime together name which cached artifact is in place; inode
+# cannot, because cargo writes a fresh one on every swap even when restoring a
+# library it has already built.
+DBFFI_ID = stat -f '%z:%m' $(1) 2>/dev/null
+RELINK   = [ -e $(1) ] && [ "$$($(call DBFFI_ID,$(2)))" = "$$(cat $(1).dbffi 2>/dev/null)" ] || rm -f $(1)
+# Written only after SwiftPM returns, so a failed link leaves no claim that the
+# product matches the library.
+STAMP    = $(call DBFFI_ID,$(2)) > $(1).dbffi
 
 .PHONY: build
 build: ## Debug build of core and app
 	cargo build
 	@$(call RELINK,$(APP_DEBUG),target/debug/libdbffi.a)
 	RUST_PROFILE=debug swift build --package-path $(APP_DIR) -c debug
+	@$(call STAMP,$(APP_DEBUG),target/debug/libdbffi.a)
 
 .PHONY: release
 release: ## Release build of core and app
 	cargo build --release
 	@$(call RELINK,$(APP_BIN),target/release/libdbffi.a)
 	swift build --package-path $(APP_DIR) -c release
+	@$(call STAMP,$(APP_BIN),target/release/libdbffi.a)
 	@echo "binary: $(APP_BIN)  (run 'make package' for the launchable .app)"
 
 .PHONY: core
