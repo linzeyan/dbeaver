@@ -1260,6 +1260,17 @@ final class AppModel {
         connectionPassword = hasUnreadPassword ? "" : savedConnectionPassword
     }
 
+    /// Puts a dragged connection above another and writes the new order down.
+    ///
+    /// Written through immediately rather than left as an unsaved edit. The form
+    /// holds one connection and this changes the list, so there would be no row
+    /// to show the pencil against — and a reorder that vanished on quit would be
+    /// a gesture that did not take.
+    func moveConnection(_ dragged: UUID, above target: UUID) {
+        guard connections.move(dragged, above: target) else { return }
+        ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
+    }
+
     /// Forgets the connection the form is showing, once its owner says so.
     ///
     /// The password goes with it. One left behind belongs to an entry nothing will

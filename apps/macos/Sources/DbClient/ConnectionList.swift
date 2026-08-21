@@ -96,6 +96,41 @@ struct ConnectionList: Equatable {
         connections.first { $0.id == id }
     }
 
+    /// Puts a connection directly above another, in that one's folder.
+    ///
+    /// One rule for the two things a drag can mean, because they are one
+    /// gesture: dropping onto a row in another folder files the connection, and
+    /// dropping onto a row in its own folder chooses the order.
+    ///
+    /// The array's order *is* the order — the sidebar draws it, `save` is
+    /// careful not to disturb it, and the file is meant to be read and edited by
+    /// hand. An `order:` number on every entry would be a second copy of a fact
+    /// the document already carries, and it is the copy that goes wrong.
+    ///
+    /// False when there is nothing to do, so that a drop which changes nothing —
+    /// onto itself, onto the row already below it, onto something no longer in
+    /// the list — does not rewrite the file for no reason.
+    @discardableResult
+    mutating func move(_ id: UUID, above target: UUID) -> Bool {
+        guard id != target, let from = index(of: id), let landing = connection(target) else {
+            return false
+        }
+        var moved = connections[from]
+        let sameFolder = moved.folder == landing.folder
+        connections.remove(at: from)
+        // Read again rather than adjusted by hand: taking the dragged row out
+        // moves everything after it up by one, and which side of the target it
+        // came from decides whether that happened.
+        guard let to = index(of: target) else { return false }
+        if sameFolder, from == to {
+            connections.insert(moved, at: from)
+            return false
+        }
+        moved.folder = landing.folder
+        connections.insert(moved, at: to)
+        return true
+    }
+
     /// Puts an edited connection back where it was, or adds one that is new.
     ///
     /// In place, and that is the whole point of the method: the sidebar is drawn in
