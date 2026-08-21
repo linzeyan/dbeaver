@@ -592,6 +592,10 @@ final class AppModel {
         get { session.connectionColor }
         set { session.connectionColor = newValue }
     }
+    private(set) var capabilities: Capabilities {
+        get { session.capabilities }
+        set { session.capabilities = newValue }
+    }
     private(set) var safety: ConnectionSafety {
         get { session.safety }
         set { session.safety = newValue }
@@ -1346,6 +1350,7 @@ final class AppModel {
         connectionColor = connectionDraft.color
         safety = ConnectionSafety(of: connectionDraft)
         record(server: inventory.server)
+        capabilities = inventory.capabilities
         connectionState = .connected
         // Open the schema a user most likely wants, and land on a table
         // rather than an empty pane. Opening to nothing makes every session
@@ -1481,7 +1486,13 @@ final class AppModel {
         // this application deciding the answer mattered more than the data.
         return Inventory(
             schemas: schemas, relations: relations,
-            server: (try? db.serverInfo())?.label ?? "")
+            server: (try? db.serverInfo())?.label ?? "",
+            // Read here rather than on the main actor for the reason everything
+            // else in this function is: it crosses the FFI boundary, and the
+            // window is not the place to wait for anything that does. It costs no
+            // round trip, so it rides along with the metadata instead of being a
+            // second trip of its own.
+            capabilities: (try? db.capabilities()) ?? .unknown)
     }
 
     private struct Inventory: Sendable {
@@ -1489,6 +1500,9 @@ final class AppModel {
         let relations: [String: [RelationInfo]]
         /// What answered, for the list row to keep. Empty where it would not say.
         let server: String
+        /// What this connection can do, for the controls that would otherwise
+        /// have to find out by being refused.
+        let capabilities: Capabilities
     }
 
     // MARK: - Refresh
@@ -4157,7 +4171,12 @@ final class AppModel {
     /// answer does: as the running call failing, with `cancelled` set.
     func cancelRunningStatement() {
         guard canCancel, let db else { return }
-        status = "Cancelling…"
+        // Two different things to say, because two different things happen. Where
+        // the request reaches the server this stops the work; where it does not,
+        // it stops the waiting and the server finishes a page nobody will read.
+        // Somebody who presses this after four minutes believes the first one, so
+        // the second says what it is instead of borrowing the word.
+        status = capabilities.cancelStopsTheStatement ? "Cancelling…" : "Giving up waiting…"
         // A browse page is fetched through a cursor, which runs on a connection
         // of its own — `db.cancel()` names the session's backend and would leave
         // the fetch running behind a button that said it had stopped it. Which

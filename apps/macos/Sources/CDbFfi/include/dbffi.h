@@ -98,6 +98,12 @@ char* db_drivers_json(char** err);
 // own spelling, and is empty where it states none.
 char* db_server_info_json(DbHandle* handle, char** err);
 
+// What this connection can do. Takes a handle rather than a scheme because one
+// driver may reach several products and they do not all answer the same — the
+// MySQL driver also reaches StarRocks and Doris, which are not transactional.
+// Costs no round trip.
+char* db_capabilities_json(DbHandle* handle, char** err);
+
 // One reading of an editor buffer: what to paint, where the statements are, and
 // which one a run would send. Takes no handle for the reason db_drivers_json
 // does not — reading SQL needs the dialect and not the connection, and an editor

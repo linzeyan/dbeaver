@@ -219,7 +219,7 @@ impl ServerInfo {
 /// Small on purpose. A field belongs here when something reads it; the rest of
 /// what a driver knows about itself is in its module docs, where it is being read
 /// by people rather than by programs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Capabilities {
     /// Whether statements on this session can be wrapped in a transaction.
     ///
