@@ -27,6 +27,10 @@ enum FocusArea: Hashable {
     case connectDatabase
     case connectUser
     case connectPassword
+    /// The CA path. Its own case rather than sharing one, because `CompactField`
+    /// draws its focus ring from a `FocusArea` and two fields answering to one
+    /// would both light up.
+    case connectRootCert
     /// The chooser's own filter field. Separate from `navigatorFilter` because the
     /// two are never on screen together and each draws its own ring.
     case connectionFilter

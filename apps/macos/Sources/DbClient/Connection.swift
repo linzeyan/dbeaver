@@ -1,6 +1,58 @@
 import Foundation
 import Security
 
+/// How much of the server's identity to insist on before anything is sent.
+///
+/// libpq's words, spelled as libpq spells them, because the string this becomes
+/// is read by the core's PostgreSQL driver and because they are the words in
+/// whatever runbook the person at the keyboard is copying from.
+///
+/// `allow` is missing on purpose. It asks for plaintext first and TLS only if
+/// that is refused, which the driver's wire protocol has no way to express; a
+/// URL carrying it is read as `prefer`, which is the neighbour it is one step
+/// from. Offering it in a picker would be offering a choice that silently became
+/// another one.
+enum SslMode: String, CaseIterable, Identifiable, Codable {
+    case disable
+    case prefer
+    case require
+    case verifyCa = "verify-ca"
+    case verifyFull = "verify-full"
+
+    var id: String { rawValue }
+
+    /// What the picker shows.
+    var title: String {
+        switch self {
+        case .disable: return "Disable"
+        case .prefer: return "Prefer"
+        case .require: return "Require"
+        case .verifyCa: return "Verify CA"
+        case .verifyFull: return "Verify Full"
+        }
+    }
+
+    /// What choosing it means, in one line beside the picker.
+    ///
+    /// Written out because the words do not say it and the wrong reading is the
+    /// dangerous one: "Require" sounds like the strict setting and is the one
+    /// that accepts any certificate at all. It is the single most misread
+    /// option in every PostgreSQL client there is, and a client that repeated
+    /// the word without the sentence would be repeating the mistake.
+    var summary: String {
+        switch self {
+        case .disable: return "never encrypt"
+        case .prefer: return "encrypt if the server offers it"
+        case .require: return "encrypt, but prove nothing"
+        case .verifyCa: return "check the certificate, not the name"
+        case .verifyFull: return "check the certificate and the name"
+        }
+    }
+
+    /// Whether naming a CA to trust would change anything.
+    var verifiesCertificate: Bool { self == .verifyCa || self == .verifyFull }
+}
+
 /// Where to connect, as the connection form collects it.
 ///
 /// Deliberately holds no password. This is the value that gets written to
@@ -21,9 +73,25 @@ struct ConnectionSettings: Equatable, Codable {
     /// Where the database lives, for a file-shaped driver. Empty for a server.
     var path: String
 
+    /// How much of the server's identity to insist on.
+    ///
+    /// `prefer` by default, as it is in libpq. A client quieter about TLS than
+    /// `psql` is one that downgrades a connection without saying so, and nothing
+    /// that connected before this existed stops connecting: prefer falls back.
+    var sslMode: SslMode
+
+    /// A PEM file holding a CA to trust in addition to the public ones.
+    ///
+    /// Empty for the ordinary case, which is a server whose certificate comes
+    /// from an issuer everybody already trusts. Named by path rather than found
+    /// in the login Keychain, because trust that depended on which Mac the
+    /// client ran from would be trust whose failures cannot be reproduced.
+    var sslRootCert: String
+
     init(
         scheme: String, host: String = "", port: String = "", database: String = "",
-        user: String = "", path: String = ""
+        user: String = "", path: String = "", sslMode: SslMode = .prefer,
+        sslRootCert: String = ""
     ) {
         self.scheme = scheme
         self.host = host
@@ -31,6 +99,8 @@ struct ConnectionSettings: Equatable, Codable {
         self.database = database
         self.user = user
         self.path = path
+        self.sslMode = sslMode
+        self.sslRootCert = sslRootCert
     }
 
     var driver: DriverInfo? { DriverCatalog.named(scheme) }
@@ -121,6 +191,28 @@ struct ConnectionSettings: Equatable, Codable {
         // connection, and sending `:@` states something the form did not.
         url.password = password.isEmpty ? nil : password
         url.path = "/" + trimmed(database)
+
+        // Only for a driver that reads them. On one that does not, these are two
+        // parameters handed to a client that has never heard of them, which is
+        // ignored at best and a refused connection at worst — and the connection
+        // it refused would be refused over a setting the form put there.
+        //
+        // `prefer` writes nothing, which is not an omission: it is what the
+        // driver does when nobody says otherwise, and leaving it out keeps the
+        // string somebody copies out of this form as short as what they would
+        // have typed.
+        if driver?.honoursSslMode == true {
+            var items: [URLQueryItem] = []
+            if sslMode != .prefer {
+                items.append(URLQueryItem(name: "sslmode", value: sslMode.rawValue))
+            }
+            let ca = trimmed(sslRootCert)
+            if !ca.isEmpty, sslMode.verifiesCertificate {
+                items.append(URLQueryItem(name: "sslrootcert", value: ca))
+            }
+            url.queryItems = items.isEmpty ? nil : items
+        }
+
         // URLComponents percent-encodes what it is given, which is the whole
         // reason this is not string interpolation: a password holding `@` or `/`
         // would otherwise be read as the end of the credentials.
@@ -142,6 +234,22 @@ struct ConnectionSettings: Equatable, Codable {
         scheme = url?.scheme ?? DriverCatalog.first?.scheme ?? ""
         let shape = DriverCatalog.named(scheme)?.shape
         let rawPath = url?.path ?? ""
+
+        // Before the file branch returns, which is the only reason these are up
+        // here rather than beside the fields they belong with.
+        //
+        // A mode this build does not have becomes `prefer` rather than refusing
+        // the URL: `--conn` exists so that a string which did not work lands in
+        // the form to be corrected, and one that emptied the form over a word
+        // would be the exact failure it was added to avoid. libpq's `allow`
+        // arrives here and is read as `prefer`, which is what the driver does
+        // with it too.
+        let parameters = url?.queryItems ?? []
+        func parameter(_ name: String) -> String? {
+            parameters.first { $0.name == name }?.value
+        }
+        sslMode = SslMode(rawValue: parameter("sslmode") ?? "") ?? .prefer
+        sslRootCert = parameter("sslrootcert") ?? ""
 
         if shape == .file {
             // A relative path parses as the authority, so it has to be put back
