@@ -55,17 +55,17 @@ pub enum TunnelError {
     Io(#[from] std::io::Error),
 }
 
-/// Where to connect, who to connect as, and what to forward to.
+/// Where the bastion is and who to log in as.
 ///
-/// `target_host` is resolved by the SSH server, not here. That is the whole
-/// point of a bastion: the name is one only the far side can look up.
+/// Everything about the tunnel except what it forwards to, which is passed to
+/// `Tunnel::open` instead: a connection string already names the host and port
+/// the database is on, and a field here holding a second copy of that would be
+/// a field every caller had to remember to keep in step.
 pub struct TunnelConfig {
     pub host: String,
     pub port: u16,
     pub user: String,
     pub password: String,
-    pub target_host: String,
-    pub target_port: u16,
     pub known_hosts: PathBuf,
 }
 
@@ -133,7 +133,13 @@ impl Tunnel {
     /// question of what to do when the port someone configured is taken.
     /// Loopback because a forward reachable from the network would put the
     /// database in front of anyone who can reach this machine.
-    pub async fn open(config: TunnelConfig) -> Result<Tunnel, TunnelError> {
+    /// `target_host` is resolved by the SSH server, not here. That is the whole
+    /// point of a bastion: the name is one only the far side can look up.
+    pub async fn open(
+        config: TunnelConfig,
+        target_host: &str,
+        target_port: u16,
+    ) -> Result<Tunnel, TunnelError> {
         let gate = Gatekeeper {
             host: config.host.clone(),
             port: config.port,
@@ -155,8 +161,8 @@ impl Tunnel {
 
         let listener = TcpListener::bind(("127.0.0.1", 0u16)).await?;
         let local = listener.local_addr()?;
-        let target_host = config.target_host;
-        let target_port = u32::from(config.target_port);
+        let target_host = target_host.to_owned();
+        let target_port = u32::from(target_port);
         let accepting = tokio::spawn(async move {
             while let Ok((mut inbound, peer)) = listener.accept().await {
                 let opened = session

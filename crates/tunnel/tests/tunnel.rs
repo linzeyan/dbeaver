@@ -29,23 +29,27 @@ fn known_hosts() -> PathBuf {
         })
 }
 
-/// The fixture, forwarding to a name only the far side can resolve.
+/// The bastion these tests log in to.
 fn config() -> TunnelConfig {
     TunnelConfig {
         host: "127.0.0.1".into(),
         port: 52222,
         user: "bench".into(),
         password: "bench".into(),
-        target_host: "pg".into(),
-        target_port: 5432,
         known_hosts: known_hosts(),
     }
 }
 
+/// What the tunnel forwards to: the compose service name, which resolves inside
+/// the compose network and nowhere else.
+const TARGET: (&str, u16) = ("pg", 5432);
+
 #[tokio::test]
 #[ignore = "requires the SSH server and the benchmark database (make db-up-ssh db-up)"]
 async fn postgres_answers_through_the_forward() {
-    let tunnel = Tunnel::open(config()).await.expect("the tunnel opened");
+    let tunnel = Tunnel::open(config(), TARGET.0, TARGET.1)
+        .await
+        .expect("the tunnel opened");
     let mut probe = tokio::net::TcpStream::connect(tunnel.local_addr())
         .await
         .expect("the local end of the tunnel accepted a connection");
@@ -88,10 +92,14 @@ async fn a_server_that_is_not_on_record_is_not_given_the_password() {
     // to be Debug — and a forward is a live socket and a running task, so
     // deriving Debug on it to satisfy a test would be the test deciding the
     // public API.
-    let Err(error) = Tunnel::open(TunnelConfig {
-        known_hosts: empty.clone(),
-        ..config()
-    })
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            known_hosts: empty.clone(),
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
     .await
     else {
         panic!("a server that is not on record must not be given the password")
@@ -107,10 +115,14 @@ async fn a_server_that_is_not_on_record_is_not_given_the_password() {
 #[tokio::test]
 #[ignore = "requires the SSH server (make db-up-ssh)"]
 async fn a_refused_password_says_so() {
-    let Err(error) = Tunnel::open(TunnelConfig {
-        password: "not the password".into(),
-        ..config()
-    })
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            password: "not the password".into(),
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
     .await
     else {
         panic!("the wrong password must not open a tunnel")
