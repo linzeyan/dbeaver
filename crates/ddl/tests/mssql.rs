@@ -8,9 +8,9 @@
 //! the fixture drifted; one that breaks the first means the renderer did.
 
 use dbconn::{
-    Browse, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor, DbResult, Driver,
-    IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor, DbResult,
+    Driver, IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_mssql::MsSqlSource;
 use tokio::sync::OnceCell;
@@ -145,8 +145,11 @@ impl Driver for Fixture {
         unreachable!("nothing here is long enough to cancel")
     }
 
-    fn transactional(&self) -> bool {
-        false
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: false,
+        }
     }
 
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

@@ -69,7 +69,7 @@ impl Session {
     pub fn state(&self, driver: &dyn Driver) -> TxState {
         let inner = self.lock();
         TxState {
-            transactional: driver.transactional(),
+            transactional: driver.capabilities().transactional,
             autocommit: inner.autocommit,
             open: inner.open,
             savepoints: inner.savepoints.clone(),
@@ -113,7 +113,7 @@ impl Session {
                 "commit or roll back the open transaction before changing mode",
             ));
         }
-        if !on && !driver.transactional() {
+        if !on && !driver.capabilities().transactional {
             return Err(DbError::new(
                 "this connection cannot hold a transaction open",
             ));

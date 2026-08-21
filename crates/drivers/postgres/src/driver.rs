@@ -8,9 +8,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -109,8 +110,14 @@ impl Driver for PgSource {
 
     /// Statements run on a connection of their own here, which is what a
     /// transaction needs to span them.
-    fn transactional(&self) -> bool {
-        true
+    ///
+    /// Cancel reaches the statement: it opens a connection of its own and names
+    /// this session's backend, which is what the postmaster signals.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: true,
+            cancel_stops_the_statement: true,
+        }
     }
 
     async fn transaction(&self, step: &TxStep) -> DbResult<()> {

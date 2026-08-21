@@ -8,9 +8,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{Rows, RowsCancel, SnowflakeError, SnowflakeSource, parts, quote};
@@ -196,8 +197,13 @@ impl Driver for SnowflakeSource {
     ///
     /// Snowflake has no savepoints under any transport, so the three savepoint
     /// steps have nowhere to go regardless.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the statement: one cancel per statement in flight.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open

@@ -8,8 +8,9 @@
 //! harness, which is where "this text is valid SQL" belongs.
 
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo, RelationInfo,
-    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DbResult, Driver, IndexInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 use dbedit::Edits;
 use std::collections::HashMap;
@@ -140,8 +141,11 @@ impl Driver for Fake {
     async fn cancel(&self) -> DbResult<()> {
         unreachable!("nothing here reaches a server to cancel")
     }
-    fn transactional(&self) -> bool {
-        false
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: false,
+        }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {
         unreachable!("the caller owns the transaction these statements go in")

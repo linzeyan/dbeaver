@@ -8,9 +8,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{FlightSqlError, FlightSqlSource, Rows, RowsCancel};
@@ -140,8 +140,16 @@ impl Driver for FlightSqlSource {
     /// are in the same transaction because they name it, not because they went
     /// down the same socket. Nothing here is pooled or pinned and the transaction
     /// still holds.
-    fn transactional(&self) -> bool {
-        true
+    ///
+    /// Cancel does not reach the statement, and this is the other driver where it
+    /// does not. Flight SQL has an action for it that this build does not send:
+    /// `cancel` stops this side's reads, the `DoGet` stream is dropped, and the
+    /// reset that follows is the only thing the server hears.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: true,
+            cancel_stops_the_statement: false,
+        }
     }
 
     async fn transaction(&self, step: &TxStep) -> DbResult<()> {

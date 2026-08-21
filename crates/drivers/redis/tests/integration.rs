@@ -711,7 +711,10 @@ async fn transaction_control_is_refused_rather_than_quietly_skipped() {
     let source = RedisSource::connect(&url(0))
         .await
         .expect("the driver could not connect");
-    assert!(!source.transactional());
+    assert!(!source.capabilities().transactional);
+    // Redis does have a cancel that reaches the server, which is the other half
+    // of what this subject is asserting about itself.
+    assert!(source.capabilities().cancel_stops_the_statement);
     for step in [
         TxStep::Begin,
         TxStep::Commit,

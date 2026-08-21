@@ -10,9 +10,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, DuckError, DuckSource};
@@ -114,8 +115,14 @@ impl Driver for DuckSource {
     /// they can; savepoints are a step inside one, and `transaction` refuses
     /// those by name so that the gap is reported where it is rather than by
     /// hiding Commit and Rollback as well.
-    fn transactional(&self) -> bool {
-        true
+    ///
+    /// Cancel reaches the statement, for the reason it does in the SQLite driver:
+    /// the engine is in this process and interrupting it stops the work.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: true,
+            cancel_stops_the_statement: true,
+        }
     }
 
     async fn transaction(&self, step: &TxStep) -> DbResult<()> {

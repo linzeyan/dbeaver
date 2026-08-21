@@ -9,9 +9,10 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{Rows, RowsCancel, TrinoError, TrinoSource, parts};
@@ -201,8 +202,15 @@ impl Driver for TrinoSource {
     /// _refused_by_the_only_writable_catalog` — so that a coordinator whose
     /// catalogs take writes in a transaction turns this into a failing test
     /// rather than a comment nobody rereads.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the statement: one `DELETE` to the coordinator per statement
+    /// in flight, which is available because HTTP is stateless and a cancel
+    /// contends with nothing.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open

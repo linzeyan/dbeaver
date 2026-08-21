@@ -775,7 +775,10 @@ async fn asking_about_a_table_that_is_not_there_is_an_empty_answer() {
 #[ignore = "requires a Cassandra server"]
 async fn transaction_control_is_refused_by_name() {
     let src = fixture().await;
-    assert!(!src.transactional());
+    assert!(!src.capabilities().transactional);
+    // The one the whole field exists for: Cancel here stops this side's reads and
+    // the coordinator never hears about it.
+    assert!(!src.capabilities().cancel_stops_the_statement);
     for step in [
         dbconn::TxStep::Begin,
         dbconn::TxStep::Commit,

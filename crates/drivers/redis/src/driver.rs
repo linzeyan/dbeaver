@@ -11,9 +11,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, RedisError, RedisSource};
@@ -157,8 +157,14 @@ impl Driver for RedisSource {
     /// `WATCH` does not close the gap. It is optimistic concurrency — the `EXEC`
     /// fails if a watched key changed — which is a retry loop an application
     /// writes, not something a Rollback button can stand for.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the server, which is asked to abandon what this session is
+    /// running.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused by name, every step, so that nobody is told a transaction is open

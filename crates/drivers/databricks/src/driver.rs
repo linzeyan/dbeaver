@@ -9,9 +9,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
-    Browse, ColumnInfo, ConstraintInfo, Cursor as CursorApi, CursorCancel as CursorCancelApi,
-    DbError, DbResult, Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
+    CursorCancel as CursorCancelApi, DbError, DbResult, Driver, IndexInfo, RelationInfo,
+    RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{DatabricksError, DatabricksSource, Rows, RowsCancel, parts};
@@ -177,8 +177,13 @@ impl Driver for DatabricksSource {
     /// comparing them should not conclude that REST is what costs a transaction.
     /// It costs Snowflake one. It costs Databricks nothing, because there was
     /// none.
-    fn transactional(&self) -> bool {
-        false
+    ///
+    /// Cancel reaches the statement: one cancel per statement in flight.
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            transactional: false,
+            cancel_stops_the_statement: true,
+        }
     }
 
     /// Refused rather than skipped, so that nobody is told a transaction is open
