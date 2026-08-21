@@ -161,16 +161,20 @@ struct SettingsView: View {
             caveat: syncCaveat,
             selection: $preferences.connectionStorage)
 
-        SettingsToggle(
-            title: "Remember passwords",
+        SettingsChoice(
+            title: "Keep passwords",
             explanation:
-                "A saved connection's password is kept in your login Keychain and filled in "
-                + "when you connect. Off, because this build is signed ad-hoc: its signature "
-                + "changes every time it is rebuilt, so macOS treats each build as a new "
-                + "application and asks you to authorise the read again — Always Allow does "
-                + "not hold. While this is off nothing is written to the Keychain and "
-                + "nothing is read from it; type the password when you connect.",
-            isOn: $preferences.remembersPasswords)
+                "Ask every time keeps nothing anywhere. On this Mac writes them to "
+                + "~/.config/dbclient/credentials, encrypted with a key derived from this "
+                + "machine and this account and stored nowhere — the file is unreadable on "
+                + "another Mac, in a backup, or in a dotfiles repository, though not against "
+                + "something already running as you. In the login Keychain is the system's "
+                + "own store and the stronger answer, except that this build is signed "
+                + "ad-hoc: its signature changes on every rebuild, so macOS asks you to "
+                + "authorise the read again and Always Allow does not hold. Whichever you "
+                + "pick, saving a connection clears the other one.",
+            caveat: nil,
+            selection: $preferences.passwordStorage)
     }
 
     /// The data surface: what it leaves out, and what it asks before sending.
@@ -247,11 +251,24 @@ enum SettingsPane: String, CaseIterable, Identifiable {
 /// chosen cannot be honoured. It is drawn in the warning tone and only when there
 /// is one: a control that quietly does something other than what it says is the
 /// failure this exists to prevent.
-private struct SettingsChoice: View {
+/// What a setting with more than two answers looks like.
+///
+/// Generic over the choice because there are two of them now and they differ in
+/// nothing but their cases. A second copy of this view would be a second place
+/// to change when the row's spacing does, and the two would drift.
+private protocol SettingsOption: CaseIterable, Identifiable, Hashable {
+    var label: String { get }
+}
+
+extension ConnectionStorage: SettingsOption {}
+extension PasswordStorage: SettingsOption {}
+
+private struct SettingsChoice<Option: SettingsOption>: View
+where Option.AllCases: RandomAccessCollection {
     let title: String
     let explanation: String
     let caveat: String?
-    @Binding var selection: ConnectionStorage
+    @Binding var selection: Option
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
@@ -263,7 +280,7 @@ private struct SettingsChoice: View {
                 .foregroundStyle(Theme.textSecondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             Picker("", selection: $selection) {
-                ForEach(ConnectionStorage.allCases) { place in
+                ForEach(Option.allCases) { place in
                     Text(place.label).tag(place)
                 }
             }

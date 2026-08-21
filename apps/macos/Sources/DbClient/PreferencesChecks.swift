@@ -37,6 +37,7 @@ enum PreferencesChecks {
         checkAConnectionSurvivesAnICloudThatIsNotAvailable()
         checkTheFileGoesWhereXDGSaysItDoes()
         checkTheSettingsPanelHasRoomForTheICloudCaveat()
+        checkAPasswordKeptOnThisMacIsNotInTheFileAsText()
         checkAnEmptyColumnIsOnlyHiddenWhenTheSettingSaysSo()
         checkAColumnThatFillsUpLaterComesBackWhileTheEvidenceIsOpen()
         checkAColumnStaysDecidedOnceTheEvidenceIsIn()
@@ -96,7 +97,8 @@ enum PreferencesChecks {
         expect(fresh.confirmsDeletions, true, "Save asks before it sends deletions")
         expect(fresh.insertsRowOfDefaults, false, "an empty new row is refused here, by name")
         expect(fresh.usesTranslucentSidebar, false, "the sidebar is opaque, showing only itself")
-        expect(fresh.remembersPasswords, false, "no password is kept until somebody asks for it")
+        expect(
+            fresh.passwordStorage, .never, "no password is kept until somebody asks for it")
         expect(
             fresh.connectionStorage, .thisMac, "the remembered connection does not leave the Mac")
     }
@@ -111,7 +113,7 @@ enum PreferencesChecks {
         first.confirmsDeletions = false
         first.insertsRowOfDefaults = true
         first.usesTranslucentSidebar = true
-        first.remembersPasswords = true
+        first.passwordStorage = .thisMac
         first.connectionStorage = .iCloud
 
         // A second reader over the same store, which is what the next launch is.
@@ -120,7 +122,7 @@ enum PreferencesChecks {
         expect(second.confirmsDeletions, false, "the confirmation being off was kept")
         expect(second.insertsRowOfDefaults, true, "sending a row of defaults was kept")
         expect(second.usesTranslucentSidebar, true, "the translucent sidebar was kept")
-        expect(second.remembersPasswords, true, "remembering passwords was kept")
+        expect(second.passwordStorage, .thisMac, "where passwords are kept was kept")
         expect(second.connectionStorage, .iCloud, "keeping connections in iCloud was kept")
     }
 
@@ -402,6 +404,50 @@ enum PreferencesChecks {
     /// is the thing being asserted on.
     private static func scratch() -> Preferences {
         Preferences(store: ScratchDefaults.store("verify-preferences"))
+    }
+
+    /// What "on this Mac" is worth, which is three separate claims.
+    ///
+    /// That a password comes back is the easy one. The other two are what make
+    /// this a place to put a secret at all: the password is not in the file as
+    /// anything `strings` or a backup indexer would find, and the file is
+    /// readable only by its owner. A store that quietly failed either would look
+    /// exactly like this one from the form's side.
+    private static func checkAPasswordKeptOnThisMacIsNotInTheFileAsText() {
+        guard let root = scratchDirectory() else { return }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = CredentialFile(url: root.appending(path: "credentials"))
+        let first = UUID()
+        let second = UUID()
+
+        file.save("hunter2", for: first)
+        expect(file.password(for: first), "hunter2", "a password kept here comes back")
+
+        let bytes = (try? Data(contentsOf: file.url)) ?? Data()
+        expect(bytes.isEmpty, false, "and there is a file to come back from")
+        expect(
+            bytes.range(of: Data("hunter2".utf8)) == nil, true,
+            "with the password nowhere in it as text")
+        let mode =
+            (try? FileManager.default.attributesOfItem(atPath: file.url.path))?[.posixPermissions]
+            as? Int
+        expect(mode, 0o600, "and readable only by its owner")
+
+        // One file holds all of them, so the second must not displace the first.
+        file.save("s3cond", for: second)
+        expect(file.password(for: first), "hunter2", "a second password leaves the first alone")
+        expect(file.password(for: second), "s3cond", "and is itself readable")
+
+        file.delete(for: first)
+        expect(file.password(for: first), nil, "a withdrawn password is gone")
+        expect(file.password(for: second), "s3cond", "and takes none of the others with it")
+
+        // Nothing left behind, rather than an encrypted empty map. "There is no
+        // file" is the state somebody checks by looking.
+        file.delete(for: second)
+        expect(
+            FileManager.default.fileExists(atPath: file.url.path), false,
+            "and the last one takes the file with it")
     }
 
     /// A directory nothing else can see, for the checks that write files. Removed

@@ -45,6 +45,7 @@ enum AppModelConnectionChecks {
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
+        checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
         if failures == 0 {
             fputs("connection-chooser: all checks passed\n", stderr)
         } else {
@@ -240,7 +241,7 @@ enum AppModelConnectionChecks {
                     scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
                     user: "user"))
             let model = makeModel(with: [connection])
-            model.preferences.remembersPasswords = true
+            model.preferences.passwordStorage = .keychain
             ConnectionKeychain.save("s3cret", for: connection.id)
             defer { ConnectionKeychain.delete(for: connection.id) }
 
@@ -264,7 +265,7 @@ enum AppModelConnectionChecks {
                     scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
                     user: "user"))
             let model = makeModel(with: [connection])
-            model.preferences.remembersPasswords = true
+            model.preferences.passwordStorage = .keychain
             ConnectionKeychain.save("s3cret", for: connection.id)
             defer { ConnectionKeychain.delete(for: connection.id) }
 
@@ -301,7 +302,7 @@ enum AppModelConnectionChecks {
                     scheme: "postgres", host: "127.0.0.1", port: "1", database: "db",
                     user: "user"))
             let model = makeModel(with: [connection])
-            model.preferences.remembersPasswords = true
+            model.preferences.passwordStorage = .keychain
             ConnectionKeychain.save("stored", for: connection.id)
             defer { ConnectionKeychain.delete(for: connection.id) }
 
@@ -466,7 +467,7 @@ enum AppModelConnectionChecks {
                     scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
                     user: "user"))
             let model = makeModel(with: [connection])
-            model.preferences.remembersPasswords = true
+            model.preferences.passwordStorage = .keychain
             defer {
                 ConnectionKeychain.delete(for: connection.id)
                 SessionPasswords.forget(connection.id)
@@ -503,6 +504,64 @@ enum AppModelConnectionChecks {
                 model.connectionPassword, "",
                 "and once the process has forgotten, the field is empty — which is the "
                     + "prompt on next launch")
+        }
+    }
+
+    /// The whole point of the file answer, from the form's side.
+    ///
+    /// A second model over the same store is what the next launch is, and this is
+    /// the thing that was broken: the field came up empty and the password had to
+    /// be typed again, or a Keychain panel had to be authorised, every single
+    /// time. Nothing is deferred here — that state exists only for the answer
+    /// that raises a panel, and this one does not.
+    ///
+    /// The suite's own `XDG_CONFIG_HOME` points at a scratch directory, so
+    /// `CredentialFile.shared` writes there rather than into the developer's
+    /// `~/.config`.
+    private static func checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch() {
+        MainActor.assumeIsolated {
+            let connection = SavedConnection(
+                name: "Kept Here",
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "host.example.com", port: "5432", database: "db",
+                    user: "user"))
+            defer {
+                CredentialFile.shared.delete(for: connection.id)
+                ConnectionKeychain.delete(for: connection.id)
+            }
+
+            let model = makeModel(with: [connection])
+            model.preferences.passwordStorage = .thisMac
+            model.selectConnection(connection.id)
+            model.connectionPassword = "hunter2"
+            model.saveConnection()
+            expect(
+                ConnectionKeychain.password(for: connection.id), nil,
+                "choosing the file means the Keychain is not written")
+
+            // The model selected this row while it was being built, before the
+            // setting above was in place, so ask it again — on a real launch the
+            // setting is read from disk before any window exists.
+            let next = makeModel(with: [connection])
+            next.preferences.passwordStorage = .thisMac
+            next.selectConnection(nil)
+            next.selectConnection(connection.id)
+            expect(
+                next.connectionPassword, "hunter2",
+                "and the next launch has the password already, without anybody retyping it")
+            expect(
+                next.hasUnreadPassword, false,
+                "with nothing deferred, because this answer raises no panel to wait for")
+
+            // Changing the setting moves nothing by itself; the next Save does.
+            // Anything else would rewrite stores behind somebody who was only
+            // reading the Settings window.
+            model.preferences.passwordStorage = .keychain
+            model.connectionPassword = "moved"
+            model.saveConnection()
+            expect(
+                CredentialFile.shared.password(for: connection.id), nil,
+                "and a Save under the Keychain answer takes the file copy with it")
         }
     }
 
