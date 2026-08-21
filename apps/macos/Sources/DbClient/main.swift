@@ -1128,7 +1128,10 @@ func probeSessions(model: AppModel) {
             guard model.sessions[0].queryBuffers[0].text == marker else {
                 fail("the first connection's editor did not survive the second opening")
             }
-            guard model.sessions[1].queryBuffers[0].text.isEmpty else {
+            // Not "is empty": a connection that lands on a table puts a
+            // suggested SELECT in its own editor, and that suggestion is the
+            // second connection's own. What must not be there is the marker.
+            guard model.sessions[1].queryBuffers[0].text != marker else {
                 fail("the second connection opened holding the first one's text")
             }
             // A statement that takes long enough to still be running after the
