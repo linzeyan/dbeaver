@@ -44,9 +44,14 @@ PG_IMAGE     := postgres:17
 # other test in this tree reaches the benchmark database.
 PGTLS_CONTAINER := pg-tls
 PGTLS_PORT      := 55434
-# Under target/ because it is generated, disposable and already ignored. The
-# tests read the CA from the same place by a path relative to their crate.
+# Under target/ because it is generated, disposable and already ignored.
 PGTLS_CERTS     := $(CURDIR)/target/pgtls
+# Exported so the tests read the CA from where this put it, rather than from a
+# path compiled into them. Their fallback is relative to their own crate, which
+# is the same file until `target/` is shared between git worktrees — then a
+# cached test binary names the worktree it was built in, and that worktree may
+# be gone.
+export PGTLS_CA := $(PGTLS_CERTS)/ca.crt
 
 # MongoDB, for the driver's own tests and for its pass through the shared
 # contract. Non-default port for the same reason as PostgreSQL's. It holds no
@@ -206,8 +211,14 @@ test-integration: db-check db-check-compatible db-check-mongo db-check-clickhous
 # test name — `--exact`, because the compatibility subjects carry the driver's
 # name as well as their own and a plain `mysql` filter would pull TiDB and
 # StarRocks into a job where neither server is running.
+#
+# Three containers rather than two. `cargo test -p driver-postgres -- --ignored`
+# runs every ignored test in that crate, and five of them are the TLS ones,
+# which want a second PostgreSQL on a second port — so the job that runs this
+# has to start it, and the check below is what says so in one line instead of
+# five refused connections.
 .PHONY: test-postgres
-test-postgres: db-check db-check-compatible ## Integration tests behind PostgreSQL and the servers read through its driver
+test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests behind PostgreSQL and the servers read through its driver
 	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored
 	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
@@ -755,6 +766,16 @@ db-check-clickhouse: ## Fail unless the ClickHouse test container is reachable
 db-check: ## Fail unless the benchmark database is reachable
 	@docker exec $(PG_CONTAINER) pg_isready -U bench -d bench >/dev/null 2>&1 \
 		|| { echo "benchmark database not running; run 'make db-seed'"; exit 1; }
+
+# Its own check rather than a line in `db-check`, because it is a second server
+# on a second port and the first one's answer says nothing about it. `pg_isready`
+# would answer here too, and `nc` is used instead for the reason
+# `db-check-compatible` uses it: what is being asked is whether anything is
+# listening, and a server refusing plaintext is not going to say more than that.
+.PHONY: db-check-pgtls
+db-check-pgtls: ## Fail unless the TLS-only PostgreSQL container is reachable
+	@nc -z 127.0.0.1 $(PGTLS_PORT) >/dev/null 2>&1 \
+		|| { echo "tls postgres not running; run 'make db-up-pgtls'"; exit 1; }
 
 # Separate from db-check because the benchmarks want PostgreSQL and nothing
 # else: making every `make bench` depend on a MongoDB container would be asking

@@ -18,7 +18,19 @@ const SERVER: &str = "postgres://bench:bench@127.0.0.1:55434/bench";
 
 /// The CA that signed the fixture's certificate, which is what `sslrootcert`
 /// wants: the root to trust, not the leaf to expect.
-const CERTIFICATE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../../target/pgtls/ca.crt");
+///
+/// `PGTLS_CA` is read first, and the Makefile sets it, so the fixture's location
+/// has one source. The fallback is a compile-time path and that is the whole
+/// reason the variable exists: `CARGO_MANIFEST_DIR` is baked into the binary
+/// when it is built, so a workspace sharing one `target/` between git worktrees
+/// hands back a cached test binary naming the worktree it was compiled in —
+/// which may since have been removed. The failure that produces is a missing CA
+/// file, reported against a path nobody recognises.
+fn certificate() -> String {
+    std::env::var("PGTLS_CA").unwrap_or_else(|_| {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../../target/pgtls/ca.crt").to_owned()
+    })
+}
 
 /// Needs no server. The CA file is read while the connection is still being
 /// decided, which is why naming one that is not there fails by saying so rather
@@ -88,8 +100,9 @@ async fn verify_ca_wants_the_chain_and_not_the_name() {
         "a self-signed certificate is in no public root store"
     );
 
+    let certificate = certificate();
     PgSource::connect(&format!(
-        "{SERVER}?sslmode=verify-ca&sslrootcert={CERTIFICATE}"
+        "{SERVER}?sslmode=verify-ca&sslrootcert={certificate}"
     ))
     .await
     .expect("named as a root, the chain verifies and the wrong name is allowed");
@@ -100,8 +113,9 @@ async fn verify_ca_wants_the_chain_and_not_the_name() {
 #[tokio::test]
 #[ignore = "requires the TLS test server (make db-up-pgtls)"]
 async fn verify_full_refuses_the_name_verify_ca_allows() {
+    let certificate = certificate();
     let Err(error) = PgSource::connect(&format!(
-        "{SERVER}?sslmode=verify-full&sslrootcert={CERTIFICATE}"
+        "{SERVER}?sslmode=verify-full&sslrootcert={certificate}"
     ))
     .await
     else {

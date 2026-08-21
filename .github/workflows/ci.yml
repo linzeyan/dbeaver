@@ -65,8 +65,14 @@ jobs:
           # unedited. `make db-seed` takes a minute or so for the million rows
           # the estimate test checks for, which is the cost of testing against
           # real PostgreSQL rather than a stub that agrees with us.
+          #
+          # `db-up-pgtls` is a second PostgreSQL, refusing plaintext and serving
+          # a certificate that names a host nothing connects to. Both halves are
+          # load bearing — without the first, "it connected" says nothing about
+          # TLS, and without the second `verify-ca` and `verify-full` cannot be
+          # told apart — which is why it cannot be the container above.
           - name: PostgreSQL
-            up: db-seed db-up-compatible
+            up: db-seed db-up-compatible db-up-pgtls
             test: test-postgres
           - name: MySQL
             up: db-up-mysql db-up-tidb db-up-starrocks
