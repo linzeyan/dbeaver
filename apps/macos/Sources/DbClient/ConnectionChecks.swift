@@ -36,6 +36,7 @@ enum ConnectionChecks {
         checkWriteRefusal()
         checkSslParameters()
         checkSslSurvivesTheFile()
+        checkFoldersGroupTheList()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -745,6 +746,73 @@ enum ConnectionChecks {
         expect(
             decoded?.toSavedConnection().settings.sslRootCert, "",
             "and names no certificate")
+    }
+
+    /// A folder is a path on the entry, tidied on the way in and on the way out,
+    /// and the list hands the connections over grouped by it.
+    ///
+    /// The tidying is the half that would be found by a user rather than by this:
+    /// the file is meant to be hand-edited, so `"/clients/"` and `"clients"` will
+    /// both appear in one, and a sidebar that drew two folders would be reporting
+    /// its own parsing back as their mistake.
+    private static func checkFoldersGroupTheList() {
+        func made(_ name: String, folder: String) -> SavedConnection {
+            SavedConnection(
+                name: name, folder: folder,
+                settings: ConnectionSettings(
+                    scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                    user: "ana"))
+        }
+
+        expect(made("a", folder: "/clients//acme/ ").folderPath, "clients/acme", "a path is tidied")
+        expect(made("b", folder: "clients / acme").folderPath, "clients/acme", "spaces and all")
+        expect(made("c", folder: "").folderPath, "", "and the top level stays empty")
+
+        let list = ConnectionList([
+            made("acme", folder: "clients/acme"),
+            made("loose", folder: ""),
+            made("bink", folder: "clients/bink"),
+            made("second acme", folder: "/clients/acme")
+        ])
+        let groups = list.grouped("")
+        expect(
+            groups.map(\.path), ["", "clients/acme", "clients/bink"],
+            "the top level comes first and the folders sort by path")
+        expect(
+            groups[1].connections.map(\.name), ["acme", "second acme"],
+            "two spellings of one folder are one folder, in the file's own order")
+        expect(groups[1].name, "acme", "and a header reads the folder's own name")
+        expect(
+            list.folders, ["clients/acme", "clients/bink"],
+            "the folders that exist are the ones something is in")
+
+        // A folder the filter empties is gone rather than left as a header over
+        // nothing, which would say the folder is empty when what happened is that
+        // the search did not match.
+        expect(
+            list.grouped("loose").map(\.path), [""],
+            "a folder nothing matched is not drawn")
+
+        // The file's round trip, which is where a key that is written but not read
+        // would be lost without anything saying so.
+        let back = SavedConnection.Raw(from: made("d", folder: " /clients/acme "))
+            .toSavedConnection()
+        expect(back.folder, "clients/acme", "the folder survives the file, tidied")
+
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(
+            decoded?.toSavedConnection().folder, "",
+            "an entry written before folders existed is at the top level")
+
+        // Moving a connection is an unsaved edit, named, or Save is a button
+        // somebody presses and nothing happens.
+        var moved = made("e", folder: "clients/acme")
+        let original = moved
+        moved.folder = "internal"
+        expect(
+            original.unsavedEdits(against: moved, passwordChanged: false)?.fields, ["Folder"],
+            "moving a connection to another folder is an unsaved edit")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

@@ -106,18 +106,49 @@ struct SavedConnection: Identifiable, Equatable, Codable {
 
     var settings: ConnectionSettings
 
+    /// Which folder the sidebar draws this under, as a path: `"clients/acme"`,
+    /// or `""` for the top level.
+    ///
+    /// On the entry rather than in a tree document beside the list. This file is
+    /// meant to be carried between machines and edited by hand, and a second
+    /// structure naming connections by id is one somebody's edit can put out of
+    /// step with the list it describes — a folder holding an id that is not there,
+    /// or a connection in no folder at all. A path on the entry cannot disagree
+    /// with anything.
+    ///
+    /// A string and not a `[String]`, for the same reason: `"clients/acme"` is
+    /// what somebody would type, and a list of segments in JSON is a shape that
+    /// invites a stray empty one.
+    var folder: String
+
     init(
         id: UUID = UUID(), name: String = "", color: ConnectionColor = .none,
-        isReadOnly: Bool = false, isProduction: Bool = false, server: String = "",
-        settings: ConnectionSettings
+        folder: String = "", isReadOnly: Bool = false, isProduction: Bool = false,
+        server: String = "", settings: ConnectionSettings
     ) {
         self.id = id
         self.name = name
         self.color = color
+        self.folder = folder
         self.isReadOnly = isReadOnly
         self.isProduction = isProduction
         self.server = server
         self.settings = settings
+    }
+
+    /// The folder path with the noise taken out: no leading or trailing slash, no
+    /// empty segments, no stray spaces around a name.
+    ///
+    /// Everything reads this rather than `folder`, because `folder` is whatever a
+    /// person typed or a file held. `"/clients//acme/"` and `"clients / acme"` are
+    /// both somebody asking for the same folder, and a sidebar that drew three of
+    /// them would be reporting its own parsing back as the user's mistake.
+    var folderPath: String {
+        folder
+            .split(separator: "/")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "/")
     }
 
     /// What a list row calls this connection.
@@ -212,6 +243,17 @@ struct SavedConnection: Identifiable, Equatable, Codable {
     struct Raw: Codable {
         var color: String
         var database: String
+        /// The folder path, or `""` for the top level.
+        ///
+        /// No version bump goes with this key, and that is a decision rather than
+        /// an oversight. The version is bumped when an entry stops meaning what it
+        /// used to, and an entry written before this key existed means exactly
+        /// what it means now: a connection at the top level. Bumping would be
+        /// worse than useless — a document numbered higher than a build knows
+        /// about is read as no connections at all, so it would empty the sidebar
+        /// of every copy of this application that has not been updated, over a
+        /// field those copies would be right to ignore.
+        var folder: String
         var host: String
         var id: String
         var name: String
@@ -237,13 +279,14 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         var user: String
 
         init(
-            color: String, database: String, host: String, id: String, name: String, path: String,
-            port: String, production: Bool = false, readOnly: Bool = false, scheme: String,
-            server: String = "", sslMode: String = "prefer", sslRootCert: String = "",
-            user: String
+            color: String, database: String, folder: String = "", host: String, id: String,
+            name: String, path: String, port: String, production: Bool = false,
+            readOnly: Bool = false, scheme: String, server: String = "",
+            sslMode: String = "prefer", sslRootCert: String = "", user: String
         ) {
             self.color = color
             self.database = database
+            self.folder = folder
             self.host = host
             self.id = id
             self.name = name
@@ -259,6 +302,10 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         }
 
         init(from connection: SavedConnection) {
+            // Written back tidied rather than as typed, so that a file this
+            // application has saved holds one spelling of a folder. What somebody
+            // hand-edits into it is still read the way they meant it.
+            self.folder = connection.folderPath
             self.color = connection.color.rawValue
             self.database = connection.settings.database
             self.host = connection.settings.host
@@ -306,6 +353,10 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             // it in, and until then the row says only where it points.
             self.server = try container.decodeIfPresent(String.self, forKey: .server) ?? ""
 
+            // The top level, for an entry written before folders existed, which
+            // is where those entries have always been drawn.
+            self.folder = try container.decodeIfPresent(String.self, forKey: .folder) ?? ""
+
             // `prefer` for an entry written before this key existed, which is
             // what that entry has been connecting with all along: it is the
             // driver's own default, so reading it this way changes nothing about
@@ -322,8 +373,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case color, database, host, id, name, path, port, production, readOnly, scheme, server,
-                sslMode, sslRootCert, user
+            case color, database, folder, host, id, name, path, port, production, readOnly, scheme,
+                server, sslMode, sslRootCert, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -344,8 +395,9 @@ struct SavedConnection: Identifiable, Equatable, Codable {
                 sslRootCert: self.sslRootCert
             )
             return SavedConnection(
-                id: id, name: self.name, color: color, isReadOnly: self.readOnly,
-                isProduction: self.production, server: self.server, settings: settings)
+                id: id, name: self.name, color: color, folder: self.folder,
+                isReadOnly: self.readOnly, isProduction: self.production, server: self.server,
+                settings: settings)
         }
     }
 }
@@ -474,6 +526,10 @@ extension SavedConnection {
 
         if self.settings.path != draft.settings.path {
             changedFields.append("File")
+        }
+
+        if self.folderPath != draft.folderPath {
+            changedFields.append("Folder")
         }
 
         if self.settings.sslMode != draft.settings.sslMode {
