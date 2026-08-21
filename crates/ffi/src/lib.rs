@@ -128,7 +128,12 @@ pub unsafe extern "C" fn db_connect(
         }
     };
     let opened = runtime().block_on(async {
-        let attempt = registry::connect(s);
+        // Through `connect_through` even though there is no bastion to hand it
+        // yet. This is the one door every connection in the application goes
+        // through, so it has to be the door the tunnel is tested behind — a
+        // second entry point reached only by tests is a path that works only in
+        // tests.
+        let attempt = registry::connect_through(s, None);
         if timeout_secs == 0 {
             return attempt.await;
         }
@@ -145,7 +150,12 @@ pub unsafe extern "C" fn db_connect(
         }
     });
     match opened {
-        Ok(driver) => {
+        // The forward is dropped here, which is right only because `None` was
+        // asked for above and so there is never one to drop. The day a bastion
+        // reaches this call, the handle has to grow somewhere to keep the
+        // tunnel alive or it will close under the connection that just opened
+        // through it.
+        Ok((driver, _)) => {
             let driver: Arc<dyn Driver> = Arc::from(driver);
             let scheme = registry::scheme_of(s);
             let names = Names::new(driver.clone(), dbsql::for_scheme(scheme));

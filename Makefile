@@ -427,6 +427,7 @@ test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
 .PHONY: test-tunnel
 test-tunnel: db-up-ssh db-up ## Run the SSH tunnel tests against that container
 	cargo test -p dbtunnel -- --include-ignored
+	cargo test -p dbffi --lib -- --include-ignored registry::tests
 
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container

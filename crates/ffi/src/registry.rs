@@ -12,6 +12,7 @@
 //! discover its own drivers at startup.
 
 use dbconn::{DbError, Driver};
+use dbtunnel::{Tunnel, TunnelConfig};
 use driver_athena::AthenaSource;
 use driver_bigquery::BigQuerySource;
 use driver_cassandra::CassandraSource;
@@ -28,6 +29,7 @@ use driver_snowflake::SnowflakeSource;
 use driver_sqlite::SqliteSource;
 use driver_trino::TrinoSource;
 use serde::Serialize;
+use url::Url;
 
 /// What a connection to this kind of database is made of.
 ///
@@ -240,6 +242,84 @@ pub fn scheme_of(url: &str) -> &str {
     url.split_once("://").map_or("", |(scheme, _)| scheme)
 }
 
+/// Where a connection string points, for a tunnel to forward to.
+///
+/// The port is the one written down, or the driver's own default when none is —
+/// read from the same table the connection form offers it from, so a string
+/// that omits the port tunnels to the place it would otherwise have dialled.
+///
+/// A file is refused rather than quietly tunnelled to nothing. SQLite and
+/// DuckDB open a path on this machine; there is no host on the far side for a
+/// forward to end at, and a tunnel that appeared to work would be one that
+/// opened a different database than the one asked for.
+fn target_of(url: &str) -> Result<(String, u16), DbError> {
+    let scheme = scheme_of(url);
+    let Some(entry) = CATALOG.iter().find(|d| d.scheme == scheme) else {
+        return Err(DbError::new(format!(
+            "no driver for {scheme}://. This build has: {}",
+            known()
+        )));
+    };
+    if matches!(entry.shape, Shape::File) {
+        return Err(DbError::new(format!(
+            "a tunnel forwards to a server, and {} opens a file on this machine",
+            entry.label
+        )));
+    }
+    // Deliberately without the string in any of these, as everywhere else in
+    // this module: a connection string holds a password.
+    let parsed = Url::parse(url)
+        .map_err(|_| DbError::new("that connection string is not a URL a tunnel can read"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| DbError::new("that connection string names no host to forward to"))?;
+    let port = parsed.port().or(entry.default_port).ok_or_else(|| {
+        DbError::new(format!(
+            "{} has no default port, so one has to be written down",
+            entry.label
+        ))
+    })?;
+    Ok((host.to_owned(), port))
+}
+
+/// Opens whichever database `url` names, through `bastion` when there is one.
+///
+/// The tunnel comes back beside the driver rather than being kept inside it.
+/// The forward is what the driver is talking through, so it has to outlive the
+/// connection — and the only thing that knows when a connection is finished is
+/// whatever is holding it.
+pub async fn connect_through(
+    url: &str,
+    bastion: Option<TunnelConfig>,
+) -> Result<(Box<dyn Driver>, Option<Tunnel>), DbError> {
+    let Some(bastion) = bastion else {
+        return Ok((connect(url).await?, None));
+    };
+    let (host, port) = target_of(url)?;
+    let tunnel = Tunnel::open(bastion, &host, port)
+        .await
+        .map_err(|error| DbError::new(error.to_string()))?;
+
+    // Rewritten rather than handed to the driver as an extra argument. Fifteen
+    // drivers each take an address out of a string, and a tunnel every one of
+    // them had to know about would be a tunnel in fifteen places — which is the
+    // shape this whole item exists to avoid.
+    let local = tunnel.local_addr();
+    let mut dialled = Url::parse(url)
+        .map_err(|_| DbError::new("that connection string is not a URL a tunnel can read"))?;
+    // `_` rather than `()` in both: these two answer with different error types
+    // — `set_host` reports a parse failure and `set_port` reports only that it
+    // refused — and neither shape adds anything to a message that is already
+    // about the string this could not rewrite.
+    dialled
+        .set_host(Some(&local.ip().to_string()))
+        .map_err(|_| DbError::new("that connection string will not take a different host"))?;
+    dialled
+        .set_port(Some(local.port()))
+        .map_err(|_| DbError::new("that connection string will not take a different port"))?;
+    Ok((connect(dialled.as_str()).await?, Some(tunnel)))
+}
+
 /// Opens whichever database `url` names.
 pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
     let Some((scheme, rest)) = url.split_once("://").filter(|(s, _)| !s.is_empty()) else {
@@ -356,6 +436,99 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    /// Where `make db-up-ssh` wrote the fixture's host keys.
+    ///
+    /// Read from the environment first, with a compile-time fallback, for the
+    /// same reason `PGTLS_CA` is: `CARGO_MANIFEST_DIR` is baked into the test
+    /// binary when it is built, so a workspace sharing one `target/` between
+    /// git worktrees hands back a cached binary naming the worktree it was
+    /// compiled in — which may since have been removed.
+    fn known_hosts() -> PathBuf {
+        std::env::var("SSH_KNOWN_HOSTS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../target/ssh/known_hosts"
+                ))
+            })
+    }
+
+    fn bastion() -> TunnelConfig {
+        TunnelConfig {
+            host: "127.0.0.1".into(),
+            port: 52222,
+            user: "bench".into(),
+            password: "bench".into(),
+            known_hosts: known_hosts(),
+        }
+    }
+
+    /// A real driver opening a real database through the bastion.
+    ///
+    /// `crates/tunnel`'s own tests prove bytes cross the forward. This proves
+    /// the thing above it: that the local end of that forward reaches the
+    /// connection string, and that PostgreSQL's driver then opens on it without
+    /// being told any of this happened. `pg` is the compose service name, which
+    /// resolves inside the compose network and nowhere else — so a connection
+    /// that succeeds here cannot have gone any other way.
+    #[tokio::test]
+    #[ignore = "requires the SSH server and the benchmark database (make db-up-ssh db-up)"]
+    async fn a_driver_opens_on_a_host_only_the_bastion_can_reach() {
+        // No port written down, on purpose. It is the shape somebody actually
+        // types, and it is the only way `target_of`'s fallback to the driver's
+        // own default port is ever reached: spelled `pg:5432`, this test would
+        // pass against a tunnel that forwarded to the wrong port for every
+        // string that omits one.
+        let opened = connect_through("postgres://bench:bench@pg/bench", Some(bastion())).await;
+        let Ok((driver, tunnel)) = opened else {
+            panic!("the connection did not open through the tunnel");
+        };
+
+        // Held for the length of the test on purpose: dropping it closes the
+        // forward, and a driver still talking through a closed forward is the
+        // failure the return type exists to make hard to write.
+        let tunnel = tunnel.expect("a tunnel was asked for, so one comes back");
+        assert_eq!(tunnel.local_addr().ip().to_string(), "127.0.0.1");
+
+        let schemas = driver.schemas().await.expect("the connection answers");
+        assert!(
+            schemas.iter().any(|s| s.name == "public"),
+            "expected the benchmark database's schemas, got {schemas:?}"
+        );
+    }
+
+    /// The other half of the contract: without a bastion nothing changes, and
+    /// every connection this application makes goes through here now.
+    #[tokio::test]
+    #[ignore = "requires the benchmark database (make db-up)"]
+    async fn without_a_bastion_the_string_is_dialled_as_written() {
+        let opened = connect_through("postgres://bench:bench@127.0.0.1:55432/bench", None).await;
+        let Ok((driver, tunnel)) = opened else {
+            panic!("the connection did not open directly");
+        };
+        assert!(tunnel.is_none(), "nothing was asked to be tunnelled");
+        driver.schemas().await.expect("the connection answers");
+    }
+
+    /// Needs no server: the refusal happens before anything is dialled.
+    ///
+    /// A file has no far side for a forward to end at, so a tunnel that
+    /// appeared to work here would have opened a different database than the
+    /// one asked for — on this machine rather than the other one.
+    #[tokio::test]
+    async fn a_file_database_cannot_be_tunnelled_to() {
+        let error = connect_through("sqlite:///tmp/nowhere.db", Some(bastion()))
+            .await
+            .err()
+            .expect("a file is refused");
+        assert!(
+            error.to_string().contains("opens a file"),
+            "expected the refusal to say why, got {error}"
+        );
+    }
 
     /// The failure `url` produces, insisting there is one.
     ///
