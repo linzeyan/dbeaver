@@ -37,6 +37,7 @@ enum ConnectionChecks {
         checkSslParameters()
         checkSslSurvivesTheFile()
         checkFoldersGroupTheList()
+        checkAnEntryWithoutTheKeyStillSavesItsPassword()
         if failures == 0 {
             fputs("connection: all checks passed\n", stderr)
         } else {
@@ -755,6 +756,47 @@ enum ConnectionChecks {
     /// the file is meant to be hand-edited, so `"/clients/"` and `"clients"` will
     /// both appear in one, and a sidebar that drew two folders would be reporting
     /// its own parsing back as their mistake.
+    /// The absent key reads as `true`, and that is the whole of this check.
+    ///
+    /// Every entry in every existing `connections.json` is missing this key, so
+    /// the default is not a detail of the format — it is what happens to
+    /// everybody who updates. Read as `false` it would quietly stop using
+    /// passwords those people had stored, and they would find out one connection
+    /// at a time.
+    private static func checkAnEntryWithoutTheKeyStillSavesItsPassword() {
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(decoded?.savesPassword ?? false, true, "an entry from before the key still saves")
+
+        let declined = #"""
+            {"scheme":"postgres","host":"h","port":"1","database":"d","user":"u",
+             "savesPassword":false}
+            """#
+        let off = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(declined.utf8))
+        expect(off?.savesPassword ?? true, false, "and one that declined is honoured")
+
+        // Out and back, because the flag is only worth anything if it survives
+        // the trip a saved file makes: written by `Raw(from:)` and read by
+        // `toSavedConnection()`, with a mistake in either one silently restoring
+        // the default.
+        let kept = SavedConnection(
+            name: "No secrets", savesPassword: false,
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                user: "ana"))
+        let round = SavedConnection.Raw(from: kept).toSavedConnection()
+        expect(round.savesPassword, false, "and survives being written out and read back")
+
+        // An edit to it is an edit, so Save has something to do and the row is
+        // marked. A flag that changed without saying so would be a decision about
+        // a secret that nobody was told had been made.
+        var draft = kept
+        draft.savesPassword = true
+        expect(
+            kept.unsavedEdits(against: draft, passwordChanged: false) != nil, true,
+            "and changing it is an unsaved edit")
+    }
+
     private static func checkFoldersGroupTheList() {
         func made(_ name: String, folder: String) -> SavedConnection {
             SavedConnection(

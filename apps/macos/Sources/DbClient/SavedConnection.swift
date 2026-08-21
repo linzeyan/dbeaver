@@ -121,15 +121,29 @@ struct SavedConnection: Identifiable, Equatable, Codable {
     /// invites a stray empty one.
     var folder: String
 
+    /// Whether this connection's password may be written to the Keychain.
+    ///
+    /// A veto and never a grant. The preference decides whether this application
+    /// stores passwords at all; this decides whether *this* connection is one of
+    /// the ones it stores. Both have to agree before anything is written, which
+    /// is the only arrangement where turning the preference off means what it
+    /// says.
+    ///
+    /// True by default, which is what every entry written before this key existed
+    /// meant: the preference was the only answer and this one did not contradict
+    /// it.
+    var savesPassword: Bool
+
     init(
         id: UUID = UUID(), name: String = "", color: ConnectionColor = .none,
-        folder: String = "", isReadOnly: Bool = false, isProduction: Bool = false,
-        server: String = "", settings: ConnectionSettings
+        folder: String = "", savesPassword: Bool = true, isReadOnly: Bool = false,
+        isProduction: Bool = false, server: String = "", settings: ConnectionSettings
     ) {
         self.id = id
         self.name = name
         self.color = color
         self.folder = folder
+        self.savesPassword = savesPassword
         self.isReadOnly = isReadOnly
         self.isProduction = isProduction
         self.server = server
@@ -254,6 +268,15 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         /// of every copy of this application that has not been updated, over a
         /// field those copies would be right to ignore.
         var folder: String
+        /// Whether this entry's password may be kept in the Keychain.
+        ///
+        /// No version bump, for the reason the folder key carries none: an entry
+        /// written before this existed means exactly what it means now. Absent
+        /// reads as `true`, which is what those entries have always done — and it
+        /// is the one direction that is safe to be wrong in here, because the
+        /// preference above it is off by default and nothing is written until
+        /// somebody turns it on.
+        var savesPassword: Bool
         var host: String
         var id: String
         var name: String
@@ -279,14 +302,15 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         var user: String
 
         init(
-            color: String, database: String, folder: String = "", host: String, id: String,
-            name: String, path: String, port: String, production: Bool = false,
-            readOnly: Bool = false, scheme: String, server: String = "",
+            color: String, database: String, folder: String = "", savesPassword: Bool = true,
+            host: String, id: String, name: String, path: String, port: String,
+            production: Bool = false, readOnly: Bool = false, scheme: String, server: String = "",
             sslMode: String = "prefer", sslRootCert: String = "", user: String
         ) {
             self.color = color
             self.database = database
             self.folder = folder
+            self.savesPassword = savesPassword
             self.host = host
             self.id = id
             self.name = name
@@ -315,6 +339,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.port = connection.settings.port
             self.production = connection.isProduction
             self.readOnly = connection.isReadOnly
+            self.savesPassword = connection.savesPassword
             self.scheme = connection.settings.scheme
             self.server = connection.server
             self.sslMode = connection.settings.sslMode.rawValue
@@ -357,6 +382,14 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             // is where those entries have always been drawn.
             self.folder = try container.decodeIfPresent(String.self, forKey: .folder) ?? ""
 
+            // True for an entry written before this key existed. Reading it as
+            // false would be this application deciding, on somebody's behalf and
+            // without asking, that a password they had stored should stop being
+            // used — and the first they would hear of it is a connection that
+            // asked them to type it again.
+            self.savesPassword =
+                try container.decodeIfPresent(Bool.self, forKey: .savesPassword) ?? true
+
             // `prefer` for an entry written before this key existed, which is
             // what that entry has been connecting with all along: it is the
             // driver's own default, so reading it this way changes nothing about
@@ -373,8 +406,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         }
 
         private enum CodingKeys: String, CodingKey {
-            case color, database, folder, host, id, name, path, port, production, readOnly, scheme,
-                server, sslMode, sslRootCert, user
+            case color, database, folder, savesPassword, host, id, name, path, port, production,
+                readOnly, scheme, server, sslMode, sslRootCert, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -396,7 +429,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             )
             return SavedConnection(
                 id: id, name: self.name, color: color, folder: self.folder,
-                isReadOnly: self.readOnly, isProduction: self.production, server: self.server,
+                savesPassword: self.savesPassword, isReadOnly: self.readOnly,
+                isProduction: self.production, server: self.server,
                 settings: settings)
         }
     }
@@ -530,6 +564,10 @@ extension SavedConnection {
 
         if self.folderPath != draft.folderPath {
             changedFields.append("Folder")
+        }
+
+        if self.savesPassword != draft.savesPassword {
+            changedFields.append("Password storage")
         }
 
         if self.settings.sslMode != draft.settings.sslMode {
