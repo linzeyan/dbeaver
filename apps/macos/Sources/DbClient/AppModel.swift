@@ -1122,22 +1122,35 @@ final class AppModel {
     private func deferPassword(of id: UUID) {
         connectionPassword = ""
         savedConnectionPassword = ""
-        // An entry that declined the Keychain is answered from memory instead,
-        // and filled in rather than deferred: there is no panel to raise and
-        // nothing to authorise, so making somebody press Connect before the
-        // field showed what this process already knows would only make the form
-        // look emptier than it is.
+        // An entry that declined storage is answered from memory instead, and
+        // filled in rather than deferred: there is no panel to raise and nothing
+        // to authorise, so making somebody press Connect before the field showed
+        // what this process already knows would only make the form look emptier
+        // than it is.
         if connections.connection(id)?.savesPassword == false {
             connectionPassword = SessionPasswords.password(for: id) ?? ""
             savedConnectionPassword = connectionPassword
             deferredPassword = nil
             return
         }
-        // Nothing is asked of the Keychain at all while the setting is off — not
-        // even whether an item exists — so that a window opened by somebody who
-        // declined this feature touches no secret of theirs in any way.
-        deferredPassword =
-            preferences.remembersPasswords && ConnectionKeychain.hasPassword(for: id) ? id : nil
+        switch preferences.passwordStorage {
+        case .never:
+            // Nothing is read and nothing is asked — not even whether an item
+            // exists — so that a window opened by somebody who declined this
+            // touches no secret of theirs in any way.
+            deferredPassword = nil
+        case .thisMac:
+            // Filled in, for the same reason the session store above is: opening
+            // the file raises no panel and authorises nothing, so there is
+            // nothing to wait until Connect for.
+            connectionPassword = CredentialFile.shared.password(for: id) ?? ""
+            savedConnectionPassword = connectionPassword
+            deferredPassword = nil
+        case .keychain:
+            // Deferred, because this is the answer that asks. Clicking a row is
+            // looking, not connecting, and looking must not raise a panel.
+            deferredPassword = ConnectionKeychain.hasPassword(for: id) ? id : nil
+        }
     }
 
     /// Reads the deferred password, if there is one.
@@ -1189,18 +1202,40 @@ final class AppModel {
         // deletion would be silent and total.
         if !connectionDraft.savesPassword {
             // Off means off for what is already stored, not only for what is
-            // being typed now. Leaving the old item behind would have the file
-            // saying this password is not kept while the Keychain still held it,
-            // and the entry somebody turned the flag off *for* is exactly the one
-            // with a password already in there.
+            // being typed now. Leaving the old copy behind would have the file
+            // saying this password is not kept while a store still held it, and
+            // the entry somebody turned the flag off *for* is exactly the one
+            // with a password already in there. Both stores, because the setting
+            // may have been the other one when it was written.
             ConnectionKeychain.delete(for: connectionDraft.id)
+            CredentialFile.shared.delete(for: connectionDraft.id)
             SessionPasswords.remember(connectionPassword, for: connectionDraft.id)
             deferredPassword = nil
-        } else if preferences.remembersPasswords,
-            !hasUnreadPassword || !connectionPassword.isEmpty
-        {
-            ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
-            deferredPassword = nil
+        } else {
+            switch preferences.passwordStorage {
+            case .never:
+                break
+            case .thisMac:
+                // The Keychain copy goes, for the reason above: one password, one
+                // place. An empty field deletes rather than stores, which is what
+                // `CredentialFile.save` does with it — and unlike the Keychain
+                // branch there is no unread state to protect, because this answer
+                // fills the field in as soon as the row is clicked.
+                ConnectionKeychain.delete(for: connectionDraft.id)
+                CredentialFile.shared.save(connectionPassword, for: connectionDraft.id)
+                deferredPassword = nil
+            case .keychain:
+                CredentialFile.shared.delete(for: connectionDraft.id)
+                // A password left unread is left alone: writing the empty field
+                // over it would delete somebody's stored password because they
+                // saved a change to the port, and `ConnectionKeychain.save`
+                // treats empty as "store nothing", so the deletion would be
+                // silent and total.
+                if !hasUnreadPassword || !connectionPassword.isEmpty {
+                    ConnectionKeychain.save(connectionPassword, for: connectionDraft.id)
+                }
+                deferredPassword = nil
+            }
         }
         // Assigned either way, including when nothing was written. Save has done
         // everything it is going to do, and leaving this behind would have the
@@ -1234,6 +1269,7 @@ final class AppModel {
         connections.remove(saved.id)
         ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
         ConnectionKeychain.delete(for: saved.id)
+        CredentialFile.shared.delete(for: saved.id)
         SessionPasswords.forget(saved.id)
         connectionDraft = quickConnectDraft
         connectionPassword = quickConnectPassword

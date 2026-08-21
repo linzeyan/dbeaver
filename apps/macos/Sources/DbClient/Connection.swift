@@ -352,6 +352,35 @@ enum ConnectionStorage: String, CaseIterable, Identifiable {
     }
 }
 
+/// Where a saved connection's password is kept, as the Settings window offers it.
+///
+/// Three answers, and the middle one is why this is no longer a switch. "On this
+/// Mac" is a file under `$XDG_CONFIG_HOME/dbclient`, encrypted with a key
+/// derived from this machine and this account — see `CredentialFile` for what
+/// that does and does not protect. "In the login Keychain" is the system's own
+/// store and the strongest answer available, at the cost of an authorisation
+/// panel this build cannot avoid.
+///
+/// The default asks every time. Writing somebody's database password down is a
+/// decision about their credentials rather than about their convenience, and
+/// neither place to write it is one to choose on their behalf before they have
+/// seen the setting.
+enum PasswordStorage: String, CaseIterable, Identifiable {
+    case never
+    case thisMac
+    case keychain
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .never: return "Ask every time"
+        case .thisMac: return "On this Mac"
+        case .keychain: return "In the login Keychain"
+        }
+    }
+}
+
 /// The two directories the remembered connection can be written to.
 ///
 /// A value rather than two functions, so the checks can hand in a scratch pair:

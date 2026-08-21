@@ -89,20 +89,15 @@ final class Preferences {
         didSet { store.set(connectionStorage.rawValue, forKey: Key.connectionStorage) }
     }
 
-    /// Whether database passwords are kept in the login Keychain.
+    /// Where a saved connection's password is kept, or that it is not kept.
     ///
-    /// Off. Reading a stored secret makes macOS ask the user to authorise it,
-    /// and this build is signed ad-hoc — the signature changes on every rebuild,
-    /// so the system treats each build as a different application and "Always
-    /// Allow" never holds. Until the app is signed with a stable identity that
-    /// panel is the ordinary experience rather than the exception, and that is
-    /// not a thing to turn on for somebody without asking.
-    ///
-    /// Off means nothing is written either. A switch that stopped reading but
-    /// kept storing would leave secrets on disk for a feature its owner had
-    /// declined.
-    var remembersPasswords: Bool {
-        didSet { store.set(remembersPasswords, forKey: Key.remembersPasswords) }
+    /// Asks every time on a fresh installation, for the reason `PasswordStorage`
+    /// gives. Whichever of the other two is chosen, the one not chosen is
+    /// cleared when a connection is saved: two stores holding one password are
+    /// two to forget when somebody stops wanting it kept, and the stale one is
+    /// always the one nobody looks at.
+    var passwordStorage: PasswordStorage {
+        didSet { store.set(passwordStorage.rawValue, forKey: Key.passwordStorage) }
     }
 
     /// What a fresh installation does. The only statement of these values.
@@ -110,7 +105,7 @@ final class Preferences {
         Key.hidesEmptyColumns: false,
         Key.confirmsDeletions: true,
         Key.insertsRowOfDefaults: false,
-        Key.remembersPasswords: false,
+        Key.passwordStorage: PasswordStorage.never.rawValue,
         Key.usesTranslucentSidebar: false,
         Key.connectionStorage: ConnectionStorage.thisMac.rawValue
     ]
@@ -121,7 +116,7 @@ final class Preferences {
         static let insertsRowOfDefaults = "dev.dbclient.insertsRowOfDefaults"
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
         static let connectionStorage = "dev.dbclient.connectionStorage"
-        static let remembersPasswords = "dev.dbclient.remembersPasswords"
+        static let passwordStorage = "dev.dbclient.passwordStorage"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -152,7 +147,11 @@ final class Preferences {
         confirmsDeletions = store.bool(forKey: Key.confirmsDeletions)
         insertsRowOfDefaults = store.bool(forKey: Key.insertsRowOfDefaults)
         usesTranslucentSidebar = store.bool(forKey: Key.usesTranslucentSidebar)
-        remembersPasswords = store.bool(forKey: Key.remembersPasswords)
+        // An unrecognised value reads as "ask every time" rather than as a
+        // crash, which is what a plist edited by hand or written by a later
+        // version offering a fourth place would otherwise be.
+        passwordStorage =
+            PasswordStorage(rawValue: store.string(forKey: Key.passwordStorage) ?? "") ?? .never
         connectionStorage = Self.connectionStorage(in: store)
     }
 }
