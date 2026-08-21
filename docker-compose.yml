@@ -1,0 +1,289 @@
+# Every server the tests run against, in one place.
+#
+# These were fourteen hand-written `docker run` lines in the Makefile, plus an
+# SSH server that was not written down anywhere at all. The arguments are the
+# same ones; what is new is that each container now has a budget. Left to themselves they size their caches and heaps from the host, and
+# on a 16GB machine an idle Cassandra had taken 8.6GB of it — so bringing up two
+# or three servers to run one test suite could put the machine into swap and get
+# something unrelated killed.
+#
+# Names are pinned with `container_name` so that the readiness checks and the
+# `docker exec` lines in the Makefile keep working unchanged: a service here is
+# the same container it has always been, started a different way.
+#
+# Every service is behind a profile of its own name, which means a bare
+# `docker compose up -d` starts nothing. That is deliberate. There is no case
+# for running all fifteen at once, and the default gesture should not be the
+# one that exhausts the machine.
+#
+#   docker compose up -d pg                 # or, preferably, `make db-up`
+#   docker compose --profile "*" ps         # what is running
+#   docker compose --profile "*" down       # or `make db-down-all`
+#
+# The `--profile "*"` on the last two is not decoration: the profile filter
+# applies to every subcommand, so a plain `docker compose down` here selects
+# nothing, removes nothing and exits 0.
+#
+# Prefer the `make db-up-*` targets: they wait for the server to answer, which
+# `up -d` does not, and a container that is running is not a database that is
+# ready.
+
+# Containers here are started, used for an afternoon and thrown away, and none
+# of them is the reason anybody is at the machine. Uncapped json-file logging
+# has no ceiling at all, so a server left running over a weekend in a retry loop
+# can quietly fill the disk. Thirty megabytes each is more scrollback than any
+# of these failures needs.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # The benchmark database, and the one every app-level target connects to. The
+  # server settings are tuned for throughput measurement rather than durability
+  # — `fsync=off` in particular — because what is being measured is this client,
+  # and a fixture that can be rebuilt by `make db-seed` has nothing to lose.
+  #
+  # `shared_buffers=2GB` is why the budget is 3GB: a limit under what the server
+  # was told to reserve is a limit that kills it on the first large scan.
+  pg:
+    image: ${PG_IMAGE}
+    container_name: ${PG_CONTAINER}
+    profiles: [pg]
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    command:
+      - -c
+      - shared_buffers=2GB
+      - -c
+      - work_mem=256MB
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - fsync=off
+    ports:
+      - "${PG_PORT}:5432"
+    mem_limit: 3g
+    cpus: 4
+    logging: *logging
+
+  # PostgreSQL with TLS on and plaintext refused.
+  #
+  # The key has to be 0600 and owned by the server's own user, and a bind mount
+  # from this Mac is neither — so the certificates are copied in at start rather
+  # than mounted into place, which also keeps a running container on the
+  # certificate it was started with. `make db-up-pgtls` generates them first;
+  # started by hand without that step, this service will not find /certs.
+  pgtls:
+    image: ${PG_IMAGE}
+    container_name: ${PGTLS_CONTAINER}
+    profiles: [pgtls]
+    environment:
+      POSTGRES_USER: bench
+      POSTGRES_PASSWORD: bench
+      POSTGRES_DB: bench
+    volumes:
+      - ./target/pgtls:/certs:ro
+    command:
+      - bash
+      - -c
+      - >-
+        install -o postgres -g postgres -m 600 /certs/server.key /tmp/server.key
+        && install -o postgres -g postgres -m 644 /certs/server.crt /tmp/server.crt
+        && install -o postgres -g postgres -m 644 /certs/pg_hba.conf /tmp/pg_hba.conf
+        && exec docker-entrypoint.sh postgres -c ssl=on
+        -c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key
+        -c hba_file=/tmp/pg_hba.conf
+    ports:
+      - "${PGTLS_PORT}:5432"
+    mem_limit: 512m
+    cpus: 1
+    logging: *logging
+
+  mongo:
+    image: ${MONGO_IMAGE}
+    container_name: ${MONGO_CONTAINER}
+    profiles: [mongo]
+    ports:
+      - "${MONGO_PORT}:27017"
+    mem_limit: 1g
+    cpus: 2
+    logging: *logging
+
+  redis:
+    image: ${REDIS_IMAGE}
+    container_name: ${REDIS_CONTAINER}
+    profiles: [redis]
+    ports:
+      - "${REDIS_PORT}:6379"
+    mem_limit: 512m
+    cpus: 1
+    logging: *logging
+
+  # The heap is set here rather than left to the image because Cassandra sizes
+  # it from what `free` reports, and inside a memory-limited container on Docker
+  # Desktop that is still the host's total. So it would compute a heap several
+  # times the size of its own cgroup and be killed reaching for it — the limit
+  # has to be told to the JVM as well as to the kernel.
+  cassandra:
+    image: ${CASSANDRA_IMAGE}
+    container_name: ${CASSANDRA_CONTAINER}
+    profiles: [cassandra]
+    environment:
+      MAX_HEAP_SIZE: 1G
+      HEAP_NEWSIZE: 200M
+    ports:
+      - "${CASSANDRA_PORT}:9042"
+    mem_limit: 2g
+    cpus: 2
+    logging: *logging
+
+  trino:
+    image: ${TRINO_IMAGE}
+    container_name: ${TRINO_CONTAINER}
+    profiles: [trino]
+    ports:
+      - "${TRINO_PORT}:8080"
+    mem_limit: 2g
+    cpus: 2
+    logging: *logging
+
+  flightsql:
+    image: ${FLIGHTSQL_IMAGE}
+    container_name: ${FLIGHTSQL_CONTAINER}
+    profiles: [flightsql]
+    environment:
+      FLIGHT_PASSWORD: ${FLIGHTSQL_PASSWORD}
+      TLS_ENABLED: "0"
+      DATABASE_BACKEND: duckdb
+    ports:
+      - "${FLIGHTSQL_PORT}:31337"
+    mem_limit: 1g
+    cpus: 2
+    logging: *logging
+
+  cockroach:
+    image: ${COCKROACH_IMAGE}
+    container_name: ${COCKROACH_CONTAINER}
+    profiles: [cockroach]
+    command: start-single-node --insecure
+    ports:
+      - "${COCKROACH_PORT}:26257"
+    mem_limit: 2g
+    cpus: 2
+    logging: *logging
+
+  greptime:
+    image: ${GREPTIME_IMAGE}
+    container_name: ${GREPTIME_CONTAINER}
+    profiles: [greptime]
+    command: >-
+      standalone start
+      --postgres-addr 0.0.0.0:4003
+      --rpc-bind-addr 0.0.0.0:4001
+      --http-addr 0.0.0.0:4000
+    ports:
+      - "${GREPTIME_PORT}:4003"
+    mem_limit: 1g
+    cpus: 2
+    logging: *logging
+
+  tidb:
+    image: ${TIDB_IMAGE}
+    container_name: ${TIDB_CONTAINER}
+    profiles: [tidb]
+    ports:
+      - "${TIDB_PORT}:4000"
+    mem_limit: 2g
+    cpus: 2
+    logging: *logging
+
+  # A frontend and a backend in one container, both of which want room. This is
+  # the largest budget here and it is still less than a third of what the image
+  # would take if nothing stopped it.
+  starrocks:
+    image: ${STARROCKS_IMAGE}
+    container_name: ${STARROCKS_CONTAINER}
+    profiles: [starrocks]
+    ports:
+      - "${STARROCKS_PORT}:9030"
+    mem_limit: 4g
+    cpus: 4
+    logging: *logging
+
+  mysql:
+    image: ${MYSQL_IMAGE}
+    container_name: ${MYSQL_CONTAINER}
+    profiles: [mysql]
+    environment:
+      MYSQL_ROOT_PASSWORD: test
+      MYSQL_DATABASE: test
+    ports:
+      - "${MYSQL_PORT}:3306"
+    mem_limit: 1g
+    cpus: 2
+    logging: *logging
+
+  # Emulated on Apple silicon, which is slow rather than large; the budget is
+  # generous because SQL Server refuses to start at all below 2GB and says so in
+  # a way that reads like a licensing error.
+  mssql:
+    image: ${MSSQL_IMAGE}
+    container_name: ${MSSQL_CONTAINER}
+    profiles: [mssql]
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: ${MSSQL_PASSWORD}
+      MSSQL_PID: Developer
+    ports:
+      - "${MSSQL_PORT}:1433"
+    mem_limit: 3g
+    cpus: 2
+    logging: *logging
+
+  clickhouse:
+    image: ${CLICKHOUSE_IMAGE}
+    container_name: ${CLICKHOUSE_CONTAINER}
+    profiles: [clickhouse]
+    environment:
+      CLICKHOUSE_PASSWORD: test
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    ports:
+      - "${CLICKHOUSE_PORT}:8123"
+      - "${CLICKHOUSE_NATIVE_PORT}:9000"
+    mem_limit: 2g
+    cpus: 2
+    logging: *logging
+
+  # The only server here that holds no data. It exists so that the tunnel
+  # support has something to tunnel through, and what it forwards to is the
+  # benchmark PostgreSQL above, reached the way any host would reach it.
+  #
+  # Password authentication on purpose: it is the first of the two auth methods
+  # to be supported, and a fixture that needed a key on disk would be a fixture
+  # that has to be generated before it can be used.
+  #
+  # The image ships `AllowTcpForwarding no`, which `make db-up-ssh` turns on —
+  # started by hand, this container will refuse the one thing it is for.
+  ssh:
+    image: ${SSH_IMAGE}
+    container_name: ${SSH_CONTAINER}
+    profiles: [ssh]
+    environment:
+      USER_NAME: ${SSH_USER}
+      USER_PASSWORD: ${SSH_PASSWORD}
+      PASSWORD_ACCESS: "true"
+      PUID: "1000"
+      PGID: "1000"
+    ports:
+      - "${SSH_PORT}:2222"
+    mem_limit: 256m
+    cpus: 1
+    logging: *logging

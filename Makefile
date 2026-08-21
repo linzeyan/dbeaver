@@ -32,67 +32,21 @@ APP_BUNDLE_BIN := $(APP_BUNDLE)/Contents/MacOS/DbClient
 SWIFT_FORMAT := $(shell command -v swift-format 2>/dev/null || xcrun --find swift-format 2>/dev/null)
 SWIFT_FORMAT_MISSING := swift-format not found on PATH or in the Xcode toolchain (xcrun --find swift-format)
 
-# Benchmark database. Ports are non-default to avoid colliding with a local
-# PostgreSQL install.
-PG_CONTAINER := pg-bench
-PG_PORT      := 55432
-PG_IMAGE     := postgres:17
+# What each test server is called, which port it is published on, which image it
+# comes from and what its password is. Read from .env rather than written here,
+# because `docker compose` reads that same file to start the containers: a port
+# is published by one tool and checked by another, and a number written down
+# twice is a number that will one day disagree with itself.
+include .env
 
-# PostgreSQL again, with TLS on and plaintext refused. Its own container rather
-# than a flag on the one above, because the whole point of it is that a
-# connection asking for `sslmode=disable` is turned away — and that is how every
-# other test in this tree reaches the benchmark database.
-PGTLS_CONTAINER := pg-tls
-PGTLS_PORT      := 55434
 # Under target/ because it is generated, disposable and already ignored.
-PGTLS_CERTS     := $(CURDIR)/target/pgtls
+PGTLS_CERTS := $(CURDIR)/target/pgtls
 # Exported so the tests read the CA from where this put it, rather than from a
 # path compiled into them. Their fallback is relative to their own crate, which
 # is the same file until `target/` is shared between git worktrees — then a
 # cached test binary names the worktree it was built in, and that worktree may
 # be gone.
 export PGTLS_CA := $(PGTLS_CERTS)/ca.crt
-
-# MongoDB, for the driver's own tests and for its pass through the shared
-# contract. Non-default port for the same reason as PostgreSQL's. It holds no
-# benchmark data — every test seeds and drops the database it uses, so this
-# container needs nothing done to it beyond being up.
-MONGO_CONTAINER := mongo-test
-MONGO_PORT      := 57017
-MONGO_IMAGE     := mongo:7
-
-# Redis, for the driver's own tests. Non-default port for the same reason as
-# PostgreSQL's.
-REDIS_CONTAINER := redis-test
-REDIS_PORT      := 56379
-REDIS_IMAGE     := redis:7
-
-# Cassandra, for the driver's own tests. Non-default port for the same reason as
-# PostgreSQL's. It takes a long time to start.
-CASSANDRA_CONTAINER := cassandra-test
-CASSANDRA_PORT      := 59042
-CASSANDRA_IMAGE     := cassandra:5
-
-# Trino, the one database of the REST set that can be run at all without a cloud
-# account. It needs no seeding: the `tpch` catalog generates its data on demand,
-# so `tpch.sf1.orders` is a million and a half rows that exist because they were
-# asked for — which also makes it the only server here whose fixture cannot
-# drift.
-TRINO_CONTAINER := trino-test
-TRINO_PORT      := 58080
-TRINO_IMAGE     := trinodb/trino:latest
-
-# A third-party Arrow Flight SQL server, which is the only kind worth testing
-# against: a server written here would agree with this client by construction.
-# The image is the Arrow project's own example server over DuckDB, and it ships
-# a small TPC-H database inside it — so, like Trino, it needs no seeding and its
-# fixture cannot drift. `flight_sql_client` in the image is what readiness is
-# asked with, because a port that accepts a connection is not a server that
-# answers a query.
-FLIGHTSQL_CONTAINER := flightsql-test
-FLIGHTSQL_PORT      := 51337
-FLIGHTSQL_IMAGE     := voltrondata/flight-sql:latest
-FLIGHTSQL_PASSWORD  := flight
 
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
@@ -417,11 +371,7 @@ check: fmt-check lint test ## Everything CI should enforce
 
 .PHONY: db-up
 db-up: ## Start the benchmark PostgreSQL container
-	@docker start $(PG_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(PG_CONTAINER) \
-			-e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench -e POSTGRES_USER=bench \
-			-p $(PG_PORT):5432 $(PG_IMAGE) \
-			-c shared_buffers=2GB -c work_mem=256MB -c max_wal_size=8GB -c fsync=off
+	@docker compose up -d pg
 # Three minutes, and the container's own log if it runs out. A minute is enough
 # on a warm laptop and is not enough on a cold CI runner doing initdb against a
 # shared disk — and when it ran out, all that reached the log was `pg_isready`'s
@@ -447,19 +397,10 @@ db-seed: db-up ## Create the 1M-row benchmark table
 .PHONY: db-up-pgtls
 db-up-pgtls: ## Start the TLS-only PostgreSQL container
 	@$(TOOLS)/make-pgtls-certs.sh $(PGTLS_CERTS)
-# The key has to be 0600 and owned by the server's own user, and a bind mount
-# from this Mac is neither. Copied in rather than mounted into place, which also
-# keeps the running container on the certificate it was started with.
-	@docker start $(PGTLS_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(PGTLS_CONTAINER) \
-			-e POSTGRES_PASSWORD=bench -e POSTGRES_DB=bench -e POSTGRES_USER=bench \
-			-p $(PGTLS_PORT):5432 -v $(PGTLS_CERTS):/certs:ro $(PG_IMAGE) \
-			bash -c 'install -o postgres -g postgres -m 600 /certs/server.key /tmp/server.key \
-				&& install -o postgres -g postgres -m 644 /certs/server.crt /tmp/server.crt \
-				&& install -o postgres -g postgres -m 644 /certs/pg_hba.conf /tmp/pg_hba.conf \
-				&& exec docker-entrypoint.sh postgres -c ssl=on \
-					-c ssl_cert_file=/tmp/server.crt -c ssl_key_file=/tmp/server.key \
-					-c hba_file=/tmp/pg_hba.conf'
+# The certificates are generated first because the container copies them in as
+# it starts and will not come up without them — which is also why this target,
+# rather than `docker compose up -d pgtls`, is the way to start it.
+	@docker compose up -d pgtls
 	@echo "waiting for the TLS postgres..."
 	@for i in $$(seq 1 180); do \
 		if docker exec $(PGTLS_CONTAINER) pg_isready -U bench -d bench 2>/dev/null; then exit 0; fi; \
@@ -480,9 +421,7 @@ test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
 
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container
-	@docker start $(MONGO_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(MONGO_CONTAINER) \
-			-p $(MONGO_PORT):27017 $(MONGO_IMAGE)
+	@docker compose up -d mongo
 	@echo "waiting for mongodb..."
 	@for i in $$(seq 1 60); do \
 		docker exec $(MONGO_CONTAINER) mongosh --quiet --eval 'db.runCommand({ping:1})' \
@@ -497,9 +436,7 @@ db-down-mongo: ## Stop and remove the MongoDB test container
 
 .PHONY: db-up-redis
 db-up-redis: ## Start the Redis test container
-	@docker start $(REDIS_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(REDIS_CONTAINER) \
-			-p $(REDIS_PORT):6379 $(REDIS_IMAGE)
+	@docker compose up -d redis
 	@echo "waiting for redis..."
 	@for i in $$(seq 1 60); do \
 		docker exec $(REDIS_CONTAINER) redis-cli ping \
@@ -521,9 +458,7 @@ db-check-redis: ## Fail unless the Redis test container is reachable
 
 .PHONY: db-up-cassandra
 db-up-cassandra: ## Start the Cassandra test container
-	@docker start $(CASSANDRA_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(CASSANDRA_CONTAINER) \
-			-p $(CASSANDRA_PORT):9042 $(CASSANDRA_IMAGE)
+	@docker compose up -d cassandra
 	@echo "waiting for cassandra (this takes a while)..."
 	@for i in $$(seq 1 120); do \
 		docker exec $(CASSANDRA_CONTAINER) cqlsh -e "describe keyspaces" \
@@ -548,9 +483,7 @@ db-check-cassandra: ## Fail unless the Cassandra test container is reachable
 # which is what the driver does and what `/v1/info` reports with `starting`.
 .PHONY: db-up-trino
 db-up-trino: ## Start the Trino test container
-	@docker start $(TRINO_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(TRINO_CONTAINER) \
-			-p $(TRINO_PORT):8080 $(TRINO_IMAGE)
+	@docker compose up -d trino
 	@echo "waiting for trino..."
 	@for i in $$(seq 1 120); do \
 		curl -sf http://127.0.0.1:$(TRINO_PORT)/v1/info \
@@ -571,11 +504,7 @@ db-check-trino: ## Fail unless the Trino test container is reachable
 
 .PHONY: db-up-flightsql
 db-up-flightsql: ## Start the Arrow Flight SQL test container
-	@docker start $(FLIGHTSQL_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(FLIGHTSQL_CONTAINER) \
-			-p $(FLIGHTSQL_PORT):31337 \
-			-e FLIGHT_PASSWORD=$(FLIGHTSQL_PASSWORD) -e TLS_ENABLED=0 \
-			-e DATABASE_BACKEND=duckdb $(FLIGHTSQL_IMAGE)
+	@docker compose up -d flightsql
 	@echo "waiting for flight sql..."
 	@for i in $$(seq 1 60); do \
 		docker exec $(FLIGHTSQL_CONTAINER) flight_sql_client --command Execute \
@@ -601,24 +530,9 @@ db-check-flightsql: ## Fail unless the Arrow Flight SQL test container is reacha
 		|| { echo "flight sql not running; run 'make db-up-flightsql'"; exit 1; }
 	@$(DBCHECK) "$(FLIGHTSQL_URL)" $(DBCHECK_TIMEOUT)
 
-# The two databases that exist to prove protocol compatibility rather than to
-# be supported: they are read by the PostgreSQL driver and no code of their own,
-# so what these containers test is that the claim is true.
-COCKROACH_CONTAINER := cockroach-test
-COCKROACH_PORT      := 56257
-GREPTIME_CONTAINER  := greptime-test
-GREPTIME_PORT       := 54003
-
 .PHONY: db-up-compatible
 db-up-compatible: ## Start the PostgreSQL-compatible databases (CockroachDB, GreptimeDB)
-	@docker start $(COCKROACH_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(COCKROACH_CONTAINER) \
-			-p $(COCKROACH_PORT):26257 cockroachdb/cockroach:v24.1.5 \
-			start-single-node --insecure
-	@docker start $(GREPTIME_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(GREPTIME_CONTAINER) \
-			-p $(GREPTIME_PORT):4003 greptime/greptimedb:latest standalone start \
-			--postgres-addr 0.0.0.0:4003 --rpc-bind-addr 0.0.0.0:4001 --http-addr 0.0.0.0:4000
+	@docker compose up -d cockroach greptime
 # `break` where the other targets fail: running out of patience here left the
 # recipe returning success with nothing listening, so the miss surfaced later as
 # `db-check-compatible` telling someone to run the target they had just run.
@@ -650,19 +564,9 @@ db-check-compatible: ## Fail unless the PostgreSQL-compatible containers are rea
 	@$(DBCHECK) "postgres://root@127.0.0.1:$(COCKROACH_PORT)/defaultdb" $(DBCHECK_TIMEOUT)
 	@$(DBCHECK) "postgres://greptime@127.0.0.1:$(GREPTIME_PORT)/public" $(DBCHECK_TIMEOUT)
 
-# The same argument on the other protocol: TiDB and StarRocks are read by the
-# MySQL driver and no code of their own. Both take `root` with no password,
-# which is their own default rather than a setting chosen here.
-TIDB_CONTAINER      := tidb-test
-TIDB_PORT           := 54000
-STARROCKS_CONTAINER := starrocks-test
-STARROCKS_PORT      := 59030
-
 .PHONY: db-up-tidb
 db-up-tidb: ## Start the TiDB test container
-	@docker start $(TIDB_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(TIDB_CONTAINER) \
-			-p $(TIDB_PORT):4000 pingcap/tidb:latest
+	@docker compose up -d tidb
 	@echo "waiting for tidb..."
 	@for i in $$(seq 1 60); do \
 		nc -z 127.0.0.1 $(TIDB_PORT) >/dev/null 2>&1 && break; \
@@ -691,9 +595,7 @@ db-check-tidb: ## Fail unless the TiDB test container is reachable
 # first statement then fails.
 .PHONY: db-up-starrocks
 db-up-starrocks: ## Start the StarRocks test container
-	@docker start $(STARROCKS_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(STARROCKS_CONTAINER) \
-			-p $(STARROCKS_PORT):9030 starrocks/allin1-ubuntu:latest
+	@docker compose up -d starrocks
 	@echo "waiting for starrocks (a minute or so on a cold start)..."
 	@for i in $$(seq 1 300); do \
 		docker exec $(STARROCKS_CONTAINER) \
@@ -715,19 +617,9 @@ db-check-starrocks: ## Fail unless the StarRocks test container is reachable
 		|| { echo "starrocks not running; run 'make db-up-starrocks'"; exit 1; }
 	@$(DBCHECK) "mysql://root@127.0.0.1:$(STARROCKS_PORT)/" $(DBCHECK_TIMEOUT)
 
-# MySQL. No seeding here: the driver's own tests build the fixture themselves,
-# because a fixture kept in a Makefile drifts away from the assertions that read
-# it and nobody notices until one of them fails for the wrong reason.
-MYSQL_CONTAINER := mysql-test
-MYSQL_PORT      := 53306
-MYSQL_IMAGE     := mysql:8
-
 .PHONY: db-up-mysql
 db-up-mysql: ## Start the MySQL test container
-	@docker start $(MYSQL_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(MYSQL_CONTAINER) \
-			-e MYSQL_ROOT_PASSWORD=test -e MYSQL_DATABASE=test \
-			-p $(MYSQL_PORT):3306 $(MYSQL_IMAGE)
+	@docker compose up -d mysql
 	@echo "waiting for mysql..."
 	@for i in $$(seq 1 60); do \
 		docker exec $(MYSQL_CONTAINER) mysqladmin ping -uroot -ptest --silent \
@@ -743,24 +635,15 @@ db-down-mysql: ## Stop and remove the MySQL test container
 db-check-mysql: ## Fail unless the MySQL test container is reachable
 	@docker exec $(MYSQL_CONTAINER) mysqladmin ping -uroot -ptest --silent >/dev/null 2>&1 \
 		|| { echo "mysql not running; run 'make db-up-mysql'"; exit 1; }
-	@$(DBCHECK) "mysql://root:test@127.0.0.1:$(MYSQL_PORT)/bench" $(DBCHECK_TIMEOUT)
-
-# SQL Server. Microsoft publishes no ARM64 build — not for 2019, 2022 or 2025 —
-# so on Apple silicon this runs under Rosetta and needs `--platform`. Azure SQL
-# Edge is the usual ARM64 substitute and is the wrong fixture: it is a reduced
-# engine, and half of what the tests exercise is the full `sys.*` surface and
-# the CLR types it does not have.
-MSSQL_CONTAINER := mssql-test
-MSSQL_PORT      := 51433
-MSSQL_PASSWORD  := Str0ng!Passw0rd
-MSSQL_IMAGE     := mcr.microsoft.com/mssql/server:2022-latest
+# No database named, as in `db-check-tidb`. `bench` is created by the driver's
+# own integration test, so asking for it here made the gate assert a fixture as
+# well as a server — and since `test-mysql` depends on this gate, a container
+# that had never run the test could never run it.
+	@$(DBCHECK) "mysql://root:test@127.0.0.1:$(MYSQL_PORT)/" $(DBCHECK_TIMEOUT)
 
 .PHONY: db-up-mssql
 db-up-mssql: ## Start the SQL Server test container
-	@docker start $(MSSQL_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(MSSQL_CONTAINER) --platform linux/amd64 \
-			-e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=$(MSSQL_PASSWORD)' -e MSSQL_PID=Developer \
-			-p $(MSSQL_PORT):1433 $(MSSQL_IMAGE)
+	@docker compose up -d mssql
 	@echo "waiting for sql server (emulated; this takes a while)..."
 	@for i in $$(seq 1 180); do \
 		nc -z 127.0.0.1 $(MSSQL_PORT) >/dev/null 2>&1 && break; \
@@ -778,15 +661,11 @@ db-check-mssql: ## Fail unless the SQL Server test container is reachable
 	# `TrustServerCertificate` because the image signs its own certificate with
 	# one nothing here has a reason to trust — the same parameter the contract
 	# suite connects with, for the same reason.
-	@$(DBCHECK) "sqlserver://sa:Str0ng%21Passw0rd@127.0.0.1:$(MSSQL_PORT)/dbclient_contract?TrustServerCertificate=true" \
+# `master` rather than `dbclient_contract`, which the contract suite creates:
+# see the note on `db-check-mysql`. Reaching for it on a fresh container did not
+# even fail clearly — the missing database surfaced as a TDS read error.
+	@$(DBCHECK) "sqlserver://sa:Str0ng%21Passw0rd@127.0.0.1:$(MSSQL_PORT)/master?TrustServerCertificate=true" \
 		$(DBCHECK_TIMEOUT)
-
-# ClickHouse, whose fixture is a seed script rather than a few inserts: the
-# driver's argument is about types, so the table has to contain the types it
-# argues about.
-CLICKHOUSE_CONTAINER := clickhouse-test
-CLICKHOUSE_PORT      := 58123
-CLICKHOUSE_IMAGE     := clickhouse/clickhouse-server:24
 
 # Alone among these targets this one only starts a server, because ClickHouse's
 # HTTP interface refuses a body holding more than one statement. seed.sql can
@@ -794,10 +673,7 @@ CLICKHOUSE_IMAGE     := clickhouse/clickhouse-server:24
 # already does with it.
 .PHONY: db-up-clickhouse
 db-up-clickhouse: ## Start the ClickHouse test container
-	@docker start $(CLICKHOUSE_CONTAINER) 2>/dev/null \
-		|| docker run -d --name $(CLICKHOUSE_CONTAINER) \
-			-p $(CLICKHOUSE_PORT):8123 -p 59000:9000 -e CLICKHOUSE_PASSWORD=test \
-			--ulimit nofile=262144:262144 $(CLICKHOUSE_IMAGE)
+	@docker compose up -d clickhouse
 	@echo "waiting for clickhouse..."
 	@for i in $$(seq 1 60); do \
 		curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/?query=SELECT+1" \
@@ -815,7 +691,9 @@ db-down-clickhouse: ## Stop and remove the ClickHouse test container
 db-check-clickhouse: ## Fail unless the ClickHouse test container is reachable
 	@curl -sf "http://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/?query=SELECT+1" >/dev/null 2>&1 \
 		|| { echo "clickhouse not running; run 'make db-up-clickhouse'"; exit 1; }
-	@$(DBCHECK) "clickhouse://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/bench" $(DBCHECK_TIMEOUT)
+# `default` rather than `bench`, which the seed script creates: see the note on
+# `db-check-mysql` for why a readiness gate must not also ask for a fixture.
+	@$(DBCHECK) "clickhouse://default:test@127.0.0.1:$(CLICKHOUSE_PORT)/default" $(DBCHECK_TIMEOUT)
 
 .PHONY: db-check
 db-check: ## Fail unless the benchmark database is reachable
@@ -843,6 +721,65 @@ db-check-mongo: ## Fail unless the MongoDB test container is reachable
 		>/dev/null 2>&1 \
 		|| { echo "mongodb not running; run 'make db-up-mongo'"; exit 1; }
 	@$(DBCHECK) "$(MONGO_URL)" $(DBCHECK_TIMEOUT)
+
+.PHONY: db-up-ssh
+db-up-ssh: ## Start the SSH server the tunnel tests connect through
+	@docker compose up -d ssh
+	@echo "waiting for sshd..."
+	@for i in $$(seq 1 60); do \
+		docker exec $(SSH_CONTAINER) test -f /config/sshd/sshd_config 2>/dev/null && break; \
+		sleep 1; \
+	done
+# The image ships `AllowTcpForwarding no`, and a forward is the whole reason
+# this container exists — so without this it comes up healthy and refuses every
+# tunnel with `administratively prohibited`, which reads like a bug in the
+# client. Rewritten in place rather than mounted over, because the image
+# generates this file on first start and would overwrite a bind mount; guarded
+# by the grep so that starting an already-corrected container does not restart
+# it for nothing.
+	@docker exec $(SSH_CONTAINER) grep -q '^AllowTcpForwarding yes' /config/sshd/sshd_config \
+		|| { docker exec $(SSH_CONTAINER) \
+				sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config \
+			&& docker restart $(SSH_CONTAINER) >/dev/null; }
+# Waited for by reading the banner rather than with `nc -z`, which Docker's own
+# forwarder answers whether or not sshd is behind it yet: the port is open the
+# moment the container starts, so a `-z` loop fell through immediately and the
+# check below then failed against a server that was two seconds from ready.
+	@for i in $$(seq 1 60); do \
+		nc -w 5 127.0.0.1 $(SSH_PORT) </dev/null 2>/dev/null | grep -q '^SSH-2\.0' && break; \
+		sleep 1; \
+	done
+	@$(MAKE) --no-print-directory db-check-ssh
+
+.PHONY: db-down-ssh
+db-down-ssh: ## Stop and remove the SSH test container
+	-docker rm -f $(SSH_CONTAINER)
+
+# Both halves, as everywhere else here: the config check answers whether this
+# server will forward at all, and the banner read answers whether it can be
+# reached from this machine through the port forward. `nc -z` alone would say
+# yes to Docker's forwarder with nothing behind it.
+.PHONY: db-check-ssh
+db-check-ssh: ## Fail unless the SSH test container is up and will forward
+	@docker exec $(SSH_CONTAINER) grep -q '^AllowTcpForwarding yes' /config/sshd/sshd_config \
+		2>/dev/null \
+		|| { echo "ssh server not running or not forwarding; run 'make db-up-ssh'"; exit 1; }
+	@nc -w 5 127.0.0.1 $(SSH_PORT) </dev/null 2>/dev/null | grep -q '^SSH-2\.0' \
+		|| { echo "ssh server did not answer on $(SSH_PORT); run 'make db-up-ssh'"; exit 1; }
+
+# The one target that knows about all of them, which is only possible now that
+# one file does. Worth having because the per-server `db-down-*` targets each
+# name a container, so clearing the machine meant remembering which of fifteen
+# had been started — and the ones left behind are exactly the ones nobody
+# remembered.
+#
+# `--profile "*"` is not optional. Every service sits behind a profile so that a
+# bare `docker compose up` cannot start all fifteen at once, and `down` obeys
+# the same filter: without it this target selects nothing, removes nothing and
+# exits 0 — a target that reports having cleared the machine and has not.
+.PHONY: db-down-all
+db-down-all: ## Stop and remove every test container
+	docker compose --profile "*" down --remove-orphans
 
 ##@ Benchmarks
 
