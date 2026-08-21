@@ -658,11 +658,31 @@ enum ConnectionStore {
 enum ConnectionKeychain {
     private static let service = "dev.dbclient.connection"
 
+    /// Which of a connection's two secrets an item holds: its database password,
+    /// or the secret for the bastion it is reached through.
+    ///
+    /// One item per secret rather than one item holding both. They are wanted at
+    /// the same moment, so a single item would save a lookup — and it would have
+    /// to carry a format to keep them apart, which is a rule nobody would
+    /// remember was there the first time a password happened to contain the
+    /// separator.
+    ///
+    /// The raw value is a suffix on the account, so the database password keeps
+    /// the account it has always had: an item written by an earlier build is the
+    /// same item this one asks for, and nobody is made to type a password again
+    /// because a second kind of secret was added beside it.
+    enum Secret: String {
+        case password = ""
+        case ssh = "/ssh"
+    }
+
     /// `synchronised` picks which item is being asked about, and it has to be
     /// stated: a Keychain query with no opinion matches local items only, so the
     /// synchronised one is invisible unless it is asked for by name.
-    static func password(for id: UUID, synchronised: Bool = false) -> String? {
-        var query = item(for: id, synchronised: synchronised)
+    static func password(for id: UUID, _ secret: Secret = .password, synchronised: Bool = false)
+        -> String?
+    {
+        var query = item(for: id, secret, synchronised: synchronised)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var found: CFTypeRef?
@@ -679,8 +699,10 @@ enum ConnectionKeychain {
     /// attributes are listed. So this answers "is there one?" without raising
     /// the panel that asks the user to authorise a read — which is what lets the
     /// form say a password is saved without having to look at it.
-    static func hasPassword(for id: UUID, synchronised: Bool = false) -> Bool {
-        var query = item(for: id, synchronised: synchronised)
+    static func hasPassword(for id: UUID, _ secret: Secret = .password, synchronised: Bool = false)
+        -> Bool
+    {
+        var query = item(for: id, secret, synchronised: synchronised)
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var found: CFTypeRef?
@@ -701,9 +723,10 @@ enum ConnectionKeychain {
     /// this build" and "written".
     @discardableResult
     static func save(
-        _ password: String, for id: UUID, synchronised: Bool = false
+        _ password: String, for id: UUID, _ secret: Secret = .password,
+        synchronised: Bool = false
     ) -> Bool {
-        let query = item(for: id, synchronised: synchronised)
+        let query = item(for: id, secret, synchronised: synchronised)
         _ = SecItemDelete(query as CFDictionary)
         // An empty password is a trust or peer connection. Storing nothing for
         // it is not a gap: there is nothing to remember.
@@ -720,12 +743,15 @@ enum ConnectionKeychain {
     /// the application will ever show it, offer to change it, or delete it, and it
     /// outlives the decision to stop keeping the connection at all.
     ///
-    /// Both items, because the synchronised one is invisible to a query that does
-    /// not ask for it by name — deleting only the local copy would leave the one
-    /// that can travel.
+    /// Every item, which is four of them: two secrets, each with a synchronised
+    /// copy that is invisible to a query not asking for it by name. Deleting
+    /// fewer would leave one behind, and the one left behind is the worst kind —
+    /// a secret keyed by a uuid nothing will ever show, change or delete again.
     static func delete(for id: UUID) {
-        _ = SecItemDelete(item(for: id, synchronised: false) as CFDictionary)
-        _ = SecItemDelete(item(for: id, synchronised: true) as CFDictionary)
+        for secret in [Secret.password, .ssh] {
+            _ = SecItemDelete(item(for: id, secret, synchronised: false) as CFDictionary)
+            _ = SecItemDelete(item(for: id, secret, synchronised: true) as CFDictionary)
+        }
     }
 
     // MARK: - The half that can leave the machine
@@ -792,11 +818,11 @@ enum ConnectionKeychain {
     /// on the other Mac in the file, so that machine knows which item to ask for,
     /// and the two copies of a password cannot come to describe different
     /// connections.
-    private static func item(for id: UUID, synchronised: Bool) -> [String: Any] {
+    private static func item(for id: UUID, _ secret: Secret, synchronised: Bool) -> [String: Any] {
         var item: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: id.uuidString
+            kSecAttrAccount as String: id.uuidString + secret.rawValue
         ]
         if synchronised { item[kSecAttrSynchronizable as String] = true }
         return item
