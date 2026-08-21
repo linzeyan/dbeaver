@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use dbtunnel::{Tunnel, TunnelConfig, TunnelError};
+use dbtunnel::{Credential, Tunnel, TunnelConfig, TunnelError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Where `make db-up-ssh` wrote the fixture's host keys.
@@ -35,9 +35,20 @@ fn config() -> TunnelConfig {
         host: "127.0.0.1".into(),
         port: 52222,
         user: "bench".into(),
-        password: "bench".into(),
+        credential: Credential::Password("bench".into()),
         known_hosts: known_hosts(),
     }
+}
+
+/// One of the keys `make db-up-ssh` generated, beside the host keys.
+///
+/// Read from the environment first, with a compile-time fallback, for the same
+/// reason `known_hosts` is.
+fn key(name: &str) -> PathBuf {
+    std::env::var("SSH_KEY_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/ssh")))
+        .join(name)
 }
 
 /// What the tunnel forwards to: the compose service name, which resolves inside
@@ -112,12 +123,140 @@ async fn a_server_that_is_not_on_record_is_not_given_the_password() {
     );
 }
 
+/// The key the fixture authorised, which is the ordinary case.
+#[tokio::test]
+#[ignore = "requires the SSH server (make db-up-ssh)"]
+async fn a_key_the_server_knows_opens_the_tunnel() {
+    let tunnel = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Key {
+                path: key("dbclient_test"),
+                passphrase: None,
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    .expect("the key was accepted");
+    assert_eq!(tunnel.local_addr().ip().to_string(), "127.0.0.1");
+}
+
+/// The same, through a passphrase.
+///
+/// Its own case because the passphrase is not passed to the server at all — it
+/// decrypts the file here — so a build that ignored it would fail in a way that
+/// looks like the server rejecting a key it actually knows.
+#[tokio::test]
+#[ignore = "requires the SSH server (make db-up-ssh)"]
+async fn a_locked_key_opens_with_its_passphrase() {
+    let tunnel = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Key {
+                path: key("dbclient_locked"),
+                passphrase: Some("hunter2".into()),
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    .expect("the locked key was decrypted and accepted");
+    assert_eq!(tunnel.local_addr().ip().to_string(), "127.0.0.1");
+}
+
+/// A locked key with no passphrase fails to *load*, and says so.
+///
+/// This is the distinction the `Key` variant exists for. Reported as a refusal
+/// it would send somebody to the server to add a key that is already there.
+#[tokio::test]
+#[ignore = "requires the SSH server (make db-up-ssh)"]
+async fn a_locked_key_without_its_passphrase_says_it_could_not_be_read() {
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Key {
+                path: key("dbclient_locked"),
+                passphrase: None,
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    else {
+        panic!("a key that cannot be decrypted must not open a tunnel")
+    };
+    assert!(
+        matches!(error, TunnelError::Key { .. }),
+        "expected the could-not-be-read answer, got {error}"
+    );
+}
+
+/// A key file that is not there, which is the same class of failure as a
+/// passphrase that is wrong: nothing was asked of the server.
+#[tokio::test]
+#[ignore = "requires the SSH server (make db-up-ssh)"]
+async fn a_key_file_that_is_not_there_says_which_one() {
+    let missing = key("dbclient_no_such_key");
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Key {
+                path: missing.clone(),
+                passphrase: None,
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    else {
+        panic!("a key file that is not there must not open a tunnel")
+    };
+    let TunnelError::Key { file, .. } = &error else {
+        panic!("expected the could-not-be-read answer, got {error}")
+    };
+    assert!(
+        file.contains("dbclient_no_such_key"),
+        "expected the message to name the file, got {file}"
+    );
+}
+
+/// A perfectly good key the server has never been told about. This one *is* a
+/// refusal, and has to read as one.
+#[tokio::test]
+#[ignore = "requires the SSH server (make db-up-ssh)"]
+async fn a_key_the_server_does_not_know_is_refused() {
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Key {
+                path: key("dbclient_stranger"),
+                passphrase: None,
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    else {
+        panic!("a key nobody authorised must not open a tunnel")
+    };
+    assert!(
+        matches!(error, TunnelError::Rejected(_)),
+        "expected a refusal rather than a read failure, got {error}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires the SSH server (make db-up-ssh)"]
 async fn a_refused_password_says_so() {
     let Err(error) = Tunnel::open(
         TunnelConfig {
-            password: "not the password".into(),
+            credential: Credential::Password("not the password".into()),
             ..config()
         },
         TARGET.0,

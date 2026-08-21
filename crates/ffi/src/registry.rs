@@ -437,6 +437,10 @@ pub async fn connect(url: &str) -> Result<Box<dyn Driver>, DbError> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    // Here rather than beside the other `dbtunnel` imports at the top: only the
+    // fixture below names a credential, so at module scope it is an import the
+    // non-test build has no use for — and `-D warnings` is right to say so.
+    use dbtunnel::Credential;
 
     /// Where `make db-up-ssh` wrote the fixture's host keys.
     ///
@@ -461,7 +465,7 @@ mod tests {
             host: "127.0.0.1".into(),
             port: 52222,
             user: "bench".into(),
-            password: "bench".into(),
+            credential: Credential::Password("bench".into()),
             known_hosts: known_hosts(),
         }
     }
