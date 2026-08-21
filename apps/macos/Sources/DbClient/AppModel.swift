@@ -159,6 +159,19 @@ final class AppModel {
         get { session.schemas }
         set { session.schemas = newValue }
     }
+    private(set) var databases: [DatabaseInfo]? {
+        get { session.databases }
+        set { session.databases = newValue }
+    }
+    /// Whether the navigator draws a level above the schemas.
+    ///
+    /// False for both of the reasons there can be nothing to draw, which the
+    /// view does not have to tell apart: an engine with no database level
+    /// answers nil, and a login that can see none answers empty. Asked here
+    /// rather than written inline, because the same condition decides four
+    /// things in `NavigatorView` and a condition written four times is one that
+    /// will one day be written three times.
+    var hasDatabaseLevel: Bool { !(databases ?? []).isEmpty }
     private(set) var relations: [String: [RelationInfo]] {
         get { session.relations }
         set { session.relations = newValue }
@@ -1422,6 +1435,7 @@ final class AppModel {
         isConnecting = false
         isPresentingConnection = false
         schemas = inventory.schemas
+        databases = inventory.databases
         relations = inventory.relations
         connectionLabel = Self.label(for: connString)
         connectionColor = connectionDraft.color
@@ -1557,12 +1571,18 @@ final class AppModel {
         for schema in schemas {
             relations[schema.name] = try db.relations(schema: schema.name)
         }
+        // `try?` collapsing to the same nil the call can answer on its own: a
+        // driver that has no database level says nil, and one that will not say
+        // throws. Both mean there is no level to draw, and neither is a reason
+        // to fail a connection that is otherwise open — the same argument the
+        // server label below is read under.
+        let databases = (try? db.databases()) ?? nil
         // Asked here, where a failure costs the label and not the connection. A
         // database that will not say what it is is still a database somebody has
         // just opened, and refusing to show it over a version string would be
         // this application deciding the answer mattered more than the data.
         return Inventory(
-            schemas: schemas, relations: relations,
+            schemas: schemas, databases: databases, relations: relations,
             server: (try? db.serverInfo())?.label ?? "",
             // Read here rather than on the main actor for the reason everything
             // else in this function is: it crosses the FFI boundary, and the
@@ -1574,6 +1594,8 @@ final class AppModel {
 
     private struct Inventory: Sendable {
         let schemas: [SchemaInfo]
+        /// The level above the schemas, where the engine has one.
+        let databases: [DatabaseInfo]?
         let relations: [String: [RelationInfo]]
         /// What answered, for the list row to keep. Empty where it would not say.
         let server: String
@@ -1618,6 +1640,10 @@ final class AppModel {
             return try Self.inventory(of: db)
         } then: { [self] inventory in
             schemas = inventory.schemas
+            // Refreshed with the rest of the tree, not left alone: a database
+            // created or dropped since this connection opened is exactly the
+            // kind of change somebody presses refresh for.
+            databases = inventory.databases
             relations = inventory.relations
             // A dropped schema should not come back already open if one of the
             // same name is created later; the user never expanded that one.

@@ -266,6 +266,42 @@ struct NavigatorView: View {
     /// nothing else — a state worth being able to reach and not one worth
     /// coming back to.
     @State private var isConnectionExpanded = true
+    /// Open, and not remembered, for the same reason the connection above it is:
+    /// the database this connection is on is the one thing in this tree that is
+    /// certain to be worth looking at, so a collapsed one is a state to be able
+    /// to reach and not one to come back to.
+    @State private var isDatabaseExpanded = true
+
+    /// The schemas of whichever database this connection is open on.
+    ///
+    /// A property rather than two copies of the same block: it is drawn under
+    /// the connection for an engine with no database level and under the current
+    /// database for one that has, and two copies would be two places for the row
+    /// styling to drift apart.
+    @ViewBuilder private var schemaRows: some View {
+        ForEach(model.schemas) { schema in
+            let relations = model.visibleRelations(in: schema.name)
+            if !relations.isEmpty {
+                DisclosureGroup(isExpanded: expansion(for: schema.name)) {
+                    ForEach(relations) { relation in
+                        NavigatorRow(relation: relation)
+                            .tag(relation)
+                            // The window's own selected tone, now that the
+                            // system's is switched off below. A shade stronger
+                            // than the grid's 0.18, which is read with a
+                            // brighter cell cursor over it; this band is the
+                            // only layer there is.
+                            .listRowBackground(
+                                relation == model.navigatorSelection
+                                    ? Theme.accent.opacity(0.22).color
+                                    : Color.clear)
+                    }
+                } label: {
+                    SchemaLabel(name: schema.name, count: relations.count)
+                }
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -273,12 +309,14 @@ struct NavigatorView: View {
                 .padding(.horizontal, Theme.Space.sm)
                 .padding(.vertical, Theme.Space.sm)
 
-            if model.schemas.isEmpty {
+            if model.schemas.isEmpty, !model.hasDatabaseLevel {
                 EmptyState(
                     symbol: "server.rack",
                     title: "No schemas",
                     hint: "Nothing to browse on this connection yet.")
-            } else if model.matchedRelationCount == 0, model.isFiltering {
+            } else if model.matchedRelationCount == 0, model.isFiltering,
+                !model.hasDatabaseLevel
+            {
                 // A filtered tree that matched nothing has to say so. Left
                 // blank it reads as a navigator that failed to load, which is
                 // the one reading that would send someone looking for a bug
@@ -287,7 +325,7 @@ struct NavigatorView: View {
                     symbol: "magnifyingglass",
                     title: "No matches",
                     hint: "No relation or schema is named like “\(model.navigatorFilter)”.")
-            } else if model.matchedRelationCount == 0 {
+            } else if model.matchedRelationCount == 0, !model.hasDatabaseLevel {
                 // Same shape, different fact: the schemas are there and hold
                 // nothing. Saying "no matches" here would blame a filter that
                 // is not switched on.
@@ -298,29 +336,26 @@ struct NavigatorView: View {
             } else {
                 List(selection: $model.navigatorSelection) {
                     DisclosureGroup(isExpanded: $isConnectionExpanded) {
-                        ForEach(model.schemas) { schema in
-                            let relations = model.visibleRelations(in: schema.name)
-                            if !relations.isEmpty {
-                                DisclosureGroup(isExpanded: expansion(for: schema.name)) {
-                                    ForEach(relations) { relation in
-                                        NavigatorRow(relation: relation)
-                                            .tag(relation)
-                                            // The window's own selected tone,
-                                            // now that the system's is switched
-                                            // off below. A shade stronger than
-                                            // the grid's 0.18, which is read
-                                            // with a brighter cell cursor over
-                                            // it; this band is the only layer
-                                            // there is.
-                                            .listRowBackground(
-                                                relation == model.navigatorSelection
-                                                    ? Theme.accent.opacity(0.22).color
-                                                    : Color.clear)
+                        if model.hasDatabaseLevel {
+                            ForEach(model.databases ?? []) { database in
+                                if database.isCurrent {
+                                    DisclosureGroup(isExpanded: $isDatabaseExpanded) {
+                                        schemaRows
+                                    } label: {
+                                        DatabaseLabel(name: database.name, isCurrent: true)
                                     }
-                                } label: {
-                                    SchemaLabel(name: schema.name, count: relations.count)
+                                } else {
+                                    // No disclosure triangle, because there is
+                                    // nothing behind it: this connection is open
+                                    // on one database and no schemas have been
+                                    // read for the others. A row that opened to
+                                    // nothing would read as an empty database
+                                    // rather than an unread one.
+                                    DatabaseLabel(name: database.name, isCurrent: false)
                                 }
                             }
+                        } else {
+                            schemaRows
                         }
                     } label: {
                         ConnectionRootRow(model: model)
@@ -485,6 +520,32 @@ private struct ConnectionRootRow: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Connection \(model.connectionLabel), \(model.connectionState.label)")
+    }
+}
+
+/// One database on the server, above the schemas.
+///
+/// The one this connection is open on is told apart by tone rather than by a
+/// word, because it is the row that will be expanded and the others will not —
+/// the shape already says it, and a "(current)" suffix would say it again in a
+/// sidebar that is short of width.
+private struct DatabaseLabel: View {
+    let name: String
+    let isCurrent: Bool
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs + 2) {
+            Image(systemName: isCurrent ? "cylinder.fill" : "cylinder")
+                .font(.system(size: 10))
+                .foregroundStyle(isCurrent ? Theme.accent.color : Theme.textTertiary.color)
+            Text(name)
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(isCurrent ? Theme.text.color : Theme.textSecondary.color)
+                .lineLimit(1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            isCurrent ? "Database \(name), open" : "Database \(name), not open")
     }
 }
 
