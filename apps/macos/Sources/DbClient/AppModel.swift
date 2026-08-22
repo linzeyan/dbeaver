@@ -1485,18 +1485,81 @@ final class AppModel {
 
     /// Opens another database on this server, in a tab of its own.
     ///
-    /// A second connection rather than a switch. PostgreSQL cannot change
-    /// database in session at all, and on the engines that can it would mean the
-    /// tab in front quietly becoming a different database — with a result set
-    /// still on screen that came from the old one. The credentials are the ones
-    /// already in this session's connection string, so nothing is asked for
-    /// again and nothing new is stored.
+    /// The credentials are the ones already in this session's connection string,
+    /// so nothing is asked for again and nothing new is stored.
     func openDatabase(_ name: String) {
         guard let rewritten = Self.connString(connString, onDatabase: name) else { return }
         // This session's bastion rather than the form's: the tab this was
         // started from is the one being copied, and the chooser may since have
         // moved to a row with a different bastion or none at all.
         open(rewritten, through: session.bastion)
+    }
+
+    /// Moves this tab onto another database on the same server.
+    ///
+    /// A new connection under the hood, which is what a database is on the two
+    /// engines that report a level of them: PostgreSQL cannot change database
+    /// within a session at all, and SQL Server's `USE` would move the one
+    /// connection statements run on and leave the pool behind it on the old
+    /// database. So the honest implementation of "switch" is the one this makes
+    /// — dial the same server again, naming the other database — and what makes
+    /// it a switch rather than `openDatabase` is that the tab stays.
+    ///
+    /// The tab is a fresh `Session` rather than the old one cleared out. Nearly
+    /// every field on that object describes the database that is being left, and
+    /// a clear-out is a list that has to be edited every time one is added; the
+    /// things worth carrying over are few enough to name, and they are named
+    /// below. What they have in common is that they are the person's, not the
+    /// server's.
+    func switchDatabase(to name: String) {
+        guard canSwitchDatabase(to: name),
+            let rewritten = Self.connString(connString, onDatabase: name)
+        else { return }
+        // Refused rather than confirmed, and refused rather than done quietly.
+        // Switching drops the staged changes and rolls back the transaction, and
+        // this is the one path to another database that has an alternative
+        // costing nothing: the same database opens in a new tab with this one
+        // left exactly as it is.
+        if let work = unsavedWork {
+            errorMessage =
+                work.transactionOpen && work.changes == 0
+                ? "Commit or roll back this connection's transaction before switching database. "
+                    + "Opening \(name) in a new tab leaves it alone."
+                : "Send or revert \(Self.pluralized(work.changes, "change")) before switching "
+                    + "database. Opening \(name) in a new tab leaves them alone."
+            return
+        }
+
+        let leaving = session
+        let arriving = Session()
+        // The bastion, because the other database is behind the same one; the
+        // colour and the safety marks, because they describe the server and the
+        // server has not changed; the buffers and the pane, because they are
+        // what somebody was doing rather than what they were doing it to.
+        arriving.bastion = leaving.bastion
+        arriving.connectionColor = leaving.connectionColor
+        arriving.safety = leaving.safety
+        arriving.queryBuffers = leaving.queryBuffers
+        arriving.activeQueryBufferIndex = leaving.activeQueryBufferIndex
+        arriving.activeTab = leaving.activeTab
+        sessions[activeSession] = arriving
+        // In this order: the tab is already the new session when the old one is
+        // let go of, so nothing that lands late from the connection being closed
+        // can be reported against the tab it used to be in.
+        drain(leaving)
+        open(rewritten, through: arriving.bastion)
+    }
+
+    /// Whether this tab can be moved onto `name`.
+    ///
+    /// Not `db != nil`: a tab with no connection has no connection string
+    /// either, and a string that cannot be rewritten is refused by the rewrite.
+    /// What this does rule out is the database already open — a switch to where
+    /// you are would drop the session and dial the same server to arrive back
+    /// where it started.
+    func canSwitchDatabase(to name: String) -> Bool {
+        guard !isConnecting, !isBusy else { return false }
+        return (databases ?? []).contains { $0.name == name && !$0.isCurrent }
     }
 
     /// The bastion these settings describe, or nothing when they describe none.

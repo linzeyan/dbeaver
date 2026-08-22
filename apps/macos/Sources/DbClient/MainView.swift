@@ -423,15 +423,33 @@ struct NavigatorView: View {
                                     // that only counts over the name reads as a
                                     // row that sometimes works.
                                     .contentShape(Rectangle())
+                                    // Double-click moves this tab, which is
+                                    // what picking a database in a sidebar
+                                    // means everywhere else. It costs a
+                                    // reconnect — a database is a separate
+                                    // connection on both engines that report a
+                                    // level of them — so it stays a deliberate
+                                    // gesture rather than following the
+                                    // selection, and the tab it moves is the
+                                    // one whose tree is being read.
                                     .onTapGesture(count: 2) {
-                                        model.openDatabase(database.name)
+                                        model.switchDatabase(to: database.name)
                                     }
                                     .contextMenu {
+                                        Button("Switch to \(database.name)") {
+                                            model.switchDatabase(to: database.name)
+                                        }
+                                        // Kept, and second. It is the answer
+                                        // when the tab in front is holding
+                                        // something worth keeping — a staged
+                                        // edit, an open transaction, a result
+                                        // being read — which is also when the
+                                        // switch refuses.
                                         Button("Open in New Tab") {
                                             model.openDatabase(database.name)
                                         }
                                     }
-                                    .help("Double-click to open \(database.name) in a new tab")
+                                    .help("Double-click to open \(database.name) in this tab")
                             }
                         }
                     } else {

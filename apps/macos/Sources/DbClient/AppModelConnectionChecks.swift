@@ -51,6 +51,8 @@ enum AppModelConnectionChecks {
         checkOnlyIdleOpenConnectionsAreProbed()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
+        checkSwitchingDatabaseMovesTheTabRatherThanAddingOne()
+        checkSwitchingIsRefusedWhileThereIsWorkToLose()
         checkTheBastionIsBuiltFromWhatWasTyped()
         checkAnEntryThatDeclinedStorageKeepsItsPasswordInMemoryOnly()
         checkAPasswordKeptOnThisMacIsThereOnTheNextLaunch()
@@ -494,6 +496,79 @@ enum AppModelConnectionChecks {
         expect(
             AppModel.knownHostsFile.hasSuffix("/.ssh/known_hosts"), true,
             "the host keys come from the user's own known_hosts")
+    }
+
+    /// Picking another database moves this tab onto it, and moves nothing else.
+    ///
+    /// The tab is rebuilt from a fresh `Session` rather than cleared out, so the
+    /// half that can be wrong is the short list of things deliberately carried
+    /// across — and the loudest of them is the editor. Somebody who has written
+    /// a statement and then goes looking for the table it names, one database
+    /// over, must not find their own work gone when they arrive.
+    ///
+    /// The port is one nothing listens on, so the connection this asks for is
+    /// refused on the session's queue while the main actor reads what was
+    /// written before the dispatch — which is everything below.
+    private static func checkSwitchingDatabaseMovesTheTabRatherThanAddingOne() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.sessions[0].connString = "postgres://nobody@127.0.0.1:1/bench"
+            model.sessions[0].databases = [
+                DatabaseInfo(name: "bench", isCurrent: true),
+                DatabaseInfo(name: "archive", isCurrent: false)
+            ]
+            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.renameQueryBuffer(0, to: "the work")
+            model.queryText = "select 1"
+
+            expect(
+                model.canSwitchDatabase(to: "bench"), false,
+                "the database already open is not somewhere to switch to")
+            expect(
+                model.canSwitchDatabase(to: "elsewhere"), false,
+                "and neither is a name the server did not report")
+
+            model.switchDatabase(to: "archive")
+            expect(model.sessions.count, 1, "the tab moved rather than a second one appearing")
+            expect(
+                model.sessions[0].connString, "postgres://nobody@127.0.0.1:1/archive",
+                "onto the database that was picked")
+            expect(
+                model.queryBuffers.first?.name, "the work",
+                "carrying the buffers somebody was writing in")
+            expect(model.queryText, "select 1", "and what they had written in them")
+            expect(
+                model.schemas.isEmpty, true,
+                "and nothing of the tree of the database it left")
+        }
+    }
+
+    /// A switch throws away what a quit would, so it refuses where a quit asks.
+    ///
+    /// Refusing rather than asking, because unlike a quit this one has a way out
+    /// that costs nothing: the same database opens in a new tab with this one
+    /// left exactly as it was, and that is what the sentence says to do. A
+    /// version that switched anyway would roll back the transaction the toolbar
+    /// has been showing in amber, on a double-click aimed at a name.
+    private static func checkSwitchingIsRefusedWhileThereIsWorkToLose() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.sessions[0].connString = "postgres://nobody@127.0.0.1:1/bench"
+            model.sessions[0].databases = [
+                DatabaseInfo(name: "bench", isCurrent: true),
+                DatabaseInfo(name: "archive", isCurrent: false)
+            ]
+            model.sessions[0].transaction = TransactionState(
+                transactional: true, autocommit: false, open: true, savepoints: [])
+
+            model.switchDatabase(to: "archive")
+            expect(
+                model.sessions[0].connString, "postgres://nobody@127.0.0.1:1/bench",
+                "the tab stayed on the database it was on")
+            expect(
+                model.errorMessage?.contains("new tab"), true,
+                "and the refusal names the way to see the other one anyway")
+        }
     }
 
     /// Everything except the database has to survive being pointed somewhere

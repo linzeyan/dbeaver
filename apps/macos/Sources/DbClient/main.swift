@@ -673,6 +673,16 @@ let historyAll = CommandLine.arguments.contains("--history-all")
 /// picture. Best with `--tab query`, which is the pane the strip is in.
 let renameBuffer = CommandLine.arguments.contains("--rename-buffer")
 
+/// `--switch-database archive` moves the tab onto another database, once the
+/// first one has finished opening.
+///
+/// The gesture is a double-click on a row in the tree and a capture cannot
+/// double-click, which is the reason every flag in this group exists. This one
+/// also reports what it left behind: the tab count, the editor and the tree,
+/// before and after — the three things a switch is supposed to move exactly one
+/// of.
+let switchToDatabase = argument("--switch-database")
+
 /// `--collapse-sidebar` opens the window with the objects as a rail.
 ///
 /// Exists for the reason `--rename-buffer` does: the rail is reached through a
@@ -1893,6 +1903,62 @@ func runScriptWhenReady(model: AppModel) {
     poll()
 }
 
+/// Drives `--switch-database`: waits for the first database to be open, reports
+/// the window, moves the tab, and reports it again.
+///
+/// Polls rather than hooks, for the reason `reconnectWhenReady` gives: the
+/// model's background pipeline has no completion hook and this process ends in
+/// `exit`, which loses stdout.
+@MainActor
+func switchDatabaseWhenReady(model: AppModel, to name: String) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 120
+
+    func report(_ phase: String) {
+        let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
+        let objects = model.schemas
+            .flatMap { model.relations[$0.name] ?? [] }
+            .map(\.id).sorted()
+        let current = (model.databases ?? []).first(where: \.isCurrent)?.name ?? "(none)"
+        fputs("\(tag) tabs     \(model.sessions.count)\n", stderr)
+        fputs("\(tag) database \(current)\n", stderr)
+        fputs("\(tag) objects  \(objects.joined(separator: ", "))\n", stderr)
+        fputs("\(tag) editor   \(model.queryText.isEmpty ? "(empty)" : model.queryText)\n", stderr)
+        fputs("\(tag) message  \(model.errorMessage ?? "(none)")\n", stderr)
+    }
+
+    func whenSettled(_ next: @escaping @MainActor () -> Void) {
+        func poll() {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("switch probe timed out waiting for a session\n", stderr)
+                exit(1)
+            }
+            let browsed =
+                model.selected == nil || model.errorMessage != nil
+                || (model.browseResult.hasRun && !model.browseResult.isLoading)
+            guard !model.isShowingConnectionForm, !model.isBusy, browsed else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    MainActor.assumeIsolated(poll)
+                }
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                MainActor.assumeIsolated(next)
+            }
+        }
+        poll()
+    }
+
+    whenSettled {
+        report("before")
+        guard model.canSwitchDatabase(to: name) else {
+            fputs("switch  refused  \(name) is not somewhere this tab can go\n", stderr)
+            return
+        }
+        model.switchDatabase(to: name)
+        whenSettled { report("after") }
+    }
+}
+
 /// Drives `--filter-objects`: the View menu's item, sent once the tree is there
 /// to be filtered.
 ///
@@ -2430,6 +2496,7 @@ if benchMode {
                 model: model, open: showHistory, all: historyAll, pick: historyPick)
         }
         if renameBuffer { openBufferNameField(model: model) }
+        if let switchToDatabase { switchDatabaseWhenReady(model: model, to: switchToDatabase) }
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if preferencesProbe { probePreferences(model: model) }
