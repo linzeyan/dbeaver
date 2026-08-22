@@ -1500,6 +1500,7 @@ async fn every_check(subject: &Subject) {
     states_a_unique_key_in_columns(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
     moves_between_databases_only_where_it_says_it_can(subject).await;
+    draws_its_databases_at_one_level_or_the_other(subject).await;
     controls_a_transaction(subject).await;
 }
 
@@ -1543,6 +1544,29 @@ async fn moves_between_databases_only_where_it_says_it_can(subject: &Subject) {
         .use_database("no_such_database_anywhere")
         .await
         .expect_err("a name that is not in the list is not somewhere to go");
+}
+
+/// A driver whose schemas are its databases does not also report a level of
+/// them.
+///
+/// `schema_is_the_database` says the navigator should put the word "database" on
+/// the level `schemas()` reports. A driver that says that *and* answers `Some`
+/// from `databases()` has the same list twice — once as the level above and once
+/// as the level below it, both called databases, with the relations only
+/// reachable under the lower one. Nothing on screen would say which of the two
+/// is the real one, so it is refused here where the two answers are written a
+/// few lines apart.
+async fn draws_its_databases_at_one_level_or_the_other(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    if !driver.capabilities().schema_is_the_database {
+        return;
+    }
+    let databases = driver.databases().await.expect("databases failed");
+    assert!(
+        databases.is_none(),
+        "this driver calls its schemas databases, so a level of databases above \
+         them would be the same list at two indents"
+    );
 }
 
 /// A driver names the product it reached, and does not answer with silence.

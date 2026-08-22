@@ -237,6 +237,11 @@ struct StatusDot: View {
 struct SidebarFilterField: View {
     @Binding var text: String
     @FocusState.Binding var focus: FocusArea?
+    /// What the level above the relations is called on this connection, from
+    /// `AppModel.containerNoun`. Both sentences below name it, and on the
+    /// engines whose schemas are their databases the word "schema" would be
+    /// telling somebody to search for a row the tree does not draw.
+    let noun: String
 
     var body: some View {
         HStack(spacing: Theme.Space.xs + 2) {
@@ -247,7 +252,7 @@ struct SidebarFilterField: View {
             // Named for what it matches. "Filter" alone, over a tree of two
             // levels, leaves the user to discover by experiment that the schema
             // row is searched too.
-            TextField("Filter tables and schemas", text: $text)
+            TextField("Filter tables and \(noun)s", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.text.color)
@@ -284,7 +289,7 @@ struct SidebarFilterField: View {
         // the hands already know; a filter is easy to leave switched on by
         // accident, and both of them end with the whole tree back.
         .onExitCommand { text = "" }
-        .help("Show only schemas and relations whose name contains this (⌥⌘F)")
+        .help("Show only \(noun)s and relations whose name contains this (⌥⌘F)")
     }
 }
 

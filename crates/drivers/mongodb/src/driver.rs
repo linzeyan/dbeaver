@@ -155,6 +155,7 @@ impl Driver for MongoSource {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
+            schema_is_the_database: true,
         }
     }
 

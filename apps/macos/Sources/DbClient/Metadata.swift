@@ -65,31 +65,47 @@ struct Capabilities: Codable, Hashable {
     /// after they were pressed.
     let writesStatements: Bool
 
+    /// Whether the level `schemas()` reports is what this engine calls a
+    /// database.
+    ///
+    /// True for MySQL, ClickHouse, MongoDB, SQLite, Redis and Athena, where
+    /// there is one level of container and the engine's own word for it is
+    /// "database" — a MySQL `SCHEMA` is a `DATABASE`, and Redis's are numbered.
+    /// The tree draws the same level either way; this decides the icon on it and
+    /// the word every sentence about it uses. See `AppModel.containerNoun`.
+    let schemaIsTheDatabase: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
     /// transaction control it might not have, promises no cancel it might not be
-    /// able to deliver, claims no switch it might have to take back, and draws
-    /// no control that writes.
+    /// able to deliver, claims no switch it might have to take back, draws no
+    /// control that writes, and calls the level it has not read yet by the
+    /// neutral word.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
-        writesStatements: false)
+        writesStatements: false, schemaIsTheDatabase: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
         case cancelStopsTheStatement = "cancel_stops_the_statement"
         case switchesDatabase = "switches_database"
         case writesStatements = "writes_statements"
+        case schemaIsTheDatabase = "schema_is_the_database"
     }
 }
 
 /// One database on the server this connection reached.
 ///
-/// Only some engines have this level: MySQL and SQL Server put databases above
-/// schemas, PostgreSQL can list them but cannot switch within a session, and
-/// SQLite has one file and nothing above it. The absence is `nil` rather than an
+/// Only three engines have this level: SQL Server puts databases above schemas,
+/// PostgreSQL can list them but cannot switch within a session, and DuckDB's are
+/// catalogs attached to the open connection. The absence is `nil` rather than an
 /// empty array, so the navigator can tell "no such level here" from "this login
 /// can see none of them".
+///
+/// A `nil` here does not mean there are no databases — on MySQL, Mongo, SQLite
+/// and the rest, the databases *are* the level below, which is what
+/// `Capabilities.schemaIsTheDatabase` says.
 struct DatabaseInfo: Codable, Hashable, Identifiable {
     let name: String
     /// Whether this is the one the open connection is on. Not derivable from the

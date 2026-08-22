@@ -273,6 +273,38 @@ pub struct Capabilities {
     /// to — it is a catalog on the connection that is already open, and often
     /// one the connection string does not name.
     pub switches_database: bool,
+
+    /// Whether the level `schemas()` reports is what this engine's own words
+    /// call a database.
+    ///
+    /// Twelve of the fifteen drivers answer `None` from `databases()` and put
+    /// their one container level in `schemas()`, and on some of them that level
+    /// is not a schema at all: a MySQL `SCHEMA` *is* a `DATABASE` — the two
+    /// keywords are synonyms in its own grammar — a Mongo one is a database, a
+    /// SQLite one is `main` and whatever is attached, a Redis one is the number
+    /// in `SELECT 4`, and a ClickHouse or Athena one is a database in the very
+    /// call that lists it. A navigator that calls those schemas is using a word the
+    /// user will not find in their own database's documentation, and it is the
+    /// only word on that row.
+    ///
+    /// This is a name, not a shape: the tree draws one level above the relations
+    /// either way. The alternative was to move those lists into `databases()`,
+    /// which would have been the same list at two indents — everything that
+    /// reaches a relation reaches it through a schema name — and that doubling
+    /// is what this field exists instead of.
+    ///
+    /// False where the level really is a schema under a database this driver
+    /// does report (PostgreSQL, SQL Server, DuckDB), where it is a
+    /// `database.schema` pair flattened into one row (Snowflake, Databricks,
+    /// Trino, Flight SQL), and where the engine has a word of its own that is
+    /// not "database" either — a Cassandra keyspace, a BigQuery dataset.
+    /// Calling those databases would be a second wrong word rather than a
+    /// truer one; they keep the neutral one until something gives that level a
+    /// noun of its own.
+    ///
+    /// A driver that answers true must answer `None` from `databases()`. Both
+    /// at once is the doubling above, and `contract.rs` refuses it.
+    pub schema_is_the_database: bool,
 }
 
 /// One session against one database.

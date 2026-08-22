@@ -670,7 +670,20 @@ final class AppModel {
     /// which is what this note used to claim: they outrank the tab's own summary
     /// and survive a query run while a file is being written, and `status` can do
     /// neither. See the note on `exportStatus`.
-    private var settledStatus: String { Self.pluralized(schemas.count, "schema") }
+    private var settledStatus: String { Self.pluralized(schemas.count, containerNoun) }
+
+    /// What this connection calls the level the navigator draws above the
+    /// relations.
+    ///
+    /// One word, read by every sentence that names that level — the footer
+    /// count, both empty states, the filter's placeholder and its tooltip, the
+    /// Refresh tooltip, the row's spoken label. On MySQL, ClickHouse, Mongo,
+    /// SQLite, Redis and Athena those rows *are* the server's databases, and
+    /// calling them schemas puts a word on screen that is in none of those
+    /// engines' own documentation. See `Capabilities.schemaIsTheDatabase`, which
+    /// is where the answer comes from — the scheme string cannot give it, since
+    /// one driver reaches several products.
+    var containerNoun: String { capabilities.schemaIsTheDatabase ? "database" : "schema" }
 
     private(set) var isBusy: Bool {
         get { session.isBusy }

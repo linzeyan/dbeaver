@@ -188,6 +188,7 @@ impl Driver for CassandraSource {
             transactional: false,
             cancel_stops_the_statement: false,
             switches_database: false,
+            schema_is_the_database: false,
         }
     }
 

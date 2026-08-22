@@ -157,6 +157,7 @@ impl Driver for MsSqlSource {
             transactional: true,
             cancel_stops_the_statement: true,
             switches_database: false,
+            schema_is_the_database: false,
         }
     }
 

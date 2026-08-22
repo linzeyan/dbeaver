@@ -85,7 +85,7 @@ struct SidebarRail: View {
 
             RailButton(
                 symbol: "arrow.clockwise",
-                help: "Reload schemas and objects from the database (⇧⌘R)",
+                help: "Reload \(model.containerNoun)s and objects from the database (⇧⌘R)",
                 label: "Refresh objects",
                 isEnabled: model.canRefresh,
                 action: model.refresh)

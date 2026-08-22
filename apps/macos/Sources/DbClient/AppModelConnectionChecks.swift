@@ -53,6 +53,7 @@ enum AppModelConnectionChecks {
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
+        checkTheLevelIsNamedByTheCapabilityAndNotTheScheme()
         checkTheTabSaysWhatItIsWithoutSayingTheSecret()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
         checkSwitchingDatabaseMovesTheTabRatherThanAddingOne()
@@ -778,7 +779,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].connString = "redis://127.0.0.1:6379/0"
             model.sessions[0].capabilities = Capabilities(
                 transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
-                writesStatements: false)
+                writesStatements: false, schemaIsTheDatabase: true)
 
             expect(model.canEditCell, false, "no cell of a Redis key type is editable")
             expect(
@@ -792,10 +793,46 @@ enum AppModelConnectionChecks {
             // relation already said yes, which is what made the defect invisible.
             model.sessions[0].capabilities = Capabilities(
                 transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
-                writesStatements: true)
+                writesStatements: true, schemaIsTheDatabase: true)
             expect(
                 model.editObstacle == nil, true,
                 "a database with a grammar has nothing to explain")
+        }
+    }
+
+    /// The level above the relations is named by the capability, never by the
+    /// scheme.
+    ///
+    /// One driver reaches several products and they do not all answer alike —
+    /// which is the reason `Capabilities` is read off the open session in the
+    /// first place — so a shortcut through the connection string would be right
+    /// until the day somebody points `mysql://` at something that is not MySQL.
+    /// The check pins that by contradicting the scheme in both directions: a
+    /// `redis://` connection whose capability says schema, and a `postgres://`
+    /// one whose capability says database. Neither pair exists in the wild;
+    /// what is being pinned is which of the two the window read.
+    private static func checkTheLevelIsNamedByTheCapabilityAndNotTheScheme() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            func capabilities(schemaIsTheDatabase: Bool) -> Capabilities {
+                Capabilities(
+                    transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
+                    writesStatements: false, schemaIsTheDatabase: schemaIsTheDatabase)
+            }
+
+            model.sessions[0].connString = "redis://127.0.0.1:6379/0"
+            model.sessions[0].capabilities = capabilities(schemaIsTheDatabase: false)
+            expect(model.containerNoun, "schema", "the capability names the level, not the scheme")
+
+            model.sessions[0].connString = "postgres://ana@db.example:5432/sales"
+            model.sessions[0].capabilities = capabilities(schemaIsTheDatabase: true)
+            expect(model.containerNoun, "database", "and it names it in the other direction too")
+
+            // Before anything is asked, the neutral word. A window that guessed
+            // "database" here would rename the level of every connection for as
+            // long as the first read takes.
+            model.sessions[0].capabilities = .unknown
+            expect(model.containerNoun, "schema", "an unasked connection makes no claim")
         }
     }
 

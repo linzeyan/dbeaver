@@ -145,6 +145,7 @@ impl Driver for DuckSource {
             transactional: true,
             cancel_stops_the_statement: true,
             switches_database: true,
+            schema_is_the_database: false,
         }
     }
 

@@ -150,6 +150,7 @@ impl Driver for Fake {
             transactional: false,
             cancel_stops_the_statement: false,
             switches_database: false,
+            schema_is_the_database: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

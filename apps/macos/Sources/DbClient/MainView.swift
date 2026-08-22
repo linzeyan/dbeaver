@@ -337,8 +337,11 @@ struct NavigatorView: View {
                                     : Color.clear)
                     }
                 } label: {
-                    SchemaLabel(name: schema.name, count: relations.count)
-                        .background(highlightOff(ifFirst: schema.name == first))
+                    SchemaLabel(
+                        name: schema.name, count: relations.count,
+                        noun: model.containerNoun
+                    )
+                    .background(highlightOff(ifFirst: schema.name == first))
                 }
             }
         }
@@ -349,7 +352,9 @@ struct NavigatorView: View {
     /// Naming a level this connection does not have would send somebody looking
     /// for a row that was never going to be there.
     private var noMatchesHint: String {
-        let levels = model.hasDatabaseLevel ? "database, schema or relation" : "relation or schema"
+        let levels =
+            model.hasDatabaseLevel
+            ? "database, schema or relation" : "relation or \(model.containerNoun)"
         return "No \(levels) is named like “\(model.navigatorFilter)”."
     }
 
@@ -373,14 +378,16 @@ struct NavigatorView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SidebarFilterField(text: $model.navigatorFilter, focus: $focus)
-                .padding(.horizontal, Theme.Space.sm)
-                .padding(.vertical, Theme.Space.sm)
+            SidebarFilterField(
+                text: $model.navigatorFilter, focus: $focus, noun: model.containerNoun
+            )
+            .padding(.horizontal, Theme.Space.sm)
+            .padding(.vertical, Theme.Space.sm)
 
             if model.schemas.isEmpty, !model.hasDatabaseLevel {
                 EmptyState(
                     symbol: "server.rack",
-                    title: "No schemas",
+                    title: "No \(model.containerNoun)s",
                     hint: "Nothing to browse on this connection yet.")
             } else if model.matchedRelationCount == 0, model.isFiltering,
                 model.visibleDatabases.isEmpty
@@ -405,7 +412,7 @@ struct NavigatorView: View {
                 EmptyState(
                     symbol: "square.stack.3d.up",
                     title: "No objects",
-                    hint: "These schemas hold no tables or views.")
+                    hint: "These \(model.containerNoun)s hold no tables or views.")
             } else {
                 // No row for the connection at the top. The strip across the
                 // window names it, in the control that also switches between
@@ -539,7 +546,7 @@ struct NavigatorView: View {
                     model.canRefresh ? Theme.textSecondary.color : Theme.textTertiary.color
                 )
                 .disabled(!model.canRefresh)
-                .help("Reload schemas and objects from the database (⇧⌘R)")
+                .help("Reload \(model.containerNoun)s and objects from the database (⇧⌘R)")
                 .accessibilityLabel("Refresh objects")
             }
             .padding(.horizontal, Theme.Space.md)
@@ -663,13 +670,27 @@ private struct DatabaseLabel: View {
     }
 }
 
+/// The level above the relations, whatever this engine calls it.
+///
+/// One row rather than a second view for the engines whose schemas are their
+/// databases: the row is the same row — a name, a count, and the relations
+/// behind it — and only the noun and the icon differ. `noun` comes from
+/// `AppModel.containerNoun`, which reads the capability rather than the scheme.
+///
+/// The database icon is the unfilled `cylinder`, the same one `DatabaseLabel`
+/// draws for a database this connection is not on. There is nothing to fill
+/// here: on these engines every one of these rows is open at once, so a mark
+/// for "the current one" would be a distinction the tree does not make.
 private struct SchemaLabel: View {
     let name: String
     let count: Int
+    let noun: String
+
+    private var isDatabase: Bool { noun == "database" }
 
     var body: some View {
         HStack(spacing: Theme.Space.xs + 2) {
-            Image(systemName: "square.stack.3d.up")
+            Image(systemName: isDatabase ? "cylinder" : "square.stack.3d.up")
                 .font(.system(size: 10))
                 .foregroundStyle(Theme.textSecondary.color)
             Text(name)
@@ -680,7 +701,8 @@ private struct SchemaLabel: View {
                 .foregroundStyle(Theme.textTertiary.color)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Schema \(name), \(AppModel.pluralized(count, "object"))")
+        .accessibilityLabel(
+            "\(noun.capitalized) \(name), \(AppModel.pluralized(count, "object"))")
     }
 }
 
