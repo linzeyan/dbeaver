@@ -52,6 +52,7 @@ struct ArrowArray {
 typedef struct DbHandle DbHandle;
 typedef struct DbQuery DbQuery;
 typedef struct DbCursor DbCursor;
+typedef struct DbTransfer DbTransfer;
 
 // All calls block. Do not call from the main thread.
 // Any `err` out-parameter, when set, must be released with db_string_free.
@@ -581,16 +582,41 @@ int64_t db_export(DbCursor* cursor, const char* format, const char* path, int64_
 int64_t db_export_sql(DbHandle* handle, DbCursor* cursor, const char* table, const char* path,
                       int64_t row_limit, char** err);
 
-// Drains the cursor into `target` as INSERT statements for `table`.
+// Moves a cursor's rows into `table` on `target`, one batch per call.
 //
 // The dialect comes from the target connection, because the statements are
 // written for the database they are being sent to — a DuckDB cursor feeding
 // a PostgreSQL target needs PostgreSQL quoting, and the source's dialect is
 // irrelevant to the INSERTs that reach the server.
 //
-// Returns the row count on success, -1 on error, -2 when the source was
-// cancelled. Fails if this build has no dialect for the target database.
-int64_t db_transfer(DbCursor* cursor, DbHandle* target, const char* table, char** err);
+// Polled rather than one blocking call, the shape db_cursor already has, and
+// for the two things a blocking call cannot do: report how far it has got while
+// it is getting there, and be stopped. Null on failure with err set. Fails if
+// this build has no dialect for the target database.
+//
+// The transfer takes the cursor: do not free it, fetch from it or cancel it
+// afterwards. db_transfer_free closes it.
+DbTransfer* db_transfer_start(DbCursor* cursor, DbHandle* target, const char* table, char** err);
+
+// Moves one batch and writes the running row count into `rows`. Returns 1 when
+// a batch went across, 0 when the source is exhausted, -1 on error, -2 when
+// stopped — the same convention db_cursor_next uses.
+//
+// `rows` is written on every answer, failures included: it describes the target,
+// and the batches written before a failure are still there.
+int db_transfer_step(DbTransfer* transfer, int64_t* rows, char** err);
+
+// Stops the transfer at both ends. Returns 0 when the requests were delivered,
+// -1 when one could not be. May be called while a step is in flight, and has to
+// be — a step waits on a fetch from the source and an INSERT on the target, and
+// a stop that reached only one of them would land about half the time.
+//
+// Delivery is not interruption: what is promised is that no further batch is
+// sent. The rows already written stay written.
+int db_transfer_cancel(DbTransfer* transfer, char** err);
+
+// Releases the transfer and the cursor it took.
+void db_transfer_free(DbTransfer* transfer);
 
 // Reads a file into an existing table on `target`.
 //

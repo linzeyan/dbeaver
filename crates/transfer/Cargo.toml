@@ -42,3 +42,8 @@ driver-duckdb = { path = "../drivers/duckdb" }
 driver-postgres = { path = "../drivers/postgres" }
 # The async runtime for #[tokio::test] in the transfer test suite.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# For the one test double in `stepping.rs`: a target that answers nothing and
+# counts the cancels it is sent, which is the only way to witness that a stop
+# reaches the write half. Implementing `Driver` by hand needs the trait's own
+# attribute.
+async-trait = { workspace = true }

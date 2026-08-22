@@ -8,12 +8,14 @@
 
 mod delimited;
 mod import;
+mod moving;
 mod parquet_file;
 mod sql_script;
 mod target;
 
 pub use delimited::{DelimitedReader, DelimitedWriter};
 pub use import::import;
+pub use moving::{Step, Stopper, Transfer};
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;
 pub use target::TargetWriter;

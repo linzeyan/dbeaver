@@ -107,6 +107,19 @@ pub struct DbCursor {
     cancel: Box<dyn CursorCancel>,
 }
 
+/// A transfer in flight: the source it is draining, the state of the move, and
+/// the stop somebody may press.
+///
+/// Three fields for the reason `DbCursor` has two: `db_transfer_cancel` runs
+/// while a `db_transfer_step` is in flight on another thread, so each entry
+/// point borrows only what it needs and the two sets are disjoint. The stopper
+/// holds its own references to both ends — see `dbtransfer::Stopper`.
+pub struct DbTransfer {
+    cursor: Box<dyn Cursor>,
+    transfer: dbtransfer::Transfer,
+    stopper: dbtransfer::Stopper,
+}
+
 /// An SSH bastion to reach the database through, as the caller fills it in.
 ///
 /// Flat fields rather than a tagged union, because this struct is written by
@@ -2266,60 +2279,168 @@ pub unsafe extern "C" fn db_export_sql(
     }
 }
 
-/// Drains the cursor into `target` as INSERT statements for `table`.
+/// Starts moving a cursor's rows into `table` on `target`, one batch per call.
 ///
 /// The dialect comes from the target connection, because the statements are
 /// written for the database they are being sent to — a DuckDB cursor feeding
 /// a PostgreSQL target needs PostgreSQL quoting, and the source's dialect is
 /// irrelevant to the INSERTs that reach the server.
 ///
-/// Returns the row count on success. Returns -1 when the target refused the
-/// statement (a table that does not exist, a type mismatch, a constraint
-/// violation) and -2 when the source was cancelled — the same convention
-/// `db_export_sql` uses, so a caller that already handles one can handle the
-/// other without a second branch.
+/// **The transfer takes the cursor.** It is drained here and closed by
+/// `db_transfer_free`, so the caller must not free it, fetch from it, or cancel
+/// it afterwards — `db_transfer_cancel` is where a cancel goes, and it reaches
+/// the cursor as well as the write. One owner, because the alternative is a
+/// cursor two entry points can close and a fetch that outlives the object
+/// fetching it.
+///
+/// Null on failure with `err` set: a null argument, or a target this build has
+/// no dialect for.
 ///
 /// # Safety
 /// `cursor` must come from `db_cursor` and not have been freed. `target` must
-/// come from `db_connect` and not have been freed. `table` must be a valid
-/// NUL-terminated C string. `err` must be null or point to writable storage
-/// for one `char *`.
+/// come from `db_connect` and not have been freed; it may be freed while the
+/// transfer runs, since what is kept is a reference to the driver rather than to
+/// the handle. `table` must be a valid NUL-terminated C string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn db_transfer(
+pub unsafe extern "C" fn db_transfer_start(
     cursor: *mut DbCursor,
     target: *mut DbHandle,
     table: *const c_char,
     err: *mut *mut c_char,
-) -> i64 {
+) -> *mut DbTransfer {
     if cursor.is_null() || target.is_null() || table.is_null() {
         unsafe { set_err(err, "null cursor, target, or table") };
-        return -1;
+        return ptr::null_mut();
     }
     let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
-        Ok(s) => s,
+        Ok(s) => s.to_string(),
         Err(e) => {
             unsafe { set_err(err, e) };
-            return -1;
+            return ptr::null_mut();
         }
     };
     let t = unsafe { &*target };
     let Some(dialect) = t.dialect else {
         unsafe { set_err(err, "this build has no dialect for this database") };
-        return -1;
+        return ptr::null_mut();
     };
-    let c = unsafe { &mut (*cursor).cursor };
-    match runtime().block_on(dbtransfer::transfer(
-        c.as_mut(),
-        t.driver.as_ref(),
-        dialect,
-        table_str.to_string(),
-    )) {
-        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+
+    // Taken apart rather than held whole: the cursor and its canceller are used
+    // by two entry points that run at the same time, and keeping them in one
+    // borrow is what would make that unsound. See `DbCursor`, which is split for
+    // the same reason.
+    let DbCursor {
+        cursor,
+        cancel: source_cancel,
+    } = *unsafe { Box::from_raw(cursor) };
+    let moving = dbtransfer::Transfer::new(t.driver.clone(), dialect, table_str);
+    let stopper = moving.stopper(Arc::from(source_cancel));
+    Box::into_raw(Box::new(DbTransfer {
+        cursor,
+        transfer: moving,
+        stopper,
+    }))
+}
+
+/// Moves one batch, and writes the running row count into `rows`.
+///
+/// Returns 1 when a batch went across, 0 when the source is exhausted and
+/// everything is on the target, -1 on failure with `err` set, and -2 when
+/// somebody has stopped it. The same convention `db_cursor_next` uses, for the
+/// same reason: a caller that already handles one can handle the other without
+/// a second branch.
+///
+/// `rows` is written on every answer including the failures, because it is the
+/// count that describes the *target* — a step that failed half way still leaves
+/// the batches before it there, and a progress line that reset to zero on
+/// failure would be reporting a rollback nobody performed.
+///
+/// Blocks for as long as one fetch and one round of INSERTs take, which is what
+/// makes the count worth reading between calls. The caller decides how often to
+/// ask; nothing here is on a timer.
+///
+/// # Safety
+/// `transfer` must come from `db_transfer_start` and not have been freed. It
+/// must not be stepped from two threads at once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_transfer_step(
+    transfer: *mut DbTransfer,
+    rows: *mut i64,
+    err: *mut *mut c_char,
+) -> c_int {
+    if transfer.is_null() {
+        unsafe { set_err(err, "null transfer") };
+        return -1;
+    }
+    // Two disjoint borrows of the same object, and deliberately not one: the
+    // stopper next door is read by `db_transfer_cancel` while this is in
+    // flight, and a `&mut` covering the whole struct would be aliasing it.
+    let source = unsafe { &mut (*transfer).cursor };
+    let moving = unsafe { &mut (*transfer).transfer };
+    let outcome = runtime().block_on(moving.step(source.as_mut()));
+    if !rows.is_null() {
+        unsafe { *rows = i64::try_from(moving.moved()).unwrap_or(i64::MAX) };
+    }
+    match outcome {
+        Ok(dbtransfer::Step::Moved(_)) => 1,
+        Ok(dbtransfer::Step::Done(_)) => 0,
+        Ok(dbtransfer::Step::Stopped(_)) => -2,
         Err(e) => {
             let cancelled = e.is_cancelled();
             unsafe { set_err(err, e) };
             if cancelled { -2 } else { -1 }
         }
+    }
+}
+
+/// Stops the transfer, at both ends. Returns 0 when the requests were
+/// delivered, -1 when one of them could not be.
+///
+/// The one call here that may be made while a step is in flight, and it has to
+/// be: a step blocks for a fetch and a write, and a stop that waited its turn
+/// would arrive after the work it exists to interrupt. Sound because it borrows
+/// only the stopper, which the step does not touch.
+///
+/// **Both halves**, which is what neither `db_cursor_cancel` nor `db_cancel`
+/// could do alone. The first stops a fetch on the source and leaves an INSERT
+/// of ten thousand rows running on the target; the second reaches the target
+/// and cannot see the source. A transfer waits on both in turn, so a stop that
+/// covered one of them would land, on average, half the time.
+///
+/// Delivery is not interruption, as everywhere else here: what is promised is
+/// that no further batch is sent. The rows already written stay written — a
+/// transfer is not a transaction, and the target may not have one.
+///
+/// # Safety
+/// `transfer` must come from `db_transfer_start` and not have been freed. It
+/// must not be freed concurrently with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_transfer_cancel(
+    transfer: *mut DbTransfer,
+    err: *mut *mut c_char,
+) -> c_int {
+    if transfer.is_null() {
+        unsafe { set_err(err, "null transfer") };
+        return -1;
+    }
+    let stopper = unsafe { &(*transfer).stopper };
+    match runtime().block_on(stopper.stop()) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
+/// Releases the transfer and the cursor it took.
+///
+/// # Safety
+/// `transfer` must come from `db_transfer_start` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_transfer_free(transfer: *mut DbTransfer) {
+    if !transfer.is_null() {
+        drop(unsafe { Box::from_raw(transfer) });
     }
 }
 

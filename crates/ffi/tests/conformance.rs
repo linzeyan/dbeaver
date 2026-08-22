@@ -50,9 +50,9 @@ use dbffi::{
     db_foreign_keys_json, db_free, db_import, db_indexes_json, db_names_forget, db_query,
     db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format,
-    db_sql_scan_json, db_string_free, db_transfer, db_triggers_json, db_tx_autocommit,
-    db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint,
-    db_tx_state_json,
+    db_sql_scan_json, db_string_free, db_transfer_cancel, db_transfer_free, db_transfer_start,
+    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
+    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -1561,6 +1561,20 @@ fn connected() -> *mut dbffi::DbHandle {
 /// which is what lets these checks count rows without reading an Arrow array:
 /// PostgreSQL reports the row count of a SELECT the same way it reports the
 /// row count of a DELETE.
+/// The message behind an `err`, released as it is read. Empty when there was
+/// none, which is what an assertion that never fires wants to print.
+fn complaint(err: &mut *mut c_char) -> String {
+    if err.is_null() {
+        return String::new();
+    }
+    let message = unsafe { CStr::from_ptr(*err) }
+        .to_string_lossy()
+        .into_owned();
+    unsafe { db_string_free(*err) };
+    *err = ptr::null_mut();
+    message
+}
+
 fn ran(handle: *mut dbffi::DbHandle, sql: &str) -> i64 {
     let text = CString::new(sql).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
@@ -2414,13 +2428,32 @@ fn a_transfer_puts_the_source_rows_in_the_target_table() {
     )
     .unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 64, &mut err, ptr::null_mut()) };
+    // One row per fetch, so the count has to arrive in pieces rather than in one
+    // answer at the end — which is the whole reason this is a handle.
+    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 1, &mut err, ptr::null_mut()) };
     assert!(!cursor.is_null());
 
     let table = CString::new("people").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let rows = unsafe { db_transfer(cursor, handle_tgt, table.as_ptr(), &mut err) };
-    assert_eq!(rows, 3, "every source row was reported written");
+    let transfer = unsafe { db_transfer_start(cursor, handle_tgt, table.as_ptr(), &mut err) };
+    assert!(!transfer.is_null(), "the transfer must start");
+
+    let mut seen: Vec<i64> = Vec::new();
+    loop {
+        let mut rows: i64 = -1;
+        let mut err: *mut c_char = ptr::null_mut();
+        let step = unsafe { db_transfer_step(transfer, &mut rows, &mut err) };
+        assert!(step >= 0, "no step should fail: {}", complaint(&mut err));
+        seen.push(rows);
+        if step == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![1, 2, 3, 3],
+        "each step reports the running total, and the last reports it again as done"
+    );
 
     // Asked of the target as predicates rather than counted: a transfer that
     // wrote three rows of the wrong thing passes a count and fails these.
@@ -2436,12 +2469,74 @@ fn a_transfer_puts_the_source_rows_in_the_target_table() {
         "the NULL arrived a NULL and not an empty string"
     );
 
-    unsafe { db_cursor_free(cursor) };
+    // The cursor goes with it: the transfer took it at `start`.
+    unsafe { db_transfer_free(transfer) };
     unsafe { db_free(handle_src) };
     unsafe { db_free(handle_tgt) };
 }
 
-// A null cursor, a null target, and a null table each return -1 and set err.
+/// Stopped between two batches, the transfer sends no more and keeps what it
+/// sent.
+///
+/// Stopped from this thread rather than another, which is the case the handle
+/// exists for and also the one a test can pin without a race: what is being
+/// checked is that the flag is read at the top of the step and that the rows
+/// already written are not taken back. The concurrent case is the same flag.
+#[test]
+fn a_stopped_transfer_leaves_what_it_had_already_written() {
+    let src = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_src = unsafe { db_connect(src.as_ptr(), ptr::null(), 10, &mut err) };
+    let tgt = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle_tgt = unsafe { db_connect(tgt.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle_src.is_null() && !handle_tgt.is_null());
+    ran(handle_tgt, "CREATE TABLE people (id INTEGER)");
+
+    let sql = CString::new("SELECT * FROM (VALUES (1), (2), (3), (4)) AS t(id)").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let cursor = unsafe { db_cursor(handle_src, sql.as_ptr(), 1, &mut err, ptr::null_mut()) };
+    let table = CString::new("people").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let transfer = unsafe { db_transfer_start(cursor, handle_tgt, table.as_ptr(), &mut err) };
+    assert!(!transfer.is_null());
+
+    let mut rows: i64 = -1;
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_transfer_step(transfer, &mut rows, &mut err) },
+        1
+    );
+    assert_eq!(rows, 1);
+
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_transfer_cancel(transfer, &mut err) },
+        0,
+        "stopping is delivered: {}",
+        complaint(&mut err)
+    );
+
+    let mut rows: i64 = -1;
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_transfer_step(transfer, &mut rows, &mut err) },
+        -2,
+        "the step after the stop says so rather than sending"
+    );
+    assert_eq!(rows, 1, "and still reports what is on the target");
+    assert_eq!(
+        ran(handle_tgt, "SELECT id FROM people"),
+        1,
+        "the row already sent stays; a transfer is not a transaction"
+    );
+
+    unsafe { db_transfer_free(transfer) };
+    unsafe { db_free(handle_src) };
+    unsafe { db_free(handle_tgt) };
+}
+
+// A null cursor, a null target, and a null table each answer null and set err.
 #[test]
 fn a_transfer_without_a_cursor_says_so_instead_of_crashing() {
     let tgt = CString::new("duckdb://:memory:").unwrap();
@@ -2451,9 +2546,10 @@ fn a_transfer_without_a_cursor_says_so_instead_of_crashing() {
 
     let table = CString::new("people").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe { db_transfer(ptr::null_mut(), handle_tgt, table.as_ptr(), &mut err) };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_transfer must say why it failed");
+    let started =
+        unsafe { db_transfer_start(ptr::null_mut(), handle_tgt, table.as_ptr(), &mut err) };
+    assert!(started.is_null());
+    assert!(!err.is_null(), "db_transfer_start must say why it failed");
     unsafe { db_string_free(err) };
     unsafe { db_free(handle_tgt) };
 }
@@ -2472,10 +2568,11 @@ fn a_transfer_without_a_target_says_so_instead_of_crashing() {
 
     let table = CString::new("people").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe { db_transfer(cursor, ptr::null_mut(), table.as_ptr(), &mut err) };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_transfer must say why it failed");
+    let started = unsafe { db_transfer_start(cursor, ptr::null_mut(), table.as_ptr(), &mut err) };
+    assert!(started.is_null());
+    assert!(!err.is_null(), "db_transfer_start must say why it failed");
     unsafe { db_string_free(err) };
+    // Refused before the cursor was taken, so it is still the caller's to close.
     unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle_src) };
 }
@@ -2498,17 +2595,17 @@ fn a_transfer_without_a_table_name_says_so_instead_of_crashing() {
     assert!(!handle_tgt.is_null());
 
     let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe { db_transfer(cursor, handle_tgt, ptr::null(), &mut err) };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_transfer must say why it failed");
+    let started = unsafe { db_transfer_start(cursor, handle_tgt, ptr::null(), &mut err) };
+    assert!(started.is_null());
+    assert!(!err.is_null(), "db_transfer_start must say why it failed");
     unsafe { db_string_free(err) };
     unsafe { db_cursor_free(cursor) };
     unsafe { db_free(handle_src) };
     unsafe { db_free(handle_tgt) };
 }
 
-// Transferring into a table that does not exist on the target returns -1 and
-// sets err — the INSERT statement fails on the server.
+// Transferring into a table that does not exist on the target fails the step —
+// the INSERT is refused by the server.
 #[test]
 fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     let src = CString::new("duckdb://:memory:").unwrap();
@@ -2529,9 +2626,17 @@ fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     // Do NOT create the table — the INSERT will fail on the server.
     let table = CString::new("ghost_table").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe { db_transfer(cursor, handle_tgt, table.as_ptr(), &mut err) };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_transfer must say why it failed");
+    let transfer = unsafe { db_transfer_start(cursor, handle_tgt, table.as_ptr(), &mut err) };
+    assert!(
+        !transfer.is_null(),
+        "starting is not what fails: nothing has been sent yet"
+    );
+
+    let mut rows: i64 = -1;
+    let mut err: *mut c_char = ptr::null_mut();
+    let step = unsafe { db_transfer_step(transfer, &mut rows, &mut err) };
+    assert_eq!(step, -1);
+    assert!(!err.is_null(), "db_transfer_step must say why it failed");
     let message = unsafe { CStr::from_ptr(err) }
         .to_string_lossy()
         .into_owned();
@@ -2541,8 +2646,9 @@ fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
             || message.contains("relation"),
         "error should mention the missing table, got: {message}"
     );
+    assert_eq!(rows, 0, "and nothing is claimed to have arrived");
     unsafe { db_string_free(err) };
-    unsafe { db_cursor_free(cursor) };
+    unsafe { db_transfer_free(transfer) };
     unsafe { db_free(handle_src) };
     unsafe { db_free(handle_tgt) };
 }
