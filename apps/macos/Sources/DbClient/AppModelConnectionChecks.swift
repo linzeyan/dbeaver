@@ -50,6 +50,7 @@ enum AppModelConnectionChecks {
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
+        checkTheFilterReachesTheDatabaseLevel()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
         checkSwitchingDatabaseMovesTheTabRatherThanAddingOne()
         checkSwitchingIsRefusedWhileThereIsWorkToLose()
@@ -643,6 +644,65 @@ enum AppModelConnectionChecks {
             expect(
                 model.databases?.first?.isCurrent, true,
                 "keeping which one the connection is open on")
+        }
+    }
+
+    /// The filter reaches the database level, and says so when it reaches
+    /// nothing at all.
+    ///
+    /// The level is somewhere to go rather than a caption, so leaving it out of
+    /// the filter left the one row that moves the window as the one row a filter
+    /// could not find. The empty answer is the load-bearing half: the navigator
+    /// puts its "No matches" state up when no database survives, and a tree that
+    /// kept every database row could never reach that state — it would answer a
+    /// filter that matched nothing with a list of databases, which reads as a
+    /// filter that is not switched on.
+    private static func checkTheFilterReachesTheDatabaseLevel() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.sessions[0].databases = [
+                DatabaseInfo(name: "bench", isCurrent: true),
+                DatabaseInfo(name: "archive", isCurrent: false)
+            ]
+            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].relations = [
+                "public": [
+                    RelationInfo(
+                        schema: "public", name: "orders", kind: .table, estimatedRows: nil),
+                    RelationInfo(schema: "public", name: "items", kind: .table, estimatedRows: nil)
+                ]
+            ]
+
+            expect(
+                model.visibleDatabases.map(\.name), ["bench", "archive"],
+                "with no filter the tree lists every database")
+
+            model.navigatorFilter = "orders"
+            expect(
+                model.visibleDatabases.map(\.name), ["bench"],
+                "a filter matching a relation keeps the database holding it")
+            expect(model.matchedRelationCount, 1, "and narrows the relations under it")
+
+            model.navigatorFilter = "arch"
+            expect(
+                model.visibleDatabases.map(\.name), ["archive"],
+                "a database is reached by its own name")
+            expect(
+                model.matchedRelationCount, 0,
+                "and the database the connection is on goes with its relations")
+
+            model.navigatorFilter = "bench"
+            expect(
+                model.visibleDatabases.map(\.name), ["bench"],
+                "the open database answers to its own name too")
+            expect(
+                model.matchedRelationCount, 2,
+                "keeping everything under it, the rule a schema's own name follows")
+
+            model.navigatorFilter = "no such thing"
+            expect(
+                model.visibleDatabases.isEmpty, true,
+                "and a filter that matches nothing anywhere leaves the tree empty to say so")
         }
     }
 

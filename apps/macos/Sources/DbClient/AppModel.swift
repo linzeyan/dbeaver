@@ -2136,7 +2136,16 @@ final class AppModel {
         // subset of its tables that happen to repeat the schema's name in their
         // own would be a different question entirely.
         if schema.lowercased().contains(needle) { return all }
+        // And the same one level up, where the level exists: typing the name of
+        // the database that is open is asking to see it, and the tree under a
+        // row that matched should not be emptier than the tree beside it.
+        if currentDatabaseMatches(needle) { return all }
         return all.filter { $0.name.lowercased().contains(needle) }
+    }
+
+    /// Whether the database this connection is on is itself what was typed.
+    private func currentDatabaseMatches(_ needle: String) -> Bool {
+        (databases ?? []).contains { $0.isCurrent && $0.name.lowercased().contains(needle) }
     }
 
     /// Whether a schema's disclosure is open.
@@ -2152,6 +2161,32 @@ final class AppModel {
 
     var matchedRelationCount: Int {
         schemas.reduce(0) { $0 + visibleRelations(in: $1.name).count }
+    }
+
+    /// The database rows the tree draws, which under a filter is a subset.
+    ///
+    /// The level joined the filter's reach when it became a level somebody can
+    /// enter: a list of databases is a list of places to go, and a field that
+    /// narrowed everything except the one row that moves the window is a field
+    /// that stops working exactly where the tree got interesting.
+    ///
+    /// Two ways a row survives. Its own name matches — that is the row somebody
+    /// typing `archive` is reaching for, and it stays whether or not anything
+    /// under it does. Or it is the database this connection is on and something
+    /// under it matched, because the schemas and relations hang off that row and
+    /// hiding it would take the matches with it.
+    ///
+    /// Empty is the answer that means the filter found nothing anywhere, which
+    /// is what `NavigatorView` reads to put its "No matches" state up. It is also
+    /// the answer on every engine with no database level at all, so the view's
+    /// conditions do not have to ask which case they are in.
+    var visibleDatabases: [DatabaseInfo] {
+        let all = databases ?? []
+        guard let needle = filterNeedle else { return all }
+        return all.filter { database in
+            database.name.lowercased().contains(needle)
+                || (database.isCurrent && matchedRelationCount > 0)
+        }
     }
 
     var totalRelationCount: Int {

@@ -344,6 +344,15 @@ struct NavigatorView: View {
         }
     }
 
+    /// What the empty filter result lists, which is what the filter searched.
+    ///
+    /// Naming a level this connection does not have would send somebody looking
+    /// for a row that was never going to be there.
+    private var noMatchesHint: String {
+        let levels = model.hasDatabaseLevel ? "database, schema or relation" : "relation or schema"
+        return "No \(levels) is named like “\(model.navigatorFilter)”."
+    }
+
     /// The first schema that draws a row, which is not always the first schema:
     /// one holding nothing visible is skipped entirely.
     private var firstDrawnSchema: String? {
@@ -374,17 +383,22 @@ struct NavigatorView: View {
                     title: "No schemas",
                     hint: "Nothing to browse on this connection yet.")
             } else if model.matchedRelationCount == 0, model.isFiltering,
-                !model.hasDatabaseLevel
+                model.visibleDatabases.isEmpty
             {
                 // A filtered tree that matched nothing has to say so. Left
                 // blank it reads as a navigator that failed to load, which is
                 // the one reading that would send someone looking for a bug
                 // instead of for a shorter word.
+                //
+                // `visibleDatabases` rather than `hasDatabaseLevel`: a tree with
+                // a database level is empty when no database name matched
+                // either, and the condition that asked whether the level exists
+                // could never reach this state on the engines that have one.
                 EmptyState(
                     symbol: "magnifyingglass",
                     title: "No matches",
-                    hint: "No relation or schema is named like “\(model.navigatorFilter)”.")
-            } else if model.matchedRelationCount == 0, !model.hasDatabaseLevel {
+                    hint: noMatchesHint)
+            } else if model.matchedRelationCount == 0, model.visibleDatabases.isEmpty {
                 // Same shape, different fact: the schemas are there and hold
                 // nothing. Saying "no matches" here would blame a filter that
                 // is not switched on.
@@ -400,10 +414,10 @@ struct NavigatorView: View {
                 // narrow.
                 List(selection: $model.navigatorSelection) {
                     if model.hasDatabaseLevel {
-                        ForEach(Array((model.databases ?? []).enumerated()), id: \.element.id) {
+                        ForEach(Array(model.visibleDatabases.enumerated()), id: \.element.id) {
                             index, database in
                             if database.isCurrent {
-                                DisclosureGroup(isExpanded: $isDatabaseExpanded) {
+                                DisclosureGroup(isExpanded: databaseExpansion) {
                                     schemaRows
                                 } label: {
                                     DatabaseLabel(name: database.name, isCurrent: true)
@@ -549,6 +563,21 @@ struct NavigatorView: View {
         // touch this" and "this is what was here last time" is the whole of what
         // somebody needs before trusting a table name they can see.
         return model.isTreeStale ? "\(counted) · from last time" : counted
+    }
+
+    /// The current database's disclosure, which the filter takes over.
+    ///
+    /// Same arrangement as `expansion(for:)` one level down, and for the same
+    /// reason: matches inside a collapsed group are matches nobody can see, and
+    /// a collapse written while filtering would edit the arrangement the field
+    /// is supposed to hand back untouched.
+    private var databaseExpansion: Binding<Bool> {
+        Binding(
+            get: { model.isFiltering || isDatabaseExpanded },
+            set: { isOpen in
+                guard !model.isFiltering else { return }
+                isDatabaseExpanded = isOpen
+            })
     }
 
     private func expansion(for schema: String) -> Binding<Bool> {
