@@ -144,10 +144,19 @@ impl Driver for MsSqlSource {
     ///
     /// Cancel reaches the statement: `KILL` aimed at the connections that are
     /// actually busy.
+    ///
+    /// A database is not somewhere this session can move to, and this is the one
+    /// place in that answer where the database is not the reason. T-SQL has
+    /// `USE`, and it would move the connection statements run on and leave the
+    /// pool the catalog is read through where it was — a navigator listing one
+    /// database's tables while the editor was writing to another. Reporting
+    /// false is what sends the front end down the path that moves all of it: a
+    /// new connection with the other name in the string.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
+            switches_database: false,
         }
     }
 

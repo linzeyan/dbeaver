@@ -257,6 +257,7 @@ impl Driver for Fixture {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: false,
+            switches_database: false,
         }
     }
 

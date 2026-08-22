@@ -150,6 +150,7 @@ impl Driver for MySqlSource {
         Capabilities {
             transactional: MySqlSource::transactional(self),
             cancel_stops_the_statement: true,
+            switches_database: false,
         }
     }
 

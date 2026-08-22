@@ -250,6 +250,29 @@ pub struct Capabilities {
     /// that stops the work and one that stops the waiting — which is not what
     /// somebody pressing it after four minutes believes it does.
     pub cancel_stops_the_statement: bool,
+
+    /// Whether an entry of `databases()` is another container on this
+    /// connection, rather than somewhere to open a new one.
+    ///
+    /// The two are not variants of one gesture and a front end has to know which
+    /// it is holding. Where this is false, moving to another database means
+    /// dialling the server again with the other name in the string, and
+    /// everything the session was holding — its transaction, its temporary
+    /// tables, its cursors — goes with the connection it was holding them on.
+    /// Where it is true, `use_database` moves this session and none of that is
+    /// lost.
+    ///
+    /// False on the two servers that report a level of databases, and for
+    /// different reasons that both come down to the arrangement inside the
+    /// driver. PostgreSQL cannot change database within a session at all. SQL
+    /// Server can, with `USE`, but this driver keeps a connection for statements
+    /// and a pool beside it for catalog reads, so a `USE` would move one of them
+    /// and leave the navigator reading the database it was on.
+    ///
+    /// True for DuckDB, where an attached database is not somewhere to connect
+    /// to — it is a catalog on the connection that is already open, and often
+    /// one the connection string does not name.
+    pub switches_database: bool,
 }
 
 /// One session against one database.
@@ -286,12 +309,34 @@ pub trait Driver: Send + Sync {
     /// way — see `DatabaseInfo` for the two shapes that produce it, and each
     /// driver's own implementation for which of them it is.
     ///
-    /// What a caller does with `Some` is open a *new* connection on the database
-    /// it picked. That is the contract rather than an implementation detail:
-    /// PostgreSQL cannot change database within a session at all, so a method
-    /// that promised to switch would be a promise one of the two drivers that
-    /// answers here could not keep.
+    /// What a caller does with `Some` depends on the driver, and
+    /// `Capabilities::switches_database` is where it says which: an entry is
+    /// either another container on this connection, reached with `use_database`,
+    /// or somewhere to open a *new* connection on. Both are real answers here —
+    /// PostgreSQL cannot change database within a session at all, and DuckDB's
+    /// attached databases are not somewhere a connection could be opened — so
+    /// this method promises neither and the capability beside it is not
+    /// optional reading.
     async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>>;
+
+    /// Moves this session onto another database reported by `databases()`.
+    ///
+    /// Only where `capabilities().switches_database` says so; the default is the
+    /// refusal every other driver would have written. This is the one place in
+    /// the trait with a default, and the reason it may have one is that the
+    /// per-driver answer is already forced next door: a capability field costs
+    /// fifteen sentences whether or not anybody implements this, and a second
+    /// set of fifteen refusals would be the same fifteen answers written twice.
+    ///
+    /// What "moves" has to mean, for a driver that overrides it: everything the
+    /// session reads afterwards is of the new database — the catalog as well as
+    /// the statements. A driver that reads its catalog on connections of their
+    /// own has to carry the choice rather than send one `USE` and hope.
+    async fn use_database(&self, name: &str) -> DbResult<()> {
+        Err(DbError::new(format!(
+            "this connection cannot be moved to {name} — open it as a connection of its own"
+        )))
+    }
 
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>>;
 

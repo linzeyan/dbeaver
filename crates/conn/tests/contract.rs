@@ -229,10 +229,11 @@ async fn sqlite() -> Subject {
 /// DuckDB, which like SQLite needs nothing installed and so runs under plain
 /// `cargo test`.
 ///
-/// Its schema is `memory.main` rather than `main`: DuckDB has a catalog level
-/// above the schema and the trait has one string, so the driver flattens the two
-/// into a qualified name. `ATTACH` is ordinary usage there and produces two
-/// schemas both called `main`, so the level cannot simply be dropped.
+/// Its schema is plain `main`. DuckDB has a catalog level above the schema and
+/// `ATTACH` is ordinary usage there, so two schemas called `main` can be open at
+/// once — but the level is `databases()` now rather than a prefix folded into
+/// the schema string, and the driver qualifies its own statements with the
+/// database the connection is currently on.
 async fn duckdb() -> Subject {
     let driver = driver_duckdb::DuckSource::connect(":memory:")
         .await
@@ -248,7 +249,7 @@ async fn duckdb() -> Subject {
 
     Subject {
         driver: Box::new(driver),
-        schema: "memory.main".to_string(),
+        schema: "main".to_string(),
         relation: "nums".to_string(),
         key: "id".to_string(),
         read: "SELECT id FROM nums ORDER BY id".to_string(),
@@ -598,10 +599,10 @@ const TRINO_ORIGIN: &str = "http://127.0.0.1:58080";
 /// fixture has to name the system the data is in.
 ///
 /// Its schema is `memory.dbclient_contract` — a catalog and a schema, flattened
-/// into the one string the trait has, which is DuckDB's arrangement arrived at
-/// for a different reason: DuckDB can attach two databases with a schema called
-/// `main`, and every Trino name has a catalog in it because a catalog is which
-/// connector the rows come from.
+/// into the one string the trait has. Every Trino name has a catalog in it
+/// because a catalog is which connector the rows come from, and a coordinator
+/// reads from all of them at once: there is no statement that moves a session
+/// onto one, so the level cannot become `databases()` the way DuckDB's did.
 ///
 /// `memory` because it is the only catalog on a stock coordinator that takes a
 /// write at all; `tpch` and `system` are both read-only. Its own schema rather
@@ -878,10 +879,12 @@ async fn mssql() -> Subject {
 /// through nothing at all. The scratch table for the transaction check is created
 /// and dropped by the check, as every other SQL subject's is.
 ///
-/// The schema is `TPC-H-small.main` for the reason DuckDB's is `memory.main`:
-/// Flight SQL has a catalog above the schema and the trait has one string. That
-/// it is DuckDB behind this server is a coincidence of the image and not
-/// something the driver knows or asks.
+/// The schema is `TPC-H-small.main` for the reason DuckDB's used to be
+/// `memory.main`: Flight SQL has a catalog above the schema and the trait has one
+/// string. DuckDB's level became `databases()` and this one has not, because the
+/// protocol has no statement that moves a session onto a catalog. That it is
+/// DuckDB behind this server is a coincidence of the image and not something the
+/// driver knows or asks.
 async fn flightsql() -> Subject {
     let driver = driver_flightsql::FlightSqlSource::connect(
         "flightsql://flight_username:flight@127.0.0.1:51337/",
@@ -1496,7 +1499,50 @@ async fn every_check(subject: &Subject) {
     walks_the_navigator(subject).await;
     states_a_unique_key_in_columns(subject).await;
     answers_for_a_relation_that_is_not_there(subject).await;
+    moves_between_databases_only_where_it_says_it_can(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// `use_database` and `capabilities().switches_database` say the same thing.
+///
+/// The field is what the navigator reads to decide whether a database in the
+/// tree is somewhere this connection can go or a connection of its own to open,
+/// and the method is what happens when it goes. A driver that sets the field and
+/// keeps the trait's refusal leaves the front end with a level it can see and
+/// cannot enter; one that implements the method and leaves the field false is
+/// never asked. Both are silent failures, which is why they are checked against
+/// each other rather than separately.
+async fn moves_between_databases_only_where_it_says_it_can(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    if !driver.capabilities().switches_database {
+        driver
+            .use_database("no_such_database_anywhere")
+            .await
+            .expect_err("this driver says it cannot move, so it should refuse to");
+        return;
+    }
+
+    let databases = driver
+        .databases()
+        .await
+        .expect("databases failed")
+        .expect("a driver that can move between databases has a list of them");
+    let current = databases
+        .iter()
+        .find(|d| d.is_current)
+        .expect("one of the databases is the one this connection is on");
+
+    // Onto the one it is already on: the move has to be real enough to run and
+    // harmless enough to leave every check after this one looking at the same
+    // database it would have seen.
+    driver
+        .use_database(&current.name)
+        .await
+        .expect("moving onto the current database should be a move that does nothing");
+    driver
+        .use_database("no_such_database_anywhere")
+        .await
+        .expect_err("a name that is not in the list is not somewhere to go");
 }
 
 /// A driver names the product it reached, and does not answer with silence.

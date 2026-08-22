@@ -38,13 +38,20 @@ impl Driver for DuckSource {
             scalar_text(self, "SELECT version()").await?,
         ))
     }
-    /// DuckDB has two levels and this driver already reports both, flattened
-    /// into `database.schema` — see `metadata.rs` for why that is the shape it
-    /// takes. A second level would also be the wrong answer to this method's
-    /// question: an attached database is on the connection that is already open,
-    /// not somewhere to open another one.
+    /// The attached databases, which is a level DuckDB genuinely has.
+    ///
+    /// Never `None`, even for a session with nothing attached: there is always
+    /// at least the database the connection opened on, and the level is real
+    /// whether or not a second one has been added to it. What makes it unlike
+    /// the level the two servers report is where the entries lead — an attached
+    /// database is a catalog on this connection and not somewhere to open
+    /// another one, which is what `capabilities().switches_database` says.
     async fn databases(&self) -> DbResult<Option<Vec<DatabaseInfo>>> {
-        Ok(None)
+        Ok(Some(DuckSource::databases(self).await?))
+    }
+
+    async fn use_database(&self, name: &str) -> DbResult<()> {
+        Ok(DuckSource::use_database(self, name).await?)
     }
 
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>> {
@@ -95,13 +102,19 @@ impl Driver for DuckSource {
 
     /// `SELECT * FROM …`, in PostgreSQL's spelling, which DuckDB follows.
     ///
-    /// The schema is written as it was reported and not quoted, because what
-    /// this driver reports is `database.schema` — the extra level DuckDB has and
-    /// the trait does not, carried as the qualified name DuckDB itself accepts.
-    /// Quoting the pair as one identifier would ask for a schema whose name has
-    /// a dot in it.
+    /// Named in all three parts, and that is not decoration. A browse is read
+    /// through a cursor, a cursor runs on a connection cloned for it, and `USE`
+    /// is per connection — so a two-part name on a session that has moved would
+    /// resolve in the database the clone opened on, which is a different table
+    /// or none. Each part is quoted separately, so a database called
+    /// `sales.2024` is one identifier rather than two.
     fn browse(&self, what: &Browse<'_>) -> String {
-        let name = format!("{}.{}", what.schema, dbsql::DUCKDB.quote(what.relation));
+        let name = format!(
+            "{}.{}.{}",
+            dbsql::DUCKDB.quote(&self.current_database()),
+            dbsql::DUCKDB.quote(what.schema),
+            dbsql::DUCKDB.quote(what.relation)
+        );
         what.sql_named(&dbsql::DUCKDB, &name)
     }
 
@@ -131,6 +144,7 @@ impl Driver for DuckSource {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
+            switches_database: true,
         }
     }
 

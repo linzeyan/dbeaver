@@ -1948,15 +1948,29 @@ func switchDatabaseWhenReady(model: AppModel, to name: String) {
         poll()
     }
 
-    whenSettled {
-        report("before")
-        guard model.canSwitchDatabase(to: name) else {
+    /// The switch, once the list of databases has the name in it.
+    ///
+    /// The refresh is not padding: on DuckDB the only way a second database
+    /// exists is an `ATTACH` sent on this connection, so a capture that opens a
+    /// file and attaches beside it — the one arrangement this flag is useful for
+    /// — has a list read before the database it is aiming at was there. A person
+    /// hits Refresh at that point, and so does this, once.
+    func attempt(afterRefreshing refresh: Bool) {
+        report(refresh ? "before" : "again")
+        if model.canSwitchDatabase(to: name) {
+            model.switchDatabase(to: name)
+            whenSettled { report("after") }
+            return
+        }
+        guard refresh, model.canRefresh else {
             fputs("switch  refused  \(name) is not somewhere this tab can go\n", stderr)
             return
         }
-        model.switchDatabase(to: name)
-        whenSettled { report("after") }
+        model.refresh()
+        whenSettled { attempt(afterRefreshing: false) }
     }
+
+    whenSettled { attempt(afterRefreshing: true) }
 }
 
 /// Drives `--filter-objects`: the View menu's item, sent once the tree is there

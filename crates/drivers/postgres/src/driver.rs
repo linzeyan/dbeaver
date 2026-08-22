@@ -120,10 +120,15 @@ impl Driver for PgSource {
     ///
     /// Cancel reaches the statement: it opens a connection of its own and names
     /// this session's backend, which is what the postmaster signals.
+    ///
+    /// A database is not somewhere this session can move to. PostgreSQL settles
+    /// it at connect and there is no statement that changes it, so the list this
+    /// driver reports is a list of connections to open.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
+            switches_database: false,
         }
     }
 

@@ -125,6 +125,7 @@ impl Driver for Fake {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: false,
+            switches_database: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

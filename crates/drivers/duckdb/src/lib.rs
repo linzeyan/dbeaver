@@ -41,8 +41,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow_map::Layout;
 use dbconn::{
-    ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, RelationInfo, RelationshipInfo,
+    SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use duckdb::{Connection, InterruptHandle};
 use std::path::{Path, PathBuf};
@@ -73,6 +73,13 @@ pub enum DuckError {
     InStatement { sql: String, source: duckdb::Error },
     #[error("no database file at {0}")]
     NoSuchDatabase(String),
+    /// Asked to move this session onto a catalog that is not attached to it.
+    ///
+    /// Its own variant rather than the one above, which is about a file that is
+    /// not there. This one is about a name that is: the caller picked it out of
+    /// a list, and the list has since changed or the name never came from one.
+    #[error("{0} is not attached to this connection")]
+    NotAttached(String),
     /// Raised before a row moves, by `duckdb-rs` rather than by DuckDB: the
     /// binding refuses any result containing a `VARIANT`. Restated here because
     /// its own message names a Rust concept and does not say what to do instead.
@@ -311,6 +318,17 @@ pub struct DuckSource {
     session_interrupt: Arc<InterruptHandle>,
     cancels: Cancels,
     next_id: AtomicU64,
+    /// Which attached database the navigator is reading and unqualified names
+    /// resolve in.
+    ///
+    /// Carried here rather than left to `USE`, and that is not belt and braces.
+    /// `USE` is per connection, and every catalog read in this driver happens on
+    /// a connection of its own — so a `USE` sent to the session would move the
+    /// statements and leave the navigator listing the database it started on.
+    /// The catalog queries bind this instead, and the session gets the `USE` as
+    /// well so that a name typed into the editor means the same database the
+    /// tree is showing.
+    current: Arc<Mutex<String>>,
 }
 
 /// Keeps one connection's interrupt handle reachable by `cancel` for exactly as
@@ -452,6 +470,20 @@ impl DuckSource {
         let cloned = Arc::clone(&seed);
         let session = blocking(move || clone_connection(&cloned)).await?;
         let session_interrupt = session.interrupt_handle();
+        // Asked rather than derived from the path. A file called `sales.duckdb`
+        // is the catalog `sales`, an in-memory one is `memory`, and an
+        // `:memory:` opened through the registry is neither spelling — the
+        // server's own answer is the only one that is right for all three.
+        let opened_on = blocking({
+            let seed = Arc::clone(&seed);
+            move || {
+                let conn = seed.lock().map_err(|_| DuckError::ReaderGone)?;
+                Ok(conn.query_row("SELECT current_database()", [], |row| {
+                    row.get::<_, String>(0)
+                })?)
+            }
+        })
+        .await?;
 
         Ok(Self {
             seed,
@@ -459,7 +491,50 @@ impl DuckSource {
             session_interrupt,
             cancels: Arc::new(Mutex::new(Vec::new())),
             next_id: AtomicU64::new(0),
+            current: Arc::new(Mutex::new(opened_on)),
         })
+    }
+
+    /// The database the navigator is on. Cloned rather than borrowed: it is one
+    /// short string, and every caller is about to send it to another thread.
+    ///
+    /// A poisoned lock answers with the empty string rather than failing the
+    /// call. Nothing is named by it, so a catalog read filtered on it comes back
+    /// empty — an empty tree rather than a driver that stops answering, and the
+    /// same direction `cancel` takes when it finds the lock poisoned.
+    pub fn current_database(&self) -> String {
+        self.current
+            .lock()
+            .map(|name| name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Moves this session onto another attached database.
+    ///
+    /// Both halves, in this order: the name is checked against the attached list
+    /// so that a `USE` cannot leave the driver pointing at a catalog that is not
+    /// there, then the session connection is told, then the catalog reads are.
+    /// A `USE` that fails leaves everything as it was.
+    pub async fn use_database(&self, name: &str) -> Result<(), DuckError> {
+        let wanted = name.to_string();
+        let attached = self.databases().await?;
+        if !attached.iter().any(|d| d.name == wanted) {
+            return Err(DuckError::NotAttached(wanted));
+        }
+
+        let session = Arc::clone(&self.session);
+        let statement = format!("USE {}", dbsql::DUCKDB.quote(&wanted));
+        blocking(move || {
+            let conn = session.lock().map_err(|_| DuckError::ReaderGone)?;
+            conn.execute_batch(&statement)?;
+            Ok(())
+        })
+        .await?;
+
+        if let Ok(mut current) = self.current.lock() {
+            *current = wanted;
+        }
+        Ok(())
     }
 
     /// Asks DuckDB to abandon whatever this session is currently running.
@@ -520,16 +595,24 @@ impl DuckSource {
         .await
     }
 
-    /// The navigator root: every schema of every database this connection can
-    /// see, named `database.schema`.
+    /// Every attached database, and which one this session is on.
+    pub async fn databases(&self) -> Result<Vec<DatabaseInfo>, DuckError> {
+        let current = self.current_database();
+        self.with_connection(move |conn| metadata::databases(conn, &current))
+            .await
+    }
+
+    /// The navigator root: the schemas of the database this session is on.
     pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, DuckError> {
-        self.with_connection(metadata::schemas).await
+        let current = self.current_database();
+        self.with_connection(move |conn| metadata::schemas(conn, &current))
+            .await
     }
 
     /// Tables and views within one schema.
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, DuckError> {
-        let schema = schema.to_string();
-        self.with_connection(move |conn| metadata::relations(conn, &schema))
+        let (database, schema) = (self.current_database(), schema.to_string());
+        self.with_connection(move |conn| metadata::relations(conn, &database, &schema))
             .await
     }
 
@@ -539,8 +622,12 @@ impl DuckSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<ColumnInfo>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::columns(conn, &schema, &relation))
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| metadata::columns(conn, &database, &schema, &relation))
             .await
     }
 
@@ -550,15 +637,23 @@ impl DuckSource {
         schema: &str,
         relation: &str,
     ) -> Result<Option<String>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::definition(conn, &schema, &relation))
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| metadata::definition(conn, &database, &schema, &relation))
             .await
     }
 
     /// Indexes on one relation, which in DuckDB means the explicit ones.
     pub async fn indexes(&self, schema: &str, relation: &str) -> Result<Vec<IndexInfo>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::indexes(conn, &schema, &relation))
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| metadata::indexes(conn, &database, &schema, &relation))
             .await
     }
 
@@ -568,8 +663,12 @@ impl DuckSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<UniqueKeyInfo>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::unique_keys(conn, &schema, &relation))
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| metadata::unique_keys(conn, &database, &schema, &relation))
             .await
     }
 
@@ -579,9 +678,15 @@ impl DuckSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<RelationshipInfo>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::foreign_keys(conn, &schema, &relation))
-            .await
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| {
+            metadata::foreign_keys(conn, &database, &schema, &relation)
+        })
+        .await
     }
 
     /// Foreign keys other relations declare against this one.
@@ -590,9 +695,15 @@ impl DuckSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<RelationshipInfo>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::referenced_by(conn, &schema, &relation))
-            .await
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| {
+            metadata::referenced_by(conn, &database, &schema, &relation)
+        })
+        .await
     }
 
     /// CHECK and UNIQUE constraints, with DuckDB's own rendering of each.
@@ -601,8 +712,12 @@ impl DuckSource {
         schema: &str,
         relation: &str,
     ) -> Result<Vec<ConstraintInfo>, DuckError> {
-        let (schema, relation) = (schema.to_string(), relation.to_string());
-        self.with_connection(move |conn| metadata::constraints(conn, &schema, &relation))
+        let (database, schema, relation) = (
+            self.current_database(),
+            schema.to_string(),
+            relation.to_string(),
+        );
+        self.with_connection(move |conn| metadata::constraints(conn, &database, &schema, &relation))
             .await
     }
 

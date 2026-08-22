@@ -169,6 +169,19 @@ final class Database: @unchecked Sendable {
         try decodeJSON(db_databases_json(handle, &errOut), as: [DatabaseInfo]?.self)
     }
 
+    /// Moves this connection onto another database, where
+    /// `capabilities().switchesDatabase` says it can.
+    ///
+    /// Throws where it cannot, carrying the core's own sentence: the drivers
+    /// that report a level of databases without this capability are saying the
+    /// entries are connections to open, and the window opens one instead.
+    ///
+    /// Everything read afterwards is of the new database, so the caller re-reads
+    /// the tree the way it does after a refresh.
+    func useDatabase(_ name: String) throws {
+        try step("switching database failed") { db_use_database(handle, name, &$0) }
+    }
+
     func schemas() throws -> [SchemaInfo] {
         try decodeJSON(db_schemas_json(handle, &errOut), as: [SchemaInfo].self)
     }

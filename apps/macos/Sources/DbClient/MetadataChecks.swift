@@ -129,20 +129,22 @@ enum MetadataChecks {
     /// server, and it would be wrong in the direction that sounds cautious.
     private static func checkCapabilitiesDecodeTheKeysTheCoreWrites() {
         let both: Capabilities? = decode(
-            #"{"transactional":true,"cancel_stops_the_statement":true}"#)
+            #"{"transactional":true,"cancel_stops_the_statement":true,"switches_database":true}"#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
+        expect(both?.switchesDatabase, true, "and that a database in the tree is somewhere to go")
 
         // Cassandra's answer, which is the one the new field exists to carry.
         let neither: Capabilities? = decode(
-            #"{"transactional":false,"cancel_stops_the_statement":false}"#)
+            #"{"transactional":false,"cancel_stops_the_statement":false,"switches_database":false}"#
+        )
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
 
         // A field the core stopped writing is refused rather than read as false,
         // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
         // exists: a default here is an answer nobody gave.
         let renamed: Capabilities? = decode(
-            #"{"transactional":true,"cancel_stops_statement":true}"#)
+            #"{"transactional":true,"cancel_stops_statement":true,"switches_database":false}"#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 
         expect(

@@ -154,6 +154,7 @@ impl Driver for MongoSource {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
+            switches_database: false,
         }
     }
 

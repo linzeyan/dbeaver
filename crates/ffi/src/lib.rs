@@ -875,6 +875,46 @@ pub unsafe extern "C" fn db_databases_json(
     }
 }
 
+/// Moves this session onto another database. 0 on success, -1 on failure.
+///
+/// Only for a connection whose `db_capabilities_json` reports
+/// `switches_database`; every other driver refuses here by name, which is the
+/// answer rather than an error to work around — moving those means opening a
+/// connection with the other database in the string.
+///
+/// Everything the session reads afterwards is of the new database, catalog
+/// included, so a caller re-reads the tree the way it does after a refresh.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed; `name` must be
+/// a live C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_use_database(
+    handle: *mut DbHandle,
+    name: *const c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || name.is_null() {
+        unsafe { set_err(err, "null handle or name") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    let wanted = match unsafe { CStr::from_ptr(name) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return -1;
+        }
+    };
+    match runtime().block_on(h.driver.use_database(wanted)) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
 /// Non-system schemas as a JSON array. Release with `db_string_free`.
 ///
 /// # Safety

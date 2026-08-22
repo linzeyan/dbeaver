@@ -1495,15 +1495,17 @@ final class AppModel {
         open(rewritten, through: session.bastion)
     }
 
-    /// Moves this tab onto another database on the same server.
+    /// Moves this tab onto another database.
     ///
-    /// A new connection under the hood, which is what a database is on the two
-    /// engines that report a level of them: PostgreSQL cannot change database
-    /// within a session at all, and SQL Server's `USE` would move the one
-    /// connection statements run on and leave the pool behind it on the old
-    /// database. So the honest implementation of "switch" is the one this makes
-    /// — dial the same server again, naming the other database — and what makes
-    /// it a switch rather than `openDatabase` is that the tab stays.
+    /// Two ways of doing that, and `capabilities.switchesDatabase` is what says
+    /// which one this connection takes. Where it is true — DuckDB, whose
+    /// databases are catalogs attached to the connection that is already open —
+    /// the core moves the session and the tree is read again. Where it is false,
+    /// a database *is* a connection: PostgreSQL settles it at connect and SQL
+    /// Server reads its catalog through a pool a `USE` would not reach, so the
+    /// honest switch is to dial the same server again with the other name in the
+    /// string, and what makes it a switch rather than `openDatabase` is that the
+    /// tab stays.
     ///
     /// The tab is a fresh `Session` rather than the old one cleared out. Nearly
     /// every field on that object describes the database that is being left, and
@@ -1512,9 +1514,16 @@ final class AppModel {
     /// below. What they have in common is that they are the person's, not the
     /// server's.
     func switchDatabase(to name: String) {
-        guard canSwitchDatabase(to: name),
-            let rewritten = Self.connString(connString, onDatabase: name)
-        else { return }
+        guard canSwitchDatabase(to: name) else { return }
+        // The refusal below is about what a *reconnect* would throw away. A
+        // session that moves in place keeps its transaction and its staged
+        // edits, so there is nothing to ask about — and asking anyway would be
+        // this window inventing a cost the connection does not pay.
+        if capabilities.switchesDatabase {
+            switchInSession(to: name)
+            return
+        }
+        guard let rewritten = Self.connString(connString, onDatabase: name) else { return }
         // Refused rather than confirmed, and refused rather than done quietly.
         // Switching drops the staged changes and rolls back the transaction, and
         // this is the one path to another database that has an alternative
@@ -1548,6 +1557,41 @@ final class AppModel {
         // can be reported against the tab it used to be in.
         drain(leaving)
         open(rewritten, through: arriving.bastion)
+    }
+
+    /// Moves the session itself, for a connection whose databases are containers
+    /// on it rather than connections to open.
+    ///
+    /// Nothing is dropped except what described the database being left: the
+    /// selection and the panes under it, cleared here rather than after the
+    /// round trip because the refresh that follows reads the selection to decide
+    /// what to put back, and putting back a table from the old catalog is the
+    /// one wrong answer available.
+    ///
+    /// The tree comes back through `refresh`, which is the same read the button
+    /// beside the object count performs. Two round trips where one would do, and
+    /// the second is the one that also forgets the completion names, files the
+    /// tree under this connection and settles the status line — all of which a
+    /// switch needs and none of which is worth a second copy of.
+    private func switchInSession(to name: String) {
+        guard canRefresh else { return }
+        isBusy = true
+        status = "Opening \(name)…"
+        errorMessage = nil
+        selected = nil
+        columns = []
+        clearRelationDetail()
+        browseResult.discard()
+        discardBrowse()
+        run { db in
+            try db.useDatabase(name)
+        } then: { [self] in
+            // Cleared so `refresh` can set it again; it refuses while something
+            // is running, and the something is this.
+            isBusy = false
+            expanded = []
+            refresh()
+        }
     }
 
     /// Whether this tab can be moved onto `name`.

@@ -267,6 +267,10 @@ void db_names_forget(DbHandle* handle);
 // Null where the engine has no level above schemas, which is not the same as an
 // empty array — see db_databases_json in crates/ffi.
 char* db_databases_json(DbHandle* handle, char** err);
+// Moves this session onto another database, where the capabilities say it can.
+// 0 on success, -1 on failure — including the refusal every driver that cannot
+// answers with. Everything read afterwards is of the new database.
+int db_use_database(DbHandle* handle, const char* name, char** err);
 char* db_schemas_json(DbHandle* handle, char** err);
 char* db_relations_json(DbHandle* handle, const char* schema, char** err);
 char* db_columns_json(DbHandle* handle, const char* schema, const char* relation,

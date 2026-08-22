@@ -51,18 +51,20 @@ impl Renderer for DuckDb {
 
 /// A table, from `duckdb_tables()`.
 ///
-/// Upstream filters `database_name = ? AND schema_name = ?` and this filters on
-/// the two joined by a dot, because that is what a schema is called on this side:
-/// `Driver::schemas` lists `database_name || '.' || schema_name` for DuckDB, the
-/// shared shape having room for one level and DuckDB having two. Every metadata
-/// query in `driver-duckdb` is written the same way, and for the same reason —
-/// splitting the string back apart would be guessing which half a dot belongs to.
+/// Upstream filters `database_name = ? AND schema_name = ?` and so does this,
+/// with `current_database()` for the half a `RelationInfo` does not carry:
+/// `Driver::schemas` lists the schemas of the database the session is on, so a
+/// relation's schema is `main` and which `main` it is comes from the session.
+/// `Driver::query` runs on that session connection — the same one `use_database`
+/// sends its `USE` to — so the two always name the same database. Asking DuckDB
+/// rather than threading the name through the trait keeps the renderer working
+/// off the driver it was handed and nothing else.
 async fn table(driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String> {
     let schema = relation.schema.as_str();
     let name = relation.name.as_str();
     let statement = format!(
         "SELECT sql FROM duckdb_tables() \
-         WHERE database_name || '.' || schema_name = {} AND table_name = {}",
+         WHERE database_name = current_database() AND schema_name = {} AND table_name = {}",
         literal(schema),
         literal(name)
     );

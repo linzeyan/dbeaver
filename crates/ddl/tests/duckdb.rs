@@ -175,6 +175,7 @@ impl Driver for Fixture {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: false,
+            switches_database: false,
         }
     }
 
@@ -202,23 +203,22 @@ async fn rendered(driver: &dyn Driver, relation: &RelationInfo) -> String {
 // Rendering
 // ---------------------------------------------------------------------------
 
-/// The question upstream asks, with this driver's two-level schema in it.
+/// The question upstream asks, with both of this driver's levels in it.
 ///
 /// The filter is what this test is about. A database with one table answers any
 /// filter at all, so the live half below cannot tell a right one from a wrong
-/// one; this can.
+/// one; this can. The database half is `current_database()` rather than a name:
+/// `main` is a schema in every attached database, and a lookup that dropped the
+/// level would answer with whichever one the catalog listed first.
 #[tokio::test]
 async fn a_table_is_asked_for_by_database_schema_and_name() {
     let fixture = Fixture::answering(&[Some("CREATE TABLE parts(id INTEGER);")]);
-    rendered(
-        &fixture,
-        &relation("fixture.main", "parts", RelationKind::Table),
-    )
-    .await;
+    rendered(&fixture, &relation("main", "parts", RelationKind::Table)).await;
     assert_eq!(
         fixture.asked(),
         ["SELECT sql FROM duckdb_tables() \
-          WHERE database_name || '.' || schema_name = 'fixture.main' AND table_name = 'parts'"]
+          WHERE database_name = current_database() AND schema_name = 'main' \
+          AND table_name = 'parts'"]
     );
 }
 
@@ -228,7 +228,7 @@ async fn a_view_is_read_through_the_metadata_call_that_already_has_it() {
     let fixture = Fixture::defining("CREATE VIEW open_parts AS SELECT id FROM parts;");
     let ddl = rendered(
         &fixture,
-        &relation("fixture.main", "open_parts", RelationKind::View),
+        &relation("main", "open_parts", RelationKind::View),
     )
     .await;
     assert_eq!(ddl, "CREATE VIEW open_parts AS SELECT id FROM parts;");
@@ -245,7 +245,7 @@ async fn a_table_with_no_stored_statement_is_refused() {
     let error = dbddl::definition(
         &fixture,
         &dbsql::DUCKDB,
-        &relation("fixture.main", "vanished", RelationKind::Table),
+        &relation("main", "vanished", RelationKind::Table),
     )
     .await
     .expect_err("a table with no statement rendered as something");
@@ -261,7 +261,7 @@ async fn a_view_with_no_stored_statement_is_refused() {
     let error = dbddl::definition(
         &Fixture::default(),
         &dbsql::DUCKDB,
-        &relation("fixture.main", "vanished", RelationKind::View),
+        &relation("main", "vanished", RelationKind::View),
     )
     .await
     .expect_err("a view with no statement rendered as something");
@@ -275,7 +275,7 @@ async fn a_kind_duckdb_does_not_have_is_refused() {
     let error = dbddl::definition(
         &fixture,
         &dbsql::DUCKDB,
-        &relation("fixture.main", "rollup", RelationKind::MaterializedView),
+        &relation("main", "rollup", RelationKind::MaterializedView),
     )
     .await
     .expect_err("a materialized view rendered as something");
@@ -321,7 +321,7 @@ CREATE VIEW open_parts AS SELECT id, sku FROM parts WHERE qty > 0;";
 
 async fn listed(source: &DuckSource, name: &str) -> RelationInfo {
     source
-        .relations("fixture.main")
+        .relations("main")
         .await
         .expect("listing the fixture database")
         .into_iter()

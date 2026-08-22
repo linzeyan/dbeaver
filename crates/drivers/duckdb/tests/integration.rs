@@ -45,15 +45,6 @@ impl Fixture {
     }
 }
 
-/// A schema name as this driver spells one.
-///
-/// `fixture` is the database name DuckDB derives from `fixture.duckdb`, and
-/// every metadata call here takes the two levels joined, because the trait has
-/// room for one.
-fn schema(name: &str) -> String {
-    format!("fixture.{name}")
-}
-
 /// The failure `sql` produces, insisting there is one.
 ///
 /// A helper rather than `expect_err`, which wants the success type to be
@@ -288,7 +279,7 @@ async fn a_rendered_column_still_says_what_the_database_declared() {
     let fixture = Fixture::new(TYPES);
     let src = fixture.connect().await;
     let columns = src
-        .columns(&schema("main"), "types_all")
+        .columns("main", "types_all")
         .await
         .expect("columns failed");
     let declared = |name: &str| {
@@ -684,7 +675,7 @@ async fn a_transaction_holds_a_change_back_from_everything_outside_it() {
     // And a catalog read answers rather than queueing behind the open
     // transaction, which is what a navigator needs while somebody edits.
     assert!(
-        src.relations(&schema("main"))
+        src.relations("main")
             .await
             .unwrap()
             .iter()
@@ -833,20 +824,22 @@ async fn the_navigator_root_holds_the_users_own_schemas() {
     // `main` is the trap. `duckdb_schemas()` marks the user's own `main` as
     // internal — the same flag it uses for `pg_catalog` — so filtering on it
     // would return a navigator with everything the user made missing.
-    assert!(names.contains(&schema("main")), "got {names:?}");
-    assert!(names.contains(&schema("app")));
-    // `system` holds information_schema and pg_catalog; `temp` holds one
-    // connection's temporary objects, and every call here has a connection of
-    // its own, so nothing could ever be under it.
-    assert!(!names.iter().any(|n| n.starts_with("system.")), "{names:?}");
-    assert!(!names.iter().any(|n| n.starts_with("temp.")), "{names:?}");
+    //
+    // Named plainly, which is the shape this driver used to be unable to
+    // report: the database is a level of its own now, so a schema is `main`
+    // here as it is in every other driver rather than `fixture.main`.
+    assert_eq!(
+        names,
+        vec!["app".to_string(), "main".to_string()],
+        "got {names:?}"
+    );
 }
 
 #[tokio::test]
 async fn a_view_is_not_reported_as_a_table() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    let relations = src.relations(&schema("app")).await.unwrap();
+    let relations = src.relations("app").await.unwrap();
 
     let orders = relations
         .iter()
@@ -855,7 +848,7 @@ async fn a_view_is_not_reported_as_a_table() {
     assert_eq!(orders.kind, RelationKind::Table);
     assert_eq!(
         orders.schema,
-        schema("app"),
+        "app".to_string(),
         "a relation knows where it lives"
     );
     assert_eq!(orders.estimated_rows, Some(2));
@@ -874,7 +867,7 @@ async fn a_view_is_not_reported_as_a_table() {
 async fn a_column_reports_its_place_its_type_and_whether_it_is_the_key() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    let columns = src.columns(&schema("app"), "orders").await.unwrap();
+    let columns = src.columns("app", "orders").await.unwrap();
 
     for (offset, column) in columns.iter().enumerate() {
         assert_eq!(
@@ -896,7 +889,7 @@ async fn a_column_reports_its_place_its_type_and_whether_it_is_the_key() {
     assert!(!total.is_primary_key);
 
     // A composite key marks every column in it.
-    let regions = src.columns(&schema("app"), "regions").await.unwrap();
+    let regions = src.columns("app", "regions").await.unwrap();
     let keyed: Vec<&str> = regions
         .iter()
         .filter(|c| c.is_primary_key)
@@ -911,7 +904,7 @@ async fn a_view_reports_the_whole_statement_it_was_created_from() {
     let src = fixture.connect().await;
 
     let definition = src
-        .definition(&schema("app"), "recent_orders")
+        .definition("app", "recent_orders")
         .await
         .unwrap()
         .expect("a view has a definition");
@@ -924,17 +917,14 @@ async fn a_view_reports_the_whole_statement_it_was_created_from() {
 
     // A table is not a view, and the distinction is what the structure pane
     // hangs a section on.
-    assert_eq!(
-        src.definition(&schema("app"), "orders").await.unwrap(),
-        None
-    );
+    assert_eq!(src.definition("app", "orders").await.unwrap(), None);
 }
 
 #[tokio::test]
 async fn the_index_list_holds_what_the_planner_can_use_and_not_the_key() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    let indexes = src.indexes(&schema("app"), "orders").await.unwrap();
+    let indexes = src.indexes("app", "orders").await.unwrap();
 
     let names: Vec<&str> = indexes.iter().map(|i| i.name.as_str()).collect();
     // Exactly the three CREATE INDEXes. DuckDB maintains the primary key and the
@@ -988,7 +978,7 @@ async fn a_unique_constraint_is_reported_as_the_columns_it_is_over() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
 
-    let keys = src.unique_keys(&schema("app"), "customers").await.unwrap();
+    let keys = src.unique_keys("app", "customers").await.unwrap();
     assert_eq!(keys.len(), 1, "{keys:?}");
     assert_eq!(keys[0].columns, ["email"]);
     // Not `customers_email_unique`, which is what the fixture declared: DuckDB
@@ -1000,18 +990,8 @@ async fn a_unique_constraint_is_reported_as_the_columns_it_is_over() {
 
     // The primary key is not here: `ColumnInfo::is_primary_key` reports it, and
     // `regions` has a composite one that would otherwise appear twice.
-    assert!(
-        src.unique_keys(&schema("app"), "regions")
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        src.unique_keys(&schema("app"), "notes")
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(src.unique_keys("app", "regions").await.unwrap().is_empty());
+    assert!(src.unique_keys("app", "notes").await.unwrap().is_empty());
 
     // `orders_cust_ux` is a `CREATE UNIQUE INDEX` and not a declared constraint,
     // and DuckDB keeps those in `duckdb_indexes()` alone — where the columns
@@ -1019,19 +999,14 @@ async fn a_unique_constraint_is_reported_as_the_columns_it_is_over() {
     // was created that way is not editable here, and the honest reason is that
     // the catalog does not offer its key as columns. Nothing is guessed from the
     // index list to close the gap.
-    assert!(
-        src.unique_keys(&schema("app"), "orders")
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(src.unique_keys("app", "orders").await.unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn a_composite_foreign_key_keeps_the_order_of_both_sides() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    let keys = src.foreign_keys(&schema("app"), "orders").await.unwrap();
+    let keys = src.foreign_keys("app", "orders").await.unwrap();
     assert_eq!(keys.len(), 2);
 
     let region = keys
@@ -1044,7 +1019,7 @@ async fn a_composite_foreign_key_keeps_the_order_of_both_sides() {
     // regrouped.
     assert_eq!(region.local_columns, ["ship_country", "ship_zone"]);
     assert_eq!(region.other_columns, ["country", "zone"]);
-    assert_eq!(region.other_schema, schema("app"));
+    assert_eq!(region.other_schema, "app".to_string());
     // Not blank and not invented: DuckDB has no referential actions at all.
     assert_eq!(region.on_update, "NO ACTION");
     assert_eq!(region.on_delete, "NO ACTION");
@@ -1057,10 +1032,7 @@ async fn a_composite_foreign_key_keeps_the_order_of_both_sides() {
 async fn an_inbound_reference_is_named_for_the_table_that_was_asked_about() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    let inbound = src
-        .referenced_by(&schema("app"), "customers")
-        .await
-        .unwrap();
+    let inbound = src.referenced_by("app", "customers").await.unwrap();
 
     assert_eq!(inbound.len(), 1);
     let key = &inbound[0];
@@ -1074,7 +1046,7 @@ async fn an_inbound_reference_is_named_for_the_table_that_was_asked_about() {
     // the referenced table and `duckdb_constraints` skips it deliberately, so
     // this scan cannot double-count.
     assert!(
-        src.foreign_keys(&schema("app"), "customers")
+        src.foreign_keys("app", "customers")
             .await
             .unwrap()
             .is_empty()
@@ -1085,7 +1057,7 @@ async fn an_inbound_reference_is_named_for_the_table_that_was_asked_about() {
 async fn a_check_constraint_reports_the_databases_own_text() {
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    let constraints = src.constraints(&schema("app"), "orders").await.unwrap();
+    let constraints = src.constraints("app", "orders").await.unwrap();
 
     // Where DuckDB beats SQLite outright: SQLite keeps a CHECK only inside the
     // CREATE TABLE text and its driver cannot report one at all.
@@ -1110,7 +1082,7 @@ async fn a_check_constraint_reports_the_databases_own_text() {
         "got {constraints:?}"
     );
     let total = src
-        .columns(&schema("app"), "orders")
+        .columns("app", "orders")
         .await
         .unwrap()
         .into_iter()
@@ -1119,7 +1091,7 @@ async fn a_check_constraint_reports_the_databases_own_text() {
     assert!(!total.nullable, "and it is still reported once, here");
 
     let unique = src
-        .constraints(&schema("app"), "customers")
+        .constraints("app", "customers")
         .await
         .unwrap()
         .into_iter()
@@ -1136,28 +1108,13 @@ async fn a_table_with_none_of_these_features_answers_for_all_of_them() {
     let src = fixture.connect().await;
     let bare = "notes";
 
-    assert_eq!(src.columns(&schema("app"), bare).await.unwrap().len(), 1);
-    assert!(src.indexes(&schema("app"), bare).await.unwrap().is_empty());
-    assert!(
-        src.foreign_keys(&schema("app"), bare)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        src.referenced_by(&schema("app"), bare)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        src.constraints(&schema("app"), bare)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(src.triggers(&schema("app"), bare).await.unwrap().is_empty());
-    assert_eq!(src.definition(&schema("app"), bare).await.unwrap(), None);
+    assert_eq!(src.columns("app", bare).await.unwrap().len(), 1);
+    assert!(src.indexes("app", bare).await.unwrap().is_empty());
+    assert!(src.foreign_keys("app", bare).await.unwrap().is_empty());
+    assert!(src.referenced_by("app", bare).await.unwrap().is_empty());
+    assert!(src.constraints("app", bare).await.unwrap().is_empty());
+    assert!(src.triggers("app", bare).await.unwrap().is_empty());
+    assert_eq!(src.definition("app", bare).await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -1168,7 +1125,11 @@ async fn a_relation_that_is_not_there_is_an_empty_answer() {
     let src = fixture.connect().await;
     let missing = "no_such_relation_anywhere";
 
-    for schema_name in [schema("app"), schema("nowhere"), "nonsense".to_string()] {
+    for schema_name in [
+        "app".to_string(),
+        "nowhere".to_string(),
+        "nonsense".to_string(),
+    ] {
         assert!(src.columns(&schema_name, missing).await.unwrap().is_empty());
         assert!(src.indexes(&schema_name, missing).await.unwrap().is_empty());
         assert!(
@@ -1207,12 +1168,7 @@ async fn triggers_are_empty_because_duckdb_has_none() {
     // issued.
     let fixture = Fixture::new(CATALOG);
     let src = fixture.connect().await;
-    assert!(
-        src.triggers(&schema("app"), "orders")
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(src.triggers("app", "orders").await.unwrap().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -1237,7 +1193,7 @@ async fn an_in_memory_database_is_one_database_for_everything_on_it() {
         .unwrap();
     while created.next_batch().await.unwrap().is_some() {}
 
-    let relations = src.relations("memory.main").await.unwrap();
+    let relations = src.relations("main").await.unwrap();
     assert!(
         relations.iter().any(|r| r.name == "scratch"),
         "a metadata connection should see the same database, got {relations:?}"
@@ -1262,8 +1218,12 @@ async fn an_empty_path_is_the_in_memory_database_too() {
             .await
             .unwrap()
             .iter()
-            .any(|s| s.name == "memory.main")
+            .any(|s| s.name == "main")
     );
+    // And it is called `memory`, which is DuckDB's own name for the database an
+    // in-memory connection opens on — asked rather than derived, because no path
+    // was given to derive it from.
+    assert_eq!(src.current_database(), "memory");
 }
 
 // ---------------------------------------------------------------------------
@@ -1319,7 +1279,7 @@ async fn the_trait_sees_everything_the_inherent_api_does() {
     cursor.close().await.expect("close failed");
     driver.cancel().await.expect("session cancel failed");
 
-    let root = schema("main");
+    let root = "main".to_string();
     assert!(
         driver
             .schemas()
@@ -1360,4 +1320,148 @@ async fn the_trait_sees_everything_the_inherent_api_does() {
     };
     assert!(err.statement_position().is_some(), "got {err}");
     assert!(!err.is_cancelled());
+}
+
+// ---------------------------------------------------------------------------
+// The database level
+// ---------------------------------------------------------------------------
+
+/// Drains a statement, for the setup that has to go through the driver's own
+/// session rather than through a second connection.
+///
+/// `ATTACH` is per connection, so an attachment made anywhere else is not on the
+/// session these tests then ask about — which is the whole property being
+/// tested.
+async fn run(src: &DuckSource, sql: &str) {
+    let mut stream = src
+        .query(sql, 10)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e}"));
+    while stream.next_batch().await.unwrap().is_some() {}
+}
+
+#[tokio::test]
+async fn an_attached_database_is_a_level_of_its_own() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+
+    // The name DuckDB derives from `fixture.duckdb`, asked rather than guessed.
+    assert_eq!(src.current_database(), "fixture");
+    let alone = src.databases().await.unwrap();
+    assert_eq!(alone.len(), 1, "got {alone:?}");
+    assert!(alone[0].is_current, "the one database is the current one");
+
+    run(&src, "ATTACH ':memory:' AS scratch").await;
+    let both: Vec<(String, bool)> = src
+        .databases()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|d| (d.name, d.is_current))
+        .collect();
+    assert_eq!(
+        both,
+        vec![
+            ("fixture".to_string(), true),
+            ("scratch".to_string(), false)
+        ],
+        "the attached database is listed, and the session is still on the first"
+    );
+
+    // The tree is the current database's and nothing else's. Before this driver
+    // had a level, both databases' schemas were in one list under composite
+    // names, which is the shape this replaced.
+    let schemas: Vec<String> = src
+        .schemas()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(schemas, vec!["app".to_string(), "main".to_string()]);
+}
+
+#[tokio::test]
+async fn moving_onto_an_attached_database_moves_the_catalog_and_the_statements() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    run(&src, "ATTACH ':memory:' AS scratch").await;
+    run(&src, "CREATE TABLE scratch.main.notes (body VARCHAR)").await;
+    run(&src, "INSERT INTO scratch.main.notes VALUES ('kept')").await;
+
+    src.use_database("scratch").await.expect("the switch");
+    assert_eq!(src.current_database(), "scratch");
+
+    // The catalog reads move, and they are the half that could have been left
+    // behind: each of them runs on a connection cloned for it, and a `USE` on
+    // the session would not have reached one.
+    let schemas: Vec<String> = src
+        .schemas()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(schemas, vec!["main".to_string()], "scratch has only main");
+    let relations = src.relations("main").await.unwrap();
+    assert_eq!(relations.len(), 1);
+    assert_eq!(relations[0].name, "notes");
+    assert!(
+        src.relations("app").await.unwrap().is_empty(),
+        "and the database that was left is not being read any more"
+    );
+
+    // And an unqualified name in the editor means the database the tree is
+    // showing, which is what the `USE` on the session connection buys.
+    let mut stream = src.query("SELECT body FROM notes", 10).await.unwrap();
+    let batch = stream.next_batch().await.unwrap().expect("a row");
+    assert_eq!(col::<StringArray>(&batch, "body").value(0), "kept");
+}
+
+#[tokio::test]
+async fn a_browse_after_a_switch_names_the_database_it_landed_on() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    run(&src, "ATTACH ':memory:' AS scratch").await;
+    run(&src, "CREATE TABLE scratch.main.notes (body VARCHAR)").await;
+    run(&src, "INSERT INTO scratch.main.notes VALUES ('kept')").await;
+    src.use_database("scratch").await.expect("the switch");
+
+    // Three parts, and the test is the cursor rather than the SQL: a cursor runs
+    // on a connection cloned for it, which never saw the `USE`. A two-part name
+    // would resolve in the database the clone opened on — where `main.notes`
+    // does not exist at all.
+    let sql = Driver::browse(
+        &src,
+        &dbconn::Browse {
+            schema: "main",
+            relation: "notes",
+            filter: None,
+            order: None,
+            keys: &[],
+            limit: None,
+        },
+    );
+    // Quoted only where a name needs it, which none of these three do — what
+    // matters is that all three are there.
+    assert!(sql.contains("scratch.main.notes"), "got {sql}");
+    let mut cursor = Driver::cursor(&src, &sql, 10).await.expect("a cursor");
+    let batch = cursor.fetch().await.unwrap().expect("a row");
+    assert_eq!(col::<StringArray>(&batch, "body").value(0), "kept");
+    cursor.close().await.expect("close failed");
+}
+
+#[tokio::test]
+async fn a_database_that_is_not_attached_is_refused_by_name() {
+    let fixture = Fixture::new(CATALOG);
+    let src = fixture.connect().await;
+    let err = src
+        .use_database("warehouse")
+        .await
+        .expect_err("nothing called warehouse is attached");
+    assert!(err.to_string().contains("warehouse"), "got {err}");
+    // And the refusal changed nothing: a failed switch that had already moved
+    // the driver's idea of where it is would leave the tree reading a database
+    // the session is not on.
+    assert_eq!(src.current_database(), "fixture");
 }

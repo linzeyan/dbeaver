@@ -17,60 +17,82 @@
 //! function form is used throughout and the filtering is written out, so it is
 //! visible rather than inherited.
 //!
-//! ## Two levels flattened onto one
+//! ## Two levels, and which one is showing
 //!
 //! DuckDB names a relation in three parts — database, schema, table — and the
-//! shared `SchemaInfo` has room for one. So a schema here is called
-//! `database.schema`: `warehouse.main`, `warehouse.app`. Three reasons, in the
-//! order they mattered.
+//! trait's metadata methods carry two. The level above is `databases()`, and the
+//! session is on exactly one of them at a time: every query below is filtered by
+//! the name `DuckSource::current_database` is holding, and `use_database` is
+//! what moves it.
 //!
-//! `ATTACH` is ordinary DuckDB usage, and after one there are two schemas called
-//! `main` with different contents in them. A sidebar showing two identical nodes
-//! is worse than one showing a longer name.
+//! This replaced a flattening. A schema used to be reported as `database.schema`
+//! — `warehouse.main`, `warehouse.app` — so that an `ATTACH` did not produce two
+//! nodes called `main` with different contents. The composite read correctly and
+//! pasted into SQL correctly, and it was still the wrong shape: it put DuckDB's
+//! database level in the one place a front end cannot draw a level, and it made
+//! the common case, one database with one schema, read `memory.main` where every
+//! other driver reads `main`.
 //!
-//! The qualified name is real SQL. `SELECT * FROM warehouse.main.orders` is what
-//! DuckDB itself accepts, so a front end that pastes the name it was given into
-//! a statement gets a statement that runs — which a bare `main` would not, once
-//! a second database is attached.
+//! What the level costs in exchange: a table in an attached database is not in
+//! the tree until the session is moved onto it. Everything is reachable, and no
+//! longer all at once.
 //!
-//! And it needs no parsing to undo. Every query below filters on
-//! `database_name || '.' || schema_name = ?` rather than splitting the string,
-//! so a database called `sales.2024` or a schema called `"a.b"` resolves exactly
-//! instead of resolving to whichever half a `split_once` guessed at.
-//!
-//! What it costs: the common case, one database with one schema in it, reads
-//! `warehouse.main` in the sidebar where every other driver reads `main`. That
-//! is the visible price of the trait having one level where DuckDB has two.
+//! The database is bound as a parameter here rather than qualified into the
+//! statement, so a database called `sales.2024` needs no quoting rules of its
+//! own — the same property the composite name had, kept.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
+    RelationKind, RelationshipInfo, SchemaInfo, UniqueKeyInfo,
 };
 use duckdb::Connection;
 use duckdb::types::Value;
 
 use crate::DuckError;
 
-/// Every schema a connection can reach, except the ones nothing can be under.
+/// Every database attached to this connection, and which one the session is on.
+///
+/// `system` and `temp` are left out for the reason `schemas` leaves them out:
+/// one holds DuckDB's own catalog and the other holds a single connection's
+/// temporary objects, and neither is somewhere to point a navigator.
+///
+/// Which one is current is passed in rather than read from `current_database()`
+/// here. This query runs on a connection cloned for it, and `USE` is per
+/// connection — so the answer that function gives on this connection is the
+/// database the *clone* opened on, which is precisely the fact this driver
+/// stopped relying on.
+pub(crate) fn databases(conn: &Connection, current: &str) -> Result<Vec<DatabaseInfo>, DuckError> {
+    let mut stmt = conn.prepare(
+        "SELECT database_name \
+         FROM duckdb_databases() \
+         WHERE database_name NOT IN ('system', 'temp') \
+         ORDER BY database_name",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let name: String = row.get(0)?;
+        Ok(DatabaseInfo {
+            is_current: name == current,
+            name,
+        })
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// The schemas of the database this session is on.
 ///
 /// Filtered by database rather than by the `internal` flag, which is the trap
 /// here. `duckdb_schemas()` reports `internal = true` for the `main` schema of
 /// the user's own database — the schema everything they created is in — so the
 /// obvious `WHERE NOT internal` returns a navigator with the user's tables
 /// missing and their extra schemas present.
-///
-/// `system` holds `information_schema`, `pg_catalog` and DuckDB's own `main`.
-/// `temp` holds one connection's temporary objects, and every call here runs on
-/// a connection of its own, so it is a node that can never have anything under
-/// it.
-pub(crate) fn schemas(conn: &Connection) -> Result<Vec<SchemaInfo>, DuckError> {
+pub(crate) fn schemas(conn: &Connection, database: &str) -> Result<Vec<SchemaInfo>, DuckError> {
     let mut stmt = conn.prepare(
-        "SELECT database_name || '.' || schema_name \
+        "SELECT schema_name \
          FROM duckdb_schemas() \
-         WHERE database_name NOT IN ('system', 'temp') \
-         ORDER BY database_name, schema_name",
+         WHERE database_name = ? \
+         ORDER BY schema_name",
     )?;
-    let rows = stmt.query_map([], |row| Ok(SchemaInfo { name: row.get(0)? }))?;
+    let rows = stmt.query_map([database], |row| Ok(SchemaInfo { name: row.get(0)? }))?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -81,18 +103,22 @@ pub(crate) fn schemas(conn: &Connection) -> Result<Vec<SchemaInfo>, DuckError> {
 /// materialized views, no foreign tables and no partitioned tables, and its
 /// table functions are functions rather than relations in the catalog, so
 /// SQLite's `Virtual` has nothing to describe here either.
-pub(crate) fn relations(conn: &Connection, schema: &str) -> Result<Vec<RelationInfo>, DuckError> {
+pub(crate) fn relations(
+    conn: &Connection,
+    database: &str,
+    schema: &str,
+) -> Result<Vec<RelationInfo>, DuckError> {
     let mut stmt = conn.prepare(
         "SELECT table_name AS name, 'table' AS kind, estimated_size \
          FROM duckdb_tables() \
-         WHERE database_name || '.' || schema_name = ? AND NOT internal \
+         WHERE database_name = ? AND schema_name = ? AND NOT internal \
          UNION ALL \
          SELECT view_name, 'view', CAST(NULL AS BIGINT) \
          FROM duckdb_views() \
-         WHERE database_name || '.' || schema_name = ? AND NOT internal \
+         WHERE database_name = ? AND schema_name = ? AND NOT internal \
          ORDER BY name",
     )?;
-    let rows = stmt.query_map([schema, schema], |row| {
+    let rows = stmt.query_map([database, schema, database, schema], |row| {
         let kind: String = row.get(1)?;
         Ok(RelationInfo {
             schema: schema.to_string(),
@@ -123,6 +149,7 @@ pub(crate) fn relations(conn: &Connection, schema: &str) -> Result<Vec<RelationI
 /// wire form a rendering, and this is where the declaration is kept.
 pub(crate) fn columns(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Vec<ColumnInfo>, DuckError> {
@@ -140,10 +167,10 @@ pub(crate) fn columns(
            ON pk.database_name = c.database_name \
           AND pk.schema_name = c.schema_name \
           AND pk.table_name = c.table_name \
-         WHERE c.database_name || '.' || c.schema_name = ? AND c.table_name = ? \
+         WHERE c.database_name = ? AND c.schema_name = ? AND c.table_name = ? \
          ORDER BY c.column_index",
     )?;
-    let rows = stmt.query_map([schema, relation], |row| {
+    let rows = stmt.query_map([database, schema, relation], |row| {
         Ok(ColumnInfo {
             name: row.get(0)?,
             data_type: row.get(1)?,
@@ -169,14 +196,17 @@ pub(crate) fn columns(
 /// is worth the trait knowing.
 pub(crate) fn definition(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Option<String>, DuckError> {
     let mut stmt = conn.prepare(
         "SELECT sql FROM duckdb_views() \
-         WHERE database_name || '.' || schema_name = ? AND view_name = ?",
+         WHERE database_name = ? AND schema_name = ? AND view_name = ?",
     )?;
-    let mut rows = stmt.query_map([schema, relation], |row| row.get::<_, Option<String>>(0))?;
+    let mut rows = stmt.query_map([database, schema, relation], |row| {
+        row.get::<_, Option<String>>(0)
+    })?;
     match rows.next() {
         Some(row) => Ok(row?),
         None => Ok(None),
@@ -193,6 +223,7 @@ pub(crate) fn definition(
 /// reads the key.
 pub(crate) fn indexes(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Vec<IndexInfo>, DuckError> {
@@ -205,10 +236,10 @@ pub(crate) fn indexes(
     let mut stmt = conn.prepare(
         "SELECT index_name, is_unique, CAST(expressions AS VARCHAR[]) \
          FROM duckdb_indexes() \
-         WHERE database_name || '.' || schema_name = ? AND table_name = ? \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ? \
          ORDER BY index_name",
     )?;
-    let rows = stmt.query_map([schema, relation], |row| {
+    let rows = stmt.query_map([database, schema, relation], |row| {
         Ok(IndexInfo {
             name: row.get(0)?,
             is_unique: row.get(1)?,
@@ -251,17 +282,18 @@ pub(crate) fn indexes(
 /// there is no grouping pass.
 pub(crate) fn unique_keys(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Vec<UniqueKeyInfo>, DuckError> {
     let mut stmt = conn.prepare(
         "SELECT constraint_name, CAST(constraint_column_names AS VARCHAR[]) \
          FROM duckdb_constraints() \
-         WHERE database_name || '.' || schema_name = ? AND table_name = ? \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ? \
            AND constraint_type = 'UNIQUE' \
          ORDER BY constraint_name, constraint_index",
     )?;
-    let rows = stmt.query_map([schema, relation], |row| {
+    let rows = stmt.query_map([database, schema, relation], |row| {
         Ok(UniqueKeyInfo {
             name: row.get(0)?,
             columns: strings(row.get(1)?),
@@ -277,17 +309,18 @@ pub(crate) fn unique_keys(
 /// and has to be regrouped.
 pub(crate) fn foreign_keys(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Vec<RelationshipInfo>, DuckError> {
     let mut stmt = conn.prepare(
         "SELECT constraint_name, constraint_column_names, referenced_table, referenced_column_names \
          FROM duckdb_constraints() \
-         WHERE database_name || '.' || schema_name = ? AND table_name = ? \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ? \
            AND constraint_type = 'FOREIGN KEY' \
          ORDER BY constraint_index",
     )?;
-    let rows = stmt.query_map([schema, relation], |row| {
+    let rows = stmt.query_map([database, schema, relation], |row| {
         Ok(RelationshipInfo {
             name: row.get(0)?,
             local_columns: strings(row.get(1)?),
@@ -317,6 +350,7 @@ pub(crate) fn foreign_keys(
 /// merely likely.
 pub(crate) fn referenced_by(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Vec<RelationshipInfo>, DuckError> {
@@ -327,11 +361,11 @@ pub(crate) fn referenced_by(
     let mut stmt = conn.prepare(
         "SELECT constraint_name, table_name, referenced_column_names, constraint_column_names \
          FROM duckdb_constraints() \
-         WHERE database_name || '.' || schema_name = ? AND referenced_table = ? \
+         WHERE database_name = ? AND schema_name = ? AND referenced_table = ? \
            AND constraint_type = 'FOREIGN KEY' \
          ORDER BY table_name, constraint_index",
     )?;
-    let rows = stmt.query_map([schema, relation], |row| {
+    let rows = stmt.query_map([database, schema, relation], |row| {
         Ok(RelationshipInfo {
             name: row.get(0)?,
             local_columns: strings(row.get(2)?),
@@ -362,17 +396,18 @@ pub(crate) fn referenced_by(
 /// turn one fact into two.
 pub(crate) fn constraints(
     conn: &Connection,
+    database: &str,
     schema: &str,
     relation: &str,
 ) -> Result<Vec<ConstraintInfo>, DuckError> {
     let mut stmt = conn.prepare(
         "SELECT constraint_name, constraint_type, constraint_text \
          FROM duckdb_constraints() \
-         WHERE database_name || '.' || schema_name = ? AND table_name = ? \
+         WHERE database_name = ? AND schema_name = ? AND table_name = ? \
            AND constraint_type IN ('CHECK', 'UNIQUE') \
          ORDER BY constraint_type, constraint_index",
     )?;
-    let rows = stmt.query_map([schema, relation], |row| {
+    let rows = stmt.query_map([database, schema, relation], |row| {
         let kind: String = row.get(1)?;
         Ok(ConstraintInfo {
             name: row.get(0)?,

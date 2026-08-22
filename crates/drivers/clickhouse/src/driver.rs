@@ -129,6 +129,7 @@ impl Driver for ChSource {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
+            switches_database: false,
         }
     }
 

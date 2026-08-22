@@ -42,16 +42,29 @@ struct Capabilities: Codable, Hashable {
     /// claiming the work stopped.
     let cancelStopsTheStatement: Bool
 
+    /// Whether an entry of `databases()` is another container on this
+    /// connection, rather than somewhere to open a new one.
+    ///
+    /// True for DuckDB, where the entries are attached catalogs and often have
+    /// no file the connection string could name. False for PostgreSQL, which
+    /// settles its database at connect, and for SQL Server, whose driver reads
+    /// its catalog through a pool a `USE` would not reach — so both of those are
+    /// moved by opening a connection with the other name in the string, which is
+    /// what `AppModel.switchDatabase` does when this is false.
+    let switchesDatabase: Bool
+
     /// What a window has before it has asked.
     ///
-    /// Both false, which is the cautious reading in both directions: it offers no
-    /// transaction control it might not have, and it promises no cancel it might
-    /// not be able to deliver.
-    static let unknown = Capabilities(transactional: false, cancelStopsTheStatement: false)
+    /// All false, which is the cautious reading in every direction: it offers no
+    /// transaction control it might not have, promises no cancel it might not be
+    /// able to deliver, and claims no switch it might have to take back.
+    static let unknown = Capabilities(
+        transactional: false, cancelStopsTheStatement: false, switchesDatabase: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
         case cancelStopsTheStatement = "cancel_stops_the_statement"
+        case switchesDatabase = "switches_database"
     }
 }
 

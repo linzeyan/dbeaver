@@ -156,6 +156,7 @@ impl Driver for FlightSqlSource {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: false,
+            switches_database: false,
         }
     }
 

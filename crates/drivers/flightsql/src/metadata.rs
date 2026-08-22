@@ -473,10 +473,10 @@ fn qualified(catalog: &str, schema: &str) -> String {
 ///
 /// The one place this driver loses information, and the price of the trait having
 /// one namespace level where Flight SQL has two: a catalog whose name contains a
-/// dot is split in the wrong place. The DuckDB driver avoids the same split by
-/// pushing the concatenation into SQL — `database_name || '.' || schema_name = ?`
-/// — which a protocol command has no room for, since it takes the catalog and the
-/// schema as separate fields.
+/// dot is split in the wrong place. The DuckDB driver had the same problem and no
+/// longer has it — its catalog level moved to `Driver::databases`, and a session
+/// is moved onto one with `USE`. Flight SQL has no such command: a catalog is a
+/// field of every metadata call rather than somewhere a connection can be.
 fn split(schema: &str) -> (Option<&str>, &str) {
     match schema.split_once('.') {
         Some((catalog, rest)) => (Some(catalog), rest),

@@ -124,6 +124,7 @@ impl Driver for SqliteSource {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
+            switches_database: false,
         }
     }
 
