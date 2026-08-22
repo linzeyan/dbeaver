@@ -22,6 +22,8 @@ enum QueryBufferChecks {
             checkClosingTheActiveLastBufferFallsBackOne()
             checkClosingBelowTheActiveOneKeepsItActive()
             checkTheLastBufferCannotBeClosed()
+            checkRenamingTakesAndIsTrimmed()
+            checkANamelessBufferIsRefused()
         }
         if failures == 0 {
             fputs("query buffers: all checks passed\n", stderr)
@@ -86,6 +88,30 @@ enum QueryBufferChecks {
         guard let model = makeModel() else { return }
         model.closeQueryBuffer(0)
         expect(model.queryBuffers.count, 1, "the only buffer stayed")
+    }
+
+    /// The name is what the strip draws, and the ends of a typed one are never
+    /// meant. Refusing over a trailing space would be a rename that appeared to
+    /// do nothing.
+    @MainActor private static func checkRenamingTakesAndIsTrimmed() {
+        guard let model = makeModel() else { return }
+        model.addQueryBuffer()
+        model.renameQueryBuffer(1, to: "  daily report\n")
+        expect(model.queryBuffers[1].name, "daily report", "the typed name is kept, trimmed")
+        expect(model.queryBuffers[0].name, "query 1", "and the buffer beside it is untouched")
+        model.renameQueryBuffer(7, to: "nowhere")
+        expect(model.queryBuffers.count, 2, "a rename of a buffer that is not there does nothing")
+    }
+
+    /// A buffer's name is the whole of its presence in the strip. One made of
+    /// spaces is a tab with no width — reachable by ⌘⇧] and by nothing a pointer
+    /// can do.
+    @MainActor private static func checkANamelessBufferIsRefused() {
+        guard let model = makeModel() else { return }
+        model.renameQueryBuffer(0, to: "   ")
+        expect(model.queryBuffers[0].name, "query 1", "a name of spaces is refused")
+        model.renameQueryBuffer(0, to: "")
+        expect(model.queryBuffers[0].name, "query 1", "and so is an empty one")
     }
 
     // MARK: - Fixture

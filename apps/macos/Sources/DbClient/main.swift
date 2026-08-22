@@ -660,6 +660,16 @@ let showHistory = CommandLine.arguments.contains("--history")
 /// photograph the half of the panel that browses and edits appear in.
 let historyAll = CommandLine.arguments.contains("--history-all")
 
+/// `--rename-buffer` opens the name field on the active query buffer.
+///
+/// Exists for the reason `--edit-value` does: the field is reached by
+/// double-clicking a name and a capture cannot double-click. Everything a text
+/// field dropped into a 26pt strip is likely to get wrong is a matter of a few
+/// points — no border, the line sitting high against the names beside it, a
+/// width that shoves its neighbours along — and all of it is visible only in a
+/// picture. Best with `--tab query`, which is the pane the strip is in.
+let renameBuffer = CommandLine.arguments.contains("--rename-buffer")
+
 /// `--history-pick 2` recalls the nth-newest statement into the editor.
 ///
 /// Both exist for the reason `--cell` does: the panel is opened with a keystroke
@@ -1863,6 +1873,29 @@ func runScriptWhenReady(model: AppModel) {
     poll()
 }
 
+/// Drives `--rename-buffer`: puts the Query pane up and opens the name field on
+/// the buffer the editor is in.
+///
+/// Deferred by a turn, and then some, for the reason `--edit-value` records: the
+/// field seeds itself and takes focus from a `.task`, and asking for it in the
+/// same turn as the pane it lives in has it drawn before the pane is laid out.
+@MainActor
+func openBufferNameField(model: AppModel) {
+    model.activeTab = .query
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+        MainActor.assumeIsolated {
+            guard model.queryBuffers.indices.contains(model.activeQueryBufferIndex) else {
+                fputs("no buffer to rename\n", stderr)
+                return
+            }
+            model.renamingQueryBuffer = model.queryBuffers[model.activeQueryBufferIndex].id
+            fputs(
+                "rename field   on “\(model.queryBuffers[model.activeQueryBufferIndex].name)”\n",
+                stderr)
+        }
+    }
+}
+
 /// Drives `--history` and `--history-pick`. Polls, and reports to stderr, for
 /// the reasons `exportWhenReady` does: the model's background pipeline has no
 /// completion hook, and a capture switch does not justify inventing one.
@@ -2359,6 +2392,7 @@ if benchMode {
             driveHistory(
                 model: model, open: showHistory, all: historyAll, pick: historyPick)
         }
+        if renameBuffer { openBufferNameField(model: model) }
         if preferencesProbe { probePreferences(model: model) }
         if historyProbe { probeHistory(model: model) }
         if sessionsProbe { probeSessions(model: model) }

@@ -516,6 +516,33 @@ final class AppModel {
         }
     }
 
+    /// Which buffer's name is being typed over, or nil.
+    ///
+    /// On the model rather than in the strip's own `@State` for the reason
+    /// `isEditingValue` gives: the field is reached by double-clicking a name
+    /// and a capture cannot double-click, so a mode kept in the view is a mode
+    /// no screenshot can show. Everything this field is likely to get wrong —
+    /// no border, the text sitting high in a 26pt row, a width that shoves the
+    /// buffers beside it — is a matter of a few points and visible only in a
+    /// picture. Keyed by id, not index: closing a buffer to the left shifts
+    /// every index after it, and a rename in flight would follow the shift onto
+    /// its neighbour.
+    var renamingQueryBuffer: UUID?
+
+    /// Renames a buffer, if the new name is one somebody could click on.
+    ///
+    /// A name of spaces is refused rather than trimmed to nothing and kept: the
+    /// name is the whole of the buffer's presence in the strip, and a tab with
+    /// no width is a buffer that can only be reached by keyboard. Trimmed
+    /// because the ends of a typed name are never meant, and refusing over a
+    /// trailing space would be a rename that silently did nothing.
+    func renameQueryBuffer(_ index: Int, to name: String) {
+        guard queryBuffers.indices.contains(index) else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        queryBuffers[index].name = trimmed
+    }
+
     var querySelection: TextSelection? {
         get { session.querySelection }
         set { session.querySelection = newValue }
