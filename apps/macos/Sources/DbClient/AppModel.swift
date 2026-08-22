@@ -3827,6 +3827,16 @@ final class AppModel {
     /// different things: on the Structure tab, row count and elapsed time
     /// describe a result the user is not currently looking at.
     var statusLine: String {
+        // A connection that is gone outranks all of it. Everything below this
+        // line describes what the panes are showing, and what they are showing
+        // came off a connection that is no longer there — "customers · 0 rows ·
+        // 0.05 s" over a dead session is the tab's most confident sentence about
+        // its least current fact. Read from the dot rather than from a second
+        // flag, so the two cannot disagree.
+        //
+        // Only where something was open: a tab that never connected is showing
+        // the form, and the form says its own piece.
+        if connectionState == .failed, db != nil { return status }
         // An export outranks whatever the tab would otherwise say, and stops
         // doing so the moment it finishes: nothing has to remember to clear it,
         // and no stale "Exported…" can outlive the thing it described.
@@ -4829,13 +4839,7 @@ final class AppModel {
             guard let db = session.db else { continue }
             dispatch(
                 on: session.queue, applyingInto: session, { db.ping() },
-                then: { [weak self] alive in
-                    guard let self else { return }
-                    // Only ever downgrades. A session already showing a failure it
-                    // reported for its own reasons is not talked out of it by a
-                    // ping that happened to succeed afterwards.
-                    if !alive { self.connectionState = .failed }
-                })
+                then: { [weak self] alive in self?.recordHealth(alive, of: session) })
         }
     }
 
@@ -4976,6 +4980,67 @@ final class AppModel {
         errorMessage = message
         status = "Failed"
         if let statement { pointAtSyntaxError(statement) }
+
+        // And then, quietly, the question the banner cannot answer: was that a
+        // statement this database refused, or the last thing this tab will ever
+        // hear from it? Nothing on screen tells them apart — a dropped
+        // connection surfaces as an error like any other — and until this was
+        // asked, a tab whose server had gone away kept a green dot over every
+        // one of them.
+        //
+        // A round trip per failure, which is affordable because failures are
+        // things a person is sitting in front of and `ping` is the cheapest call
+        // each driver has. Not asked for a cancellation or a refused connect
+        // attempt: both return above, and neither is news about the connection.
+        askWhetherStillConnected()
+    }
+
+    /// Asks the open connection whether it is still there, and lets the answer
+    /// move the dot.
+    ///
+    /// Idle by definition at both call sites — after a failure, and when the
+    /// application comes back to the front — which is the only time the answer
+    /// means anything: the connection is serial, so a ping sent behind a running
+    /// statement reports on the moment the statement ended.
+    private func askWhetherStillConnected() {
+        guard let db, !isBusy else { return }
+        let asked = session
+        dispatch(
+            on: queue, applyingInto: asked, { db.ping() },
+            then: { [weak self] alive in self?.recordHealth(alive, of: asked) })
+    }
+
+    /// What a ping's answer does to the tab.
+    ///
+    /// Both directions from one place, because the dot is a claim about the last
+    /// round trip anybody made and a ping is the only call whose entire purpose
+    /// is to make one. An answer is therefore allowed to put a red dot back to
+    /// green: a driver that keeps a pool redials, so the tab that went red when
+    /// a server restarted is working again long before anybody would think to
+    /// close it, and a light that only ever goes one way stops being read.
+    ///
+    /// Nothing is closed, nothing is reopened, and nothing is asked in a sheet.
+    /// A connection that is gone stays a tab with its rows still on it; the way
+    /// back is Connect… (⌘K), which is a decision this cannot make on somebody's
+    /// behalf. A session whose connect attempt failed has no `db` at all, so
+    /// neither call site can reach it and its red dot is safe from a later
+    /// window's good news.
+    func recordHealth(_ alive: Bool, of asked: Session) {
+        applying(to: asked) {
+            switch (alive, connectionState) {
+            case (false, _):
+                connectionState = .failed
+                // Said in the status line as well as the dot, because the banner
+                // above it is showing the driver's own message and that message
+                // is about a statement. This is the sentence that is about the
+                // connection.
+                status = "Disconnected — Connect… (⌘K) opens it again"
+            case (true, .failed):
+                connectionState = .connected
+            case (true, _):
+                break
+            }
+        }
     }
 
     /// Says where the server found the trouble, and puts the editor's selection

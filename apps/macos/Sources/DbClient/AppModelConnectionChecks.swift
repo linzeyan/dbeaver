@@ -50,6 +50,7 @@ enum AppModelConnectionChecks {
         checkTheSessionHoldsTheConnection()
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
+        checkAPingsAnswerIsWhatTheTabShows()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
@@ -926,6 +927,75 @@ enum AppModelConnectionChecks {
                 model.connectionsWorthProbing.isEmpty, true,
                 "and a busy session is not asked, because the answer would arrive about a "
                     + "moment that had passed")
+        }
+    }
+
+    /// A ping's answer is what the dot says, in both directions, and it says it
+    /// about the session that was asked.
+    ///
+    /// The round trip is not driven here — a dropped connection cannot be staged
+    /// against a SQLite file, which is the one database that opens without a
+    /// server — so what is checked is the decision the answer feeds, which is
+    /// where every mistake in this feature would live: a dot moved on the tab in
+    /// front instead of the tab that was asked, and a red light that nothing can
+    /// ever turn green again.
+    private static func checkAPingsAnswerIsWhatTheTabShows() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            let asked = model.sessions[0]
+            asked.connectionState = .connected
+            // A real connection on the tab, for two of the assertions below: the
+            // status line only outranks the pane summary where something was
+            // open, and a second tab is only opened over a session that has
+            // something on it. SQLite is the one driver here that needs no
+            // server.
+            let file = FileManager.default.temporaryDirectory
+                .appending(path: "dbclient-health-\(UUID().uuidString).db")
+            defer { try? FileManager.default.removeItem(at: file) }
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+            guard let db = try? Database(connString: "sqlite://\(file.path)") else {
+                failures += 1
+                fputs("connection-form FAIL: a SQLite file would not open\n", stderr)
+                return
+            }
+            asked.db = db
+
+            model.recordHealth(false, of: asked)
+            expect(asked.connectionState, .failed, "a connection that did not answer goes red")
+            expect(
+                model.status.contains("Connect…"), true,
+                "and the status line names the way back rather than leaving a dead tab")
+            // Which is also what the bar reads. The tab's own summary is the
+            // most confident sentence in the window about the least current
+            // fact — it describes rows that came off a connection that is gone —
+            // and this is the picture that caught it: the dot went red over
+            // "customers · 0 rows · 0.05 s".
+            expect(
+                model.statusLine, model.status,
+                "and the bar shows that instead of what the pane last fetched")
+
+            // The recovery a pooled driver makes on its own: the server came
+            // back, the next round trip went through, and a light that could
+            // only ever go one way would still be red over a working tab.
+            model.recordHealth(true, of: asked)
+            expect(asked.connectionState, .connected, "an answer puts the light back")
+
+            // The tab that was asked, not the tab in front. The two are the same
+            // in one window and different the moment somebody switches while a
+            // ping is in flight, which is exactly when this is wrong.
+            model.presentConnection()
+            guard model.sessions.count == 2 else {
+                failures += 1
+                fputs("connection-form FAIL: a second tab did not open\n", stderr)
+                return
+            }
+            let second = model.sessions[1]
+            second.connectionState = .connected
+            model.recordHealth(false, of: asked)
+            expect(
+                second.connectionState, .connected,
+                "a ping about one connection does not move another connection's dot")
+            expect(asked.connectionState, .failed, "it moves the one it asked about")
         }
     }
 

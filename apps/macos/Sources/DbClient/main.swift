@@ -698,6 +698,16 @@ let renameBuffer = CommandLine.arguments.contains("--rename-buffer")
 /// of.
 let switchToDatabase = argument("--switch-database")
 
+/// `--drop-connection` marks the open connection as gone, once it has landed.
+///
+/// The state cannot be reached from a keyboard or a mouse: it needs a server to
+/// go away while the window is looking at it, which is exactly the thing a
+/// capture cannot arrange. What it stages is the answer to a ping that did not
+/// come back — the same call `probeOpenConnections` makes when the application
+/// returns to the front — so the picture is of the tab a person would actually
+/// be shown, with the rows still on it.
+let dropConnection = CommandLine.arguments.contains("--drop-connection")
+
 /// `--collapse-sidebar` opens the window with the objects as a rail.
 ///
 /// Exists for the reason `--rename-buffer` does: the rail is reached through a
@@ -2005,6 +2015,24 @@ func filterObjectsWhenReady(model: AppModel) {
     }
 }
 
+/// Drives `--drop-connection`: waits for the connection to land, then tells the
+/// window what a failed ping tells it.
+///
+/// Deferred rather than hooked, for the reason the flags around it are: the
+/// model's opening pipeline has no completion hook, and marking a session that
+/// has not opened yet would be marking the form.
+@MainActor
+func dropConnectionWhenReady(model: AppModel) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+        MainActor.assumeIsolated {
+            let session = model.sessions[model.activeSession]
+            model.recordHealth(false, of: session)
+            fputs("drop  dot     \(session.connectionState.label)\n", stderr)
+            fputs("drop  status  \(model.status)\n", stderr)
+        }
+    }
+}
+
 /// Drives `--rename-buffer`: puts the Query pane up and opens the name field on
 /// the buffer the editor is in.
 ///
@@ -2526,6 +2554,7 @@ if benchMode {
         }
         if renameBuffer { openBufferNameField(model: model) }
         if let switchToDatabase { switchDatabaseWhenReady(model: model, to: switchToDatabase) }
+        if dropConnection { dropConnectionWhenReady(model: model) }
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if preferencesProbe { probePreferences(model: model) }
