@@ -223,15 +223,9 @@ private struct TransactionControl: View {
 struct NavigatorView: View {
     @Bindable var model: AppModel
     @FocusState.Binding var focus: FocusArea?
-    /// Open, and not remembered between launches. There is one connection in
-    /// this tree, so a collapsed root is a sidebar showing a single row and
-    /// nothing else — a state worth being able to reach and not one worth
-    /// coming back to.
-    @State private var isConnectionExpanded = true
-    /// Open, and not remembered, for the same reason the connection above it is:
-    /// the database this connection is on is the one thing in this tree that is
-    /// certain to be worth looking at, so a collapsed one is a state to be able
-    /// to reach and not one to come back to.
+    /// Open, and not remembered between launches: the database this connection
+    /// is on is the one thing in this tree certain to be worth looking at, so a
+    /// collapsed one is a state to be able to reach and not one to come back to.
     @State private var isDatabaseExpanded = true
 
     /// The schemas of whichever database this connection is open on.
@@ -241,6 +235,7 @@ struct NavigatorView: View {
     /// database for one that has, and two copies would be two places for the row
     /// styling to drift apart.
     @ViewBuilder private var schemaRows: some View {
+        let first = firstDrawnSchema
         ForEach(model.schemas) { schema in
             let relations = model.visibleRelations(in: schema.name)
             if !relations.isEmpty {
@@ -260,9 +255,28 @@ struct NavigatorView: View {
                     }
                 } label: {
                     SchemaLabel(name: schema.name, count: relations.count)
+                        .background(highlightOff(ifFirst: schema.name == first))
                 }
             }
         }
+    }
+
+    /// The first schema that draws a row, which is not always the first schema:
+    /// one holding nothing visible is skipped entirely.
+    private var firstDrawnSchema: String? {
+        model.schemas.first { !model.visibleRelations(in: $0.name).isEmpty }?.name
+    }
+
+    /// Where `ListSelectionHighlightOff` rides now that the connection root row
+    /// it used to sit on is gone.
+    ///
+    /// The tree's first row is a database on engines that have them and a schema
+    /// on the ones that do not, so both offer it and only the first of each
+    /// accepts. The walk it performs is the same from any row in the table, and
+    /// two carriers would set the style twice to the value it already has —
+    /// which is why offering it from both is cheaper than deciding between them.
+    @ViewBuilder private func highlightOff(ifFirst isFirst: Bool) -> some View {
+        if isFirst { ListSelectionHighlightOff() }
     }
 
     var body: some View {
@@ -296,47 +310,49 @@ struct NavigatorView: View {
                     title: "No objects",
                     hint: "These schemas hold no tables or views.")
             } else {
+                // No row for the connection at the top. The strip across the
+                // window names it, in the control that also switches between
+                // them, and a root row here would be the same claim one indent
+                // further in — paid for by every row below it, in a column this
+                // narrow.
                 List(selection: $model.navigatorSelection) {
-                    DisclosureGroup(isExpanded: $isConnectionExpanded) {
-                        if model.hasDatabaseLevel {
-                            ForEach(model.databases ?? []) { database in
-                                if database.isCurrent {
-                                    DisclosureGroup(isExpanded: $isDatabaseExpanded) {
-                                        schemaRows
-                                    } label: {
-                                        DatabaseLabel(name: database.name, isCurrent: true)
+                    if model.hasDatabaseLevel {
+                        ForEach(Array((model.databases ?? []).enumerated()), id: \.element.id) {
+                            index, database in
+                            if database.isCurrent {
+                                DisclosureGroup(isExpanded: $isDatabaseExpanded) {
+                                    schemaRows
+                                } label: {
+                                    DatabaseLabel(name: database.name, isCurrent: true)
+                                        .background(highlightOff(ifFirst: index == 0))
+                                }
+                            } else {
+                                // No disclosure triangle, because there is
+                                // nothing behind it: this connection is open
+                                // on one database and no schemas have been
+                                // read for the others. A row that opened to
+                                // nothing would read as an empty database
+                                // rather than an unread one.
+                                DatabaseLabel(name: database.name, isCurrent: false)
+                                    .background(highlightOff(ifFirst: index == 0))
+                                    // The whole row, not just the words: a label
+                                    // is as wide as its text, and a double-click
+                                    // that only counts over the name reads as a
+                                    // row that sometimes works.
+                                    .contentShape(Rectangle())
+                                    .onTapGesture(count: 2) {
+                                        model.openDatabase(database.name)
                                     }
-                                } else {
-                                    // No disclosure triangle, because there is
-                                    // nothing behind it: this connection is open
-                                    // on one database and no schemas have been
-                                    // read for the others. A row that opened to
-                                    // nothing would read as an empty database
-                                    // rather than an unread one.
-                                    DatabaseLabel(name: database.name, isCurrent: false)
-                                        // The whole row, not just the words:
-                                        // a label is as wide as its text, and a
-                                        // double-click that only counts over
-                                        // the name reads as a row that
-                                        // sometimes works.
-                                        .contentShape(Rectangle())
-                                        .onTapGesture(count: 2) {
+                                    .contextMenu {
+                                        Button("Open in New Tab") {
                                             model.openDatabase(database.name)
                                         }
-                                        .contextMenu {
-                                            Button("Open in New Tab") {
-                                                model.openDatabase(database.name)
-                                            }
-                                        }
-                                        .help("Double-click to open \(database.name) in a new tab")
-                                }
+                                    }
+                                    .help("Double-click to open \(database.name) in a new tab")
                             }
-                        } else {
-                            schemaRows
                         }
-                    } label: {
-                        ConnectionRootRow(model: model)
-                            .background(ListSelectionHighlightOff())
+                    } else {
+                        schemaRows
                     }
                 }
                 .listStyle(.sidebar)
@@ -487,33 +503,6 @@ private struct ListSelectionHighlightOff: NSViewRepresentable {
             }
             table.selectionHighlightStyle = .none
         }
-    }
-}
-
-/// The tree's root: which connection everything under it belongs to.
-///
-/// The same three marks the toolbar chip carries — colour, state, name —
-/// because they answer the same question in both places, and the sidebar is
-/// where the question is asked while reading the tree rather than while
-/// reaching for the window's corner.
-private struct ConnectionRootRow: View {
-    var model: AppModel
-
-    var body: some View {
-        HStack(spacing: Theme.Space.xs + 2) {
-            if let tone = model.connectionColor.tone {
-                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                    .fill(tone.color)
-                    .frame(width: 3, height: 12)
-            }
-            StatusDot(state: model.connectionState)
-            Text(model.connectionLabel)
-                .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(Theme.text.color)
-                .lineLimit(1)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(model.connectionRootDescription)
     }
 }
 

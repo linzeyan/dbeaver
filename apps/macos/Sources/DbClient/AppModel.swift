@@ -606,21 +606,12 @@ final class AppModel {
         set { session.connectionState = newValue }
     }
 
-    /// What the navigator's root row is called out loud.
+    /// What the connection in front is called out loud, for a check to read.
     ///
-    /// The stale mark is a dimmed tree, and dimming is not a thing a screen
-    /// reader can report — so the one fact the sighted reading carries has to be
-    /// said in words here, or a tree that came off disk is announced to some
-    /// people as the live one.
-    ///
-    /// On the model rather than inside the row, so that a check can read it. A
-    /// sentence built in a view body is one nothing but a person looking at the
-    /// screen can see, and this is the half of the mark no screenshot shows.
-    var connectionRootDescription: String {
-        let named = "Connection \(connectionLabel), \(connectionState.label)"
-        guard isTreeStale else { return named }
-        return named + ", showing the objects from the last time it was open"
-    }
+    /// The sentence itself lives on `Session`, because a strip of tabs says it
+    /// once per connection and the tab being read is not always the one in
+    /// front. This forwarder is what a check with no strip to ask can call.
+    var connectionDescription: String { session.accessibleDescription }
     private(set) var connectionColor: ConnectionColor {
         get { session.connectionColor }
         set { session.connectionColor = newValue }

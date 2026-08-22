@@ -65,6 +65,23 @@ final class Session: Identifiable {
     var connectionLabel = "Not connected"
     var connectionState: StatusDot.State = .connecting
 
+    /// What this connection's tab is called out loud.
+    ///
+    /// The stale mark is a dimmed tree, and dimming is not a thing a screen
+    /// reader can report — so the one fact the sighted reading carries has to be
+    /// said in words somewhere, or a tree that came off disk is announced to
+    /// some people as the live one. The tab is that somewhere: it is the control
+    /// that names this connection, and the tree below it is this connection's.
+    ///
+    /// Here rather than in the tab's own body, so that a check can read it. A
+    /// sentence built in a view body is one nothing but a person looking at the
+    /// screen can see, and this is the half of the mark no screenshot shows.
+    var accessibleDescription: String {
+        let named = "Connection \(connectionLabel), \(connectionState.label)"
+        guard isTreeStale else { return named }
+        return named + ", showing the objects from the last time it was open"
+    }
+
     /// What the open connection can do, read once when it is adopted.
     ///
     /// On the session rather than on the window because it describes one

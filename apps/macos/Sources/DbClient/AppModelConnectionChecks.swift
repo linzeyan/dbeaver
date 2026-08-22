@@ -782,7 +782,7 @@ enum AppModelConnectionChecks {
                 "with the objects under it, which is the part that is worth waiting less for")
             expect(model.isTreeStale, true, "and the window knows it is not the live one")
             expect(
-                model.connectionRootDescription.hasSuffix(
+                model.connectionDescription.hasSuffix(
                     ", showing the objects from the last time it was open"), true,
                 "which is said out loud, because dimming is invisible to a screen reader")
 

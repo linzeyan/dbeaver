@@ -113,9 +113,7 @@ private struct ConnectionTabItem: View {
         .onTapGesture(perform: select)
         .onHover { isHovering = $0 }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Connection \(session.connectionLabel), \(session.connectionState.label)"
-        )
+        .accessibilityLabel(session.accessibleDescription)
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }
 }
