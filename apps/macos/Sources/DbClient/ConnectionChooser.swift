@@ -581,6 +581,18 @@ struct ConnectionChooser: View {
     /// reading `User` under labels that differ only by what is above them is a
     /// form somebody fills in wrong once and does not trust afterwards. The
     /// screen-reader names spell all five out.
+    ///
+    /// Three ways in, out of two fields and no picker. A key file names a key; no
+    /// key file with something in Secret is a password; neither is the ssh-agent.
+    /// The third is not a mode anybody switches to — it is what is left when
+    /// nothing has been typed, which is exactly the state somebody who uses an
+    /// agent is already in. A picker with three entries would make them choose a
+    /// word for what they were doing anyway, and would add the two states a
+    /// picker always adds: Key selected with no path, Agent selected with a
+    /// passphrase filled in underneath.
+    ///
+    /// Which leaves the placeholders to say it, since an empty field that means
+    /// something is an empty field somebody has to be told about.
     private var sshRows: some View {
         Group {
             HStack(spacing: Theme.Space.sm) {
@@ -610,12 +622,18 @@ struct ConnectionChooser: View {
                     label("Key")
                     field(
                         $model.connectionDraft.settings.sshKeyPath, .connectSshKey,
-                        "password instead", named: "SSH key file")
+                        "password or agent instead", named: "SSH key file")
                 }
                 // One field for two things, named for what it is used for rather
                 // than for whichever of them it happens to be. "Passphrase" over
                 // a bastion that takes a password is a label that has stopped
                 // being true, and the placeholder says which one is wanted.
+                //
+                // And which of the three is in force when it is empty. "Saved"
+                // still comes first: a secret that is on this machine but has not
+                // been read is not the agent case, and saying so would be the one
+                // reading that sends somebody to check whether their agent is
+                // running.
                 HStack(spacing: Theme.Space.sm) {
                     label("Secret")
                     field(
@@ -623,7 +641,7 @@ struct ConnectionChooser: View {
                         model.hasUnreadPassword
                             ? "Saved"
                             : (model.connectionDraft.settings.sshKeyPath.isEmpty
-                                ? "bastion password" : "key passphrase"),
+                                ? "password, or empty for ssh-agent" : "key passphrase"),
                         named: "SSH secret", isSecure: true)
                 }
             }
