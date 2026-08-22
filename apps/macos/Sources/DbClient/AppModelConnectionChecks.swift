@@ -468,6 +468,18 @@ enum AppModelConnectionChecks {
             for: settings(sshKeyPath: "/Users/ana/.ssh/id_ed25519"), secret: "")
         expect(unlocked?.passphrase, "", "a key with no passphrase says so with nothing")
 
+        // Neither field filled in, which the core reads as the ssh-agent. The
+        // empty password is the whole of that signal — there is no third field
+        // and no picker — so a build that sent nil instead, or invented
+        // something to put there, would turn the one arrangement needing nothing
+        // typed at all into a connection error. It would do it to everybody
+        // whose key never leaves their agent, and the message they would get is
+        // about a password they had deliberately not set.
+        let agent = AppModel.bastion(for: settings(), secret: "")
+        expect(agent?.password, "", "nothing typed anywhere still sends a password field")
+        expect(agent?.keyPath == nil, true, "with no key file beside it")
+        expect(agent?.passphrase == nil, true, "and nothing to unlock, which is what the agent is")
+
         // Trimmed for the reason the connection string's fields are: a host
         // pasted with a trailing space is the commonest way to spend five
         // minutes on a connection error.

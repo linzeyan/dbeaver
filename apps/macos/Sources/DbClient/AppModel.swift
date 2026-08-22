@@ -1484,6 +1484,12 @@ final class AppModel {
     /// left to the core to sort out. The core refuses both at once — deliberately
     /// — so a form that sent both would be reporting its own indecision as a
     /// connection error.
+    ///
+    /// Neither is the third answer, and it is a real one: the core reads an empty
+    /// password with no key file as "ask the ssh-agent". So the empty string this
+    /// returns for a secret nobody typed is load-bearing rather than a placeholder
+    /// — nothing here should turn it into a nil, and nothing should invent a
+    /// password to put in its place.
     nonisolated static func bastion(for settings: ConnectionSettings, secret: String)
         -> SshConfig?
     {
