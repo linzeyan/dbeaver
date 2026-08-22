@@ -68,6 +68,12 @@ final class Session: Identifiable {
     var connectionLabel = "New Connection"
     var connectionState: StatusDot.State = .connecting
 
+    /// Which driver this connection is on, read back out of the string it was
+    /// opened with rather than kept as a second copy that can disagree with it.
+    /// Empty until an attempt is made, which is what `DriverBadge`'s callers
+    /// test before drawing a mark for a database nobody has named yet.
+    var scheme: String { ConnectionURL.scheme(in: connString) }
+
     /// Whether this tab has ever been pointed at a server.
     ///
     /// The dot draws only then. All three states it can show are claims about

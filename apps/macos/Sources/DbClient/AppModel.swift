@@ -752,7 +752,7 @@ final class AppModel {
     /// draft is what somebody may be part way through typing into File ▸
     /// Connect… while the buffer behind it still belongs to the database that is
     /// open. Empty before there is one, which the core reads as PostgreSQL.
-    var scheme: String { ConnectionURL.scheme(in: connString) }
+    var scheme: String { session.scheme }
 
     /// A statement to open with, from `--sql`. Runs once the connection is up,
     /// in place of browsing the first table.

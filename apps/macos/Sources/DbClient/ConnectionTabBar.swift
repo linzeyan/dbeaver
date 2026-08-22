@@ -81,7 +81,13 @@ private struct ConnectionTabItem: View {
                     .fill(tone.color)
                     .frame(width: 3, height: 12)
             }
+            // The family shape, and only once there is a family to name. A tab
+            // holding a blank form has not been told which database it is, and
+            // the fallback cylinder there would be this control guessing.
             if session.hasBeenAsked {
+                Image(systemName: DriverBadge.familySymbol(forScheme: session.scheme))
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.textSecondary.color)
                 StatusDot(state: session.connectionState)
             }
             Text(session.connectionLabel)

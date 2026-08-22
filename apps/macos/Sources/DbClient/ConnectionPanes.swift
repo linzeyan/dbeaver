@@ -820,6 +820,13 @@ private struct ConnectionRow: View {
                         .truncationMode(.middle)
                 }
                 Spacer(minLength: Theme.Space.xs)
+                // Which product this row is, in two characters. The subtitle
+                // says the address and the title says what somebody called it;
+                // neither says whether this is the MySQL or the ClickHouse, and
+                // that is the fact the Kind popup below is set from.
+                Text(DriverBadge.abbreviation(forScheme: connection.settings.scheme))
+                    .font(Theme.Typography.monoSmall)
+                    .foregroundStyle(Theme.textTertiary.color)
                 marker
             }
             .padding(.horizontal, Theme.Space.sm)
