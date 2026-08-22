@@ -795,7 +795,7 @@ final class TabCommand: NSObject, NSMenuItemValidation {
     /// window that had silently changed underneath it.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         item.state = Self.tab(for: item) == model.activeTab ? .on : .off
-        return !model.isPresentingConnection
+        return !model.isShowingConnectionForm
     }
 
     private static func tab(for item: NSMenuItem) -> DetailTab? {

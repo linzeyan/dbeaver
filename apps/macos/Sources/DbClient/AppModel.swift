@@ -920,9 +920,14 @@ final class AppModel {
                 ?? ConnectionSettings(scheme: ""))
     }
 
-    /// Whether the window is showing the connection form rather than a session.
-    /// True at launch, because there is no database until one is named.
-    private(set) var isPresentingConnection = true
+    /// Whether the window is showing the connection form rather than the panes.
+    ///
+    /// Derived rather than stored. A tab with nothing open on it *is* the form,
+    /// which is what makes File ▸ Connect… a new tab rather than a sheet drawn
+    /// over the connection in front. The three places that used to set a flag —
+    /// launch, `adopt`, and closing the last connection — all set `db` as well,
+    /// and a second thing to keep in step with it was a second thing to forget.
+    var isShowingConnectionForm: Bool { db == nil }
 
     /// A connect attempt in flight. Distinct from `isBusy`, which describes the
     /// session's own queue: this is what routes a failure to the form instead
@@ -936,8 +941,10 @@ final class AppModel {
     var connectionError: String?
 
     /// Whether the form can be dismissed without connecting. Only once there is
-    /// a session behind it to go back to.
-    var canCancelConnection: Bool { db != nil }
+    /// another tab to go back to — the form is a tab of its own now, so Cancel
+    /// closes it, and closing the only tab there is would leave a window with
+    /// nothing in it.
+    var canCancelConnection: Bool { db == nil && sessions.count > 1 }
 
     /// Whether there is a connection to close.
     ///
@@ -1564,17 +1571,24 @@ final class AppModel {
     /// that tab in front.
     func presentConnection() {
         connectionError = nil
-        isPresentingConnection = true
+        // A tab of its own, rather than a form drawn over the connection in
+        // front. `sessionToFill` already opened a second tab when Connect… was
+        // used over a live one; this is that rule moved to where it can be
+        // seen, so the work being covered is never work nobody asked to leave.
+        // Over a tab that is already the form, this is what it looks like when
+        // the answer is "you are there" — nothing.
+        guard db != nil else { return }
+        sessions.append(Session())
+        activeSession = sessions.count - 1
     }
 
-    /// Puts the session back, for the form's Cancel.
+    /// Puts the session back, for the form's Cancel: the form is a tab, so
+    /// dismissing it is closing that tab. A failed attempt's red dot goes with
+    /// it, which is what used to need putting right by hand.
     func cancelConnection() {
         guard canCancelConnection else { return }
-        isPresentingConnection = false
         connectionError = nil
-        // A failed attempt left the dot red over a connection that is still
-        // working. Nothing else would ever put it right.
-        connectionState = .connected
+        closeSession(activeSession)
     }
 
     /// The session an attempt should fill: the tab in front when nothing is open
@@ -1646,7 +1660,6 @@ final class AppModel {
     private func adopt(_ connection: Database, inventory: Inventory) {
         db = connection
         isConnecting = false
-        isPresentingConnection = false
         schemas = inventory.schemas
         databases = inventory.databases
         relations = inventory.relations
@@ -1732,10 +1745,9 @@ final class AppModel {
         // Forgetting it is what stops its refusal from being reported against
         // whatever tab has taken its place.
         if sessionBeingOpened === closing { sessionBeingOpened = nil }
-        // A window showing nothing shows the chooser, which is what a window
-        // with no connection is for. Without this, closing the last one leaves
-        // the panes of a database that has gone, under a toolbar naming it.
-        if session.db == nil { isPresentingConnection = true }
+        // Nothing here has to ask for the form. A tab with no connection draws
+        // it, so closing the last one lands on the empty session this method
+        // just made and the form is what that session shows.
         drain(closing)
     }
 

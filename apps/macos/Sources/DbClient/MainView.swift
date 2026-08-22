@@ -64,13 +64,37 @@ struct MainView: View {
         // because the tree in the sidebar is the active connection's too.
         VStack(spacing: 0) {
             ConnectionTabBar(model: model)
+            // Both columns swap together. A tab with nothing open on it has no
+            // tree to navigate and no panes to draw, so what it offers instead
+            // is the pair that gets it open: the connections kept on the left,
+            // the one being named on the right. The split itself does not move,
+            // which is what stops the window relaying out the moment a database
+            // answers.
             NavigationSplitView {
-                NavigatorView(model: model, focus: $focus)
-                    .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
+                Group {
+                    if model.isShowingConnectionForm {
+                        ConnectionListPane(model: model, focus: $focus)
+                    } else {
+                        NavigatorView(model: model, focus: $focus)
+                    }
+                }
+                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
             } detail: {
-                DetailPane(model: model, focus: $focus)
+                if model.isShowingConnectionForm {
+                    ConnectionFormPane(model: model, focus: $focus)
+                } else {
+                    DetailPane(model: model, focus: $focus)
+                }
             }
         }
+        // No animation across the swap, which is not a style choice. SwiftUI
+        // cross-fades an `if`/`else` between two view trees by keeping both
+        // alive for the duration, and the pane side contains an
+        // `NSViewRepresentable` over a Metal layer. The form's layer survived
+        // that fade stranded behind the grid, visible as a dark rectangle
+        // wherever the grid had no rows to draw over it — and invisible on a
+        // full table, which is why it took a four-row view to find.
+        .transaction { $0.animation = nil }
         .toolbar { toolbarContent }
         // The View menu's Filter Objects item, arriving as a bumped counter.
         // An `NSMenuItem` action runs outside the view tree and cannot assign
@@ -92,7 +116,20 @@ struct MainView: View {
         // state and the name, and switching is a click on the tab that shows
         // them. What is left in the toolbar are the commands that act on
         // whichever connection the strip has in front.
+        //
+        // And nothing at all over the connection form. Every item here acts on
+        // a pane, and a tab showing the form has none — the rule elsewhere in
+        // this window is that a control which can never do anything is worse
+        // than no control, and three permanently dim ones is that rule three
+        // times. It cost nothing before this round because the form replaced
+        // the whole shell, toolbar included.
+        if !model.isShowingConnectionForm {
+            paneCommands
+        }
+    }
 
+    @ToolbarContentBuilder
+    private var paneCommands: some ToolbarContent {
         // Back and Forward at the navigation end, where every window that has
         // them puts them. Always present rather than appearing with the first
         // visit: a control that materialises under the pointer is worse than one

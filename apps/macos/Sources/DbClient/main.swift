@@ -109,7 +109,7 @@ if CommandLine.arguments.contains("--verify-schema-metadata") {
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
 }
-if CommandLine.arguments.contains("--verify-connection-chooser") {
+if CommandLine.arguments.contains("--verify-connection-form") {
     exit(MainActor.assumeIsolated { AppModelConnectionChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-history") {
@@ -1048,7 +1048,7 @@ func probeHistory(model: AppModel) {
 /// in the connection that asked for it rather than the one on screen, that
 /// closing one leaves the other working — and a model with nothing open has one
 /// session, no cursors and no results, so it can be asked none of them. The
-/// checks in `--verify-connection-chooser` pin the rules that decide whether a
+/// checks in `--verify-connection-form` pin the rules that decide whether a
 /// second tab appears; this pins what happens once it has.
 ///
 /// The middle phase is the load-bearing one. It starts a statement that sleeps
@@ -2048,7 +2048,7 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
             let browsed =
                 model.selected == nil || model.errorMessage != nil
                 || (model.browseResult.hasRun && !model.browseResult.isLoading)
-            guard !model.isPresentingConnection, !model.isBusy, browsed else {
+            guard !model.isShowingConnectionForm, !model.isBusy, browsed else {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     MainActor.assumeIsolated(poll)
                 }
@@ -2090,7 +2090,7 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
     whenSettled {
         report("before")
         presentThroughMenu()
-        guard model.isPresentingConnection else {
+        guard model.isShowingConnectionForm else {
             fputs("the Connect… item did not open the connection form\n", stderr)
             exit(1)
         }
@@ -2333,7 +2333,7 @@ if benchMode {
         // question about nothing.
         lifecycle.model = model
         window.delegate = lifecycle
-        window.contentView = NSHostingView(rootView: RootView(model: model))
+        window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)

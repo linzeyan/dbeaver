@@ -337,7 +337,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-preferences
 	./$(APP_BIN) --verify-accessibility
 	./$(APP_BIN) --verify-quitting
-	./$(APP_BIN) --verify-connection-chooser
+	./$(APP_BIN) --verify-connection-form
 	./$(APP_BIN) --verify-history
 	./$(APP_BIN) --verify-progressive
 	./$(APP_BIN) --verify-filter-rows

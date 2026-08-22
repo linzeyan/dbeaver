@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 
-/// Executable checks for the AppModel's connection chooser, run by `--verify-connection-chooser`.
+/// Executable checks for the AppModel's connection chooser, run by `--verify-connection-form`.
 ///
 /// Tests the model layer of the connection chooser, ensuring that the AppModel
 /// correctly handles connection selection, editing, saving, and deletion.
@@ -13,7 +13,7 @@ enum AppModelConnectionChecks {
         // Set up scratch directory for config to avoid touching user's files
         let scratch = scratchDirectory()
         guard let scratch else {
-            fputs("connection-chooser FAIL: could not create scratch directory\n", stderr)
+            fputs("connection-form FAIL: could not create scratch directory\n", stderr)
             return false
         }
         defer {
@@ -58,9 +58,9 @@ enum AppModelConnectionChecks {
         checkTheNavigatorCacheKeepsOneTreePerDatabase()
         checkAReopenedConnectionDrawsLastTimesTreeAtOnce()
         if failures == 0 {
-            fputs("connection-chooser: all checks passed\n", stderr)
+            fputs("connection-form: all checks passed\n", stderr)
         } else {
-            fputs("connection-chooser: \(failures) check(s) failed\n", stderr)
+            fputs("connection-form: \(failures) check(s) failed\n", stderr)
         }
         return failures == 0
     }
@@ -186,7 +186,7 @@ enum AppModelConnectionChecks {
             // connection has to reach that state, or the window is left drawing
             // the panes of a database that has gone under a toolbar naming it.
             expect(
-                model.isPresentingConnection, true,
+                model.isShowingConnectionForm, true,
                 "and the window is asking which database to open")
             expect(
                 model.canDisconnect, false,
@@ -601,7 +601,7 @@ enum AppModelConnectionChecks {
             FileManager.default.createFile(atPath: file.path, contents: nil)
             guard let db = try? Database(connString: "sqlite://\(file.path)") else {
                 failures += 1
-                fputs("connection-chooser FAIL: a SQLite file would not open\n", stderr)
+                fputs("connection-form FAIL: a SQLite file would not open\n", stderr)
                 return
             }
             let session = model.sessions[0]
@@ -987,7 +987,7 @@ enum AppModelConnectionChecks {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         } catch {
             fputs(
-                "connection-chooser FAIL: a scratch directory could not be made: \(error)\n", stderr
+                "connection-form FAIL: a scratch directory could not be made: \(error)\n", stderr
             )
             return nil
         }
@@ -1496,6 +1496,6 @@ enum AppModelConnectionChecks {
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
         guard got != want else { return }
         failures += 1
-        fputs("connection-chooser FAIL: \(what)\n  want: \(want)\n  got:  \(got)\n", stderr)
+        fputs("connection-form FAIL: \(what)\n  want: \(want)\n  got:  \(got)\n", stderr)
     }
 }

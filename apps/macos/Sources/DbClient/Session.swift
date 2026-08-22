@@ -62,8 +62,19 @@ final class Session: Identifiable {
     /// worth showing, and worth showing as provisional.
     var isTreeStale = false
 
-    var connectionLabel = "Not connected"
+    /// What the tab is called. The default is what a tab holding nothing but
+    /// the connection form is called, which is the only time it is read: every
+    /// other path sets it from the string the connection was opened with.
+    var connectionLabel = "New Connection"
     var connectionState: StatusDot.State = .connecting
+
+    /// Whether this tab has ever been pointed at a server.
+    ///
+    /// The dot draws only then. All three states it can show are claims about
+    /// an attempt — amber that one is running, green that one worked, red that
+    /// one did not — and a tab holding a blank form has made none. A dot there
+    /// would have to pick one of the three and be wrong.
+    var hasBeenAsked: Bool { !connString.isEmpty }
 
     /// What this connection's tab is called out loud.
     ///
@@ -77,6 +88,10 @@ final class Session: Identifiable {
     /// sentence built in a view body is one nothing but a person looking at the
     /// screen can see, and this is the half of the mark no screenshot shows.
     var accessibleDescription: String {
+        // Without the state for a tab that has made no attempt, for the reason
+        // `hasBeenAsked` gives about the dot: naming one of the three would be
+        // saying out loud the thing the dot is not drawing.
+        guard hasBeenAsked else { return connectionLabel }
         let named = "Connection \(connectionLabel), \(connectionState.label)"
         guard isTreeStale else { return named }
         return named + ", showing the objects from the last time it was open"

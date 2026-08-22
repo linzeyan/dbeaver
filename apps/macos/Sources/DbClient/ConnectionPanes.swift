@@ -1,96 +1,32 @@
 import SwiftUI
 
-/// What the window shows: the connection chooser until a database is open, the
-/// session after that.
+/// The connections somebody keeps, in the sidebar of a tab with nothing open on
+/// it.
 ///
-/// One window and one hosting view rather than a sheet over the shell. A sheet
-/// is a separate `NSWindow`, which puts it outside every capture of the main
-/// one — and screenshots are how layout defects get caught in this project. It
-/// also matches what switching connections means here: the panes behind the
-/// chooser describe a database that is about to stop being the one on screen.
-struct RootView: View {
-    @Bindable var model: AppModel
-
-    var body: some View {
-        Group {
-            if model.isPresentingConnection {
-                ConnectionChooser(model: model)
-            } else {
-                MainView(model: model)
-            }
-        }
-        // The swap happens with no animation, which is not a style choice.
-        // SwiftUI cross-fades an `if`/`else` between two view trees by keeping
-        // both alive for the duration, and `MainView` contains an
-        // `NSViewRepresentable` over a Metal layer. The card's layer was
-        // surviving that fade stranded behind the grid, visible as a dark
-        // rectangle wherever the grid had no rows to draw over it — and
-        // invisible on a full table, which is why it took a four-row view to
-        // find. Nothing here is worth animating anyway: the chooser and the
-        // session share no element for a transition to carry between them.
-        .transaction { $0.animation = nil }
-    }
-}
-
-/// Where a database is chosen.
-///
-/// Two panes in the geometry the session already uses, so that connecting does not
-/// relayout the window: the connections somebody keeps down the left, the one they
-/// are looking at on the right. The alternative — the form alone, which is what this
-/// was — asks a person who works with four databases to retype one of them every
-/// time, and gives them nowhere to record which of the four is the dangerous one.
+/// This and `ConnectionFormPane` are the two halves of what was one window
+/// covering the shell. They are columns of the shell's own split now, so the
+/// tab strip stays visible while a connection is chosen and the window does not
+/// relayout when one opens: the list and the tree occupy the same column, the
+/// form and the panes the same detail pane.
 ///
 /// The list is never empty of rows. Quick connect is always its first, which keeps
 /// "a connection I am not keeping" from being a mode: it is a row, it is selected
 /// like a row, and it holds its own draft while somebody looks at another.
-struct ConnectionChooser: View {
+struct ConnectionListPane: View {
     @Bindable var model: AppModel
-    @FocusState private var focus: FocusArea?
+    @FocusState.Binding var focus: FocusArea?
 
     /// Which folders are shut.
     ///
     /// `@State` and nothing else, which is the whole of "local, not synced": it
     /// is not in `connections.json`, so a file carried to another machine does
     /// not carry one person's idea of which folders are interesting. The cost is
-    /// that it resets when the chooser is put away — opening it is a deliberate
-    /// act and every folder open is the right thing to see on the way in.
+    /// that it resets when the tab holding it closes — opening one is a
+    /// deliberate act and every folder open is the right thing to see on the way
+    /// in.
     @State private var shutFolders: Set<String> = []
 
     var body: some View {
-        NavigationSplitView {
-            sidebar
-                .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
-        } detail: {
-            form
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.background.color)
-        }
-        .task {
-            // Where reading starts, and never the password field — which is
-            // what the form used to do when the other fields were already
-            // filled in.
-            //
-            // That one line was what put AppKit's AutoFill panel on screen. It
-            // is not summoned by having a secure field, it is summoned by a
-            // secure field holding focus: measured four ways against this
-            // window — the panel follows the focus and nothing else, the same
-            // build showing it and not showing it with only this line changed.
-            // So a form that focused the password field was asking for the
-            // panel before the user had asked for anything, which is the one
-            // thing about it nobody chose.
-            //
-            // It costs a remembered connection one Tab. What it buys is a form
-            // that opens as itself, and an AutoFill panel that appears when
-            // somebody puts the caret in the password field — which is the
-            // moment it is worth having. `buttons` keeps the band it lands in
-            // for that moment.
-            focus = .connectHost
-        }
-    }
-
-    // MARK: - The list
-
-    private var sidebar: some View {
         VStack(spacing: 0) {
             ConnectionFilterField(text: $model.connectionFilter, focus: $focus)
                 .padding(.horizontal, Theme.Space.sm)
@@ -254,7 +190,42 @@ struct ConnectionChooser: View {
             : "\(shown) of \(AppModel.pluralized(total, "connection"))"
     }
 
-    // MARK: - The form
+}
+
+// MARK: - The form
+
+/// The connection being named, in the detail pane of a tab with nothing open on
+/// it. The other half of what `ConnectionListPane` describes.
+struct ConnectionFormPane: View {
+    @Bindable var model: AppModel
+    @FocusState.Binding var focus: FocusArea?
+
+    var body: some View {
+        form
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Theme.background.color)
+            .task {
+                // Where reading starts, and never the password field — which is
+                // what the form used to do when the other fields were already
+                // filled in.
+                //
+                // That one line was what put AppKit's AutoFill panel on screen.
+                // It is not summoned by having a secure field, it is summoned by
+                // a secure field holding focus: measured four ways against this
+                // window — the panel follows the focus and nothing else, the
+                // same build showing it and not showing it with only this line
+                // changed. So a form that focused the password field was asking
+                // for the panel before the user had asked for anything, which is
+                // the one thing about it nobody chose.
+                //
+                // It costs a remembered connection one Tab. What it buys is a
+                // form that opens as itself, and an AutoFill panel that appears
+                // when somebody puts the caret in the password field — which is
+                // the moment it is worth having. `buttons` keeps the band it
+                // lands in for that moment.
+                focus = .connectHost
+            }
+    }
 
     private var form: some View {
         VStack(alignment: .leading, spacing: Theme.Space.lg) {
@@ -264,7 +235,7 @@ struct ConnectionChooser: View {
             // too — and it has to be above the password field in particular,
             // because AppKit's AutoFill button (see `buttons`) is drawn directly
             // under that one and would cover the sentence explaining why the
-            // chooser is still on screen.
+            // form is still on screen.
             if let message = model.connectionError {
                 InlineBanner(message: message) { model.connectionError = nil }
             }

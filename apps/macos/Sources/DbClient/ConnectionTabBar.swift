@@ -81,7 +81,9 @@ private struct ConnectionTabItem: View {
                     .fill(tone.color)
                     .frame(width: 3, height: 12)
             }
-            StatusDot(state: session.connectionState)
+            if session.hasBeenAsked {
+                StatusDot(state: session.connectionState)
+            }
             Text(session.connectionLabel)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(isActive ? Theme.text.color : Theme.textSecondary.color)
