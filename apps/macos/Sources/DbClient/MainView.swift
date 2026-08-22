@@ -60,11 +60,16 @@ struct MainView: View {
     @FocusState private var focus: FocusArea?
 
     var body: some View {
-        NavigationSplitView {
-            NavigatorView(model: model, focus: $focus)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
-        } detail: {
-            DetailPane(model: model, focus: $focus)
+        // The connection strip spans the window rather than the detail column,
+        // because the tree in the sidebar is the active connection's too.
+        VStack(spacing: 0) {
+            ConnectionTabBar(model: model)
+            NavigationSplitView {
+                NavigatorView(model: model, focus: $focus)
+                    .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
+            } detail: {
+                DetailPane(model: model, focus: $focus)
+            }
         }
         .toolbar { toolbarContent }
         // The View menu's Filter Objects item, arriving as a bumped counter.
@@ -73,71 +78,20 @@ struct MainView: View {
         .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
         .sheet(isPresented: $model.isGoToOpen) { GoToPalette(model: model) }
         .navigationTitle(model.selected?.name ?? "DbClient")
-        .navigationSubtitle(
-            model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? model.connectionLabel)
-    }
-
-    /// The window's connections, then the two commands that change how many
-    /// there are.
-    ///
-    /// A `Toggle` per connection rather than a `Picker`, which would render the
-    /// same checkmarks and take away the ability to say what a row means beyond
-    /// its title. Turning one on selects it; turning one off would leave the
-    /// window showing nothing, so the off case is ignored rather than disabled —
-    /// a control that refuses the click on the row already selected reads as
-    /// broken, where one that does nothing reads as already done.
-    @ViewBuilder
-    private var connectionMenuItems: some View {
-        ForEach(Array(model.sessions.enumerated()), id: \.element.id) { entry in
-            Toggle(
-                isOn: Binding(
-                    get: { entry.offset == model.activeSession },
-                    set: { if $0 { model.selectSession(entry.offset) } })
-            ) {
-                Text(entry.element.connectionLabel)
-            }
-        }
-        Divider()
-        Button("Connect…") { model.presentConnection() }
-        Button("Disconnect") { model.closeSession(model.activeSession) }
-            .disabled(!model.canDisconnect)
+        // Nothing rather than the connection's name when no object is selected.
+        // The name was here because, with no selection, the titlebar was the
+        // only place saying which database the window was pointed at; the tab
+        // strip says it now, and says it beside the tabs it can be switched to.
+        .navigationSubtitle(model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? "")
     }
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // The chip that names the connection, and the menu that lists the
-        // others. One control rather than a second strip of tabs above the
-        // query buffers': a window with two rows of tabs makes the reader work
-        // out which row means what, and the thing being switched between here is
-        // already named in the toolbar. Pressing what names the current one to
-        // get to the rest is how every switcher on this platform behaves.
-        ToolbarItem(placement: .navigation) {
-            Menu {
-                connectionMenuItems
-            } label: {
-                HStack(spacing: Theme.Space.xs + 2) {
-                    // The mark the chooser was given, where it is of use: leading
-                    // the chip that names the connection, at the top of the window
-                    // holding the rows it would change. Absent rather than grey
-                    // when no colour was picked — a bar in every session would
-                    // train the eye to stop seeing the one that means something.
-                    if let tone = model.connectionColor.tone {
-                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
-                            .fill(tone.color)
-                            .frame(width: 3, height: 12)
-                            .accessibilityLabel("\(model.connectionColor.label) connection")
-                    }
-                    StatusDot(state: model.connectionState)
-                    Text(model.connectionLabel)
-                        .font(Theme.Typography.bodyEmphasis)
-                        .foregroundStyle(Theme.textSecondary.color)
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("\(model.connectionState.label) — \(model.connectionLabel)")
-            .accessibilityLabel("Connections")
-        }
+        // The chip that named the connection is gone, and so is the menu that
+        // switched between them: `ConnectionTabBar` carries the colour, the
+        // state and the name, and switching is a click on the tab that shows
+        // them. What is left in the toolbar are the commands that act on
+        // whichever connection the strip has in front.
 
         // Back and Forward at the navigation end, where every window that has
         // them puts them. Always present rather than appearing with the first
@@ -658,7 +612,6 @@ struct DetailPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SessionTabBar(model: model)
             TabBar(selection: $model.activeTab)
             Rectangle().fill(Theme.separator.color).frame(height: 1)
 
@@ -1787,120 +1740,126 @@ struct QueryPane: View {
 
     var body: some View {
         @Bindable var result = model.queryResult
-        return VSplitView {
-            ZStack(alignment: .bottomTrailing) {
-                // The selection binding is what makes ⌘R mean "this statement":
-                // without it the pane knows the text and not where in it the
-                // user is standing.
-                // The scheme goes with them: it is how the core knows which
-                // database's rules to read the buffer by, and reading MySQL as
-                // PostgreSQL mis-colours it and splits it in the wrong places.
-                // The offers come through a closure for the same reason the
-                // scheme comes through a string: the editor is handed what it
-                // needs to do its job, not the connection it is being done
-                // against.
-                SQLEditor(
-                    text: $model.queryText, selection: $model.querySelection,
-                    scheme: model.scheme,
-                    offers: { text, caret, then in
-                        model.completions(in: text, caret: caret, then: then)
-                    }
-                )
-                .padding(.horizontal, Theme.Space.md)
-                .padding(.vertical, Theme.Space.sm)
-                .background(Theme.background.color)
-                .focused($focus, equals: .editor)
-                .accessibilityLabel("SQL editor")
-
-                HStack(spacing: Theme.Space.sm) {
-                    // Says which statement is about to run, before it runs. A
-                    // buffer of five makes ⌘R a guess otherwise, and the wrong
-                    // guess is a statement the user did not mean to execute.
-                    Text(model.runTarget?.hint ?? "nothing to run")
-                        .font(Theme.Typography.micro)
-                        .foregroundStyle(Theme.textTertiary.color)
-                        .accessibilityHidden(true)
-
-                    // The corner of the editor is where this belongs: it is
-                    // about the buffer, not about the result. ⇧⌘H reaches it
-                    // too, but a shortcut is invisible, and a list nothing on
-                    // screen mentions is a feature only the menu bar knows
-                    // about — the same argument the inspector strip's chevron
-                    // settled for the value viewer.
-                    Button {
-                        model.isHistoryOpen.toggle()
-                    } label: {
-                        Image(systemName: "clock.arrow.circlepath")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 18, height: 16)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(
-                        model.isHistoryOpen ? Theme.accent.color : Theme.textSecondary.color
+        // The buffer strip is outside the split: it names which text the editor
+        // is showing, so dragging the editor's height must not be able to hide
+        // it or to give it room it has no use for.
+        return VStack(spacing: 0) {
+            QueryBufferBar(model: model)
+            VSplitView {
+                ZStack(alignment: .bottomTrailing) {
+                    // The selection binding is what makes ⌘R mean "this statement":
+                    // without it the pane knows the text and not where in it the
+                    // user is standing.
+                    // The scheme goes with them: it is how the core knows which
+                    // database's rules to read the buffer by, and reading MySQL as
+                    // PostgreSQL mis-colours it and splits it in the wrong places.
+                    // The offers come through a closure for the same reason the
+                    // scheme comes through a string: the editor is handed what it
+                    // needs to do its job, not the connection it is being done
+                    // against.
+                    SQLEditor(
+                        text: $model.queryText, selection: $model.querySelection,
+                        scheme: model.scheme,
+                        offers: { text, caret, then in
+                            model.completions(in: text, caret: caret, then: then)
+                        }
                     )
-                    .help("Statements this window has run, and the ones you kept (⇧⌘H)")
-                    .accessibilityLabel("Query panel")
-                }
-                .padding(Theme.Space.sm)
-            }
-            // The split opens at `maxHeight`, so this is the editor's starting
-            // size as much as its ceiling: enough for a statement of about ten
-            // lines, with the result keeping the rest. Drag for more.
-            .frame(minHeight: 72, idealHeight: 120, maxHeight: 200)
+                    .padding(.horizontal, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.sm)
+                    .background(Theme.background.color)
+                    .focused($focus, equals: .editor)
+                    .accessibilityLabel("SQL editor")
 
-            VStack(spacing: 0) {
-                // Directly under the editor it feeds, and above the outcome
-                // list, which describes the run rather than the buffer.
-                if model.isHistoryOpen {
-                    QueryPanel(model: model)
-                    Rectangle().fill(Theme.separator.color).frame(height: 1)
-                }
+                    HStack(spacing: Theme.Space.sm) {
+                        // Says which statement is about to run, before it runs. A
+                        // buffer of five makes ⌘R a guess otherwise, and the wrong
+                        // guess is a statement the user did not mean to execute.
+                        Text(model.runTarget?.hint ?? "nothing to run")
+                            .font(Theme.Typography.micro)
+                            .foregroundStyle(Theme.textTertiary.color)
+                            .accessibilityHidden(true)
 
-                // Only for a run of several. A ⌘R over one statement has one
-                // outcome and the grid is already showing it; a list of one
-                // would be chrome charged to the common case to describe the
-                // rare one.
-                if model.scriptSteps.count > 1 {
-                    ScriptOutcomeList(model: model)
-                    Rectangle().fill(Theme.separator.color).frame(height: 1)
-                }
-
-                // Until this pane has run something there is nothing to show.
-                // It used to fall back to the browse's grid, which put rows
-                // under a statement that had not produced them.
-                if let step = model.selectedScriptStep {
-                    if step.outcome.hasGrid {
-                        MetalGridView(
-                            table: model.queryResult.table,
-                            generation: model.queryResult.generation,
-                            rowCount: model.queryResult.rowCount,
-                            selection: $result.selection,
-                            name: "Query result grid"
+                        // The corner of the editor is where this belongs: it is
+                        // about the buffer, not about the result. ⇧⌘H reaches it
+                        // too, but a shortcut is invisible, and a list nothing on
+                        // screen mentions is a feature only the menu bar knows
+                        // about — the same argument the inspector strip's chevron
+                        // settled for the value viewer.
+                        Button {
+                            model.isHistoryOpen.toggle()
+                        } label: {
+                            Image(systemName: "clock.arrow.circlepath")
+                                .font(.system(size: 11, weight: .medium))
+                                .frame(width: 18, height: 16)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(
+                            model.isHistoryOpen ? Theme.accent.color : Theme.textSecondary.color
                         )
-                        .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+                        .help("Statements this window has run, and the ones you kept (⇧⌘H)")
+                        .accessibilityLabel("Query panel")
+                    }
+                    .padding(Theme.Space.sm)
+                }
+                // The split opens at `maxHeight`, so this is the editor's starting
+                // size as much as its ceiling: enough for a statement of about ten
+                // lines, with the result keeping the rest. Drag for more.
+                .frame(minHeight: 72, idealHeight: 120, maxHeight: 200)
 
-                        CellInspector(cell: model.inspectedCell(in: model.queryResult))
+                VStack(spacing: 0) {
+                    // Directly under the editor it feeds, and above the outcome
+                    // list, which describes the run rather than the buffer.
+                    if model.isHistoryOpen {
+                        QueryPanel(model: model)
+                        Rectangle().fill(Theme.separator.color).frame(height: 1)
+                    }
+
+                    // Only for a run of several. A ⌘R over one statement has one
+                    // outcome and the grid is already showing it; a list of one
+                    // would be chrome charged to the common case to describe the
+                    // rare one.
+                    if model.scriptSteps.count > 1 {
+                        ScriptOutcomeList(model: model)
+                        Rectangle().fill(Theme.separator.color).frame(height: 1)
+                    }
+
+                    // Until this pane has run something there is nothing to show.
+                    // It used to fall back to the browse's grid, which put rows
+                    // under a statement that had not produced them.
+                    if let step = model.selectedScriptStep {
+                        if step.outcome.hasGrid {
+                            MetalGridView(
+                                table: model.queryResult.table,
+                                generation: model.queryResult.generation,
+                                rowCount: model.queryResult.rowCount,
+                                selection: $result.selection,
+                                name: "Query result grid"
+                            )
+                            .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
+
+                            CellInspector(cell: model.inspectedCell(in: model.queryResult))
+                        } else if model.queryResult.isLoading {
+                            RunningPane()
+                        } else {
+                            // A statement that returned no rows still has an answer,
+                            // and an empty grid with no columns is not it — that
+                            // reads as a query that broke rather than as an UPDATE
+                            // that worked.
+                            StatementNote(step: step)
+                        }
                     } else if model.queryResult.isLoading {
                         RunningPane()
                     } else {
-                        // A statement that returned no rows still has an answer,
-                        // and an empty grid with no columns is not it — that
-                        // reads as a query that broke rather than as an UPDATE
-                        // that worked.
-                        StatementNote(step: step)
+                        EmptyState(
+                            symbol: "terminal",
+                            title: "No results yet",
+                            hint: "Press ⌘R to run the statement above, ⌥⌘R for all of them."
+                        )
                     }
-                } else if model.queryResult.isLoading {
-                    RunningPane()
-                } else {
-                    EmptyState(
-                        symbol: "terminal",
-                        title: "No results yet",
-                        hint: "Press ⌘R to run the statement above, ⌥⌘R for all of them."
-                    )
                 }
+                .frame(minHeight: 160)
             }
-            .frame(minHeight: 160)
         }
     }
 }

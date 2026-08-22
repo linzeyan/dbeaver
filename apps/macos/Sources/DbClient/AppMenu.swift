@@ -93,7 +93,8 @@ enum AppMenu {
         main.addItem(
             viewMenu(
                 target: refresh, valueViewer: valueViewer, navigator: navigator, tabs: tabs,
-                goTo: goTo, historyNav: historyNav, record: record, queryTabs: queryTabs))
+                goTo: goTo, historyNav: historyNav, record: record, queryTabs: queryTabs,
+                connection: connection))
         main.addItem(
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
@@ -188,7 +189,7 @@ enum AppMenu {
         connect.target = connection
 
         // ⇧⌘K, beside the item it undoes. The connections a window holds are
-        // switched between in the toolbar rather than here, because that is
+        // switched between in the tab strip rather than here, because that is
         // where the one in front is named; what belongs in the File menu is the
         // pair that changes how many there are.
         let disconnect = menu.addItem(
@@ -357,7 +358,7 @@ enum AppMenu {
     private static func viewMenu(
         target: RefreshCommand, valueViewer: ValueViewerCommand, navigator: NavigatorCommand,
         tabs: TabCommand, goTo: GoToCommand, historyNav: HistoryCommand, record: RecordCommand,
-        queryTabs: QueryTabCommand
+        queryTabs: QueryTabCommand, connection: ConnectionCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
@@ -425,6 +426,23 @@ enum AppMenu {
             action: #selector(QueryTabCommand.nextQueryTab(_:)), keyEquivalent: "]")
         nextTab.keyEquivalentModifierMask = [.command, .shift]
         nextTab.target = queryTabs
+
+        // ⌃⇥ and ⌃⇧⇥, the keys every tabbed window on this platform answers to,
+        // for the strip those keys mean here: the connections. The four items
+        // above move within one connection — the tables it has been at, the
+        // buffers it is holding — and these two move between them, which is why
+        // they sit under the same rule rather than beside Connect… in the File
+        // menu with the pair that changes how many there are.
+        let previousConnection = menu.addItem(
+            withTitle: "Previous Connection",
+            action: #selector(ConnectionCommand.previousConnection(_:)), keyEquivalent: "\t")
+        previousConnection.keyEquivalentModifierMask = [.control, .shift]
+        previousConnection.target = connection
+        let nextConnection = menu.addItem(
+            withTitle: "Next Connection",
+            action: #selector(ConnectionCommand.nextConnection(_:)), keyEquivalent: "\t")
+        nextConnection.keyEquivalentModifierMask = .control
+        nextConnection.target = connection
 
         menu.addItem(.separator())
         // Titled for the closed state; `validateMenuItem` rewrites it.
@@ -584,7 +602,19 @@ final class ConnectionCommand: NSObject, NSMenuItemValidation {
 
     @objc func disconnect(_ sender: Any?) { model.closeSession(model.activeSession) }
 
-    /// Two items target this, and they are available in different states.
+    @objc func nextConnection(_ sender: Any?) { step(by: 1) }
+
+    @objc func previousConnection(_ sender: Any?) { step(by: -1) }
+
+    /// Wrapping, for the reason the query buffer strip wraps: the whole strip is
+    /// on screen, so there is no place past the end to be lost in.
+    private func step(by delta: Int) {
+        let count = model.sessions.count
+        guard count > 1 else { return }
+        model.selectSession(((model.activeSession + delta) % count + count) % count)
+    }
+
+    /// Four items target this, and they are available in different states.
     ///
     /// Connect… is greyed out only while an attempt is in flight. Unlike every
     /// other command here it does not need a connection — it is what a window
@@ -592,8 +622,17 @@ final class ConnectionCommand: NSObject, NSMenuItemValidation {
     /// opening another database is the thing it exists to do.
     ///
     /// Disconnect needs one to close, which is the whole of the difference.
+    ///
+    /// The two switchers need somewhere to go, and unlike Connect… they stay
+    /// available during an attempt: the tab being filled is not the tab somebody
+    /// is trying to get back to while it fills.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(disconnect(_:)) { return model.canDisconnect }
+        if item.action == #selector(nextConnection(_:))
+            || item.action == #selector(previousConnection(_:))
+        {
+            return model.sessions.count > 1
+        }
         return !model.isConnecting
     }
 }
