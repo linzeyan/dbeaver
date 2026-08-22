@@ -749,6 +749,13 @@ let switchToDatabase = argument("--switch-database")
 /// be shown, with the rows still on it.
 let dropConnection = CommandLine.arguments.contains("--drop-connection")
 
+/// `--transfer-picker` opens a second connection and puts the target picker up.
+///
+/// Another state a capture cannot click into, and for a plainer reason than the
+/// one above: the menu item is grey until a second connection is open, and
+/// nothing on a screenshot run opens one.
+let transferPicker = CommandLine.arguments.contains("--transfer-picker")
+
 /// `--collapse-sidebar` opens the window with the objects as a rail.
 ///
 /// Exists for the reason `--rename-buffer` does: the rail is reached through a
@@ -2294,6 +2301,74 @@ func dropConnectionWhenReady(model: AppModel) {
     }
 }
 
+/// Drives `--transfer-picker`: opens a second connection beside the first and
+/// puts the target picker up over the result the window is showing.
+///
+/// A capture flag rather than a probe. Whether the rules behind the sheet are
+/// right is what `--verify-connection-form` asks and `--transfer-probe` proves
+/// against two servers; whether the sentence at the top of it fits beside a menu
+/// of connection names is a question only the shutter can answer.
+///
+/// Both connections are the one `--conn` names. Two tabs on the same server is
+/// a real thing to have open — it is how a table is copied between schemas —
+/// and it means the flag needs nothing a screenshot run does not already have.
+@MainActor
+func openTransferPicker(model: AppModel) {
+    guard let conn = connArgument else {
+        fputs("--transfer-picker needs --conn\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 60
+    var asked = false
+
+    func settled(_ index: Int) -> Bool {
+        guard model.sessions.indices.contains(index) else { return false }
+        return model.sessions[index].db != nil && !model.sessions[index].isBusy
+    }
+
+    func poll() {
+        // Rows as well as a settled connection, because the rows are what is
+        // being sent: `--relation` lands the first tab on a table and the browse
+        // that follows is not what `isBusy` describes, so a picker opened as
+        // soon as the connection answered would find nothing to transfer.
+        let rows = model.sessions.first?.browseResult
+        guard settled(0), let rows, rows.rowCount > 0, !rows.isLoading else { return again() }
+        guard asked else {
+            model.connect(using: conn)
+            asked = true
+            return again()
+        }
+        guard model.sessions.count == 2, settled(1) else { return again() }
+        // The rows are read from the tab that was there first, so that is the
+        // tab the picker has to be opened over.
+        model.selectSession(0)
+        model.presentTransfer()
+        // The row count and the statement as well as the answer, because a
+        // picker that does not open is nearly always a result that is not
+        // there — and a capture of a window with no sheet in it has no other
+        // way to say which of the two it is.
+        fputs(
+            "transfer picker: open=\(model.isTransferPickerOpen) "
+                + "targets=\(model.transferTargets.count) rows=\(model.current.rowCount) "
+                + "statement=\(model.current.statement.isEmpty ? "(empty)" : "kept")\n", stderr)
+    }
+
+    /// No exit on the deadline, unlike the probes: the window is being
+    /// photographed, and a run that gave up would be photographed too. It says
+    /// so instead, which is what a capture with no sheet in it needs to explain
+    /// itself.
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("transfer picker: neither connection settled in time\n", stderr)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// Drives `--rename-buffer`: puts the Query pane up and opens the name field on
 /// the buffer the editor is in.
 ///
@@ -2816,6 +2891,7 @@ if benchMode {
         if renameBuffer { openBufferNameField(model: model) }
         if let switchToDatabase { switchDatabaseWhenReady(model: model, to: switchToDatabase) }
         if dropConnection { dropConnectionWhenReady(model: model) }
+        if transferPicker { openTransferPicker(model: model) }
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if preferencesProbe { probePreferences(model: model) }

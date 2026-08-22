@@ -51,6 +51,7 @@ enum AppModelConnectionChecks {
         checkAWindowHoldsAListOfConnections()
         checkOnlyIdleOpenConnectionsAreProbed()
         checkAPingsAnswerIsWhatTheTabShows()
+        checkATransferNeedsSomewhereToSendItAndLeaveToArrive()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
@@ -996,6 +997,118 @@ enum AppModelConnectionChecks {
                 second.connectionState, .connected,
                 "a ping about one connection does not move another connection's dot")
             expect(asked.connectionState, .failed, "it moves the one it asked about")
+        }
+    }
+
+    /// A transfer needs a live connection at each end, and the marks that decide
+    /// whether it may run belong to the tab being written into.
+    ///
+    /// Here rather than beside the export's checks because every gate in it is a
+    /// rule about a *second* connection. "Is there a result" is the question the
+    /// File menu has been asking since the first export; "is there anywhere for
+    /// it to go, is that tab free, and may anything be written there" are three
+    /// this window could not ask until it could hold two connections at once.
+    ///
+    /// `--transfer-probe` moves the rows for real. What it cannot do cheaply is
+    /// the refusals: a read-only target and a busy one are states a live probe
+    /// would have to manufacture on a server.
+    private static func checkATransferNeedsSomewhereToSendItAndLeaveToArrive() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            var scratch: [URL] = []
+            defer { for file in scratch { try? FileManager.default.removeItem(at: file) } }
+
+            /// A connection that needs no server. SQLite is the only driver here
+            /// that has one, and what is under test is which tab a rule reads —
+            /// not what either database can do.
+            func opened() -> Database? {
+                let file = FileManager.default.temporaryDirectory
+                    .appending(path: "dbclient-transfer-\(UUID().uuidString).db")
+                scratch.append(file)
+                FileManager.default.createFile(atPath: file.path, contents: nil)
+                return try? Database(connString: "sqlite://\(file.path)")
+            }
+            guard let here = opened(), let there = opened() else {
+                failures += 1
+                fputs("connection-form FAIL: a SQLite file would not open\n", stderr)
+                return
+            }
+
+            let source = model.sessions[0]
+            source.db = here
+            source.connectionState = .connected
+
+            // A real result rather than a hand-set row count: `canTransfer`
+            // reads the count and the statement off the pane, and a fixture that
+            // wrote them directly would be checking itself.
+            guard let query = try? here.query("select 1 as n", batchRows: 100),
+                let schema = try? query.schema()
+            else {
+                failures += 1
+                fputs("connection-form FAIL: a SQLite result would not come back\n", stderr)
+                return
+            }
+            let result = model.browseResult
+            result.table.setSchema(schema)
+            if let release = schema.pointee.release { release(schema) }
+            schema.deallocate()
+            while let batch = (try? query.nextBatch()) ?? nil {
+                result.table.append(batch: batch)
+            }
+            result.finish(
+                statement: "select 1 as n", capped: false, milliseconds: 1, summary: "1 row")
+
+            expect(model.current.rowCount, 1, "the pane is holding a row to send")
+            expect(
+                model.transferTargets.isEmpty, true,
+                "and with one connection open there is nowhere to send it")
+            expect(model.canTransfer, false, "so the menu item is grey")
+            model.presentTransfer()
+            expect(
+                model.isTransferPickerOpen, false,
+                "and the picker does not open behind the grey item")
+
+            model.presentConnection()
+            guard model.sessions.count == 2 else {
+                failures += 1
+                fputs("connection-form FAIL: a second tab did not open\n", stderr)
+                return
+            }
+            let other = model.sessions[1]
+            other.db = there
+            other.connectionState = .connected
+            // Back to the tab holding the rows: everything the window forwards
+            // reaches whichever connection is in front, and the transfer is
+            // asked for by the source.
+            model.selectSession(0)
+
+            expect(model.transferTargets.count, 1, "the second connection is somewhere to send to")
+            expect(
+                model.transferTargets.first === other, true, "and it is the one that is not this")
+            expect(model.canTransfer, true, "so the item is live")
+            model.presentTransfer()
+            expect(model.isTransferPickerOpen, true, "and the picker opens")
+            model.isTransferPickerOpen = false
+
+            // A tab in the middle of its own statement is not a target. Its
+            // connection is the one the rows would arrive on, and a window that
+            // sent them anyway would be using one connection twice.
+            other.isBusy = true
+            expect(model.transferTargets.isEmpty, true, "a busy connection is not offered")
+            expect(model.canTransfer, false, "and with it out there is nowhere left")
+            other.isBusy = false
+
+            // The target's marks, not the source's. This is the one that would
+            // pass every other check while writing into a database somebody
+            // marked read-only: the source is unmarked, and reading it is all
+            // the source is asked to do.
+            other.safety = ConnectionSafety(isReadOnly: true)
+            model.transferCurrentResult(to: other, table: "arrivals")
+            expect(model.isTransferring, false, "a read-only target takes nothing")
+            expect(
+                model.errorMessage?.isEmpty == false, true,
+                "and says so rather than doing nothing visible")
+            expect(other.isBusy, false, "and is not left marked busy by a transfer that never ran")
         }
     }
 

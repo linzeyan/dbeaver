@@ -251,6 +251,16 @@ enum AppMenu {
             action: #selector(ExportCommands.importFile(_:)), keyEquivalent: "")
         importItem.target = export
 
+        // Beside Import rather than in a group of its own: both write rows into
+        // a table, and the only difference between them is where the rows come
+        // from — a file for one, another open connection for the other. No
+        // shortcut, because the two databases it needs are a deliberate setup
+        // rather than something anybody reaches for mid-thought.
+        let transfer = menu.addItem(
+            withTitle: "Transfer Result to Connection…",
+            action: #selector(ExportCommands.transferResult(_:)), keyEquivalent: "")
+        transfer.target = export
+
         menu.addItem(.separator())
 
         // Their own group, under a rule of their own. The five above export a
@@ -1178,6 +1188,16 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         }
     }
 
+    /// Opens the picker that names the other connection and the table on it.
+    ///
+    /// A sheet of the window's own rather than an `NSOpenPanel` like the two
+    /// above: what this asks for is not a file, and the list it asks over —
+    /// every table on another live connection — is one this window is already
+    /// holding.
+    @objc func transferResult(_ sender: Any?) {
+        model.presentTransfer()
+    }
+
     /// Greys the items out while there is nothing to write, so the panel is
     /// never opened for a result that does not exist yet.
     ///
@@ -1186,6 +1206,10 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(importFile(_:)): return model.canImport
+        // A result to read out of *and* somewhere live to put it. The second
+        // half is why this is not `canExport`: with one connection open there
+        // is nothing to transfer to, and the item stays grey.
+        case #selector(transferResult(_:)): return model.canTransfer
         case #selector(exportFavorites(_:)): return model.canExportFavorites
         case #selector(exportStatements(_:)): return model.canExportHistory
         // Always live. Reading a file in needs nothing to already be there —

@@ -4697,6 +4697,39 @@ final class AppModel {
         return selected.schema.isEmpty ? selected.name : "\(selected.schema).\(selected.name)"
     }
 
+    /// Whether the target picker is on screen.
+    ///
+    /// On the window rather than on the session, as `isGoToOpen` is: a sheet
+    /// covers the window, and a flag per tab would leave one open behind a tab
+    /// somebody switched away from.
+    var isTransferPickerOpen = false
+
+    /// Opens the picker over the result being shown.
+    ///
+    /// Guarded here as well as in the menu's validation, because a menu item is
+    /// re-validated when the menu opens and the answer can change while it is
+    /// down — the other connection can finish, fail or close in that time.
+    func presentTransfer() {
+        guard canTransfer else { return }
+        isTransferPickerOpen = true
+    }
+
+    /// What the picker says the transfer will send, in the shape
+    /// `exportMessage` says it for a file.
+    ///
+    /// The two differ in one way that matters: an export offers a choice
+    /// between the rows on screen and the whole result, and a transfer does
+    /// not. It re-reads the statement in full, always — rows moved into another
+    /// database are the kind of thing somebody counts afterwards, and "as many
+    /// as the grid had scrolled to" is not a number anybody would choose.
+    var transferMessage: String {
+        guard current.capped else {
+            return "Sends this result in full — \(Self.pluralized(current.rowCount, "row"))."
+        }
+        return "Sends the whole result, re-read from the server. The grid is holding the "
+            + "first \(Self.formatted(current.rowCount)) rows of it."
+    }
+
     /// Sends this pane's result into `table` on another open connection.
     ///
     /// Driven from this session's queue, one batch at a time, with the running

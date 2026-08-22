@@ -98,6 +98,7 @@ struct MainView: View {
         // to a `@FocusState`; this is the only end of that wire that can.
         .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
         .sheet(isPresented: $model.isGoToOpen) { GoToPalette(model: model) }
+        .sheet(isPresented: $model.isTransferPickerOpen) { TransferSheet(model: model) }
         .navigationTitle(model.selected?.name ?? "DbClient")
         // Nothing rather than the connection's name when no object is selected.
         // The name was here because, with no selection, the titlebar was the
@@ -2916,6 +2917,24 @@ struct StatusBar: View {
                 .font(Theme.Typography.digits)
                 .foregroundStyle(Theme.textSecondary.color)
                 .lineLimit(1)
+
+            // Attached to the sentence it acts on, for the reason Load more is
+            // below: "8,192 rows → orders on staging…" is a sentence about
+            // something still happening, and the button that ends it belongs
+            // beside it rather than in a menu. The export gets the same button
+            // because it is the same situation — a long job with a running
+            // commentary and, until now, no way to change your mind.
+            if model.isTransferring {
+                Button("Stop") { model.stopTransfer() }
+                    .buttonStyle(.link)
+                    .font(Theme.Typography.micro)
+                    .help("Stop the transfer. The rows already sent stay where they are.")
+            } else if model.isExporting {
+                Button("Stop") { model.cancelExport() }
+                    .buttonStyle(.link)
+                    .font(Theme.Typography.micro)
+                    .help("Stop the export. The file keeps the rows already written.")
+            }
 
             // Attached to the sentence it acts on, so "first 100,000 of
             // ~1,000,000" reads as something you can do to rather than only
