@@ -434,6 +434,18 @@ final class Session: Identifiable {
     var isImporting = false
     var importStatus = ""
 
+    /// Rows on their way to another connection in this window, and what the
+    /// status bar says while they are.
+    ///
+    /// On the *source* session, which is the tab the transfer was started from
+    /// and the one whose queue is driving it. The target is marked busy for the
+    /// duration and is held here so that whatever ends the transfer — the last
+    /// batch, a Stop, a failure — can hand it back.
+    var isTransferring = false
+    var transferStatus = ""
+    var transferHandle: Transfer?
+    var transferTarget: Session?
+
     /// Whether `--where` / `--order` have been spent. One session's worth: they
     /// describe the database the window opened against.
     var appliedInitialFilters = false

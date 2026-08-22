@@ -380,8 +380,19 @@ test-sessions: release db-check ## Prove two connections in one window do not to
 	./$(APP_BIN) --sessions-probe --conn "$(PG_CONN)" \
 		--history-store dev.dbclient.sessionsprobe
 
+# A transfer needs two live connections, so it needs a server for the reason
+# `test-sessions` does — and one more: what the polled handle buys over the old
+# blocking call is a count between batches and a Stop that lands mid-flight, and
+# neither of those exists against a source small enough to cross in one fetch.
+# The probe builds a table of 20,000 rows, moves it, and moves it again with
+# Stop pressed.
+.PHONY: test-transfer
+test-transfer: release db-check ## Move a table between two connections, then stop one part way
+	./$(APP_BIN) --transfer-probe --conn "$(PG_CONN)" \
+		--history-store dev.dbclient.transferprobe
+
 .PHONY: test-all
-test-all: test test-integration test-swift test-preferences test-history test-sessions ## Every test
+test-all: test test-integration test-swift test-preferences test-history test-sessions test-transfer ## Every test
 
 ##@ Quality
 

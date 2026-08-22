@@ -498,6 +498,33 @@ final class Database: @unchecked Sendable {
         return Cursor(handle: c)
     }
 
+    /// Starts moving this connection's rows into `table` on another connection.
+    ///
+    /// The cursor is made here and handed straight to the transfer, which owns
+    /// it: there is no `Cursor` object in between, so there is nothing for two
+    /// pieces of Swift to free. Stopping the fetch is `Transfer.cancel`, which
+    /// reaches the write as well.
+    ///
+    /// Blocks only for as long as opening a cursor takes. The rows move one
+    /// `step` at a time, which is what lets a caller show how far it has got.
+    func startTransfer(of statement: String, batchRows: Int, into target: Database, table: String)
+        throws -> Transfer
+    {
+        var err: UnsafeMutablePointer<CChar>?
+        var position: Int32 = 0
+        guard let c = db_cursor(handle, statement, batchRows, &err, &position) else {
+            throw DbError(
+                description: Database.take(&err) ?? "cursor failed",
+                position: position > 0 ? Int(position) : nil)
+        }
+        guard let t = db_transfer_start(c, target.rawHandle, table, &err) else {
+            // The cursor was refused before it was taken, so it is still ours.
+            db_cursor_free(c)
+            throw DbError(description: Database.take(&err) ?? "transfer failed")
+        }
+        return Transfer(handle: t)
+    }
+
     /// Reads `url` into `table`, and answers how many rows arrived.
     ///
     /// On the connection rather than on a `Cursor`, because there is no result
@@ -633,6 +660,79 @@ final class Cursor: @unchecked Sendable {
         if db_cursor_cancel(handle, &err) != 0 {
             let message = Database.take(&err) ?? "cancel failed"
             fputs("cursor cancel request failed: \(message)\n", stderr)
+        }
+    }
+}
+
+/// Rows on their way from one connection to another.
+///
+/// A handle rather than a call that returns when it is finished, which is the
+/// difference between a transfer somebody can watch and one they can only wait
+/// out: `step` moves one batch and answers with the running total, so the count
+/// on screen is the count on the target.
+final class Transfer: @unchecked Sendable {
+    /// What one step did.
+    enum Step {
+        /// A batch went across; the number is the running total.
+        case moved(Int64)
+        /// Everything the source had is on the target.
+        case done(Int64)
+        /// Somebody stopped it. What had already gone stays there — a transfer
+        /// is not a transaction, and the target may not have one.
+        case stopped(Int64)
+
+        var rows: Int64 {
+            switch self {
+            case .moved(let n), .done(let n), .stopped(let n): return n
+            }
+        }
+
+        var isFinished: Bool {
+            if case .moved = self { return false }
+            return true
+        }
+    }
+
+    private let handle: OpaquePointer
+
+    fileprivate init(handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    /// Frees the transfer and the cursor it took. Never on the main thread for
+    /// the reason `Cursor.deinit` gives: closing the cursor closes a connection.
+    deinit { db_transfer_free(handle) }
+
+    /// Moves one batch. Blocks for one fetch and one round of INSERTs.
+    func step() throws -> Step {
+        var rows: Int64 = 0
+        var err: UnsafeMutablePointer<CChar>?
+        switch db_transfer_step(handle, &rows, &err) {
+        case 1:
+            return .moved(rows)
+        case 0:
+            return .done(rows)
+        case -2:
+            // Not thrown. A stop is somebody pressing Stop, and the rows that
+            // did arrive are the answer — a throw here would send the caller
+            // down the failure path for a button that worked.
+            _ = Database.take(&err)
+            return .stopped(rows)
+        default:
+            throw DbError(description: Database.take(&err) ?? "transfer failed")
+        }
+    }
+
+    /// Stops it, at both ends.
+    ///
+    /// Called from off the queue the step is blocking, and silent on failure,
+    /// for the reasons `Cursor.cancel` gives. What is promised is that no
+    /// further batch is sent.
+    func cancel() {
+        var err: UnsafeMutablePointer<CChar>?
+        if db_transfer_cancel(handle, &err) != 0 {
+            let message = Database.take(&err) ?? "cancel failed"
+            fputs("transfer cancel request failed: \(message)\n", stderr)
         }
     }
 }

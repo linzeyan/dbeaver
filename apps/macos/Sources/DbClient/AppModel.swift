@@ -705,6 +705,22 @@ final class AppModel {
         get { session.importStatus }
         set { session.importStatus = newValue }
     }
+    private(set) var isTransferring: Bool {
+        get { session.isTransferring }
+        set { session.isTransferring = newValue }
+    }
+    private(set) var transferStatus: String {
+        get { session.transferStatus }
+        set { session.transferStatus = newValue }
+    }
+    private var transferHandle: Transfer? {
+        get { session.transferHandle }
+        set { session.transferHandle = newValue }
+    }
+    private var transferTarget: Session? {
+        get { session.transferTarget }
+        set { session.transferTarget = newValue }
+    }
     var errorMessage: String? {
         get { session.errorMessage }
         set { session.errorMessage = newValue }
@@ -1961,6 +1977,14 @@ final class AppModel {
     private func drain(_ closing: Session) {
         closing.browseCursor = nil
         closing.exportCursor = nil
+        // Freed here rather than left to the session's own release: the handle
+        // holds the source cursor, and a cursor freed later is a connection
+        // closed later — on whichever thread happened to hold the last
+        // reference, which on macOS can be the main one.
+        closing.transferTarget?.isBusy = false
+        closing.transferTarget = nil
+        closing.transferHandle = nil
+        closing.isTransferring = false
         closing.browseFetchInFlight = false
         guard let db = closing.db else { return }
         let hadTransaction = closing.transaction.open
@@ -3856,6 +3880,7 @@ final class AppModel {
         // An export outranks whatever the tab would otherwise say, and stops
         // doing so the moment it finishes: nothing has to remember to clear it,
         // and no stale "Exported…" can outlive the thing it described.
+        if isTransferring { return transferStatus }
         if isExporting { return exportStatus }
         if isImporting { return importStatus }
         switch activeTab {
@@ -4631,6 +4656,156 @@ final class AppModel {
         exportCursor?.cancel()
     }
 
+    // MARK: - Transfer
+
+    /// The connections in this window a transfer could send rows to.
+    ///
+    /// Open ones, other than this tab, that are not doing something else. A
+    /// transfer needs a live connection at both ends, so the list is the window's
+    /// own tabs and not the saved-connection file: opening one is Connect…, and
+    /// a picker that offered to open a connection *and* move a table would be
+    /// two decisions behind one button.
+    ///
+    /// A tab transferring into itself is excluded rather than refused later. It
+    /// is not a nonsense — a table copied within one database is a real thing to
+    /// want — but the core writes through a second connection, and this session's
+    /// is the one the source cursor is reading on.
+    var transferTargets: [Session] {
+        sessions.filter { $0 !== session && $0.db != nil && !$0.isBusy && !$0.isTransferring }
+    }
+
+    /// Whether there is a result to send and somewhere to send it.
+    ///
+    /// Keyed on the result rather than on the selected relation, which is what
+    /// makes a filtered browse and a query result both transferable: what moves
+    /// is the statement this pane ran, read again through a cursor of its own —
+    /// the same source `exportCurrentResult` uses, and for the same reason.
+    var canTransfer: Bool {
+        db != nil && !isBusy && !isTransferring && !isExporting && !isImporting
+            && current.rowCount > 0 && !current.statement.isEmpty && !transferTargets.isEmpty
+    }
+
+    /// The table a transfer would fill in by default: the one it is reading.
+    ///
+    /// A transfer writes into a table that already exists, so this is a name to
+    /// match rather than a name to invent — and on the target it is nearly
+    /// always spelled the same, which is what a copy from production into
+    /// staging is. Nil on the Query tab, where there is no relation to name:
+    /// there the field opens empty rather than guessing.
+    var transferTableName: String? {
+        guard activeTab != .query, let selected else { return nil }
+        return selected.schema.isEmpty ? selected.name : "\(selected.schema).\(selected.name)"
+    }
+
+    /// Sends this pane's result into `table` on another open connection.
+    ///
+    /// Driven from this session's queue, one batch at a time, with the running
+    /// total published between batches — which is the whole reason the core hands
+    /// back a handle rather than a row count at the end. Nothing is held in this
+    /// process: each batch is fetched, sent and dropped in the core.
+    ///
+    /// The target is marked busy for the duration. Its rows are arriving on its
+    /// own connection while its tab is on screen, and a statement somebody ran
+    /// there in the meantime would be a second use of one connection — which the
+    /// window's one-queue-per-session rule exists to prevent everywhere else.
+    func transferCurrentResult(to target: Session, table: String) {
+        guard canTransfer, let targetDb = target.db else { return }
+        let named = table.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !named.isEmpty else {
+            errorMessage = "Name the table on \(target.connectionLabel) these rows go into."
+            return
+        }
+        // The target's marks, not this connection's: the rows are being written
+        // there. Read-only refuses outright, production asks — the same two
+        // answers a statement typed into that tab would get.
+        if let refusal = target.safety.writeRefusal {
+            errorMessage = refusal
+            return
+        }
+        if target.safety.asks(about: .modify),
+            !confirmProductionRun(
+                ProductionRun(
+                    count: 1,
+                    worst: "INSERT INTO \(named) — \(Self.pluralized(current.rowCount, "row")) "
+                        + "from \(connectionLabel)",
+                    danger: .modify, label: target.connectionLabel))
+        {
+            return
+        }
+
+        let statement = current.statement
+        let page = batchRows
+        let source = session
+        isTransferring = true
+        transferTarget = target
+        transferStatus = "Sending to \(target.connectionLabel)…"
+        // A new transfer supersedes the previous failure, as a new query does.
+        errorMessage = nil
+        target.isBusy = true
+        run { [self] db -> TransferOutcome in
+            let moving = try db.startTransfer(
+                of: statement, batchRows: page, into: targetDb, table: named)
+            // Published before the first step, so Stop has something to name for
+            // all of it — the same reason the export publishes its cursor early.
+            DispatchQueue.main.async { [self] in
+                MainActor.assumeIsolated { applying(to: source) { transferHandle = moving } }
+            }
+            while true {
+                let step = try moving.step()
+                let rows = step.rows
+                DispatchQueue.main.async { [self] in
+                    MainActor.assumeIsolated {
+                        applying(to: source) {
+                            transferStatus =
+                                "\(Self.formatted(Int(rows))) rows → \(named) on "
+                                + "\(target.connectionLabel)…"
+                        }
+                    }
+                }
+                if step.isFinished {
+                    if case .stopped = step { return TransferOutcome(rows: rows, stopped: true) }
+                    return TransferOutcome(rows: rows, stopped: false)
+                }
+            }
+        } then: { [self] outcome in
+            endTransfer()
+            let rows = Self.pluralized(Int(outcome.rows), "row")
+            status =
+                outcome.stopped
+                ? "Stopped after \(rows) into \(named) on \(target.connectionLabel)"
+                : "\(rows) sent to \(named) on \(target.connectionLabel)"
+        }
+    }
+
+    /// What a finished transfer answers with. A row count alone cannot say
+    /// whether it finished or was stopped, and those are two different sentences.
+    private struct TransferOutcome: Sendable {
+        let rows: Int64
+        let stopped: Bool
+    }
+
+    /// Stops a transfer part way through.
+    ///
+    /// Both ends, which neither `Database.cancel` nor a cursor's own cancel can
+    /// do alone: a transfer waits on a fetch from the source and then on an
+    /// INSERT into the target, in turn. See `db_transfer_cancel`.
+    func stopTransfer() {
+        guard let moving = transferHandle else { return }
+        DispatchQueue.global(qos: .userInitiated).async { moving.cancel() }
+    }
+
+    /// Puts the window back after a transfer, however it ended.
+    ///
+    /// Called from the success path and from `fail`, because a failure is the
+    /// third way one ends and the target would otherwise stay busy — a tab that
+    /// never accepts another statement, with nothing on screen saying why.
+    private func endTransfer() {
+        isTransferring = false
+        transferHandle = nil
+        transferTarget?.isBusy = false
+        transferTarget = nil
+    }
+
     // MARK: - Import
 
     /// Whether a file has a table to go into.
@@ -4993,6 +5168,7 @@ final class AppModel {
             return
         }
 
+        if isTransferring { endTransfer() }
         errorMessage = message
         status = "Failed"
         if let statement { pointAtSyntaxError(statement) }

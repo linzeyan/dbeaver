@@ -427,6 +427,47 @@ if historyProbe {
     }
 }
 
+/// How many rows `--transfer-probe` moves.
+///
+/// A hundred thousand and not three. What is under test is a transfer polled a
+/// batch at a time and stopped part way through, and a source small enough to
+/// cross in one fetch — `AppModel` reads 8192 rows at a time — is a transfer
+/// with no middle to stop in. Twelve fetches is a middle wide enough that the
+/// poll below sees the count move without having to race it.
+let transferProbeRows = 100_000
+
+/// `--transfer-probe` fills a table on `--conn` for that transfer to move.
+///
+/// Built here rather than in the probe, for the reason `--history-probe` builds
+/// its own here: the navigator reads its inventory once at connect time, and a
+/// table created after that is one the sidebar has never heard of.
+let transferProbe = CommandLine.arguments.contains("--transfer-probe")
+if transferProbe {
+    guard let conn = connArgument else {
+        fputs("--transfer-probe needs --conn\n", stderr)
+        exit(2)
+    }
+    do {
+        let db = try Database(connString: conn)
+        func ran(_ sql: String) throws {
+            let query = try db.query(sql, batchRows: 1000)
+            while try query.nextBatch() != nil {}
+        }
+        try ran("DROP TABLE IF EXISTS transfer_probe_src")
+        try ran("DROP TABLE IF EXISTS transfer_probe_dst")
+        try ran("CREATE TABLE transfer_probe_src (id int PRIMARY KEY, note varchar(32))")
+        try ran(
+            "INSERT INTO transfer_probe_src SELECT g, 'row ' || g "
+                + "FROM generate_series(1, \(transferProbeRows)) AS g")
+        // The same shape, and a key of its own: an index to maintain is part of
+        // what makes one batch take long enough for Stop to land inside it.
+        try ran("CREATE TABLE transfer_probe_dst (id int PRIMARY KEY, note varchar(32))")
+    } catch {
+        fputs("transfer: could not build the fixture: \(error)\n", stderr)
+        exit(1)
+    }
+}
+
 /// `--sessions-probe` opens a second connection to `--conn` beside the first.
 ///
 /// No fixture, unlike `--history-probe`: it reads nothing but `pg_sleep`, so it
@@ -1261,6 +1302,226 @@ func probeSessions(model: AppModel) {
             fail("nothing arrived within the deadline")
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// Drives `--transfer-probe`. Moves a table's rows from the connection in the
+/// first tab into a table on the connection in the second, twice: once to the
+/// end, and once with Stop pressed part way.
+///
+/// Two live connections, for the reason `--sessions-probe` needs them. A
+/// transfer is one connection reading while another writes, and every rule about
+/// which handle does which is invisible to a check holding one handle. That both
+/// ends are PostgreSQL is not the interesting part and is not meant to be: what
+/// is under test is the polled handle, the running total the window publishes
+/// between batches, and whether Stop reaches a transfer already in flight.
+///
+/// It writes, and it drops what it wrote. Point `--conn` at a scratch database.
+@MainActor
+func probeTransfer(model: AppModel) {
+    guard let conn = connArgument else {
+        fputs("transfer: --transfer-probe needs --conn\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 300
+    let target = "transfer_probe_dst"
+    // Answered yes without anybody being asked, as `--history-probe` does with
+    // deletions: a probe that stopped on a modal would hang rather than fail.
+    model.confirmProductionRun = { _ in true }
+
+    /// Runs `sql` on a connection of its own and answers what the server
+    /// counted, or nil if the statement could not be sent at all.
+    ///
+    /// Its own connection because both of the window's are spoken for — one is
+    /// reading the source and the other is being written into — and a probe that
+    /// borrowed either would be measuring its own interference.
+    func ran(_ sql: String) -> Int? {
+        guard let db = try? Database(connString: conn),
+            let query = try? db.query(sql, batchRows: 1)
+        else { return nil }
+        while (try? query.nextBatch()) ?? nil != nil {}
+        return query.rowsAffected
+    }
+
+    /// Empties the target and reports what was in it.
+    ///
+    /// A DELETE rather than a `count(*)` because it answers the question and
+    /// clears the table for the next run in one statement — and because the
+    /// count of what it removed comes back as a number rather than as an Arrow
+    /// batch this would then have to decode.
+    func emptied(_ what: String) -> Int {
+        guard let rows = ran("DELETE FROM \(target)") else {
+            fputs("transfer FAIL: could not read the target back\n", stderr)
+            exit(1)
+        }
+        fputs("transfer \(what): \(rows) rows had arrived\n", stderr)
+        return rows
+    }
+
+    /// Drops the fixture, after closing the window's connections.
+    ///
+    /// The closing is not tidiness, it is what makes the drop possible: a
+    /// transfer reads its source through a server-side cursor, and a cursor open
+    /// on a table holds a lock that `DROP TABLE` waits behind for as long as the
+    /// connection lives. Closing the tabs releases both handles; a probe that
+    /// dropped first would hang here instead of reporting what it found.
+    func tidy() {
+        while model.sessions.contains(where: { $0.db != nil }) {
+            model.closeSession(0)
+        }
+        _ = ran("DROP TABLE IF EXISTS transfer_probe_src")
+        _ = ran("DROP TABLE IF EXISTS \(target)")
+    }
+
+    /// Leaves the fixture where it is, unlike every other probe here. A failure
+    /// can arrive with a transfer still in flight, and the tables it is reading
+    /// cannot be dropped until that lets go — so a tidy on this path is a hang
+    /// instead of a report. The next run drops them before it builds them.
+    func fail(_ why: String) -> Never {
+        fputs("transfer FAIL: \(why)\n", stderr)
+        fputs(
+            "  status=\(model.statusLine) error=\(model.errorMessage ?? "(none)")\n", stderr)
+        exit(1)
+    }
+
+    /// A session that has answered and is not in the middle of anything.
+    func settled(_ index: Int) -> Bool {
+        guard model.sessions.indices.contains(index) else { return false }
+        return model.sessions[index].db != nil && !model.sessions[index].isBusy
+    }
+
+    /// Every distinct progress line this run has shown, which is how the claim
+    /// that the count moves *between* batches is checked: a transfer that
+    /// reported only at the end would leave one line here.
+    var progress: Set<String> = []
+
+    enum Phase { case first, second, ran, moving, stopping, stopped }
+    var phase = Phase.first
+
+    func poll() {
+        switch phase {
+        case .first:
+            guard settled(0), model.sessions.count == 1 else { return again() }
+            model.connect(using: conn)
+            phase = .second
+            return again()
+
+        case .second:
+            guard model.sessions.count == 2, settled(1), model.activeSession == 1 else {
+                return again()
+            }
+            // Back to the tab the rows are read from: what the model forwards
+            // goes to whichever connection is in front, and the transfer is
+            // asked for by the source.
+            model.selectSession(0)
+            model.activeTab = .query
+            model.queryText = "select id, note from transfer_probe_src order by id"
+            model.runCurrentQuery()
+            phase = .ran
+            return again()
+
+        case .ran:
+            // The target has to have settled too, and settling once is not
+            // enough: a connection that has just answered goes back to work on
+            // the relation it landed on, and a transfer will not send rows into
+            // a tab that is in the middle of something.
+            guard settled(0), settled(1), model.current.rowCount > 0 else { return again() }
+            guard model.canTransfer else {
+                let other = model.sessions[1]
+                fail(
+                    "a result of \(model.current.rowCount) rows with a second connection "
+                        + "open is not transferable: statement="
+                        + (model.current.statement.isEmpty ? "(empty)" : "kept")
+                        + " targets=\(model.transferTargets.count)"
+                        + " other=[open=\(other.db != nil) busy=\(other.isBusy)"
+                        + " transferring=\(other.isTransferring)]")
+            }
+            model.transferCurrentResult(to: model.sessions[1], table: target)
+            guard model.isTransferring else {
+                fail("the transfer did not start: \(model.errorMessage ?? "no reason given")")
+            }
+            phase = .moving
+            return again()
+
+        case .moving:
+            if model.isTransferring {
+                progress.insert(model.transferStatus)
+                // The status bar is the other half of the claim. A window that
+                // shows nothing until the end is what the polled handle exists
+                // to replace, and a progress line the status bar outranks is
+                // the same thing with extra steps.
+                guard model.statusLine == model.transferStatus else {
+                    fail("the status bar is showing \(model.statusLine), not the transfer")
+                }
+                guard model.sessions[1].isBusy else {
+                    fail("the target is taking rows and is not marked busy")
+                }
+                return again()
+            }
+            let moved = emptied("after the whole table")
+            guard moved == transferProbeRows else {
+                fail("\(transferProbeRows) rows were sent and \(moved) arrived")
+            }
+            guard !model.sessions[1].isBusy else { fail("the target was left busy") }
+            guard progress.count > 1 else {
+                fail("the transfer published no running total: \(progress.sorted())")
+            }
+            guard !model.status.hasPrefix("Stopped") else {
+                fail("a transfer nobody stopped reported itself stopped: \(model.status)")
+            }
+            fputs("transfer finished: \(model.status)\n", stderr)
+
+            progress.removeAll()
+            model.transferCurrentResult(to: model.sessions[1], table: target)
+            guard model.isTransferring else {
+                fail(
+                    "the second transfer did not start: "
+                        + (model.errorMessage ?? "no reason given"))
+            }
+            phase = .stopping
+            return again()
+
+        case .stopping:
+            // Stopped as soon as there is a handle to stop it by. Whatever had
+            // already gone across stays there — that is what `Step::Stopped`
+            // promises and the one thing a transfer cannot take back — so the
+            // count this ends on is deliberately not pinned to a number.
+            guard model.sessions[0].transferHandle != nil else { return again() }
+            model.stopTransfer()
+            phase = .stopped
+            return again()
+
+        case .stopped:
+            guard !model.isTransferring else { return again() }
+            let partial = emptied("after Stop")
+            guard partial < transferProbeRows else {
+                fail("Stop stopped nothing: all \(partial) rows went across")
+            }
+            guard model.status.hasPrefix("Stopped") else {
+                fail("the window did not say it had been stopped: \(model.status)")
+            }
+            guard model.errorMessage == nil else {
+                fail("Stop was reported as a failure: \(model.errorMessage ?? "")")
+            }
+            fputs("transfer stopped: \(model.status)\n", stderr)
+            tidy()
+            exit(0)
+        }
+    }
+
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            let tabs = model.sessions.map { "open=\($0.db != nil) busy=\($0.isBusy)" }
+            fail("nothing arrived within the deadline, waiting in \(phase): \(tabs)")
+        }
+        // Twenty milliseconds rather than the fifty every other probe here
+        // polls at: one batch of a hundred thousand rows crosses in about
+        // forty, and a sampler slower than the thing it samples would read one
+        // progress line and conclude there was only ever one.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
             MainActor.assumeIsolated(poll)
         }
     }
@@ -2560,6 +2821,7 @@ if benchMode {
         if preferencesProbe { probePreferences(model: model) }
         if historyProbe { probeHistory(model: model) }
         if sessionsProbe { probeSessions(model: model) }
+        if transferProbe { probeTransfer(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
