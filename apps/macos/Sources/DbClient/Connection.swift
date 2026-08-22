@@ -110,11 +110,27 @@ struct ConnectionSettings: Equatable, Codable {
     /// client ran from would be trust whose failures cannot be reproduced.
     var sslRootCert: String
 
+    /// How many seconds to wait for the database to answer before giving up on
+    /// the attempt, or `0` for as long as the driver would wait on its own.
+    ///
+    /// Ten by default, which is the number this application dialled with before
+    /// it was settable. It is a field rather than a constant because the cases
+    /// that need longer are not exotic — a bastion two hops away, a warehouse
+    /// that is asleep, a VPN that has to come up first — and the alternative to
+    /// setting it is a Connect button that hangs until the operating system's own
+    /// TCP timeout, which on macOS is over a minute of a window saying nothing.
+    ///
+    /// Zero is the deliberate way out rather than an accident: the core reads it
+    /// as "no limit of ours" and lets the driver decide. Written as seconds
+    /// because that is what somebody typing into the field means, and because
+    /// this is the number the message names when it runs out.
+    var timeoutSeconds: Int
+
     init(
         scheme: String, host: String = "", port: String = "", database: String = "",
         user: String = "", path: String = "", sslMode: SslMode = .prefer,
         sslRootCert: String = "", sshHost: String = "", sshPort: String = "",
-        sshUser: String = "", sshKeyPath: String = ""
+        sshUser: String = "", sshKeyPath: String = "", timeoutSeconds: Int = 10
     ) {
         self.scheme = scheme
         self.host = host
@@ -128,6 +144,7 @@ struct ConnectionSettings: Equatable, Codable {
         self.sshPort = sshPort
         self.sshUser = sshUser
         self.sshKeyPath = sshKeyPath
+        self.timeoutSeconds = timeoutSeconds
     }
 
     var driver: DriverInfo? { DriverCatalog.named(scheme) }
@@ -343,6 +360,9 @@ struct ConnectionSettings: Equatable, Codable {
         sshPort = ""
         sshUser = ""
         sshKeyPath = ""
+        // The default, for the same reason: a URL has nowhere to say how long to
+        // wait for it, and this path is the one `--conn` takes.
+        timeoutSeconds = 10
 
         if shape == .file {
             // A relative path parses as the authority, so it has to be put back

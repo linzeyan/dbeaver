@@ -43,6 +43,10 @@ enum FocusArea: Hashable {
     case connectSshUser
     case connectSshKey
     case connectSshSecret
+    /// How long to wait for the database. Its own case for the reason the others
+    /// have one: the ring is drawn from the area, and a shared case rings two
+    /// fields.
+    case connectTimeout
     /// The chooser's own filter field. Separate from `navigatorFilter` because the
     /// two are never on screen together and each draws its own ring.
     case connectionFilter

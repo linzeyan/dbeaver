@@ -37,6 +37,7 @@ enum ConnectionChecks {
         checkSslParameters()
         checkSslSurvivesTheFile()
         checkTheBastionSurvivesTheFile()
+        checkThePatienceSurvivesTheFile()
         checkTheBastionSecretIsFiledBesideTheOther()
         checkTheKeychainKeepsTheTwoSecretsApart()
         checkFoldersGroupTheList()
@@ -854,6 +855,55 @@ enum ConnectionChecks {
         direct.sshHost = ""
         direct.sshUser = ""
         expect(direct.isComplete, true, "and no bastion at all is complete, as it always was")
+    }
+
+    /// How long to wait survives the file, and an entry that never said comes
+    /// back with the limit it has always been dialling under.
+    ///
+    /// The default is the load-bearing part. This key is new in a file people
+    /// keep in their dotfiles, so almost every entry that will ever be read is
+    /// one written without it — and the two wrong answers are both silent: `0`
+    /// would turn every one of those connections into one that waits as long as
+    /// the operating system does, and a small number would start refusing servers
+    /// that have always been slow.
+    private static func checkThePatienceSurvivesTheFile() {
+        let patient = SavedConnection(
+            id: UUID(uuidString: "88888888-8888-8888-8888-888888888888")!,
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "db.internal", port: "5432", database: "sales",
+                user: "ana", timeoutSeconds: 45))
+        let back = SavedConnection.Raw(from: patient).toSavedConnection()
+        expect(back.settings.timeoutSeconds, 45, "the limit somebody typed survives the file")
+
+        var brief = patient
+        brief.settings.timeoutSeconds = 5
+        expect(
+            patient.unsavedEdits(against: brief, passwordChanged: false)?.fields, ["Timeout"],
+            "and changing it is an edit worth being asked about")
+
+        // An entry written before this key existed, which is every entry anybody
+        // has today.
+        let older = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let decoded = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(older.utf8))
+        expect(
+            decoded?.toSavedConnection().settings.timeoutSeconds, 10,
+            "an entry that never said waits the ten seconds it always has")
+
+        // Nought is somebody asking for the driver's own patience, and is kept.
+        let none =
+            #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u","timeoutSeconds":0}"#
+        expect(
+            (try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(none.utf8)))?
+                .toSavedConnection().settings.timeoutSeconds, 0,
+            "and zero is a decision, not an empty field")
+
+        // A number nobody could have meant, from a file edited by hand.
+        let wrong =
+            #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u","timeoutSeconds":-3}"#
+        expect(
+            (try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(wrong.utf8)))?
+                .toSavedConnection().settings.timeoutSeconds, 10,
+            "a negative limit is read as the default rather than as no patience at all")
     }
 
     /// The bastion's secret is filed beside the database's rather than on top of

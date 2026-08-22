@@ -1050,11 +1050,18 @@ final class AppModel {
         let bastion = Self.bastion(
             for: connectionDraft.settings,
             secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? "")
+        // The same limit the Connect button would use. A Test that waited longer
+        // than the connection it is testing would pass for a connection that
+        // cannot be opened.
+        let patience = UInt32(max(0, connectionDraft.settings.timeoutSeconds))
         connectionTest = .running
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let outcome: ConnectionTest
             do {
-                outcome = .reached(try Database(connString: connString, ssh: bastion).serverInfo())
+                outcome = .reached(
+                    try Database(
+                        connString: connString, ssh: bastion, timeoutSeconds: patience
+                    ).serverInfo())
             } catch {
                 outcome = .failed("\(error)")
             }
@@ -1486,7 +1493,8 @@ final class AppModel {
             connectionDraft.settings.connectionString(password: connectionPassword),
             through: Self.bastion(
                 for: connectionDraft.settings,
-                secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? ""))
+                secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? ""),
+            waiting: connectionDraft.settings.timeoutSeconds)
     }
 
     /// Connects to a raw connection URL, from `--conn`.
@@ -1516,7 +1524,7 @@ final class AppModel {
         // `make screenshot` reaching a database through somebody's SSH key would
         // be this application deciding on its own to use a credential it was
         // never handed.
-        open(connString, through: nil)
+        open(connString, through: nil, waiting: connectionDraft.settings.timeoutSeconds)
     }
 
     /// Opens another database on this server, in a tab of its own.
@@ -1528,7 +1536,7 @@ final class AppModel {
         // This session's bastion rather than the form's: the tab this was
         // started from is the one being copied, and the chooser may since have
         // moved to a row with a different bastion or none at all.
-        open(rewritten, through: session.bastion)
+        open(rewritten, through: session.bastion, waiting: session.timeoutSeconds)
     }
 
     /// Moves this tab onto another database.
@@ -1592,7 +1600,7 @@ final class AppModel {
         // let go of, so nothing that lands late from the connection being closed
         // can be reported against the tab it used to be in.
         drain(leaving)
-        open(rewritten, through: arriving.bastion)
+        open(rewritten, through: arriving.bastion, waiting: arriving.timeoutSeconds)
     }
 
     /// Moves the session itself, for a connection whose databases are containers
@@ -1776,9 +1784,15 @@ final class AppModel {
         return added
     }
 
-    private func open(_ connString: String, through bastion: SshConfig?) {
+    /// `waiting` is how long the attempt may take, in seconds, and it is carried
+    /// on the session as well as used here: another database opened from this tab
+    /// dials the same server through the same bastion, and it would be odd for it
+    /// to be given a different amount of patience than the connection it was
+    /// started from.
+    private func open(_ connString: String, through bastion: SshConfig?, waiting: Int) {
         let filling = sessionToFill()
         sessionBeingOpened = filling
+        filling.timeoutSeconds = waiting
         // Onto that session directly rather than through the forwarding
         // properties, which reach the tab in front — and the tab in front is the
         // connection still answering queries while this one is in the air.
@@ -1810,7 +1824,9 @@ final class AppModel {
         dispatch(
             on: filling.queue, applyingInto: filling,
             {
-                let db = try Database(connString: connString, ssh: bastion)
+                let db = try Database(
+                    connString: connString, ssh: bastion,
+                    timeoutSeconds: UInt32(max(0, waiting)))
                 return (db, try Self.inventory(of: db))
             },
             then: { [self] result in

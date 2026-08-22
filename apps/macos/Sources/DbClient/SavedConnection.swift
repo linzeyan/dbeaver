@@ -285,6 +285,12 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         var sshPort: String
         var sshUser: String
         var sshKeyPath: String
+        /// Seconds to wait for the database before giving up, `0` for the
+        /// driver's own patience. No version bump, for the reason the folder key
+        /// carries none: an entry written before this key existed means exactly
+        /// what it means now, which is the ten seconds this application has
+        /// always dialled with.
+        var timeoutSeconds: Int
         var user: String
 
         init(
@@ -292,7 +298,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             host: String, id: String, name: String, path: String, port: String,
             production: Bool = false, readOnly: Bool = false, scheme: String, server: String = "",
             sslMode: String = "prefer", sslRootCert: String = "", sshHost: String = "",
-            sshPort: String = "", sshUser: String = "", sshKeyPath: String = "", user: String
+            sshPort: String = "", sshUser: String = "", sshKeyPath: String = "",
+            timeoutSeconds: Int = 10, user: String
         ) {
             self.color = color
             self.database = database
@@ -313,6 +320,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.sshPort = sshPort
             self.sshUser = sshUser
             self.sshKeyPath = sshKeyPath
+            self.timeoutSeconds = timeoutSeconds
             self.user = user
         }
 
@@ -339,6 +347,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.sshPort = connection.settings.sshPort
             self.sshUser = connection.settings.sshUser
             self.sshKeyPath = connection.settings.sshKeyPath
+            self.timeoutSeconds = connection.settings.timeoutSeconds
             self.user = connection.settings.user
         }
 
@@ -404,6 +413,13 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.sshUser = try container.decodeIfPresent(String.self, forKey: .sshUser) ?? ""
             self.sshKeyPath = try container.decodeIfPresent(String.self, forKey: .sshKeyPath) ?? ""
 
+            // Ten seconds for an entry written before this key existed, which is
+            // the limit those entries have been connecting under all along. A
+            // negative number in a hand-edited file is read as the default
+            // rather than as "give up before dialling".
+            let patience = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? 10
+            self.timeoutSeconds = patience < 0 ? 10 : patience
+
             // An entry somebody typed has no id, and one is minted here rather than
             // at the call site: an entry that arrived without an identity still has
             // to have one before anything can keep its password.
@@ -414,7 +430,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         private enum CodingKeys: String, CodingKey {
             case color, database, folder, savesPassword, host, id, name, path, port, production,
                 readOnly, scheme, server, sslMode, sslRootCert, sshHost, sshPort, sshUser,
-                sshKeyPath, user
+                sshKeyPath, timeoutSeconds, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -436,7 +452,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
                 sshHost: self.sshHost,
                 sshPort: self.sshPort,
                 sshUser: self.sshUser,
-                sshKeyPath: self.sshKeyPath
+                sshKeyPath: self.sshKeyPath,
+                timeoutSeconds: self.timeoutSeconds
             )
             return SavedConnection(
                 id: id, name: self.name, color: color, folder: self.folder,
@@ -611,6 +628,10 @@ extension SavedConnection {
         // the sentence has to say it was touched.
         if sshSecretChanged {
             changedFields.append("SSH secret")
+        }
+
+        if self.settings.timeoutSeconds != draft.settings.timeoutSeconds {
+            changedFields.append("Timeout")
         }
 
         if passwordChanged {

@@ -91,6 +91,11 @@ final class Session: Identifiable {
     /// the connections most likely to be pointed at something unfamiliar.
     var server = ""
 
+    /// How long this connection was given to answer, in seconds, and how long
+    /// another database opened from this tab will be given. Zero is the driver's
+    /// own patience; see `ConnectionSettings.timeoutSeconds`.
+    var timeoutSeconds = 10
+
     /// The whole of what this tab is, for the tooltip over a 100pt name.
     ///
     /// A tab has room for one of the three things somebody needs to tell two of

@@ -304,6 +304,7 @@ struct ConnectionFormPane: View {
                 if model.connectionDraft.settings.driver?.shape != .file {
                     sshRows
                 }
+                timeoutRow
                 // Outside the branch above, because both answers to it can be
                 // marked: a SQLite file somebody is not to write to is as real a
                 // thing as a production server.
@@ -697,6 +698,44 @@ struct ConnectionFormPane: View {
     /// the field is filled. Empty for one with no default.
     private var portPlaceholder: String {
         model.connectionDraft.settings.driver?.defaultPort.map(String.init) ?? ""
+    }
+
+    /// How long the attempt may take.
+    ///
+    /// Last of the "how to reach it" fields and above Safety, because it is the
+    /// one nobody needs until something is slow — a bastion two hops away, a
+    /// warehouse that has to wake up — and a form's first rows should be the ones
+    /// every connection fills in.
+    ///
+    /// Narrow, like Port, with the unit beside it rather than in the label: the
+    /// number is two characters and a field sized for a sentence would say a
+    /// sentence was expected. Empty is not zero — clearing the box to retype is
+    /// not somebody asking to wait forever — so it reads as the default, which is
+    /// also what the placeholder shows.
+    private var timeoutRow: some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("Timeout")
+            field(timeoutText, .connectTimeout, "10", named: "Timeout")
+                .frame(width: 56)
+            Text("seconds · 0 = the driver's own limit")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textTertiary.color)
+                .lineLimit(1)
+                .accessibilityHidden(true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The number as the field holds it: digits only, and an empty box is the
+    /// default rather than no patience at all.
+    private var timeoutText: Binding<String> {
+        Binding(
+            get: { String(model.connectionDraft.settings.timeoutSeconds) },
+            set: { typed in
+                let digits = typed.filter(\.isNumber)
+                model.connectionDraft.settings.timeoutSeconds =
+                    digits.isEmpty ? 10 : (Int(digits) ?? 10)
+            })
     }
 
     private func row(
