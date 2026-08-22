@@ -425,6 +425,9 @@ pub unsafe extern "C" fn db_server_info_json(
 /// No I/O — everything in it was settled when the connection opened — so this is
 /// priced like an accessor and may be asked whenever it is convenient.
 ///
+/// The driver's own answers, plus one this layer adds because no driver can give
+/// it: see [`Surface::writes_statements`].
+///
 /// # Safety
 /// `handle` must come from `db_connect` and not have been freed.
 #[unsafe(no_mangle)]
@@ -437,7 +440,39 @@ pub unsafe extern "C" fn db_capabilities_json(
         return ptr::null_mut();
     }
     let h = unsafe { &*handle };
-    json_result(&h.driver.capabilities(), err)
+    json_result(
+        &Surface {
+            driver: h.driver.capabilities(),
+            writes_statements: h.dialect.is_some(),
+        },
+        err,
+    )
+}
+
+/// What `db_capabilities_json` answers with: the driver's capabilities, and the
+/// one fact about a connection that belongs to this build rather than to it.
+#[derive(serde::Serialize)]
+struct Surface {
+    #[serde(flatten)]
+    driver: dbconn::Capabilities,
+
+    /// Whether this build can *write* statements for this database, as opposed
+    /// to running the ones somebody typed.
+    ///
+    /// Four calls here need a dialect and refuse without one — `db_ddl_text`,
+    /// `db_edit_sql_json`, `db_filter_clause`, `db_filter_columns_json` — and
+    /// they are the four that compose SQL rather than carry it. False does not
+    /// mean the connection is read-only or half-working: Redis runs every
+    /// command typed into a Query pane, and MongoDB runs its own statements.
+    /// What is missing is a grammar to build a statement *in*, so a grid's Set
+    /// button has nothing to send and says so after being pressed.
+    ///
+    /// Not a `Driver::capabilities` field, and this is the reason: no driver can
+    /// answer it. It is a fact about which dialects `dbsql` carries, resolved
+    /// once at connect and kept on the handle, and a driver asked to report it
+    /// would be reading a table on the other side of the crate graph and
+    /// guessing whether it still says the same thing.
+    writes_statements: bool,
 }
 
 /// Asks the database whether this connection is still good. 0 if it is, -1 if

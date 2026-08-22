@@ -53,18 +53,33 @@ struct Capabilities: Codable, Hashable {
     /// what `AppModel.switchDatabase` does when this is false.
     let switchesDatabase: Bool
 
+    /// Whether the core can write statements for this database, as opposed to
+    /// running the ones somebody typed.
+    ///
+    /// False for Redis, MongoDB, Cassandra and every other connection whose
+    /// dialect this build does not carry. It does not mean the connection is
+    /// read-only or half-working — a Query pane runs whatever is typed into it —
+    /// it means the controls that *compose* a statement have nothing to compose
+    /// one in. The grid's editing row is the one that has to say so: it used to
+    /// draw Set and Delete Row and hand back `ERR unknown command 'UPDATE'`
+    /// after they were pressed.
+    let writesStatements: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
     /// transaction control it might not have, promises no cancel it might not be
-    /// able to deliver, and claims no switch it might have to take back.
+    /// able to deliver, claims no switch it might have to take back, and draws
+    /// no control that writes.
     static let unknown = Capabilities(
-        transactional: false, cancelStopsTheStatement: false, switchesDatabase: false)
+        transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
+        writesStatements: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
         case cancelStopsTheStatement = "cancel_stops_the_statement"
         case switchesDatabase = "switches_database"
+        case writesStatements = "writes_statements"
     }
 }
 

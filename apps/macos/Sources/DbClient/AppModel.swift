@@ -2672,7 +2672,8 @@ final class AppModel {
     /// reason here that is not a discovery about the data but a decision the user
     /// already made.
     var canEditCell: Bool {
-        safety.writeRefusal == nil && activeTab == .content && selected?.kind == .table && !isBusy
+        safety.writeRefusal == nil && capabilities.writesStatements && activeTab == .content
+            && selected?.kind == .table && !isBusy
             && hasRowIdentity && selectedCell(in: browseResult) != nil
     }
 
@@ -2686,10 +2687,11 @@ final class AppModel {
     /// Why the selected cell cannot be changed, for a pane that has to say so.
     ///
     /// A control that is simply absent reads as a feature this build does not
-    /// have. The three reasons a user can act on — the connection's read-only
-    /// mark, the wrong tab, and a table with nothing to identify a row by — are
-    /// worth a sentence each, and the last of those is the core's own: it is the
-    /// one place that knows whether a unique constraint was turned down and which.
+    /// have. The four reasons a user can act on — the connection's read-only
+    /// mark, the wrong tab, a table with nothing to identify a row by, and a
+    /// database this build writes no statements for — are worth a sentence each,
+    /// and the third is the core's own: it is the one place that knows whether a
+    /// unique constraint was turned down and which.
     ///
     /// The mark leads because it is the answer for every tab and every relation.
     /// A window that said "editing is for a browsed table" about a connection
@@ -2700,6 +2702,17 @@ final class AppModel {
         guard activeTab == .content, let selected else { return "Editing is for a browsed table." }
         guard selected.kind == .table else {
             return "A \(selected.kind.label.lowercased()) has no rows of its own to change."
+        }
+        // After the tab and the relation rather than beside the read-only mark,
+        // although it is just as true of every table here: `.unknown` reads as
+        // false, so a tab that has not opened anything yet would answer this
+        // about a database nobody has named. Said only where somebody is looking
+        // at rows and wondering why they will not change, and it names the Query
+        // pane because that is where the change can still be made by hand — in
+        // whatever commands this database does have.
+        if !capabilities.writesStatements {
+            let product = DriverCatalog.named(session.scheme)?.label ?? "this database"
+            return "This build writes no statements for \(product); change rows in the Query tab."
         }
         guard let rowIdentity, rowIdentity.columns.isEmpty else { return nil }
         return rowIdentity.obstacle.map { "\($0)." }

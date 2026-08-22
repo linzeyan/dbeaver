@@ -129,22 +129,35 @@ enum MetadataChecks {
     /// server, and it would be wrong in the direction that sounds cautious.
     private static func checkCapabilitiesDecodeTheKeysTheCoreWrites() {
         let both: Capabilities? = decode(
-            #"{"transactional":true,"cancel_stops_the_statement":true,"switches_database":true}"#)
+            #"""
+            {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
+             "writes_statements":true}
+            """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
         expect(both?.switchesDatabase, true, "and that a database in the tree is somewhere to go")
+        expect(both?.writesStatements, true, "and that the core can write a statement for it")
 
-        // Cassandra's answer, which is the one the new field exists to carry.
+        // Cassandra's answer, which is the one `cancel_stops_the_statement`
+        // exists to carry — and Redis's for the field beside it.
         let neither: Capabilities? = decode(
-            #"{"transactional":false,"cancel_stops_the_statement":false,"switches_database":false}"#
-        )
+            #"""
+            {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
+             "writes_statements":false}
+            """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
+        expect(
+            neither?.writesStatements, false,
+            "and a database this build has no grammar to write for")
 
         // A field the core stopped writing is refused rather than read as false,
         // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
         // exists: a default here is an answer nobody gave.
         let renamed: Capabilities? = decode(
-            #"{"transactional":true,"cancel_stops_statement":true,"switches_database":false}"#)
+            #"""
+            {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
+             "writes_statements":true}
+            """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 
         expect(

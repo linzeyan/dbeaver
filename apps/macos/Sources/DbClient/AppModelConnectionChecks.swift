@@ -51,6 +51,7 @@ enum AppModelConnectionChecks {
         checkOnlyIdleOpenConnectionsAreProbed()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
+        checkADatabaseWithNoGrammarOffersNoEditing()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
         checkSwitchingDatabaseMovesTheTabRatherThanAddingOne()
         checkSwitchingIsRefusedWhileThereIsWorkToLose()
@@ -703,6 +704,51 @@ enum AppModelConnectionChecks {
             expect(
                 model.visibleDatabases.isEmpty, true,
                 "and a filter that matches nothing anywhere leaves the tree empty to say so")
+        }
+    }
+
+    /// A database this build writes no statements for offers no editing, and
+    /// says why instead of failing when a button is pressed.
+    ///
+    /// The defect this is about was visible and cost nothing until it was
+    /// pressed: a Redis connection drew Set, NULL, Delete Row, Add Row and
+    /// Duplicate Row over a browsed key type — every condition for editing held,
+    /// because a Redis key really is a primary key and the core really can name
+    /// one row — and the first press came back `ERR unknown command 'UPDATE'`.
+    /// Nothing between the grid and the wire knew that this build carries no
+    /// grammar to write Redis in, because the fact belongs to neither: the
+    /// driver does not know which dialects were compiled in, and `dbsql` does not
+    /// know which connection is open. The FFI knows both, which is why it is the
+    /// layer that answers.
+    private static func checkADatabaseWithNoGrammarOffersNoEditing() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            let keys = RelationInfo(
+                schema: "db0", name: "hash", kind: .table, estimatedRows: nil)
+            model.sessions[0].selected = keys
+            model.sessions[0].activeTab = .content
+            model.sessions[0].rowIdentity = RowIdentity(columns: ["key"], obstacle: nil)
+            model.sessions[0].connString = "redis://127.0.0.1:6379/0"
+            model.sessions[0].capabilities = Capabilities(
+                transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
+                writesStatements: false)
+
+            expect(model.canEditCell, false, "no cell of a Redis key type is editable")
+            expect(
+                model.editObstacle?.contains("writes no statements"), true,
+                "and the bar says so where the controls would have been")
+            expect(
+                model.editObstacle?.contains("Query tab"), true,
+                "pointing at the pane where the change can still be made by hand")
+
+            // The same window, one field different. Everything else about this
+            // relation already said yes, which is what made the defect invisible.
+            model.sessions[0].capabilities = Capabilities(
+                transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
+                writesStatements: true)
+            expect(
+                model.editObstacle == nil, true,
+                "a database with a grammar has nothing to explain")
         }
     }
 
