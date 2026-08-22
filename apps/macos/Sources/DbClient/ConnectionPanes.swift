@@ -824,9 +824,12 @@ private struct ConnectionRow: View {
                 // says the address and the title says what somebody called it;
                 // neither says whether this is the MySQL or the ClickHouse, and
                 // that is the fact the Kind popup below is set from.
-                Text(DriverBadge.abbreviation(forScheme: connection.settings.scheme))
-                    .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(Theme.textTertiary.color)
+                Text(
+                    DriverBadge.abbreviation(
+                        forServer: connection.server, scheme: connection.settings.scheme)
+                )
+                .font(Theme.Typography.monoSmall)
+                .foregroundStyle(Theme.textTertiary.color)
                 marker
             }
             .padding(.horizontal, Theme.Space.sm)

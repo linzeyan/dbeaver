@@ -1802,6 +1802,10 @@ final class AppModel {
         connectionLabel = Self.label(for: connString)
         connectionColor = connectionDraft.color
         safety = ConnectionSafety(of: connectionDraft)
+        // Both: the entry remembers it for the next time the list is drawn, and
+        // the session carries it for the tab that is open now. Quick connect has
+        // no entry, and `record` is a no-op there.
+        session.server = inventory.server
         record(server: inventory.server)
         capabilities = inventory.capabilities
         connectionState = .connected

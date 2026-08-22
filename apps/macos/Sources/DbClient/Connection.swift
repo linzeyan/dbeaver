@@ -132,6 +132,50 @@ struct ConnectionSettings: Equatable, Codable {
 
     var driver: DriverInfo? { DriverCatalog.named(scheme) }
 
+    /// Where this points, as a label.
+    ///
+    /// Built from the fields rather than by asking for a URL, because a URL would
+    /// carry the scheme and the percent-encoding and this is a label — and it
+    /// would carry the password, which is the one part of a connection that must
+    /// not be printed. Each separator belongs to the part after it, so a
+    /// connection with no port reads `ana@db.example/sales` rather than
+    /// `ana@db.example:/sales` — punctuation with nothing behind it looks like the
+    /// line was cut off.
+    var address: String {
+        if driver?.shape == .file {
+            return path
+        }
+
+        var result = ""
+
+        if !user.isEmpty {
+            result += user
+        }
+
+        if !host.isEmpty {
+            if !result.isEmpty {
+                result += "@"
+            }
+            result += host
+        }
+
+        if !port.isEmpty {
+            if !result.isEmpty {
+                result += ":"
+            }
+            result += port
+        }
+
+        if !database.isEmpty {
+            if !result.isEmpty {
+                result += "/"
+            }
+            result += database
+        }
+
+        return result
+    }
+
     /// What an empty form offers.
     ///
     /// A loopback host and whichever port the chosen driver names are the two

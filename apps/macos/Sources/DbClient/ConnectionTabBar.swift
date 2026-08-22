@@ -120,6 +120,11 @@ private struct ConnectionTabItem: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: select)
         .onHover { isHovering = $0 }
+        // What the name has no room for: which product answered, and the address
+        // it answered from. Two tabs called `bench@127.0.0.1` are the ordinary
+        // case — the same database name on staging and on production — and the
+        // strip is where somebody checks which is which before running anything.
+        .help(session.tabDescription)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(session.accessibleDescription)
         .accessibilityAddTraits(isActive ? [.isSelected] : [])

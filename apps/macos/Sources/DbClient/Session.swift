@@ -82,6 +82,31 @@ final class Session: Identifiable {
     /// would have to pick one of the three and be wrong.
     var hasBeenAsked: Bool { !connString.isEmpty }
 
+    /// What answered, as the driver reported it — "PostgreSQL 17.0", "TiDB
+    /// 8.1.0", or empty until a connection has been made.
+    ///
+    /// On the session as well as on the saved entry, and the two are not the same
+    /// claim: the entry remembers what was there last time, and this is what is
+    /// there now. Quick connect and `--conn` have no entry at all, and they are
+    /// the connections most likely to be pointed at something unfamiliar.
+    var server = ""
+
+    /// The whole of what this tab is, for the tooltip over a 100pt name.
+    ///
+    /// A tab has room for one of the three things somebody needs to tell two of
+    /// them apart — what it is called — and the two it drops are the two that
+    /// matter when the names are similar: which product answered and which
+    /// address it is at. The pointer is already on the tab by the time this is
+    /// read, so it costs nothing to be complete.
+    var tabDescription: String {
+        guard hasBeenAsked else { return connectionLabel }
+        // The saved row's line, from the string this tab was actually opened
+        // with: `ConnectionSettings.address` drops the password, which a tooltip
+        // built out of `connString` would print.
+        let address = ConnectionSettings(connectionString: connString).address
+        return server.isEmpty ? address : "\(server) · \(address)"
+    }
+
     /// What this connection's tab is called out loud.
     ///
     /// The stale mark is a dimmed tree, and dimming is not a thing a screen

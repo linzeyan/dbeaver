@@ -205,47 +205,10 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         server.isEmpty ? address : "\(server) · \(address)"
     }
 
-    /// Where this connection points, as a label.
-    ///
-    /// Built here rather than by asking `connectionString` for a URL, because a URL
-    /// would carry the scheme and the percent-encoding and this is a label. Each
-    /// separator belongs to the part after it, so a connection with no port reads
-    /// `ana@db.example/sales` rather than `ana@db.example:/sales` — punctuation with
-    /// nothing behind it looks like the line was cut off.
-    private var address: String {
-        if settings.driver?.shape == .file {
-            return settings.path
-        }
-
-        var result = ""
-
-        if !settings.user.isEmpty {
-            result += settings.user
-        }
-
-        if !settings.host.isEmpty {
-            if !result.isEmpty {
-                result += "@"
-            }
-            result += settings.host
-        }
-
-        if !settings.port.isEmpty {
-            if !result.isEmpty {
-                result += ":"
-            }
-            result += settings.port
-        }
-
-        if !settings.database.isEmpty {
-            if !result.isEmpty {
-                result += "/"
-            }
-            result += settings.database
-        }
-
-        return result
-    }
+    /// Where this connection points, as a label. `ConnectionSettings.address`
+    /// writes it, because an open tab needs the same line for a connection that
+    /// was never saved.
+    private var address: String { settings.address }
 
     /// This connection as the file writes it: one flat object.
     ///

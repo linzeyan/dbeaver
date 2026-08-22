@@ -18,6 +18,7 @@ enum DriverBadgeChecks {
         checkEveryDriverInTheCatalogIsNamed()
         checkAnUnknownSchemeFallsBackVisibly()
         checkTheFamiliesAreTheOnesTheTreeAndPanesBranchOn()
+        checkAProductThatSpeaksAnothersProtocolSaysWhatItIs()
         if failures == 0 {
             fputs("driver badge: all checks passed\n", stderr)
         } else {
@@ -69,10 +70,37 @@ enum DriverBadgeChecks {
             "the fallback is reported as a fallback, which is what the check above reads")
     }
 
+    /// What a connection is, in two letters, when the scheme is somebody else's.
+    ///
+    /// The case this exists for is a window with TiDB, CockroachDB and the two
+    /// products they impersonate open at once: keyed on the scheme, three of
+    /// those five rows draw the same mark, and the mark's whole job is telling
+    /// rows apart. The product is read off the line the driver reported, which is
+    /// also how `ServerInfo::from_banner` decided what the product was.
+    private static func checkAProductThatSpeaksAnothersProtocolSaysWhatItIs() {
+        expect(
+            DriverBadge.abbreviation(forServer: "TiDB 8.1.0", scheme: "mysql"), "Ti",
+            "a TiDB reached over mysql:// is not drawn as MySQL")
+        expect(
+            DriverBadge.abbreviation(forServer: "CockroachDB 23.1.11", scheme: "postgres"), "CR",
+            "nor a CockroachDB as PostgreSQL")
+        expect(
+            DriverBadge.abbreviation(forServer: "MySQL 8.4.0", scheme: "mysql"), "My",
+            "and the real thing keeps the mark it had")
+        expect(
+            DriverBadge.abbreviation(forServer: "", scheme: "mysql"), "My",
+            "a saved connection nothing has opened is marked by its scheme, which is all there is")
+        expect(
+            DriverBadge.abbreviation(forServer: "Vitess 19.0", scheme: "mysql"), "My",
+            "and a product with no mark of its own falls back rather than inventing one")
+        expect(
+            DriverBadge.abbreviation(forServer: "SQL Server 16.0", scheme: "sqlserver"), "MS",
+            "a product whose name is two words falls back too, and lands where it started")
+    }
+
     /// The shape is a claim about which family, and the families are the ones
-    /// that decide the tree's levels and the pane set (ui-spec §3, §5.1). A
-    /// mapping that put Redis under a cylinder would be promising a Structure
-    /// tab that the driver refuses by name.
+    /// that decide the tree's levels (ui-spec §3). A mapping that put Redis under
+    /// a cylinder would say its keyspace is a set of tables with schemas over it.
     private static func checkTheFamiliesAreTheOnesTheTreeAndPanesBranchOn() {
         expect(
             DriverBadge.familySymbol(forScheme: "postgres"), "cylinder",

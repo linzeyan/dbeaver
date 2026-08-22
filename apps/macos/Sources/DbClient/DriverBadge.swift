@@ -78,6 +78,36 @@ enum DriverBadge {
         }
     }
 
+    /// The two-letter mark for what actually answered, falling back to the
+    /// scheme's.
+    ///
+    /// A TiDB is reached over `mysql://` and a CockroachDB over `postgres://`,
+    /// because speaking somebody else's protocol is the point of those products.
+    /// Keyed on the scheme alone, a window holding one of each and the real thing
+    /// draws the same two letters three times — and the mark exists precisely to
+    /// tell rows apart at a glance.
+    ///
+    /// `server` is the line the driver reported, product first: "TiDB 8.1.0".
+    /// The first word is the product, which is how `ServerInfo::from_banner`
+    /// reads one in the first place. Empty for a saved connection nothing has
+    /// opened yet, and unknown for a product with no mark of its own — both fall
+    /// back to the scheme, which is the answer that was right before anything
+    /// answered.
+    ///
+    /// Only products a driver here can actually report have entries. StarRocks
+    /// and Doris are reached by the MySQL driver and are not in the list, because
+    /// neither puts its name in `VERSION()` — they arrive as MySQL, and a mark
+    /// for them here would be a promise this build cannot keep.
+    static func abbreviation(forServer server: String, scheme: String) -> String {
+        switch server.split(separator: " ").first.map(String.init) {
+        case "TiDB": return "Ti"
+        case "MariaDB": return "Ma"
+        case "CockroachDB": return "CR"
+        case "GreptimeDB": return "Gt"
+        default: return abbreviation(forScheme: scheme)
+        }
+    }
+
     /// Whether this scheme is one the table above names.
     ///
     /// For the check that fails when a driver is added to the registry without

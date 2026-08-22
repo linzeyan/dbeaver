@@ -52,6 +52,7 @@ enum AppModelConnectionChecks {
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
+        checkTheTabSaysWhatItIsWithoutSayingTheSecret()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
         checkSwitchingDatabaseMovesTheTabRatherThanAddingOne()
         checkSwitchingIsRefusedWhileThereIsWorkToLose()
@@ -749,6 +750,38 @@ enum AppModelConnectionChecks {
             expect(
                 model.editObstacle == nil, true,
                 "a database with a grammar has nothing to explain")
+        }
+    }
+
+    /// What the pointer gets over a tab: the product, the address, and no
+    /// password.
+    ///
+    /// A tab is one short name, and two connections to `bench` on two servers are
+    /// the case somebody has to be able to tell apart before running anything.
+    /// The tooltip is where the rest goes. It is built from the string the tab
+    /// was opened with — which is the only place a Quick connect's address exists
+    /// — and that string carries the password, so the line is assembled from
+    /// fields rather than printed.
+    private static func checkTheTabSaysWhatItIsWithoutSayingTheSecret() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            let session = model.sessions[0]
+            expect(
+                session.tabDescription, "New Connection",
+                "a tab holding a blank form is described by the only name it has")
+
+            session.connString = "postgres://bench:hunter2@db.example:5432/bench"
+            expect(
+                session.tabDescription, "bench@db.example:5432/bench",
+                "an open tab is described by where it points")
+            expect(
+                session.tabDescription.contains("hunter2"), false,
+                "and never by the password in the string it was opened with")
+
+            session.server = "PostgreSQL 17.0"
+            expect(
+                session.tabDescription, "PostgreSQL 17.0 · bench@db.example:5432/bench",
+                "with what answered in front, once something has")
         }
     }
 
