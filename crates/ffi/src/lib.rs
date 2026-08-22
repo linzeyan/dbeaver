@@ -186,7 +186,18 @@ unsafe fn bastion_of(ssh: *const DbSshConfig) -> Result<Option<TunnelConfig>, St
         (Some(_), Some(_)) => {
             return Err("an SSH bastion takes a password or a key file, not both".into());
         }
-        (None, None) => return Err("an SSH bastion needs a password or a key file".into()),
+        // Neither is the agent, and not an error. It is the only remaining
+        // meaning: a password of "" is not a password anybody sets, and the
+        // front end sends both fields empty when they were left empty — so the
+        // alternative was refusing the one arrangement that needs no secret
+        // typed in at all, which is the arrangement most people behind a bastion
+        // already have.
+        //
+        // `None` for the socket, so `$SSH_AUTH_SOCK` decides. Which agent is a
+        // question the session this process was started in has already answered,
+        // and a path in the connection form would be one more thing to keep in
+        // step with it.
+        (None, None) => Credential::Agent { socket: None },
     };
     Ok(Some(TunnelConfig {
         host: host.to_owned(),
@@ -2402,12 +2413,57 @@ mod tests {
         unsafe { db_free(handle) };
     }
 
+    /// A bastion with neither a password nor a key file goes to the agent.
+    ///
+    /// This is the whole of the front end's answer for agent authentication:
+    /// there is no third field and no checkbox, because leaving both of the two
+    /// that exist empty already means the one remaining thing. So what a build
+    /// can get wrong here is refusing that arrangement rather than reading it,
+    /// and it would get it wrong for everybody whose key never leaves their
+    /// agent.
+    ///
+    /// `make test-tunnel` points `SSH_AUTH_SOCK` at the fixture's own agent.
+    /// Without that this would ask whichever agent the developer's shell is
+    /// using, which holds keys the fixture's server has never been told about —
+    /// and a refusal from one of those would look exactly like a build that
+    /// never asked an agent at all.
+    #[test]
+    #[ignore = "requires the SSH server, its agent and the benchmark database (make db-up-ssh db-up)"]
+    fn a_bastion_with_no_secret_at_all_asks_the_agent() {
+        let conn = CString::new("postgres://bench:bench@pg/bench").unwrap();
+        let host = CString::new("127.0.0.1").unwrap();
+        let user = CString::new("bench").unwrap();
+        let hosts = known_hosts();
+        let ssh = DbSshConfig {
+            host: host.as_ptr(),
+            port: 52222,
+            user: user.as_ptr(),
+            password: ptr::null(),
+            key_path: ptr::null(),
+            passphrase: ptr::null(),
+            known_hosts: hosts.as_ptr(),
+        };
+        let mut err: *mut c_char = ptr::null_mut();
+        let handle = unsafe { db_connect(conn.as_ptr(), &ssh, 30, &mut err) };
+        assert!(
+            !handle.is_null(),
+            "the agent's key did not open the connection: {}",
+            taken(&mut err)
+        );
+        unsafe { db_free(handle) };
+    }
+
     /// A bastion filled in wrong is refused before anything is dialled, and the
     /// message says which part.
     ///
     /// Not ignored, because none of these reaches a network: a struct that
     /// cannot be read is a fault this build answers on its own, and a check that
     /// needed a container to prove it is one nobody would run.
+    ///
+    /// Neither field filled in is not among them any more: that is the agent,
+    /// and `a_bastion_with_no_secret_at_all_asks_the_agent` is where it is
+    /// checked — against a server, because asking an agent is a thing that
+    /// reaches a network.
     #[test]
     fn a_bastion_filled_in_wrong_says_which_part() {
         let conn = CString::new("postgres://bench:bench@pg/bench").unwrap();
@@ -2444,11 +2500,6 @@ mod tests {
                 "a password and a key",
                 config(host.as_ptr(), 52222, password.as_ptr(), key.as_ptr()),
                 "not both",
-            ),
-            (
-                "neither",
-                config(host.as_ptr(), 52222, ptr::null(), ptr::null()),
-                "password or a key file",
             ),
         ];
 

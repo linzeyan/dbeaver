@@ -51,6 +51,20 @@ fn key(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The socket of one of the two ssh-agents `make db-up-ssh` runs, read from the
+/// environment for the same reason `known_hosts` is.
+///
+/// The fixture's own agents and not the developer's: these tests say which key
+/// opened the tunnel, and a real agent holds keys this fixture knows nothing
+/// about — one of those being accepted would look exactly like a pass.
+fn agent(variable: &str, file: &str) -> PathBuf {
+    std::env::var(variable)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/ssh")).join(file)
+        })
+}
+
 /// What the tunnel forwards to: the compose service name, which resolves inside
 /// the compose network and nowhere else.
 const TARGET: (&str, u16) = ("pg", 5432);
@@ -270,5 +284,88 @@ async fn a_refused_password_says_so() {
     assert!(
         matches!(error, TunnelError::Rejected(_)),
         "expected the refusal to name itself, got {error}"
+    );
+}
+
+/// The agent case, which is the one where this process never sees the key.
+///
+/// `make db-up-ssh` loads `dbclient_test` into an agent of the fixture's own —
+/// the same key `a_key_the_server_knows_opens_the_tunnel` reads off the disk. So
+/// the two differ in exactly one thing, which is who does the signing, and that
+/// is what this pins.
+#[tokio::test]
+#[ignore = "requires the SSH server and its agent (make db-up-ssh)"]
+async fn an_agent_holding_the_key_opens_the_tunnel() {
+    let tunnel = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Agent {
+                socket: Some(agent("SSH_AGENT_SOCK", "agent.sock")),
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    .expect("the agent's key was accepted");
+    assert_eq!(tunnel.local_addr().ip().to_string(), "127.0.0.1");
+}
+
+/// No agent at that address at all, which is the ordinary way this goes wrong:
+/// a login shell that never started one, or a `sudo` that dropped the variable.
+///
+/// Its own answer rather than a refusal, for the reason the locked-key case
+/// gives: reported as the server saying no, it would send somebody to the
+/// bastion to authorise a key that is already authorised there.
+#[tokio::test]
+#[ignore = "requires the SSH server (make db-up-ssh)"]
+async fn an_agent_that_is_not_there_says_so() {
+    let nowhere = agent("SSH_NO_SUCH_AGENT_SOCK", "no-such-agent.sock");
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Agent {
+                socket: Some(nowhere),
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    else {
+        panic!("a socket nothing is listening on must not open a tunnel")
+    };
+    assert!(
+        matches!(error, TunnelError::NoAgent { .. }),
+        "expected the no-agent answer rather than a refusal, got {error}"
+    );
+}
+
+/// An agent that is running and holding nothing, which is a `ssh-add` that was
+/// never run.
+///
+/// Separate from the case above because the two are fixed by different things,
+/// and separate from a refusal because nothing was offered to the server at all
+/// — there was nothing to offer.
+#[tokio::test]
+#[ignore = "requires the SSH server and its agent (make db-up-ssh)"]
+async fn an_agent_holding_nothing_says_that_rather_than_blaming_the_server() {
+    let Err(error) = Tunnel::open(
+        TunnelConfig {
+            credential: Credential::Agent {
+                socket: Some(agent("SSH_EMPTY_AGENT_SOCK", "agent-empty.sock")),
+            },
+            ..config()
+        },
+        TARGET.0,
+        TARGET.1,
+    )
+    .await
+    else {
+        panic!("an agent with no keys in it must not open a tunnel")
+    };
+    assert!(
+        matches!(error, TunnelError::EmptyAgent(_)),
+        "expected the empty-agent answer rather than a refusal, got {error}"
     );
 }

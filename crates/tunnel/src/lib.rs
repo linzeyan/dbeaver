@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh::client;
+use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -51,6 +52,10 @@ pub enum TunnelError {
     Rejected(String),
     #[error("the key in {file} could not be read: {why}")]
     Key { file: String, why: String },
+    #[error("no ssh-agent answered at {at}: {why}")]
+    NoAgent { at: String, why: String },
+    #[error("the ssh-agent at {0} is holding no keys")]
+    EmptyAgent(String),
     #[error("{0}")]
     Ssh(#[from] russh::Error),
     #[error("{0}")]
@@ -71,6 +76,22 @@ pub enum Credential {
     Key {
         path: PathBuf,
         passphrase: Option<String>,
+    },
+    /// Whatever a running ssh-agent is holding, tried in the order it lists.
+    ///
+    /// The private key never reaches this process: the agent signs, which is the
+    /// whole reason people keep one — and the reason this cannot be spelled as
+    /// `Key` with a clever path. It is also the only credential here that asks
+    /// the user for nothing, so it is the one that works with a key on a
+    /// hardware token or forwarded from another machine.
+    Agent {
+        /// The agent's socket, or `None` to read `SSH_AUTH_SOCK`.
+        ///
+        /// Passed in rather than always read from the environment for the reason
+        /// `known_hosts` is a field: a test needs to say which agent, and a
+        /// process-wide variable is not something a test can set without
+        /// changing what every other test running beside it sees.
+        socket: Option<PathBuf>,
     },
 }
 
@@ -195,6 +216,57 @@ impl Tunnel {
                     )
                     .await?
                     .success()
+            }
+            Credential::Agent { socket } => {
+                let at = socket
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|| "$SSH_AUTH_SOCK".to_string());
+                let mut agent = match &socket {
+                    Some(path) => AgentClient::connect_uds(path).await,
+                    None => AgentClient::connect_env().await,
+                }
+                .map_err(|why| TunnelError::NoAgent {
+                    at: at.clone(),
+                    why: why.to_string(),
+                })?;
+                let identities =
+                    agent
+                        .request_identities()
+                        .await
+                        .map_err(|why| TunnelError::NoAgent {
+                            at: at.clone(),
+                            why: why.to_string(),
+                        })?;
+                // Its own error rather than a refusal. An agent with nothing in
+                // it is a `ssh-add` that was never run, and reporting it as the
+                // server saying no would send somebody to the bastion to fix a
+                // problem on this side of it.
+                if identities.is_empty() {
+                    return Err(TunnelError::EmptyAgent(at));
+                }
+                let hash = session.best_supported_rsa_hash().await?.flatten();
+                // Every identity, not the first. An agent commonly holds several
+                // and the server accepts one of them; stopping at the first
+                // refusal would make the tunnel depend on the order `ssh-add`
+                // happened to run in.
+                let mut accepted = false;
+                for identity in identities {
+                    let public = identity.public_key().into_owned();
+                    if session
+                        .authenticate_publickey_with(&config.user, public, hash, &mut agent)
+                        .await
+                        .map_err(|why| TunnelError::NoAgent {
+                            at: at.clone(),
+                            why: why.to_string(),
+                        })?
+                        .success()
+                    {
+                        accepted = true;
+                        break;
+                    }
+                }
+                accepted
             }
         };
         if !accepted {

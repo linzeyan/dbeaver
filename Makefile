@@ -57,6 +57,15 @@ export SSH_KNOWN_HOSTS := $(CURDIR)/target/ssh/known_hosts
 # different keys to produce them: one the server knows, one behind a passphrase,
 # and one nobody has authorised.
 export SSH_KEY_DIR := $(CURDIR)/target/ssh
+# Two ssh-agents of the fixture's own, exported for the same reason again. Not
+# the developer's own agent: these tests assert which key opened the tunnel, and
+# a real agent holds keys this fixture has never heard of — against one of those
+# the check would pass without the fixture's key being involved at all. The
+# second one is deliberately left empty, because "your agent is holding nothing"
+# is its own answer and a build that reported it as the server saying no would
+# send somebody to the bastion to fix something on this side of it.
+export SSH_AGENT_SOCK := $(CURDIR)/target/ssh/agent.sock
+export SSH_EMPTY_AGENT_SOCK := $(CURDIR)/target/ssh/agent-empty.sock
 
 # How every target that launches the app reaches that database. The application
 # has no built-in connection: without --conn it opens the connection form and
@@ -448,7 +457,12 @@ test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
 # that is visible only from the entry point the application actually calls.
 test-tunnel: db-up-ssh db-up ## Run the SSH tunnel tests against that container
 	cargo test -p dbtunnel -- --include-ignored
-	cargo test -p dbffi --lib -- --include-ignored
+# `SSH_AUTH_SOCK` pointed at the fixture's agent, because the FFI reads it: the
+# connection form has no field for which agent, so `db_connect` asks the one
+# this process was started under. Left alone, that is the developer's own — and
+# their agent's keys are ones this fixture's server has never been told about,
+# so the check would fail on a machine where everything works.
+	SSH_AUTH_SOCK=$(SSH_AGENT_SOCK) cargo test -p dbffi --lib -- --include-ignored
 
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container
@@ -783,10 +797,26 @@ db-up-ssh: ## Start the SSH server the tunnel tests connect through
 # `Disconnected`, and reads as the tunnel being broken rather than as the server
 # refusing to talk to this machine. Measured: four refusals in a row, and a
 # connection with a key the server knows is closed on sight.
-	@docker exec $(SSH_CONTAINER) grep -q '^PerSourcePenalties no' /config/sshd/sshd_config \
+#
+# `MaxStartups` is the third, and it is there because this suite grew. The
+# default is `10:30:100`: past ten connections that have not yet authenticated,
+# sshd starts dropping new ones at random. `cargo test` runs the file's cases in
+# parallel and several of them are *supposed* to fail to authenticate, so the
+# suite reaches that threshold on its own — and what a drop arrives as is
+# `Ssh(Disconnect)` on whichever unrelated case was unlucky. Measured: with
+# eleven cases in flight it took a failing build to expose it, which is the
+# worst way for a limit like this to be found.
+#
+# Guarded on the last line written rather than the first, so that a container
+# corrected by an older version of this target is corrected again rather than
+# left as it was — and the two settings are deleted before being written, so
+# correcting one twice does not leave the file saying the same thing twice.
+	@docker exec $(SSH_CONTAINER) grep -q '^MaxStartups' /config/sshd/sshd_config \
 		|| { docker exec $(SSH_CONTAINER) sh -c \
-				"sed -i 's/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config \
-					&& echo 'PerSourcePenalties no' >>/config/sshd/sshd_config" \
+				"sed -i '/^PerSourcePenalties /d; /^MaxStartups /d; \
+					s/^AllowTcpForwarding no/AllowTcpForwarding yes/' /config/sshd/sshd_config \
+					&& echo 'PerSourcePenalties no' >>/config/sshd/sshd_config \
+					&& echo 'MaxStartups 100:30:200' >>/config/sshd/sshd_config" \
 			&& docker restart $(SSH_CONTAINER) >/dev/null; }
 # Waited for by reading the banner rather than with `nc -z`, which Docker's own
 # forwarder answers whether or not sshd is behind it yet: the port is open the
@@ -828,11 +858,33 @@ db-up-ssh: ## Start the SSH server the tunnel tests connect through
 	@ssh-keyscan -p $(SSH_PORT) -H 127.0.0.1 >$(SSH_KNOWN_HOSTS) 2>/dev/null
 	@test -s $(SSH_KNOWN_HOSTS) \
 		|| { echo "ssh-keyscan wrote nothing to $(SSH_KNOWN_HOSTS)"; exit 1; }
+# The agents. Started only when the socket does not already answer — `ssh-add
+# -l` exits 2 for "no agent there" and 1 for "an agent holding nothing", and
+# only the first of those calls for a new daemon. Restarting on the second
+# would leave one orphaned agent per run of this target, and orphan the empty
+# one every single time.
+	@SSH_AUTH_SOCK=$(SSH_AGENT_SOCK) ssh-add -l >/dev/null 2>&1; \
+		test $$? -ne 2 \
+			|| { rm -f $(SSH_AGENT_SOCK); ssh-agent -a $(SSH_AGENT_SOCK) >/dev/null; }
+	@SSH_AUTH_SOCK=$(SSH_EMPTY_AGENT_SOCK) ssh-add -l >/dev/null 2>&1; \
+		test $$? -ne 2 \
+			|| { rm -f $(SSH_EMPTY_AGENT_SOCK); \
+				ssh-agent -a $(SSH_EMPTY_AGENT_SOCK) >/dev/null; }
+# Added every time rather than only when the agent was just started: a key added
+# twice is a no-op, and a regenerated key otherwise sits in a directory the agent
+# is still holding the previous version of.
+	@SSH_AUTH_SOCK=$(SSH_AGENT_SOCK) ssh-add -q $(SSH_KEY_DIR)/dbclient_test
 	@$(MAKE) --no-print-directory db-check-ssh
 
 .PHONY: db-down-ssh
 db-down-ssh: ## Stop and remove the SSH test container
 	-docker rm -f $(SSH_CONTAINER)
+# The agents go with it. They are processes on this machine rather than
+# containers, so nothing else would ever stop them, and one left running holds a
+# key the server it was for no longer exists to accept.
+	-@pkill -f "ssh-agent -a $(SSH_AGENT_SOCK)" 2>/dev/null || true
+	-@pkill -f "ssh-agent -a $(SSH_EMPTY_AGENT_SOCK)" 2>/dev/null || true
+	-@rm -f $(SSH_AGENT_SOCK) $(SSH_EMPTY_AGENT_SOCK)
 
 # Both halves, as everywhere else here: the config check answers whether this
 # server will forward at all, and the banner read answers whether it can be
