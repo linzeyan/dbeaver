@@ -238,14 +238,20 @@ test-integration: db-check db-check-compatible db-check-mongo db-check-clickhous
 .PHONY: test-postgres
 test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests behind PostgreSQL and the servers read through its driver
 # The skips are not tidiness. `-p dbffi` sweeps every target in that package,
-# and two of its lib tests open a connection through an SSH bastion — they want
-# a server this target has no reason to start, and they belong to `test-tunnel`,
-# which does start one. Named one by one rather than matched on a substring, so
-# that what this target does not run is readable here rather than being whatever
-# a pattern happens to catch.
+# and three of its tests open a connection through an SSH server — one this
+# target has no reason to start, and one `test-tunnel` does start.
+#
+# Listed one by one, having been tried as `--skip bastion` in between. That
+# catches `without_a_bastion_the_string_is_dialled_as_written`, which is named
+# for the bastion it does *not* use and needs only PostgreSQL — so the pattern
+# quietly stopped running a test this target is exactly the right place for.
+# Of the two ways this can go wrong, the silent one is worse: a fourth SSH test
+# added here fails this job loudly and gets added to the list, and a test that
+# stops running says nothing at all.
 	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored \
 		--skip a_connection_opened_through_a_bastion_still_answers \
-		--skip a_driver_opens_on_a_host_only_the_bastion_can_reach
+		--skip a_driver_opens_on_a_host_only_the_bastion_can_reach \
+		--skip a_bastion_with_no_secret_at_all_asks_the_agent
 	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		postgres_satisfies_the_contract \
