@@ -381,6 +381,15 @@ enum AppMenu {
         refresh.keyEquivalentModifierMask = [.command, .shift]
         refresh.target = target
 
+        // ⌥⌘S, which is where the Finder puts the same command and which nothing
+        // in this window takes — no modified S is bound here at all. Titled for
+        // what pressing it does; `validateMenuItem` rewrites it.
+        let sidebar = menu.addItem(
+            withTitle: "Collapse Sidebar",
+            action: #selector(NavigatorCommand.toggleSidebar(_:)), keyEquivalent: "s")
+        sidebar.keyEquivalentModifierMask = [.command, .option]
+        sidebar.target = navigator
+
         let filter = menu.addItem(
             withTitle: "Filter Objects",
             action: #selector(NavigatorCommand.focusFilter(_:)), keyEquivalent: "f")
@@ -723,9 +732,27 @@ final class NavigatorCommand: NSObject, NSMenuItemValidation {
     /// Escape is right there for starting over.
     @objc func focusFilter(_ sender: Any?) { model.focusNavigatorFilter() }
 
-    /// Greyed out until the tree has something in it. Focusing a field that can
-    /// only ever filter nothing is a command that does nothing.
-    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canFilterObjects }
+    /// Swaps the tree for the 44pt rail, and back.
+    @objc func toggleSidebar(_ sender: Any?) { model.toggleSidebar() }
+
+    /// Two items, available in different states.
+    ///
+    /// Filter Objects is greyed out until the tree has something in it: focusing
+    /// a field that can only ever filter nothing is a command that does nothing.
+    ///
+    /// The sidebar item survives an empty tree — collapsing a column is worth
+    /// doing whatever is in it — but not the connection form, where the left
+    /// column holds the saved connections and there is no tree to collapse.
+    /// Titled for what pressing it does rather than for the state the window is
+    /// in, which is what the two items further down this menu do with the same
+    /// problem.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(toggleSidebar(_:)) {
+            item.title = model.isSidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"
+            return model.canToggleSidebar
+        }
+        return model.canFilterObjects
+    }
 }
 
 /// The session tab bar's menu items, as something a menu can send to.

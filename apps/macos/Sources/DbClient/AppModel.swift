@@ -2090,7 +2090,41 @@ final class AppModel {
     /// connection has read a tree to narrow.
     var canFilterObjects: Bool { !schemas.isEmpty }
 
-    func focusNavigatorFilter() { filterFocusRequests += 1 }
+    /// Puts the tree back before asking for the caret, because the field the
+    /// caret is being asked for is *in* the tree: ⌥⌘F against a rail would
+    /// otherwise be a command that focuses a control which is not on screen.
+    /// Unconditional rather than guarded on the rail being up — wanting to
+    /// filter the objects is wanting to see them.
+    func focusNavigatorFilter() {
+        wantsSidebarRail = false
+        filterFocusRequests += 1
+    }
+
+    // MARK: - The sidebar's width
+
+    /// Whether the objects are showing as a rail rather than as a tree.
+    ///
+    /// Not kept in `Preferences`, which is where the plan for this put it, and
+    /// the reason is the one `NavigatorView.isDatabaseExpanded` gives about the
+    /// database row: a collapsed sidebar is a state to be able to reach, not a
+    /// state to come back to. Remembered across launches it would open the
+    /// window on a rail — the tree is how anything in here gets selected, and a
+    /// window that starts unable to navigate reads as one that failed to load
+    /// its objects. It costs somebody on a narrow screen one ⌥⌘S per launch.
+    var wantsSidebarRail = false
+
+    /// The rail is a way of showing the object tree, and the form has no object
+    /// tree: what the left column holds over a form is the saved connections,
+    /// which are the whole of how that tab gets used. So the state is kept and
+    /// simply does not apply until there is a tree again.
+    var isSidebarCollapsed: Bool { wantsSidebarRail && !isShowingConnectionForm }
+
+    var canToggleSidebar: Bool { !isShowingConnectionForm }
+
+    func toggleSidebar() {
+        guard canToggleSidebar else { return }
+        wantsSidebarRail.toggle()
+    }
 
     // MARK: - Back and forward
 

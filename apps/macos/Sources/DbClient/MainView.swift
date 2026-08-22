@@ -71,14 +71,7 @@ struct MainView: View {
             // which is what stops the window relaying out the moment a database
             // answers.
             NavigationSplitView {
-                Group {
-                    if model.isShowingConnectionForm {
-                        ConnectionListPane(model: model, focus: $focus)
-                    } else {
-                        NavigatorView(model: model, focus: $focus)
-                    }
-                }
-                .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
+                sidebar
             } detail: {
                 if model.isShowingConnectionForm {
                     ConnectionFormPane(model: model, focus: $focus)
@@ -109,6 +102,42 @@ struct MainView: View {
         .navigationSubtitle(model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? "")
     }
 
+    /// The left column: the tree, the rail it collapses to, or — on a tab with
+    /// nothing open on it — the saved connections.
+    ///
+    /// The width modifier is written twice rather than once on a `Group` around
+    /// all three, because the rail's is a single number and the other two share
+    /// a range. One expression covering both would have to be a range whose ends
+    /// are equal, which is a way of writing 44 that reads as a mistake.
+    ///
+    /// The system's own sidebar button is taken away here, and it has to be
+    /// exactly here. This window has two answers to the same question and only
+    /// one of them can be in the toolbar: the system's hides the column
+    /// outright, ours narrows it to the rail. Written on the split view instead,
+    /// it silently does nothing — the item is contributed by the sidebar's
+    /// content, so the content is the only place it can be removed from. And
+    /// written *outside* the width modifier rather than inside it, the width
+    /// stops arriving: the rail came back 150pt wide, which is the sidebar's
+    /// system minimum and what a column with no width of its own falls to.
+    /// Both of those were captures, in that order.
+    @ViewBuilder private var sidebar: some View {
+        if model.isSidebarCollapsed {
+            SidebarRail(model: model)
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(SidebarRail.width)
+        } else {
+            Group {
+                if model.isShowingConnectionForm {
+                    ConnectionListPane(model: model, focus: $focus)
+                } else {
+                    NavigatorView(model: model, focus: $focus)
+                }
+            }
+            .toolbar(removing: .sidebarToggle)
+            .navigationSplitViewColumnWidth(min: 200, ideal: 250, max: 420)
+        }
+    }
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         // The chip that named the connection is gone, and so is the menu that
@@ -130,6 +159,23 @@ struct MainView: View {
 
     @ToolbarContentBuilder
     private var paneCommands: some ToolbarContent {
+        // In the slot the system's sidebar button was taken out of, because it
+        // is the same command as far as anybody reaching for it is concerned:
+        // the leading end of the toolbar, directly above the column it acts on.
+        ToolbarItem(placement: .navigation) {
+            Button {
+                model.toggleSidebar()
+            } label: {
+                Label(
+                    model.isSidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar",
+                    systemImage: "sidebar.leading")
+            }
+            .help(
+                model.isSidebarCollapsed
+                    ? "Show the object tree (⌥⌘S)"
+                    : "Narrow the object tree to a rail (⌥⌘S)")
+        }
+
         // Back and Forward at the navigation end, where every window that has
         // them puts them. Always present rather than appearing with the first
         // visit: a control that materialises under the pointer is worse than one

@@ -344,6 +344,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-query-history
 	./$(APP_BIN) --verify-query-buffers
 	./$(APP_BIN) --verify-driver-badge
+	./$(APP_BIN) --verify-sidebar
 
 # The settings checked against a live window rather than as rules on their own.
 # Separate from `test-swift`, which is the set of checks that need no server:

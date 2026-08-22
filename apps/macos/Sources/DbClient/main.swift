@@ -130,6 +130,9 @@ if CommandLine.arguments.contains("--verify-query-buffers") {
 if CommandLine.arguments.contains("--verify-driver-badge") {
     exit(DriverBadgeChecks.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-sidebar") {
+    exit(SidebarChecks.run() ? 0 : 1)
+}
 
 // The three that have to state their isolation. `Preferences`, the grid's
 // accessibility tree and the sentences put to somebody quitting are main-actor
@@ -669,6 +672,23 @@ let historyAll = CommandLine.arguments.contains("--history-all")
 /// width that shoves its neighbours along — and all of it is visible only in a
 /// picture. Best with `--tab query`, which is the pane the strip is in.
 let renameBuffer = CommandLine.arguments.contains("--rename-buffer")
+
+/// `--collapse-sidebar` opens the window with the objects as a rail.
+///
+/// Exists for the reason `--rename-buffer` does: the rail is reached through a
+/// menu item and a capture cannot open a menu. It is also the only way to see
+/// what the column actually does at 44pt — whether the count fits, whether the
+/// two glyphs land where the field and the footer button they stand for were.
+let collapseSidebar = CommandLine.arguments.contains("--collapse-sidebar")
+
+/// `--filter-objects` runs the View menu's Filter Objects a beat after launch.
+///
+/// Its own flag rather than part of the one above because the pair is the check:
+/// with both, the picture shows whether asking for the filter while the rail is
+/// up actually brings the tree back *and* lands the caret in the field. That is
+/// two state changes in one turn of the run loop, which is the shape of thing
+/// that works in the model and fails on screen.
+let filterObjects = CommandLine.arguments.contains("--filter-objects")
 
 /// `--history-pick 2` recalls the nth-newest statement into the editor.
 ///
@@ -1873,6 +1893,23 @@ func runScriptWhenReady(model: AppModel) {
     poll()
 }
 
+/// Drives `--filter-objects`: the View menu's item, sent once the tree is there
+/// to be filtered.
+///
+/// Deferred rather than sent at launch for the reason `--rename-buffer` records
+/// — a field cannot take focus before the pane holding it is laid out — and
+/// here also because the connection is still opening: the command is greyed out
+/// until a schema has arrived, and this is the state a person would use it in.
+@MainActor
+func filterObjectsWhenReady(model: AppModel) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+        MainActor.assumeIsolated {
+            model.focusNavigatorFilter()
+            fputs("filter objects  rail: \(model.isSidebarCollapsed)\n", stderr)
+        }
+    }
+}
+
 /// Drives `--rename-buffer`: puts the Query pane up and opens the name field on
 /// the buffer the editor is in.
 ///
@@ -2393,6 +2430,8 @@ if benchMode {
                 model: model, open: showHistory, all: historyAll, pick: historyPick)
         }
         if renameBuffer { openBufferNameField(model: model) }
+        if collapseSidebar { model.wantsSidebarRail = true }
+        if filterObjects { filterObjectsWhenReady(model: model) }
         if preferencesProbe { probePreferences(model: model) }
         if historyProbe { probeHistory(model: model) }
         if sessionsProbe { probeSessions(model: model) }
