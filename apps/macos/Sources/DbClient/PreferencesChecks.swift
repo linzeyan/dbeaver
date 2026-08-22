@@ -101,6 +101,8 @@ enum PreferencesChecks {
             fresh.passwordStorage, .never, "no password is kept until somebody asks for it")
         expect(
             fresh.connectionStorage, .thisMac, "the remembered connection does not leave the Mac")
+        expect(
+            fresh.shutConnectionFolders, [], "every connection folder starts open")
     }
 
     /// A setting has to outlive the window, or the Settings window is a switch
@@ -115,6 +117,7 @@ enum PreferencesChecks {
         first.usesTranslucentSidebar = true
         first.passwordStorage = .thisMac
         first.connectionStorage = .iCloud
+        first.shutConnectionFolders = ["clients/acme"]
 
         // A second reader over the same store, which is what the next launch is.
         let second = Preferences(store: store)
@@ -124,6 +127,9 @@ enum PreferencesChecks {
         expect(second.usesTranslucentSidebar, true, "the translucent sidebar was kept")
         expect(second.passwordStorage, .thisMac, "where passwords are kept was kept")
         expect(second.connectionStorage, .iCloud, "keeping connections in iCloud was kept")
+        expect(
+            second.shutConnectionFolders, ["clients/acme"],
+            "a folder somebody shut is still shut on the next launch")
     }
 
     // MARK: - Where the connection is kept

@@ -100,6 +100,24 @@ final class Preferences {
         didSet { store.set(passwordStorage.rawValue, forKey: Key.passwordStorage) }
     }
 
+    /// Which connection folders the sidebar draws shut.
+    ///
+    /// Not a setting — no row in the Settings window sets it, a folder's own
+    /// disclosure does — but it belongs beside them for the two reasons they are
+    /// here: it is this Mac's, and it has to outlive the window. Not in
+    /// `connections.json`, because a file carried to another machine would carry
+    /// one person's idea of which folders are interesting with it; not `@State`
+    /// on the list, because the list is drawn once per tab and two tabs would
+    /// then disagree about which folders are shut.
+    ///
+    /// Sorted on the way out so that the file a person may read holds a folder
+    /// list rather than whichever order the set happened to hash into.
+    var shutConnectionFolders: Set<String> {
+        didSet {
+            store.set(shutConnectionFolders.sorted(), forKey: Key.shutConnectionFolders)
+        }
+    }
+
     /// What a fresh installation does. The only statement of these values.
     private static let registered: [String: Any] = [
         Key.hidesEmptyColumns: false,
@@ -107,7 +125,8 @@ final class Preferences {
         Key.insertsRowOfDefaults: false,
         Key.passwordStorage: PasswordStorage.never.rawValue,
         Key.usesTranslucentSidebar: false,
-        Key.connectionStorage: ConnectionStorage.thisMac.rawValue
+        Key.connectionStorage: ConnectionStorage.thisMac.rawValue,
+        Key.shutConnectionFolders: [String]()
     ]
 
     private enum Key {
@@ -117,6 +136,7 @@ final class Preferences {
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
         static let connectionStorage = "dev.dbclient.connectionStorage"
         static let passwordStorage = "dev.dbclient.passwordStorage"
+        static let shutConnectionFolders = "dev.dbclient.shutConnectionFolders"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -153,5 +173,6 @@ final class Preferences {
         passwordStorage =
             PasswordStorage(rawValue: store.string(forKey: Key.passwordStorage) ?? "") ?? .never
         connectionStorage = Self.connectionStorage(in: store)
+        shutConnectionFolders = Set(store.stringArray(forKey: Key.shutConnectionFolders) ?? [])
     }
 }

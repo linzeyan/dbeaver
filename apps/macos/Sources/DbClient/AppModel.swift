@@ -1387,6 +1387,24 @@ final class AppModel {
         ConnectionStore.save(connections.connections, to: preferences.connectionStorage)
     }
 
+    /// Shuts a folder in the connection sidebar, or opens it again.
+    ///
+    /// The folders that still exist are kept and the rest dropped, on every
+    /// press. A folder exists because something is in it — see
+    /// `ConnectionList.folders` — so renaming one, or emptying it by moving its
+    /// last connection out, leaves a path behind that nothing can ever open
+    /// again. Left alone the remembered set would only grow, and a folder made
+    /// with an old name months later would come back shut for no visible reason.
+    func toggleConnectionFolder(_ path: String) {
+        var shut = preferences.shutConnectionFolders.intersection(connections.folders)
+        if shut.contains(path) {
+            shut.remove(path)
+        } else {
+            shut.insert(path)
+        }
+        preferences.shutConnectionFolders = shut
+    }
+
     /// Forgets the connection the form is showing, once its owner says so.
     ///
     /// The password goes with it. One left behind belongs to an entry nothing will

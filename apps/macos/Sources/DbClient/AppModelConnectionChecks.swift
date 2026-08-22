@@ -41,6 +41,7 @@ enum AppModelConnectionChecks {
         checkSettleUnsavedConnectionEditsHonoursAnswers()
         checkFilterNarrowsByTitleAndAddress()
         checkTheSidebarSeesTheFolders()
+        checkAShutFolderOutlivesTheTabAndAVanishedOneIsForgotten()
         checkSelectingARowDoesNotReadThePassword()
         checkSavingDoesNotWipeAnUnreadPassword()
         checkATypedPasswordIsNotOverwritten()
@@ -240,6 +241,51 @@ enum AppModelConnectionChecks {
             expect(
                 model.visibleConnectionGroups.first?.connections.map(\.name), ["Acme prod"],
                 "and only what it matched inside them")
+        }
+    }
+
+    /// A folder somebody shut stays shut, and one that no longer exists is
+    /// dropped rather than remembered forever.
+    ///
+    /// The shut set is the one piece of sidebar state kept outside the view, so
+    /// what is pinned here is both halves of that decision: it is written where
+    /// the next launch reads it, and it holds folder paths rather than every
+    /// path this Mac has ever had a folder at.
+    private static func checkAShutFolderOutlivesTheTabAndAVanishedOneIsForgotten() {
+        MainActor.assumeIsolated {
+            func made(_ name: String, folder: String) -> SavedConnection {
+                SavedConnection(
+                    name: name, folder: folder,
+                    settings: ConnectionSettings(
+                        scheme: "postgres", host: "db.example", port: "5432", database: "sales",
+                        user: "ana"))
+            }
+            let model = makeModel(with: [
+                made("Acme prod", folder: "clients/acme"),
+                made("Bink prod", folder: "clients/bink")
+            ])
+            // The suite is shared with the checks around this one, which is the
+            // launch this check is describing: whatever it holds now is what a
+            // window would open on.
+            model.preferences.shutConnectionFolders = []
+
+            model.toggleConnectionFolder("clients/acme")
+            expect(
+                model.preferences.shutConnectionFolders, ["clients/acme"],
+                "shutting a folder is remembered somewhere the tab does not own")
+            model.toggleConnectionFolder("clients/acme")
+            expect(
+                model.preferences.shutConnectionFolders, [],
+                "and opening it again takes it back out")
+
+            // A folder is its connections, so moving the last one out of it is how
+            // a folder stops existing. Nothing else can remove the path.
+            model.toggleConnectionFolder("clients/bink")
+            model.connections = ConnectionList([made("Acme prod", folder: "clients/acme")])
+            model.toggleConnectionFolder("clients/acme")
+            expect(
+                model.preferences.shutConnectionFolders, ["clients/acme"],
+                "a folder nothing is in any more is forgotten rather than kept shut")
         }
     }
 

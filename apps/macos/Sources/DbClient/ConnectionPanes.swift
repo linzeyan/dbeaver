@@ -18,13 +18,12 @@ struct ConnectionListPane: View {
 
     /// Which folders are shut.
     ///
-    /// `@State` and nothing else, which is the whole of "local, not synced": it
-    /// is not in `connections.json`, so a file carried to another machine does
-    /// not carry one person's idea of which folders are interesting. The cost is
-    /// that it resets when the tab holding it closes — opening one is a
-    /// deliberate act and every folder open is the right thing to see on the way
-    /// in.
-    @State private var shutFolders: Set<String> = []
+    /// In `Preferences`, which is the whole of "local, not synced": on this Mac
+    /// and not in `connections.json`, so a file carried to another machine does
+    /// not carry one person's idea of which folders are interesting. Not held
+    /// here, because this view is drawn once per tab and a fact about the
+    /// sidebar cannot be two different facts in two tabs of the same window.
+    private var shutFolders: Set<String> { model.preferences.shutConnectionFolders }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,13 +86,7 @@ struct ConnectionListPane: View {
                                 name: group.name,
                                 count: group.connections.count,
                                 isShut: shutFolders.contains(group.path),
-                                toggle: {
-                                    if shutFolders.contains(group.path) {
-                                        shutFolders.remove(group.path)
-                                    } else {
-                                        shutFolders.insert(group.path)
-                                    }
-                                }
+                                toggle: { model.toggleConnectionFolder(group.path) }
                             )
                         }
                         if group.path.isEmpty || !shutFolders.contains(group.path) {
