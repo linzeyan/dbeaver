@@ -933,8 +933,8 @@ private struct ConnectionRow: View {
         if connection.color != .none { parts.append(connection.color.label) }
         // Before the open dot and the pencil, because these two are the reason
         // somebody would stop at this row rather than a detail about its state.
-        if connection.isReadOnly { parts.append("Read-only") }
-        if connection.isProduction { parts.append("Production") }
+        // The same words the tab says, from the same list.
+        parts.append(contentsOf: ConnectionSafety(of: connection).labels)
         if hasUnsavedEdits { parts.append("Unsaved changes") }
         if isOpen { parts.append("Open") }
         return parts.joined(separator: ", ")

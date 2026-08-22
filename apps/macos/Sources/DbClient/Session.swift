@@ -104,7 +104,12 @@ final class Session: Identifiable {
         // with: `ConnectionSettings.address` drops the password, which a tooltip
         // built out of `connString` would print.
         let address = ConnectionSettings(connectionString: connString).address
-        return server.isEmpty ? address : "\(server) · \(address)"
+        var parts = server.isEmpty ? [address] : ["\(server) · \(address)"]
+        // Last, and spelled out. The two glyphs beside the name are the mark; a
+        // glyph is a reminder for somebody who already knows what it means, and
+        // the tooltip is where the person who does not finds out.
+        parts.append(contentsOf: safety.labels)
+        return parts.joined(separator: " · ")
     }
 
     /// What this connection's tab is called out loud.
@@ -123,9 +128,14 @@ final class Session: Identifiable {
         // `hasBeenAsked` gives about the dot: naming one of the three would be
         // saying out loud the thing the dot is not drawing.
         guard hasBeenAsked else { return connectionLabel }
-        let named = "Connection \(connectionLabel), \(connectionState.label)"
-        guard isTreeStale else { return named }
-        return named + ", showing the objects from the last time it was open"
+        var parts = ["Connection \(connectionLabel)", connectionState.label]
+        // Before the stale note, for the reason the saved row puts them before
+        // its own two marks: these are why somebody stops at this tab, and the
+        // rest is a detail about its state. Said out loud because the glyphs
+        // carrying them on screen are the half a screen reader cannot report.
+        parts.append(contentsOf: safety.labels)
+        if isTreeStale { parts.append("showing the objects from the last time it was open") }
+        return parts.joined(separator: ", ")
     }
 
     /// What the open connection can do, read once when it is adopted.

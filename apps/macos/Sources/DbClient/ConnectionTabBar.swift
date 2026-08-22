@@ -94,6 +94,24 @@ private struct ConnectionTabItem: View {
                 .font(Theme.Typography.caption)
                 .foregroundStyle(isActive ? Theme.text.color : Theme.textSecondary.color)
                 .lineLimit(1)
+            // After the name rather than before it, and in the saved row's two
+            // glyphs rather than marks of their own: the same fact about the same
+            // connection, drawn the same way in the list it was chosen from and
+            // in the tab it ended up in. Read-only first, because it is the one
+            // that changes what the controls do; production second, because it is
+            // the one somebody looks up to check.
+            if session.safety.isReadOnly {
+                Image(systemName: "lock")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .accessibilityHidden(true)
+            }
+            if session.safety.isProduction {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Theme.danger.color)
+                    .accessibilityHidden(true)
+            }
             if isHovering && canClose {
                 Button(action: close) {
                     Image(systemName: "xmark")
@@ -115,6 +133,16 @@ private struct ConnectionTabItem: View {
         .overlay(alignment: .top) {
             if isActive {
                 Rectangle().fill(Theme.accent.color).frame(height: 2)
+            }
+        }
+        // A production tab is outlined as well as marked, because the glyph is
+        // 9pt and this is the one fact somebody needs to register without having
+        // looked. Along the bottom, where the strip's own separator runs, so it
+        // does not compete with the accent line that says which tab is in front —
+        // a tab can be both, and the two claims must not be the same edge.
+        .overlay(alignment: .bottom) {
+            if session.safety.isProduction {
+                Rectangle().fill(Theme.danger.color).frame(height: 2)
             }
         }
         .contentShape(Rectangle())

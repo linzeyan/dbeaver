@@ -34,6 +34,21 @@ func argument(_ flag: String) -> String? {
 /// a capture run must not change which database the next launch opens.
 let connArgument = argument("--conn")
 
+/// `--safety production,read-only` opens `--conn` with the marks a saved
+/// connection would have carried.
+///
+/// The marks live in `connections.json` and `--conn` is a string with no entry
+/// behind it, so this path is otherwise always unmarked — which means the tab's
+/// two glyphs, the danger line under a production tab and the read-only
+/// refusal in the editing row cannot be photographed at all. Both words, either
+/// order, comma-separated; anything else is ignored rather than refused, because
+/// a capture switch that exits over a typo is a capture nobody gets.
+let safetyMarks: ConnectionSafety = {
+    let asked = Set((argument("--safety") ?? "").split(separator: ",").map(String.init))
+    return ConnectionSafety(
+        isReadOnly: asked.contains("read-only"), isProduction: asked.contains("production"))
+}()
+
 /// `--reconnect "postgres://…/other"` opens a second database once the first
 /// connection has landed, through the File menu's own Connect… item, printing
 /// what the window holds before and after.
@@ -2494,7 +2509,7 @@ if benchMode {
         // Nothing here opens the form: it is what the window shows until a
         // connection replaces it, so the last branch is simply not connecting.
         if let connArgument {
-            model.connect(using: connArgument)
+            model.connect(using: connArgument, marking: safetyMarks)
         }
 
         if let initialCell { openValueViewer(model: model, on: initialCell) }

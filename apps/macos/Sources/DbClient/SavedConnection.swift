@@ -25,6 +25,20 @@ struct ConnectionSafety {
         self.init(isReadOnly: connection.isReadOnly, isProduction: connection.isProduction)
     }
 
+    /// The marks in words, in the order a reader meets them: what changes the
+    /// controls first, what to be careful of second. Empty for a connection
+    /// carrying neither, so a caller can append it and get nothing.
+    ///
+    /// One list, read by the saved row's spoken label and by the tab's — the two
+    /// places the same two glyphs are drawn. Two copies of these words would be
+    /// two places to fix when one of the marks is renamed.
+    var labels: [String] {
+        var marks: [String] = []
+        if isReadOnly { marks.append("Read-only") }
+        if isProduction { marks.append("Production") }
+        return marks
+    }
+
     /// Why a write this application controls is refused, or nil where it is not.
     ///
     /// One sentence for all of them — grid edits, generated DDL, being an import

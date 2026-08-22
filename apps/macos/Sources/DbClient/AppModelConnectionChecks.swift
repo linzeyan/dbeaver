@@ -782,6 +782,18 @@ enum AppModelConnectionChecks {
             expect(
                 session.tabDescription, "PostgreSQL 17.0 · bench@db.example:5432/bench",
                 "with what answered in front, once something has")
+
+            // The marks in words, in both of the places a glyph cannot reach:
+            // the tooltip, for somebody who does not know what a small triangle
+            // means, and the spoken label, for somebody who cannot see it.
+            session.safety = ConnectionSafety(isReadOnly: true, isProduction: true)
+            expect(
+                session.tabDescription,
+                "PostgreSQL 17.0 · bench@db.example:5432/bench · Read-only · Production",
+                "and the marks spelled out after it")
+            expect(
+                session.accessibleDescription.contains("Read-only, Production"), true,
+                "which is also what the tab says out loud, in the same order")
         }
     }
 

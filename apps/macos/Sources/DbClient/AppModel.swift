@@ -1466,8 +1466,13 @@ final class AppModel {
     /// rather than over a saved connection for the same reason, and the form is
     /// seeded from it so that a string which does not connect can be corrected
     /// rather than retyped.
-    func connect(using connString: String) {
+    /// `marking` is what the form's two checkboxes would have said. A string
+    /// carries no marks — they are the file's, and this path has no entry in the
+    /// file — so the only way to photograph a tab that is on production is to be
+    /// told, which is what `--safety` is for.
+    func connect(using connString: String, marking safety: ConnectionSafety = ConnectionSafety()) {
         connectionDraft = SavedConnection(
+            isReadOnly: safety.isReadOnly, isProduction: safety.isProduction,
             settings: ConnectionSettings(connectionString: connString))
         connectionPassword = ConnectionURL.password(in: connString) ?? ""
         savedConnectionPassword = ""
