@@ -425,13 +425,14 @@ struct NavigatorView: View {
                                     .contentShape(Rectangle())
                                     // Double-click moves this tab, which is
                                     // what picking a database in a sidebar
-                                    // means everywhere else. It costs a
-                                    // reconnect — a database is a separate
-                                    // connection on both engines that report a
-                                    // level of them — so it stays a deliberate
-                                    // gesture rather than following the
-                                    // selection, and the tab it moves is the
-                                    // one whose tree is being read.
+                                    // means everywhere else. What it costs
+                                    // depends on the connection — a `USE` where
+                                    // the databases are containers on it, a
+                                    // reconnect where a database *is* a
+                                    // connection — and the expensive case is
+                                    // why it stays a deliberate gesture rather
+                                    // than following the selection. The tab it
+                                    // moves is the one whose tree is being read.
                                     .onTapGesture(count: 2) {
                                         model.switchDatabase(to: database.name)
                                     }
