@@ -291,6 +291,12 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         /// what it means now, which is the ten seconds this application has
         /// always dialled with.
         var timeoutSeconds: Int
+        /// Seconds between idle pings, `0` for never — or absent, which means
+        /// whatever the Settings window's default says. Optional unlike the
+        /// key above it, because absent is an answer of its own here rather
+        /// than a number to fill in: an entry that never named an interval
+        /// follows the default, including when the default changes.
+        var keepAliveSeconds: Int?
         var user: String
 
         init(
@@ -299,7 +305,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             production: Bool = false, readOnly: Bool = false, scheme: String, server: String = "",
             sslMode: String = "prefer", sslRootCert: String = "", sshHost: String = "",
             sshPort: String = "", sshUser: String = "", sshKeyPath: String = "",
-            timeoutSeconds: Int = 10, user: String
+            timeoutSeconds: Int = 10, keepAliveSeconds: Int? = nil, user: String
         ) {
             self.color = color
             self.database = database
@@ -321,6 +327,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.sshUser = sshUser
             self.sshKeyPath = sshKeyPath
             self.timeoutSeconds = timeoutSeconds
+            self.keepAliveSeconds = keepAliveSeconds
             self.user = user
         }
 
@@ -348,6 +355,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.sshUser = connection.settings.sshUser
             self.sshKeyPath = connection.settings.sshKeyPath
             self.timeoutSeconds = connection.settings.timeoutSeconds
+            self.keepAliveSeconds = connection.settings.keepAliveSeconds
             self.user = connection.settings.user
         }
 
@@ -420,6 +428,13 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             let patience = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? 10
             self.timeoutSeconds = patience < 0 ? 10 : patience
 
+            // Absent means the Settings default, which is what an entry written
+            // before this key existed should do. A negative number in a
+            // hand-edited file is read the same way rather than as "ping
+            // backwards in time".
+            let pinging = try container.decodeIfPresent(Int.self, forKey: .keepAliveSeconds)
+            self.keepAliveSeconds = (pinging ?? -1) < 0 ? nil : pinging
+
             // An entry somebody typed has no id, and one is minted here rather than
             // at the call site: an entry that arrived without an identity still has
             // to have one before anything can keep its password.
@@ -430,7 +445,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         private enum CodingKeys: String, CodingKey {
             case color, database, folder, savesPassword, host, id, name, path, port, production,
                 readOnly, scheme, server, sslMode, sslRootCert, sshHost, sshPort, sshUser,
-                sshKeyPath, timeoutSeconds, user
+                sshKeyPath, timeoutSeconds, keepAliveSeconds, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -453,7 +468,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
                 sshPort: self.sshPort,
                 sshUser: self.sshUser,
                 sshKeyPath: self.sshKeyPath,
-                timeoutSeconds: self.timeoutSeconds
+                timeoutSeconds: self.timeoutSeconds,
+                keepAliveSeconds: self.keepAliveSeconds
             )
             return SavedConnection(
                 id: id, name: self.name, color: color, folder: self.folder,
@@ -632,6 +648,10 @@ extension SavedConnection {
 
         if self.settings.timeoutSeconds != draft.settings.timeoutSeconds {
             changedFields.append("Timeout")
+        }
+
+        if self.settings.keepAliveSeconds != draft.settings.keepAliveSeconds {
+            changedFields.append("Keep-alive")
         }
 
         if passwordChanged {

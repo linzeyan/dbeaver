@@ -104,6 +104,14 @@ final class Session: Identifiable {
     /// own patience; see `ConnectionSettings.timeoutSeconds`.
     var timeoutSeconds = 10
 
+    /// How often this connection is pinged while idle, in seconds, and zero for
+    /// never. Carried on the session for the reason `timeoutSeconds` is —
+    /// another database opened from this tab dials the same server and should
+    /// be kept alive at the same rate — and already resolved: the form's "use
+    /// the Settings default" answer was turned into a number when the
+    /// connection opened, so the timer never has to ask two places.
+    var keepAliveSeconds = 0
+
     /// The whole of what this tab is, for the tooltip over a 100pt name.
     ///
     /// A tab has room for one of the three things somebody needs to tell two of

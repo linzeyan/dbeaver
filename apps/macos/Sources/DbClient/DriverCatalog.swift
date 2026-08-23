@@ -25,6 +25,28 @@ struct DriverInfo: Decodable, Identifiable, Hashable {
 
     var id: String { scheme }
 
+    /// Whether the connection form offers a keep-alive interval for this
+    /// database.
+    ///
+    /// A wire-protocol connection is a socket that a server timeout, a NAT
+    /// table or a sleeping laptop will quietly drop for being idle, and a ping
+    /// down it costs one empty round trip on a connection already paid for.
+    /// The REST families have neither half of that: there is no idle socket to
+    /// lose, and every request is billed like any other — a keep-alive there
+    /// would spend API money keeping nothing alive.
+    ///
+    /// Decided here rather than asked of the core, against the rule the fields
+    /// above follow, because M-KA is a Swift-only change. Spelled as the list
+    /// of wire schemes — `docs/drivers.md`'s Tier 1 table — rather than as the
+    /// REST exclusions, so that a scheme this list has not heard of gets no
+    /// keep-alive: the stale-list failure that never costs anybody money.
+    var supportsKeepAlive: Bool { Self.wireSchemes.contains(scheme) }
+
+    private static let wireSchemes: Set<String> = [
+        "postgres", "mysql", "sqlserver", "sqlite", "clickhouse", "duckdb", "mongodb",
+        "cassandra", "redis"
+    ]
+
     /// What a connection to this kind of database is made of.
     ///
     /// The form asks for different things depending on this, which is how it

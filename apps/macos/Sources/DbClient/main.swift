@@ -76,6 +76,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-filter-rows`,
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
+// `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
 // verdict. None needs a window or a database, so they run before either exists.
@@ -153,6 +154,9 @@ if CommandLine.arguments.contains("--verify-editor-typing") {
 }
 if CommandLine.arguments.contains("--verify-find-bar") {
     exit(MainActor.assumeIsolated { FindBarChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-keep-alive") {
+    exit(MainActor.assumeIsolated { KeepAliveChecks.run() } ? 0 : 1)
 }
 
 // The three that have to state their isolation. `Preferences`, the grid's

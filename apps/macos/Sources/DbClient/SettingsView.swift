@@ -114,6 +114,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: Theme.Space.lg) {
                 switch pane {
                 case .general: general
+                case .connections: connections
                 case .grid: grid
                 case .editor: editor
                 case .sidebar: sidebar
@@ -188,6 +189,20 @@ struct SettingsView: View {
                 + "pick, saving a connection clears the other one.",
             caveat: nil,
             selection: $preferences.passwordStorage)
+    }
+
+    /// What happens to a connection while nobody is using it.
+    @ViewBuilder private var connections: some View {
+        SettingsNumber(
+            title: "Keep connections alive",
+            explanation:
+                "An idle connection is pinged this often so that a server timeout or a "
+                + "NAT table does not quietly drop it. The number here is the default; "
+                + "each connection's form can name its own, and 0 in either place turns "
+                + "the pinging off. Only wire-protocol databases are pinged — on the "
+                + "cloud warehouses a ping is a billed API call keeping nothing alive.",
+            unit: "seconds",
+            value: $preferences.keepAliveSeconds)
     }
 
     /// The data surface: what it leaves out, and what it asks before sending.
@@ -297,6 +312,7 @@ struct SettingsView: View {
 /// checkboxes is read by nobody who came looking for one of them.
 enum SettingsPane: String, CaseIterable, Identifiable {
     case general = "General"
+    case connections = "Connections"
     case grid = "Grid"
     case editor = "Editor"
     case sidebar = "Sidebar"
@@ -306,6 +322,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general: return "gearshape"
+        case .connections: return "network"
         case .grid: return "tablecells"
         case .editor: return "text.cursor"
         case .sidebar: return "sidebar.left"
@@ -424,6 +441,59 @@ private struct SettingsStepper: View {
                     .accessibilityHidden(true)
             }
         }
+    }
+}
+
+/// One setting that is a number without a short range: its name, what the
+/// number does, and a field the width of one. Where the range is a handful of
+/// integers, `SettingsStepper` is the control; this one is for values worth
+/// typing.
+///
+/// Shaped like `SettingsToggle` so the panes read as one column, with the
+/// control on its own line under the explanation — a checkbox reads at any
+/// width, but a text field pushed to the right edge of a paragraph looks like
+/// a typo.
+private struct SettingsNumber: View {
+    let title: String
+    let explanation: String
+    /// Said beside the field rather than folded into the title, so the number
+    /// somebody types has its meaning at the point they type it.
+    let unit: String
+    @Binding var value: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text(title)
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(Theme.text.color)
+            Text(explanation)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Theme.Space.sm) {
+                TextField("", text: digits)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 56)
+                    .accessibilityLabel(title)
+                    .accessibilityHint(explanation)
+                Text(unit)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textTertiary.color)
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+
+    /// The number as the field holds it: digits only, and an emptied box is
+    /// zero — for this control that is "off", which is the only thing an empty
+    /// default could honestly mean.
+    private var digits: Binding<String> {
+        Binding(
+            get: { String(value) },
+            set: { typed in
+                let digits = typed.filter(\.isNumber)
+                value = digits.isEmpty ? 0 : (Int(digits) ?? 0)
+            })
     }
 }
 

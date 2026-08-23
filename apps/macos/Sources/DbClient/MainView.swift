@@ -47,6 +47,9 @@ enum FocusArea: Hashable {
     /// have one: the ring is drawn from the area, and a shared case rings two
     /// fields.
     case connectTimeout
+    /// How often to ping the idle connection. Its own case for the same reason,
+    /// and it sits directly under Timeout, where a shared case would ring both.
+    case connectKeepAlive
     /// The chooser's own filter field. Separate from `navigatorFilter` because the
     /// two are never on screen together and each draws its own ring.
     case connectionFilter

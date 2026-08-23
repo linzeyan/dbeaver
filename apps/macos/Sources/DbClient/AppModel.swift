@@ -1511,6 +1511,10 @@ final class AppModel {
                 for: connectionDraft.settings,
                 secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? ""),
             waiting: connectionDraft.settings.timeoutSeconds,
+            // Resolved here, at the moment of dialling, which is the one place
+            // the two answers meet: a field somebody typed wins, and an empty
+            // one means whatever the Settings window says right now.
+            pinging: connectionDraft.settings.keepAliveSeconds ?? preferences.keepAliveSeconds,
             named: connectionDraft.name.isEmpty ? nil : connectionDraft.name)
     }
 
@@ -1542,7 +1546,12 @@ final class AppModel {
         // be this application deciding on its own to use a credential it was
         // never handed.
         // A raw URL has no entry and so no name; the tab is called by address.
-        open(connString, through: nil, waiting: connectionDraft.settings.timeoutSeconds, named: nil)
+        // A URL has nowhere to name a keep-alive either, so the draft's nil
+        // resolves to the Settings default, same as an empty form field.
+        open(
+            connString, through: nil, waiting: connectionDraft.settings.timeoutSeconds,
+            pinging: connectionDraft.settings.keepAliveSeconds ?? preferences.keepAliveSeconds,
+            named: nil)
     }
 
     /// Opens another database on this server, in a tab of its own.
@@ -1556,7 +1565,7 @@ final class AppModel {
         // moved to a row with a different bastion or none at all.
         open(
             rewritten, through: session.bastion, waiting: session.timeoutSeconds,
-            named: session.savedName)
+            pinging: session.keepAliveSeconds, named: session.savedName)
     }
 
     /// Moves this tab onto another database.
@@ -1625,7 +1634,7 @@ final class AppModel {
         // rather than the server, like everything else carried over above.
         open(
             rewritten, through: arriving.bastion, waiting: leaving.timeoutSeconds,
-            named: leaving.savedName)
+            pinging: leaving.keepAliveSeconds, named: leaving.savedName)
     }
 
     /// Moves the session itself, for a connection whose databases are containers
@@ -1819,12 +1828,19 @@ final class AppModel {
     /// the same reason the bastion is: on the paths that dial a server again —
     /// another database, a switch — the chooser may since have moved to a
     /// different row, and the name must be the one this tab was opened under.
+    ///
+    /// `pinging` is carried for the reason `waiting` is, and arrives already
+    /// resolved to a number of seconds — the callers that read a form settled
+    /// its "use the Settings default" answer before dialling, and the ones
+    /// that dial a server again hand on the number their session carries.
     private func open(
-        _ connString: String, through bastion: SshConfig?, waiting: Int, named savedName: String?
+        _ connString: String, through bastion: SshConfig?, waiting: Int, pinging keepAlive: Int,
+        named savedName: String?
     ) {
         let filling = sessionToFill()
         sessionBeingOpened = filling
         filling.timeoutSeconds = waiting
+        filling.keepAliveSeconds = max(0, keepAlive)
         filling.savedName = savedName
         // Onto that session directly rather than through the forwarding
         // properties, which reach the tab in front — and the tab in front is the

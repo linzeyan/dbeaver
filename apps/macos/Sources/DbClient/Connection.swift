@@ -126,11 +126,26 @@ struct ConnectionSettings: Equatable, Codable {
     /// this is the number the message names when it runs out.
     var timeoutSeconds: Int
 
+    /// How often to ping this connection while it sits idle, in seconds — `0`
+    /// for never, and nil for whatever the Settings window says.
+    ///
+    /// Nil is a different answer from a number, which is why this is the one
+    /// optional among the fields: almost nobody types one, and the people who
+    /// do not should get the default they can see in Settings — including when
+    /// that default changes later. A form that copied the default into every
+    /// entry at save time would freeze it there, and the Settings row would
+    /// quietly stop meaning what it says.
+    ///
+    /// Offered only for the wire-protocol families; see
+    /// `DriverInfo.supportsKeepAlive` for why the REST families are not asked.
+    var keepAliveSeconds: Int?
+
     init(
         scheme: String, host: String = "", port: String = "", database: String = "",
         user: String = "", path: String = "", sslMode: SslMode = .prefer,
         sslRootCert: String = "", sshHost: String = "", sshPort: String = "",
-        sshUser: String = "", sshKeyPath: String = "", timeoutSeconds: Int = 10
+        sshUser: String = "", sshKeyPath: String = "", timeoutSeconds: Int = 10,
+        keepAliveSeconds: Int? = nil
     ) {
         self.scheme = scheme
         self.host = host
@@ -145,6 +160,7 @@ struct ConnectionSettings: Equatable, Codable {
         self.sshUser = sshUser
         self.sshKeyPath = sshKeyPath
         self.timeoutSeconds = timeoutSeconds
+        self.keepAliveSeconds = keepAliveSeconds
     }
 
     var driver: DriverInfo? { DriverCatalog.named(scheme) }
@@ -363,6 +379,10 @@ struct ConnectionSettings: Equatable, Codable {
         // The default, for the same reason: a URL has nowhere to say how long to
         // wait for it, and this path is the one `--conn` takes.
         timeoutSeconds = 10
+        // Nil rather than a number, and for the reason the field is optional at
+        // all: a URL says nothing about pinging, and nothing means the Settings
+        // default.
+        keepAliveSeconds = nil
 
         if shape == .file {
             // A relative path parses as the authority, so it has to be put back

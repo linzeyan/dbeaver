@@ -104,6 +104,9 @@ enum PreferencesChecks {
         expect(
             fresh.connectionStorage, .thisMac, "the remembered connection does not leave the Mac")
         expect(
+            fresh.keepAliveSeconds, 60,
+            "an idle connection is pinged once a minute unless its entry says otherwise")
+        expect(
             fresh.shutConnectionFolders, [], "every connection folder starts open")
         expect(fresh.editorFontSize, 13, "the editor draws at the size it always has")
         expect(fresh.editorTabWidth, .four, "a tab is worth four columns, as Sequel Ace ships")
@@ -127,6 +130,7 @@ enum PreferencesChecks {
         first.usesTranslucentSidebar = true
         first.passwordStorage = .thisMac
         first.connectionStorage = .iCloud
+        first.keepAliveSeconds = 0
         first.shutConnectionFolders = ["clients/acme"]
         first.editorFontSize = 16
         first.editorTabWidth = .eight
@@ -143,6 +147,10 @@ enum PreferencesChecks {
         expect(second.usesTranslucentSidebar, true, "the translucent sidebar was kept")
         expect(second.passwordStorage, .thisMac, "where passwords are kept was kept")
         expect(second.connectionStorage, .iCloud, "keeping connections in iCloud was kept")
+        // Zero specifically, because it is the value a registered default of 60
+        // could shadow: a store that dropped the write would read back as the
+        // default, and "off" is the answer that must survive.
+        expect(second.keepAliveSeconds, 0, "keep-alive switched off was kept")
         expect(
             second.shutConnectionFolders, ["clients/acme"],
             "a folder somebody shut is still shut on the next launch")

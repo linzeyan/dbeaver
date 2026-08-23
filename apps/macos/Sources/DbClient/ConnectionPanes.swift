@@ -305,6 +305,14 @@ struct ConnectionFormPane: View {
                     sshRows
                 }
                 timeoutRow
+                // Under Timeout, because it is the same kind of answer — how
+                // this connection behaves over time, not where it is. Only for
+                // the wire families: on the REST ones a ping is a billed API
+                // call keeping no socket alive, so the field would be an offer
+                // to spend money on nothing — see `DriverInfo.supportsKeepAlive`.
+                if model.connectionDraft.settings.driver?.supportsKeepAlive == true {
+                    keepAliveRow
+                }
                 // Outside the branch above, because both answers to it can be
                 // marked: a SQLite file somebody is not to write to is as real a
                 // thing as a production server.
@@ -735,6 +743,43 @@ struct ConnectionFormPane: View {
                 let digits = typed.filter(\.isNumber)
                 model.connectionDraft.settings.timeoutSeconds =
                     digits.isEmpty ? 10 : (Int(digits) ?? 10)
+            })
+    }
+
+    /// How often to ping the connection while it is idle.
+    ///
+    /// Shaped like Timeout above it, with one difference in what the empty box
+    /// means: Timeout falls back to a constant, and this falls back to the
+    /// Settings window — which is why the placeholder is read from there rather
+    /// than written here. Zero is a value, not an absence: it is how one
+    /// connection opts out of a default that is on.
+    private var keepAliveRow: some View {
+        HStack(spacing: Theme.Space.sm) {
+            label("Keep-alive")
+            field(
+                keepAliveText, .connectKeepAlive, String(model.preferences.keepAliveSeconds),
+                named: "Keep-alive"
+            )
+            .frame(width: 56)
+            Text("seconds between pings while idle · 0 = off")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textTertiary.color)
+                .lineLimit(1)
+                .accessibilityHidden(true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// The number as the field holds it. Unlike `timeoutText`, an emptied box
+    /// stays empty — it puts the entry back on the Settings default, and
+    /// snapping a number into it would take that answer away.
+    private var keepAliveText: Binding<String> {
+        Binding(
+            get: { model.connectionDraft.settings.keepAliveSeconds.map(String.init) ?? "" },
+            set: { typed in
+                let digits = typed.filter(\.isNumber)
+                model.connectionDraft.settings.keepAliveSeconds =
+                    digits.isEmpty ? nil : Int(digits)
             })
     }
 

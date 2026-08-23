@@ -173,6 +173,20 @@ final class Preferences {
         didSet { store.set(editorUppercasesKeywords, forKey: Key.editorUppercasesKeywords) }
     }
 
+    /// How often an idle connection is pinged when its own entry does not say,
+    /// in seconds. Zero turns the default off.
+    ///
+    /// Sixty, which is under every idle timeout worth worrying about — cloud
+    /// load balancers start dropping quiet connections at around four minutes,
+    /// and the common on-premise middleboxes later than that — while costing
+    /// one empty round trip a minute on connections that are open anyway. Per
+    /// connection on the form, with this as the answer for the entries where
+    /// nobody typed one; see `ConnectionSettings.keepAliveSeconds` for how nil
+    /// defers here.
+    var keepAliveSeconds: Int {
+        didSet { store.set(keepAliveSeconds, forKey: Key.keepAliveSeconds) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -205,7 +219,8 @@ final class Preferences {
         Key.editorSoftTabs: false,
         Key.editorAutoIndent: true,
         Key.editorAutoPairs: true,
-        Key.editorUppercasesKeywords: false
+        Key.editorUppercasesKeywords: false,
+        Key.keepAliveSeconds: 60
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -221,6 +236,7 @@ final class Preferences {
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
         static let connectionStorage = "dev.dbclient.connectionStorage"
         static let passwordStorage = "dev.dbclient.passwordStorage"
+        static let keepAliveSeconds = "dev.dbclient.keepAliveSeconds"
         static let shutConnectionFolders = "dev.dbclient.shutConnectionFolders"
         static let editorFontSize = "dev.dbclient.editorFontSize"
         static let editorTabWidth = "dev.dbclient.editorTabWidth"
@@ -276,6 +292,10 @@ final class Preferences {
         passwordStorage =
             PasswordStorage(rawValue: store.string(forKey: Key.passwordStorage) ?? "") ?? .never
         connectionStorage = Self.connectionStorage(in: store)
+        // A negative number in a hand-edited plist is read as the default
+        // rather than as an interval: there is no pinging backwards in time.
+        let pinging = store.integer(forKey: Key.keepAliveSeconds)
+        keepAliveSeconds = pinging < 0 ? 60 : pinging
         shutConnectionFolders = Set(store.stringArray(forKey: Key.shutConnectionFolders) ?? [])
         editorFontSize = min(
             max(store.integer(forKey: Key.editorFontSize), Self.editorFontSizes.lowerBound),
