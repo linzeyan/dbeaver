@@ -28,6 +28,8 @@ enum KeepAliveChecks {
         checkATypedIntervalOutranksTheSettingsDefault()
         checkAnotherDatabaseOpenedFromATabKeepsItsRate()
         checkTheDraftNamesKeepAliveAmongUnsavedEdits()
+        checkOnlyOptedInIdleSessionsComeDue()
+        checkASentPingMovesTheClockWhetherOrNotItAnswers()
         if failures == 0 {
             fputs("keep-alive: all checks passed\n", stderr)
         } else {
@@ -172,6 +174,96 @@ enum KeepAliveChecks {
         expect(opened.keepAliveSeconds, 45, "the new database is pinged at this tab's rate")
         expect(opened.timeoutSeconds, 42, "with the same patience")
         expect(opened.savedName, "staging", "under the same saved name")
+    }
+
+    // MARK: - Who gets pinged, and when
+
+    /// The scheduling rule, edge by edge: off means never, an interval means
+    /// idle seconds, busy means skipped, and nothing open means nothing asked.
+    ///
+    /// Each edge fails as an invisible wrong rather than a crash — a ping down
+    /// a busy session's serial queue answers about a moment that has passed,
+    /// and a session pinged with the interval off is traffic nobody asked
+    /// for — which is why the rule takes `now` as a parameter: it lets this
+    /// check stand at any point on the clock and read the list.
+    private static func checkOnlyOptedInIdleSessionsComeDue() {
+        let model = makeModel()
+        let now = Date()
+        let session = model.sessions[0]
+
+        // Opted in, overdue, and with nothing open: never due. The timer must
+        // not be the thing that discovers a tab holding only the form.
+        session.keepAliveSeconds = 30
+        expect(
+            model.connectionsDueForKeepAlive(at: now).isEmpty, true,
+            "a session with nothing open is never due, however old its stamp")
+
+        // A real connection, for the same reason the probe's checks open one:
+        // the exclusions above say nothing on a session with nothing to ping.
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-keepalive-\(UUID().uuidString).db")
+        defer { try? FileManager.default.removeItem(at: file) }
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        guard let db = try? Database(connString: "sqlite://\(file.path)") else {
+            failures += 1
+            fputs("keep-alive FAIL: a SQLite file would not open\n", stderr)
+            return
+        }
+        session.db = db
+
+        session.keepAliveSeconds = 0
+        expect(
+            model.connectionsDueForKeepAlive(at: now).isEmpty, true,
+            "zero means never, even on a connection that has sat idle forever")
+
+        session.keepAliveSeconds = 30
+        session.lastKeptAlive = now.addingTimeInterval(-29)
+        expect(
+            model.connectionsDueForKeepAlive(at: now).isEmpty, true,
+            "a session inside its interval is left alone")
+
+        session.lastKeptAlive = now.addingTimeInterval(-30)
+        expect(
+            model.connectionsDueForKeepAlive(at: now).count, 1,
+            "and comes due the second the interval has passed")
+
+        session.isBusy = true
+        expect(
+            model.connectionsDueForKeepAlive(at: now).isEmpty, true,
+            "a busy session is skipped — the statement it is running is its own ping")
+        session.isBusy = false
+    }
+
+    /// Sending a ping is what moves the clock, so a slow answer cannot cause a
+    /// faster question — and three slept-through intervals owe one ping.
+    private static func checkASentPingMovesTheClockWhetherOrNotItAnswers() {
+        let model = makeModel()
+        let now = Date()
+        let session = model.sessions[0]
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-keepalive-\(UUID().uuidString).db")
+        defer { try? FileManager.default.removeItem(at: file) }
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        guard let db = try? Database(connString: "sqlite://\(file.path)") else {
+            failures += 1
+            fputs("keep-alive FAIL: a SQLite file would not open\n", stderr)
+            return
+        }
+        session.db = db
+        session.keepAliveSeconds = 30
+
+        // Overdue three times: the tick that catches up sends one ping, and
+        // the stamp lands on the tick's own clock, not on any of the moments
+        // that were missed.
+        session.lastKeptAlive = now.addingTimeInterval(-95)
+        model.keepAliveTick(at: now)
+        expect(session.lastKeptAlive, now, "the stamp is the moment the ping was sent")
+        expect(
+            model.connectionsDueForKeepAlive(at: now.addingTimeInterval(1)).isEmpty, true,
+            "so the next tick has nothing to send — missed intervals are not made up")
+        expect(
+            model.connectionsDueForKeepAlive(at: now.addingTimeInterval(30)).count, 1,
+            "and the session is due again one whole interval later")
     }
 
     // MARK: - The unsaved-edits sentence

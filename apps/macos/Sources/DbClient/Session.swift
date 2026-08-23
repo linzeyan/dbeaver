@@ -112,6 +112,16 @@ final class Session: Identifiable {
     /// connection opened, so the timer never has to ask two places.
     var keepAliveSeconds = 0
 
+    /// When this connection was dialled or last deliberately pinged, which is
+    /// what the keep-alive clock measures from.
+    ///
+    /// Stamped when a ping is *sent* rather than when it answers — see
+    /// `AppModel.keepAliveTick` for why that direction matters. The distant
+    /// past rather than now for a session nobody has dialled, so a connection
+    /// handed to a session by other means is simply due at once instead of
+    /// carrying a stamp about a dial that never happened.
+    var lastKeptAlive = Date.distantPast
+
     /// The whole of what this tab is, for the tooltip over a 100pt name.
     ///
     /// A tab has room for one of the three things somebody needs to tell two of

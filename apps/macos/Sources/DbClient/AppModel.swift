@@ -1841,6 +1841,11 @@ final class AppModel {
         sessionBeingOpened = filling
         filling.timeoutSeconds = waiting
         filling.keepAliveSeconds = max(0, keepAlive)
+        // The dial is itself a round trip, so the keep-alive clock starts here
+        // rather than at the distant past the session was built with — without
+        // this the first tick after connecting would ping a connection that
+        // just proved itself.
+        filling.lastKeptAlive = Date()
         filling.savedName = savedName
         // Onto that session directly rather than through the forwarding
         // properties, which reach the tab in front — and the tab in front is the
@@ -5109,6 +5114,82 @@ final class AppModel {
                 then: { [weak self] alive in self?.recordHealth(alive, of: session) })
         }
     }
+
+    // MARK: - Keep-alive
+
+    /// The sessions whose keep-alive interval has run out, as of `now`.
+    ///
+    /// Built on `connectionsWorthProbing`, which contributes its two
+    /// exclusions unchanged — and the busy one earns its keep twice here: a
+    /// long statement is already keeping the connection warm, so a session
+    /// mid-query needs no ping and is simply picked up by a later tick once
+    /// its interval has passed in idleness. What this adds is the opt-in and
+    /// the clock. Zero is off — the probe on returning to the front still
+    /// covers those sessions — and a positive interval makes a session due
+    /// once that many seconds have passed since it was dialled or last pinged.
+    ///
+    /// `now` is a parameter rather than read here so the rule can be asked
+    /// about any moment: the checks are the only caller that passes one.
+    func connectionsDueForKeepAlive(at now: Date) -> [Session] {
+        connectionsWorthProbing.filter { session in
+            session.keepAliveSeconds > 0
+                && now.timeIntervalSince(session.lastKeptAlive)
+                    >= Double(session.keepAliveSeconds)
+        }
+    }
+
+    /// One tick of the keep-alive clock: pings whatever has come due, through
+    /// the same path every other health question takes, so the answer moves
+    /// the dot exactly as a probe's answer would.
+    ///
+    /// The stamp moves when the ping is *sent*, not when it answers, and that
+    /// direction is the rule that keeps a struggling server from being pinged
+    /// harder: a ping that hangs would otherwise leave the stamp old, and
+    /// every following tick would queue another ping behind it on the one
+    /// serial queue the session has. It is also why missed ticks are not made
+    /// up — a laptop that slept through three intervals owes the server one
+    /// ping on waking, not three.
+    func keepAliveTick(at now: Date = Date()) {
+        for session in connectionsDueForKeepAlive(at: now) {
+            guard let db = session.db else { continue }
+            session.lastKeptAlive = now
+            dispatch(
+                on: session.queue, applyingInto: session, { db.ping() },
+                then: { [weak self] alive in self?.recordHealth(alive, of: session) })
+        }
+    }
+
+    /// The one repeating timer behind keep-alive, started when the application
+    /// has a window to keep alive for.
+    ///
+    /// One timer for the window rather than one per session, because the
+    /// per-session part — whose interval it is, and whether it has run out —
+    /// is `connectionsDueForKeepAlive`'s, and a timer per session would be
+    /// that rule stated a second time in scheduling. A one-second beat with a
+    /// generous tolerance costs a filter over a handful of sessions; what it
+    /// buys is that any interval somebody types is honoured to the second
+    /// instead of rounded to whichever coarser beat was chosen here.
+    ///
+    /// This is the timer `probeOpenConnections`' comment decided against, and
+    /// both decisions stand: that probe asks every open connection, unasked,
+    /// which is only worth a round trip at the moment somebody comes back.
+    /// This one pings only the sessions whose form or Settings opted in, at
+    /// the rate they named — the asking is the point.
+    func startKeepAliveTimer() {
+        guard keepAliveTimer == nil else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            // The timer fires on the main run loop; say so rather than hop.
+            MainActor.assumeIsolated { self?.keepAliveTick() }
+        }
+        timer.tolerance = 0.5
+        // `.common` rather than the default mode, so the clock keeps beating
+        // while a menu is open or a slider is mid-drag — exactly the sort of
+        // pause a default-mode timer sits out.
+        RunLoop.main.add(timer, forMode: .common)
+        keepAliveTimer = timer
+    }
+
+    @ObservationIgnored private var keepAliveTimer: Timer?
 
     // MARK: - Transactions
 

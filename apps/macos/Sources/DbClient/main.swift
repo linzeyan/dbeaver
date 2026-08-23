@@ -2875,6 +2875,10 @@ if benchMode {
         // question about nothing.
         lifecycle.model = model
         window.delegate = lifecycle
+        // Here rather than in the model's own init, because only a window that
+        // is about to run a run loop has any business owning a repeating
+        // timer: the `--verify-*` suites build models by the dozen and exit.
+        model.startKeepAliveTimer()
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)
