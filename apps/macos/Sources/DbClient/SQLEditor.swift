@@ -27,6 +27,13 @@ struct SQLEditor: NSViewRepresentable {
     /// not a fact about a text view.
     let scheme: String
 
+    /// The point size the editor draws at. A number rather than the
+    /// `Preferences` object it lives in, for the reason `scheme` is a string:
+    /// the view is handed what it needs and nothing else, and reading the
+    /// preference here would also hide from SwiftUI which property the pane
+    /// depends on.
+    let fontSize: Int
+
     /// Asks the core what could be typed at `caret`, and calls back on the main
     /// actor when the answer arrives.
     ///
@@ -81,9 +88,7 @@ struct SQLEditor: NSViewRepresentable {
         textView.selectedTextAttributes = [
             .backgroundColor: Theme.Editor.selection.nsColor
         ]
-        textView.font = Theme.Typography.editorFont
         textView.textColor = Theme.Editor.text.nsColor
-        textView.typingAttributes = Coordinator.baseAttributes
 
         // Every one of these is on by default in an `NSTextView`, and every one
         // of them corrupts SQL. Smart quotes are the dangerous one: it replaces
@@ -117,6 +122,9 @@ struct SQLEditor: NSViewRepresentable {
         scrollView.borderType = .noBorder
 
         coordinator.attach(textView)
+        // Before the first `syncText`: the buffer is attributed with
+        // `baseAttributes`, which do not exist until a size has been applied.
+        coordinator.applyStyle()
         coordinator.syncText(text)
         coordinator.applySelection(selection, in: text)
         return scrollView
@@ -130,6 +138,7 @@ struct SQLEditor: NSViewRepresentable {
         coordinator.parent = self
         guard let textView = coordinator.textView else { return }
 
+        coordinator.applyStyle()
         coordinator.syncText(text)
         coordinator.applySelection(selection, in: text)
 
@@ -205,13 +214,42 @@ struct SQLEditor: NSViewRepresentable {
         /// not read as the user typing something new to complete.
         private var accepting = false
 
-        static let baseAttributes: [NSAttributedString.Key: Any] = [
-            .font: Theme.Typography.editorFont,
-            .foregroundColor: Theme.Editor.text.nsColor
-        ]
+        /// The attributes every character starts from. Instance state rebuilt
+        /// by `applyStyle` rather than the constant it used to be, because the
+        /// font in them is now sized by a preference.
+        private(set) var baseAttributes: [NSAttributedString.Key: Any] = [:]
+
+        /// The point size last applied, so the SwiftUI updates that have
+        /// nothing to do with type — which is most of them — cost a comparison
+        /// rather than a re-attribution of the whole buffer.
+        private var appliedFontSize = 0
 
         init(_ parent: SQLEditor) {
             self.parent = parent
+        }
+
+        /// Puts the preferred type size onto the view, the typing attributes
+        /// and every character already in the buffer.
+        ///
+        /// The buffer is restyled through the storage rather than by `setText`,
+        /// which would also reset the selection and the undo stack — a size
+        /// change is a change to how the text looks, not to what it says.
+        func applyStyle() {
+            guard let textView, appliedFontSize != parent.fontSize else { return }
+            appliedFontSize = parent.fontSize
+            let font = NSFont.monospacedSystemFont(
+                ofSize: CGFloat(parent.fontSize), weight: .regular)
+            baseAttributes = [
+                .font: font,
+                .foregroundColor: Theme.Editor.text.nsColor
+            ]
+            textView.font = font
+            textView.typingAttributes = baseAttributes
+            popup.fontSize = CGFloat(parent.fontSize)
+            if let storage = textView.textStorage, storage.length > 0 {
+                storage.addAttributes(
+                    baseAttributes, range: NSRange(location: 0, length: storage.length))
+            }
         }
 
         func attach(_ textView: NSTextView) {
@@ -280,7 +318,7 @@ struct SQLEditor: NSViewRepresentable {
             guard let textView, let storage = textView.textStorage else { return }
             applyingBinding = true
             storage.setAttributedString(
-                NSAttributedString(string: text, attributes: Self.baseAttributes))
+                NSAttributedString(string: text, attributes: baseAttributes))
             applyingBinding = false
             cachedString = text
             relex(text)

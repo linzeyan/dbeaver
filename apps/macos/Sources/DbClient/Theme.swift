@@ -260,14 +260,10 @@ enum Theme {
         static let title = Font.system(size: 13, weight: .semibold)
         static let mono = Font.system(size: 12, design: .monospaced)
         static let monoSmall = Font.system(size: 11, design: .monospaced)
-        static let editor = Font.system(size: editorSize, design: .monospaced)
-        /// The same face as `editor`, for the `NSTextView` the SQL editor is
-        /// built on. A SwiftUI `Font` cannot be handed to AppKit, so the size is
-        /// named once above rather than written twice and left to drift.
-        static let editorFont = NSFont.monospacedSystemFont(ofSize: editorSize, weight: .regular)
+        // The editor's font is not here: its size became a preference, so the
+        // one statement of it lives in `Preferences.registered` and the editor
+        // builds the font from what the preference says.
         static let digits = Font.system(size: 11).monospacedDigit()
-
-        private static let editorSize: CGFloat = 13
     }
 
     // MARK: - Motion

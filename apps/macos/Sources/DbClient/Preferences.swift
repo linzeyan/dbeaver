@@ -100,6 +100,19 @@ final class Preferences {
         didSet { store.set(passwordStorage.rawValue, forKey: Key.passwordStorage) }
     }
 
+    /// The SQL editor's type size, in points.
+    ///
+    /// 13, which is the size the editor has always drawn at. The editor is the
+    /// one surface somebody reads for hours at a stretch, which is what earns
+    /// it a size setting; the grid is deliberately not covered, because its
+    /// metrics are measured into the glyph atlas and resizing it is its own
+    /// piece of work. The completion popup follows along a point behind, so
+    /// the list under the caret keeps its relation to the text it completes.
+    /// The cost is lines: bigger type means fewer of them in the same pane.
+    var editorFontSize: Int {
+        didSet { store.set(editorFontSize, forKey: Key.editorFontSize) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -126,8 +139,15 @@ final class Preferences {
         Key.passwordStorage: PasswordStorage.never.rawValue,
         Key.usesTranslucentSidebar: false,
         Key.connectionStorage: ConnectionStorage.thisMac.rawValue,
-        Key.shutConnectionFolders: [String]()
+        Key.shutConnectionFolders: [String](),
+        Key.editorFontSize: 13
     ]
+
+    /// The sizes the Settings window offers, and therefore the sizes the value
+    /// on disk is folded back into. The plist is a file somebody can edit, and
+    /// a 0 read literally draws no text at all while a 96 leaves three lines on
+    /// screen — both states the window that wrote the value could never reach.
+    static let editorFontSizes = 10...18
 
     private enum Key {
         static let hidesEmptyColumns = "dev.dbclient.hidesEmptyColumns"
@@ -137,6 +157,7 @@ final class Preferences {
         static let connectionStorage = "dev.dbclient.connectionStorage"
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let shutConnectionFolders = "dev.dbclient.shutConnectionFolders"
+        static let editorFontSize = "dev.dbclient.editorFontSize"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -174,5 +195,8 @@ final class Preferences {
             PasswordStorage(rawValue: store.string(forKey: Key.passwordStorage) ?? "") ?? .never
         connectionStorage = Self.connectionStorage(in: store)
         shutConnectionFolders = Set(store.stringArray(forKey: Key.shutConnectionFolders) ?? [])
+        editorFontSize = min(
+            max(store.integer(forKey: Key.editorFontSize), Self.editorFontSizes.lowerBound),
+            Self.editorFontSizes.upperBound)
     }
 }

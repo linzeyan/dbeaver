@@ -34,6 +34,13 @@ final class CompletionPopup: NSObject {
     /// the keyboard is a list that ignores half the ways people use a mouse.
     var onAccept: (() -> Void)?
 
+    /// The editor's point size, which the editor keeps current. The list rides
+    /// a point behind the text it completes and the detail a point behind that
+    /// — the same steps the fixed 12 and 11 used to encode against a 13pt
+    /// editor — so resizing the editor keeps the popup in proportion rather
+    /// than leaving it at yesterday's size.
+    var fontSize: CGFloat = 13
+
     private let panel: NSPanel
     private let table = NSTableView()
     private let scroll = NSScrollView()
@@ -45,7 +52,15 @@ final class CompletionPopup: NSObject {
     /// editor's height at the default window size — enough to choose from, and
     /// short enough that it does not become the thing on screen.
     private static let visibleRows = 10
-    private static let rowHeight: CGFloat = 22
+
+    private var labelFont: NSFont {
+        .monospacedSystemFont(ofSize: fontSize - 1, weight: .regular)
+    }
+    private var detailFont: NSFont { .systemFont(ofSize: fontSize - 2) }
+
+    /// The label's size plus the ten points of breathing room the fixed 22
+    /// gave a 12pt label, so a resized list keeps its density.
+    private var rowHeight: CGFloat { fontSize + 9 }
 
     override init() {
         panel = NSPanel(
@@ -81,7 +96,7 @@ final class CompletionPopup: NSObject {
         column.resizingMask = .autoresizingMask
         table.addTableColumn(column)
         table.headerView = nil
-        table.rowHeight = Self.rowHeight
+        table.rowHeight = rowHeight
         table.intercellSpacing = NSSize(width: 0, height: 0)
         table.backgroundColor = .clear
         table.selectionHighlightStyle = .regular
@@ -129,6 +144,9 @@ final class CompletionPopup: NSObject {
         }
         self.offers = offers
         self.replacing = replacing
+        // Re-taken on every show rather than only in `init`, because the
+        // editor may have been resized since the last list went up.
+        table.rowHeight = rowHeight
         table.reloadData()
         table.selectRowIndexes([0], byExtendingSelection: false)
         table.scrollRowToVisible(0)
@@ -188,20 +206,18 @@ final class CompletionPopup: NSObject {
     /// a list of qualified relation names is not, and a fixed width either
     /// truncates the second or wastes half the screen on the first.
     private func fittingSize(for offers: [SQLCompletion.Offer]) -> NSSize {
-        let label = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-        let detail = NSFont.systemFont(ofSize: 11)
         var widest: CGFloat = 0
         // Only the first screenful is measured. A thousand-column relation would
         // otherwise pay for a text measurement per name on every keystroke, to
         // decide the width of a list showing ten of them.
         for offer in offers.prefix(Self.visibleRows * 3) {
-            let l = (offer.label as NSString).size(withAttributes: [.font: label]).width
-            let d = (offer.detail as NSString).size(withAttributes: [.font: detail]).width
+            let l = (offer.label as NSString).size(withAttributes: [.font: labelFont]).width
+            let d = (offer.detail as NSString).size(withAttributes: [.font: detailFont]).width
             widest = max(widest, l + d)
         }
         let width = min(max(widest + CompletionRow.padding, 240), 560)
         let rows = CGFloat(min(offers.count, Self.visibleRows))
-        return NSSize(width: width, height: rows * Self.rowHeight)
+        return NSSize(width: width, height: rows * rowHeight)
     }
 }
 
@@ -213,7 +229,7 @@ extension CompletionPopup: NSTableViewDataSource, NSTableViewDelegate {
             tableView.makeView(withIdentifier: CompletionRow.identifier, owner: self)
             as? CompletionRow ?? CompletionRow()
         view.identifier = CompletionRow.identifier
-        view.show(offers[row])
+        view.show(offers[row], label: labelFont, detail: detailFont)
         return view
     }
 
@@ -236,9 +252,7 @@ private final class CompletionRow: NSView {
         super.init(frame: .zero)
         glyph.imageScaling = .scaleProportionallyDown
         glyph.contentTintColor = Theme.textTertiary.nsColor
-        label.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
         label.textColor = Theme.text.nsColor
-        detail.font = NSFont.systemFont(ofSize: 11)
         detail.textColor = Theme.textTertiary.nsColor
         detail.alignment = .right
         detail.lineBreakMode = .byTruncatingTail
@@ -248,10 +262,14 @@ private final class CompletionRow: NSView {
 
     @available(*, unavailable) required init?(coder: NSCoder) { nil }
 
-    func show(_ offer: SQLCompletion.Offer) {
+    /// The fonts come with each show rather than living here, because the row
+    /// is recycled and the popup is the one that knows the editor's size.
+    func show(_ offer: SQLCompletion.Offer, label labelFont: NSFont, detail detailFont: NSFont) {
         glyph.image = NSImage(
             systemSymbolName: offer.kind.symbol, accessibilityDescription: offer.kind.rawValue)
+        label.font = labelFont
         label.stringValue = offer.label
+        detail.font = detailFont
         detail.stringValue = offer.detail
         needsLayout = true
     }

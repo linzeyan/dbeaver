@@ -32,6 +32,7 @@ enum PreferencesChecks {
         checkAScratchSuiteLeavesNoFileBehind()
         checkTheDefaultsAreTheOnesThatWereDecided()
         checkASettingSurvivesBeingWrittenAndReadBack()
+        checkAnEditorFontSizeFromOutsideTheRangeIsFoldedBack()
         checkAConnectionKeptOnThisMacComesBack()
         checkAConnectionKeptInICloudGoesToTheDrive()
         checkAConnectionSurvivesAnICloudThatIsNotAvailable()
@@ -103,6 +104,7 @@ enum PreferencesChecks {
             fresh.connectionStorage, .thisMac, "the remembered connection does not leave the Mac")
         expect(
             fresh.shutConnectionFolders, [], "every connection folder starts open")
+        expect(fresh.editorFontSize, 13, "the editor draws at the size it always has")
     }
 
     /// A setting has to outlive the window, or the Settings window is a switch
@@ -118,6 +120,7 @@ enum PreferencesChecks {
         first.passwordStorage = .thisMac
         first.connectionStorage = .iCloud
         first.shutConnectionFolders = ["clients/acme"]
+        first.editorFontSize = 16
 
         // A second reader over the same store, which is what the next launch is.
         let second = Preferences(store: store)
@@ -130,6 +133,27 @@ enum PreferencesChecks {
         expect(
             second.shutConnectionFolders, ["clients/acme"],
             "a folder somebody shut is still shut on the next launch")
+        expect(second.editorFontSize, 16, "the editor's type size was kept")
+    }
+
+    /// A size the Settings window could never have written reads back as the
+    /// nearest one it offers.
+    ///
+    /// The value is a number in a plist somebody can edit: taken literally, a 0
+    /// draws no text at all and a 96 leaves three lines on screen, and both are
+    /// states with no control that leads back out of them. The key is spelled
+    /// out here because it is a contract with the disk — a renamed key would
+    /// silently orphan every kept size, and nothing else would notice.
+    private static func checkAnEditorFontSizeFromOutsideTheRangeIsFoldedBack() {
+        let store = ScratchDefaults.store("verify-preferences-font")
+        store.set(96, forKey: "dev.dbclient.editorFontSize")
+        expect(
+            Preferences(store: store).editorFontSize, 18,
+            "a hand-edited 96 reads as the largest size offered")
+        store.set(0, forKey: "dev.dbclient.editorFontSize")
+        expect(
+            Preferences(store: store).editorFontSize, 10,
+            "and a 0 as the smallest, not as no text at all")
     }
 
     // MARK: - Where the connection is kept

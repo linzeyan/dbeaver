@@ -1907,6 +1907,7 @@ struct QueryPane: View {
                     SQLEditor(
                         text: $model.queryText, selection: $model.querySelection,
                         scheme: model.scheme,
+                        fontSize: model.preferences.editorFontSize,
                         offers: { text, caret, then in
                             model.completions(in: text, caret: caret, then: then)
                         }
