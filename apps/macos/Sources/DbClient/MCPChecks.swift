@@ -28,6 +28,11 @@ enum MCPChecks {
         checkWritesAndStateChangesAreRefused()
         checkCommentTricksHideNothing()
         checkTheConservativeRejectionsAreDeliberate()
+        checkInitializeNegotiatesWhatBothSpeak()
+        checkTheProtocolAnswersItsOwnShapes()
+        checkTheToolListIsTheWholeOffer()
+        checkAToolFailureIsAnAnswerNotAProtocolError()
+        checkAQueryComesBackAsRowsWithHonestNames()
         if failures == 0 {
             fputs("mcp: all checks passed\n", stderr)
         } else {
@@ -254,6 +259,158 @@ enum MCPChecks {
         expect(
             MCPReadOnlyGuard.obstacle(in: "/* only a comment */") != nil, true,
             "and neither is a comment alone")
+    }
+
+    // MARK: - The dispatcher
+
+    /// The double the dispatcher answers from: two connections, one schema,
+    /// one relation — and a join-shaped query result whose duplicate column
+    /// names are the point.
+    private enum FakeFailure: Error { case noSuchConnection }
+    private struct FakeSource: MCPDataSource {
+        func connectionNames() -> [String] { ["prod-pg", "local"] }
+        func schemas(connection: String) throws -> [String] {
+            guard connection == "prod-pg" else { throw FakeFailure.noSuchConnection }
+            return ["public"]
+        }
+        func relations(connection: String, schema: String?) throws -> [MCPRelation] {
+            [MCPRelation(schema: "public", name: "orders", kind: "table")]
+        }
+        func describe(connection: String, schema: String?, relation: String) throws
+            -> MCPRelationDescription
+        {
+            MCPRelationDescription(
+                columns: [.init(name: "id", type: "bigint", nullable: false)],
+                ddl: "CREATE TABLE orders (id bigint)")
+        }
+        func query(connection: String, sql: String, rowCap: Int) throws -> MCPQueryResult {
+            MCPQueryResult(
+                columns: ["id", "id"], rows: [["1", "2"]], truncated: true)
+        }
+    }
+
+    private static func reply(to json: String) -> [String: Any]? {
+        guard
+            let data = MCPDispatch.handle(
+                Data(json.utf8), source: FakeSource(), rowCap: 100, serverVersion: "0.0")
+        else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    private static func toolText(_ reply: [String: Any]?) -> (isError: Bool, text: String) {
+        let result = reply?["result"] as? [String: Any]
+        let content = result?["content"] as? [[String: Any]]
+        return (
+            result?["isError"] as? Bool ?? false,
+            content?.first?["text"] as? String ?? ""
+        )
+    }
+
+    private static func checkInitializeNegotiatesWhatBothSpeak() {
+        let old = reply(
+            to:
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#
+        )
+        expect(
+            (old?["result"] as? [String: Any])?["protocolVersion"] as? String, "2024-11-05",
+            "a version both sides speak is echoed")
+        let unknown = reply(
+            to:
+                #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#
+        )
+        expect(
+            (unknown?["result"] as? [String: Any])?["protocolVersion"] as? String, "2025-03-26",
+            "an unknown one is answered with the newest we do")
+        let instructions =
+            (old?["result"] as? [String: Any])?["instructions"] as? String ?? ""
+        expect(
+            instructions.contains("list_connections"), true,
+            "the instructions teach the connection-name convention")
+    }
+
+    private static func checkTheProtocolAnswersItsOwnShapes() {
+        func code(_ reply: [String: Any]?) -> Int? {
+            (reply?["error"] as? [String: Any])?["code"] as? Int
+        }
+        expect(code(reply(to: "not json")), -32700, "unparseable bytes are a parse error")
+        expect(code(reply(to: "[1,2]")), -32600, "a batch is refused whole")
+        expect(code(reply(to: #"{"jsonrpc":"2.0","id":1}"#)), -32600, "no method is no request")
+        let missing = reply(to: #"{"jsonrpc":"2.0","id":1,"method":"resources/list"}"#)
+        expect(code(missing), -32601, "an unimplemented method says so")
+        expect(
+            ((missing?["error"] as? [String: Any])?["message"] as? String ?? "")
+                .contains("resources/list"),
+            true, "and names it")
+        expect(
+            MCPDispatch.handle(
+                Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8),
+                source: FakeSource(), rowCap: 100, serverVersion: "0.0") == nil,
+            true, "a notification is answered with silence")
+        let ping = reply(to: #"{"jsonrpc":"2.0","id":7,"method":"ping"}"#)
+        expect(ping?["result"] is [String: Any], true, "ping answers with an empty result")
+        expect(ping?["id"] as? Int, 7, "under the caller's id")
+    }
+
+    private static func checkTheToolListIsTheWholeOffer() {
+        let tools =
+            (reply(to: #"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)?["result"]
+            as? [String: Any])?["tools"] as? [[String: Any]] ?? []
+        expect(
+            tools.compactMap { $0["name"] as? String }.sorted(),
+            ["describe_relation", "list_connections", "list_relations", "list_schemas", "query"],
+            "five tools: find a connection, orient, read")
+        expect(
+            tools.allSatisfy {
+                ($0["annotations"] as? [String: Any])?["readOnlyHint"] as? Bool == true
+            },
+            true, "every one annotated read-only, because every one is")
+    }
+
+    /// The distinction this holds is the one that keeps the far model useful:
+    /// a failed tool call is a result it can read and recover from, not a
+    /// protocol error that teaches it to give up.
+    private static func checkAToolFailureIsAnAnswerNotAProtocolError() {
+        let unknown = reply(
+            to:
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"drop_everything"}}"#
+        )
+        expect(unknown?["error"] == nil, true, "an unknown tool is not a protocol error")
+        expect(toolText(unknown).isError, true, "it is a tool answer that says no")
+        let guarded = reply(
+            to:
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"connection":"prod-pg","sql":"DROP TABLE t"}}}"#
+        )
+        expect(toolText(guarded).isError, true, "a guarded statement is refused")
+        expect(
+            toolText(guarded).text.contains("Only reads"), true,
+            "with the guard's own sentence")
+        let unnamed = reply(
+            to: #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_schemas"}}"#
+        )
+        expect(toolText(unnamed).isError, true, "a missing required argument is refused")
+        let thrown = reply(
+            to:
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_schemas","arguments":{"connection":"gone"}}}"#
+        )
+        expect(toolText(thrown).isError, true, "and so is a data source that threw")
+    }
+
+    private static func checkAQueryComesBackAsRowsWithHonestNames() {
+        expect(
+            MCPDispatch.uniqued(["id", "id", "id_2"]), ["id", "id_2", "id_2_2"],
+            "a taken suffix keeps walking rather than colliding")
+        let answer = reply(
+            to:
+                #"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query","arguments":{"connection":"prod-pg","sql":"SELECT 1"}}}"#
+        )
+        let (isError, text) = toolText(answer)
+        expect(isError, false, "a read that ran is a success")
+        expect(
+            text.contains("\"id_2\""), true,
+            "a join's second id is renamed rather than silently dropped")
+        expect(
+            text.contains("\"truncated\" : true"), true,
+            "a capped result says it is not the whole answer")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
