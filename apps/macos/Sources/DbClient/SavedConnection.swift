@@ -148,10 +148,20 @@ struct SavedConnection: Identifiable, Equatable, Codable {
     /// it.
     var savesPassword: Bool
 
+    /// Whether the MCP server may reach this connection.
+    ///
+    /// False by default and per connection, never all at once: an agent's reach
+    /// is a decision about each database, and a switch that exposed the whole
+    /// sidebar would be making it about none of them. The server reads only
+    /// stored credentials for an exposed entry — a password typed for one
+    /// session was typed for that session, not for whatever asks over a port.
+    var exposedToMCP: Bool
+
     init(
         id: UUID = UUID(), name: String = "", color: ConnectionColor = .none,
         folder: String = "", savesPassword: Bool = true, isReadOnly: Bool = false,
-        isProduction: Bool = false, server: String = "", settings: ConnectionSettings
+        isProduction: Bool = false, exposedToMCP: Bool = false, server: String = "",
+        settings: ConnectionSettings
     ) {
         self.id = id
         self.name = name
@@ -160,6 +170,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         self.savesPassword = savesPassword
         self.isReadOnly = isReadOnly
         self.isProduction = isProduction
+        self.exposedToMCP = exposedToMCP
         self.server = server
         self.settings = settings
     }
@@ -265,6 +276,9 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         /// could discover from the file itself.
         var production: Bool
         var readOnly: Bool
+        /// Written even when false, for the reason `production` is — and being
+        /// discoverable matters twice here, because this flag is a door.
+        var exposedToMCP: Bool
         var scheme: String
         /// What answered, the last time. Written even when empty, for the reason
         /// the flags above it are: a key that appears only sometimes is one
@@ -302,7 +316,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
         init(
             color: String, database: String, folder: String = "", savesPassword: Bool = true,
             host: String, id: String, name: String, path: String, port: String,
-            production: Bool = false, readOnly: Bool = false, scheme: String, server: String = "",
+            production: Bool = false, readOnly: Bool = false, exposedToMCP: Bool = false,
+            scheme: String, server: String = "",
             sslMode: String = "prefer", sslRootCert: String = "", sshHost: String = "",
             sshPort: String = "", sshUser: String = "", sshKeyPath: String = "",
             timeoutSeconds: Int = 10, keepAliveSeconds: Int? = nil, user: String
@@ -318,6 +333,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.port = port
             self.production = production
             self.readOnly = readOnly
+            self.exposedToMCP = exposedToMCP
             self.scheme = scheme
             self.server = server
             self.sslMode = sslMode
@@ -345,6 +361,7 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             self.port = connection.settings.port
             self.production = connection.isProduction
             self.readOnly = connection.isReadOnly
+            self.exposedToMCP = connection.exposedToMCP
             self.savesPassword = connection.savesPassword
             self.scheme = connection.settings.scheme
             self.server = connection.server
@@ -384,6 +401,12 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             // of every statement on every connection in somebody's file.
             self.production = try container.decodeIfPresent(Bool.self, forKey: .production) ?? false
             self.readOnly = try container.decodeIfPresent(Bool.self, forKey: .readOnly) ?? false
+
+            // Absent means not exposed, and this is the flag where the safe
+            // direction matters most: a hand-edited file must not open a door
+            // by leaving a key out.
+            self.exposedToMCP =
+                try container.decodeIfPresent(Bool.self, forKey: .exposedToMCP) ?? false
 
             // Nothing, for an entry nothing has answered — including every entry
             // written before this was recorded at all. The next connection fills
@@ -444,8 +467,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
 
         private enum CodingKeys: String, CodingKey {
             case color, database, folder, savesPassword, host, id, name, path, port, production,
-                readOnly, scheme, server, sslMode, sslRootCert, sshHost, sshPort, sshUser,
-                sshKeyPath, timeoutSeconds, keepAliveSeconds, user
+                readOnly, exposedToMCP, scheme, server, sslMode, sslRootCert, sshHost, sshPort,
+                sshUser, sshKeyPath, timeoutSeconds, keepAliveSeconds, user
         }
 
         func toSavedConnection() -> SavedConnection {
@@ -474,8 +497,8 @@ struct SavedConnection: Identifiable, Equatable, Codable {
             return SavedConnection(
                 id: id, name: self.name, color: color, folder: self.folder,
                 savesPassword: self.savesPassword, isReadOnly: self.readOnly,
-                isProduction: self.production, server: self.server,
-                settings: settings)
+                isProduction: self.production, exposedToMCP: self.exposedToMCP,
+                server: self.server, settings: settings)
         }
     }
 }
@@ -583,6 +606,10 @@ extension SavedConnection {
 
         if self.isProduction != draft.isProduction {
             changedFields.append("Production")
+        }
+
+        if self.exposedToMCP != draft.exposedToMCP {
+            changedFields.append("MCP")
         }
 
         if self.settings.scheme != draft.settings.scheme {

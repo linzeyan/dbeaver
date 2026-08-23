@@ -645,7 +645,7 @@ struct ConnectionFormPane: View {
 
     /// What this connection is allowed to be.
     ///
-    /// Two checkboxes rather than one control with three settings, because they
+    /// Separate checkboxes rather than one control with modes, because they
     /// are not exclusive and the pair that proves it is the ordinary case: a
     /// production database somebody is browsing with edits switched off. A
     /// control that made them exclusive would be inventing a rule the flags do
@@ -653,7 +653,9 @@ struct ConnectionFormPane: View {
     ///
     /// Below the fields that say where the database is, since it is a different
     /// kind of answer — those describe the database, and these describe what this
-    /// application may do to it.
+    /// application may do to it. MCP sits in the row because it is the same kind
+    /// of answer again: what somebody *else* may do to it through this
+    /// application.
     private var safetyRow: some View {
         HStack(spacing: Theme.Space.sm) {
             label("Safety")
@@ -661,6 +663,10 @@ struct ConnectionFormPane: View {
                 .help("Refuse grid edits, generated DDL and imports on this connection")
             Toggle("Production", isOn: $model.connectionDraft.isProduction)
                 .help("Ask before writing to this connection")
+            Toggle("Expose to MCP", isOn: $model.connectionDraft.exposedToMCP)
+                .help(
+                    "Let the MCP server read this connection with its stored "
+                        + "credentials. Reads only, and only when the server is on.")
             Spacer(minLength: 0)
         }
         .font(Theme.Typography.body)
