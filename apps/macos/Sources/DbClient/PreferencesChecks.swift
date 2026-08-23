@@ -109,6 +109,9 @@ enum PreferencesChecks {
         expect(fresh.editorSoftTabs, false, "Tab writes a tab character until asked otherwise")
         expect(fresh.editorAutoIndent, true, "Return carries the indent, as Sequel Ace ships")
         expect(fresh.editorAutoPairs, true, "brackets and quotes pair, as Sequel Ace ships")
+        expect(
+            fresh.editorUppercasesKeywords, false,
+            "nothing rewrites typed text until somebody asks")
     }
 
     /// A setting has to outlive the window, or the Settings window is a switch
@@ -129,6 +132,7 @@ enum PreferencesChecks {
         first.editorSoftTabs = true
         first.editorAutoIndent = false
         first.editorAutoPairs = false
+        first.editorUppercasesKeywords = true
 
         // A second reader over the same store, which is what the next launch is.
         let second = Preferences(store: store)
@@ -146,6 +150,7 @@ enum PreferencesChecks {
         expect(second.editorSoftTabs, true, "soft tabs being on was kept")
         expect(second.editorAutoIndent, false, "auto-indent being off was kept")
         expect(second.editorAutoPairs, false, "auto-pair being off was kept")
+        expect(second.editorUppercasesKeywords, true, "the keyword lift being on was kept")
     }
 
     /// A size the Settings window could never have written reads back as the

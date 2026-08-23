@@ -24,6 +24,7 @@ enum EditorTyping {
         var softTabs: Bool
         var autoIndent: Bool
         var autoPairs: Bool
+        var uppercasesKeywords: Bool
     }
 
     /// One replacement to make instead of the keystroke's default: `insert`
@@ -145,6 +146,41 @@ enum EditorTyping {
         let caret = selection.lowerBound + 1
         return Edit(
             replacing: selection, insert: typed + String(closer), selection: caret..<caret)
+    }
+
+    /// The keyword the caret just finished, lifted to upper case — or nil when
+    /// there is nothing to lift. Called as a separator is typed, which is what
+    /// "finished" means: the caret stands at the end of a word and the next
+    /// keystroke is leaving it.
+    ///
+    /// Whether the word *is* a keyword is the core lexer's answer, not a word
+    /// list kept here — the same one-opinion rule the whole editor runs on,
+    /// so the words this lifts are exactly the words the colours call
+    /// keywords, dialect included. The lexer names keywords without context,
+    /// so a comment or a string keeps its `select` (those are other token
+    /// kinds), while an unquoted column deliberately called `order` would be
+    /// lifted — the cost the setting's explanation owns up to.
+    ///
+    /// A word already upper case answers nil rather than an identical edit,
+    /// because the editor applies edits through the undo stack and a no-op
+    /// there is a keystroke ⌘Z gives back nothing for.
+    static func keywordUpcase(
+        in text: String, selection: Range<Int>, scheme: String, rules: Rules
+    ) -> Edit? {
+        guard rules.uppercasesKeywords, selection.isEmpty else { return nil }
+        let scalars = Array(text.unicodeScalars)
+        let caret = min(selection.lowerBound, scalars.count)
+        guard caret >= scalars.count || !isWord(scalars[caret]) else { return nil }
+        var start = caret
+        while start > 0, isWord(scalars[start - 1]) { start -= 1 }
+        guard start < caret else { return nil }
+        let word = String(String.UnicodeScalarView(scalars[start..<caret]))
+        let lifted = word.uppercased()
+        guard lifted != word,
+            SQLScript.scan(text, scheme: scheme, selection: selection).tokens
+                .contains(where: { $0.kind == .keyword && $0.range == start..<caret })
+        else { return nil }
+        return Edit(replacing: start..<caret, insert: lifted, selection: selection)
     }
 
     private static func isWord(_ scalar: Unicode.Scalar) -> Bool {

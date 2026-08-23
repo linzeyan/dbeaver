@@ -29,6 +29,8 @@ enum EditorTypingChecks {
         checkTypingTheCloserWalksPastInsteadOfDoubling()
         checkASelectionIsWrappedNotReplaced()
         checkAQuoteStaysSingleAgainstAWord()
+        checkAFinishedKeywordIsLiftedOnlyWhileTheSettingSaysSo()
+        checkTheLexerDecidesWhatCountsAsAKeyword()
         if failures == 0 {
             fputs("editor-typing: all checks passed\n", stderr)
         } else {
@@ -199,22 +201,81 @@ enum EditorTypingChecks {
             "a parenthesis after a word still pairs — that is a call being opened")
     }
 
+    // MARK: - Keyword lift
+
+    /// A word the caret just finished comes back uppercased when the lexer
+    /// calls it a keyword — and never with the setting off, which matters
+    /// doubly here because this is the one rule that rewrites what was typed.
+    private static func checkAFinishedKeywordIsLiftedOnlyWhileTheSettingSaysSo() {
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "select", selection: 6..<6, scheme: "postgres", rules: lifting),
+            EditorTyping.Edit(replacing: 0..<6, insert: "SELECT", selection: 6..<6),
+            "a finished keyword is lifted, with the caret left where it was")
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "Select", selection: 6..<6, scheme: "postgres", rules: lifting),
+            EditorTyping.Edit(replacing: 0..<6, insert: "SELECT", selection: 6..<6),
+            "a half-shifted keyword is finished off")
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "SELECT", selection: 6..<6, scheme: "postgres", rules: lifting),
+            nil, "one already upper answers nothing — a no-op edit would still cost an undo step")
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "select", selection: 6..<6, scheme: "postgres", rules: plain),
+            nil, "and with the setting off no text is ever rewritten")
+    }
+
+    /// What is a keyword is the core lexer's answer, not a word list here —
+    /// so a string keeps its `select`, a comment keeps its, and an identifier
+    /// is never touched. A word list beside the lexer would be the second
+    /// opinion the editor's file-level rule forbids.
+    private static func checkTheLexerDecidesWhatCountsAsAKeyword() {
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "sales", selection: 5..<5, scheme: "postgres", rules: lifting),
+            nil, "an identifier is not lifted")
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "x = 'select'", selection: 11..<11, scheme: "postgres", rules: lifting),
+            nil, "a keyword inside a string literal is string, not syntax")
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "-- select", selection: 9..<9, scheme: "postgres", rules: lifting),
+            nil, "and inside a comment, comment")
+        expect(
+            EditorTyping.keywordUpcase(
+                in: "selectx", selection: 6..<6, scheme: "postgres", rules: lifting),
+            nil, "a caret still inside a word has finished nothing")
+    }
+
     // MARK: - Harness
 
     /// Auto-indent alone, so each suite exercises its own rule.
     private static let indenting = EditorTyping.Rules(
-        tabWidth: 4, softTabs: false, autoIndent: true, autoPairs: false)
+        tabWidth: 4, softTabs: false, autoIndent: true, autoPairs: false,
+        uppercasesKeywords: false)
 
     /// Auto-pair alone, likewise.
     private static let pairing = EditorTyping.Rules(
-        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: true)
+        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: true,
+        uppercasesKeywords: false)
+
+    /// The keyword lift alone, likewise.
+    private static let lifting = EditorTyping.Rules(
+        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: false,
+        uppercasesKeywords: true)
 
     /// Every rule off, for the nil half of each check.
     private static let plain = EditorTyping.Rules(
-        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: false)
+        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: false,
+        uppercasesKeywords: false)
 
     private static func soft(_ width: Int) -> EditorTyping.Rules {
-        EditorTyping.Rules(tabWidth: width, softTabs: true, autoIndent: true, autoPairs: false)
+        EditorTyping.Rules(
+            tabWidth: width, softTabs: true, autoIndent: true, autoPairs: false,
+            uppercasesKeywords: false)
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

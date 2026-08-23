@@ -421,6 +421,10 @@ struct SQLEditor: NSViewRepresentable {
             }
             switch command {
             case #selector(NSResponder.insertNewline(_:)):
+                // Return finishes a word the way a space does, so the lift
+                // comes first — and the newline rule then reads the buffer the
+                // lift produced, which holds a word of the same length.
+                upcaseKeyword()
                 return apply(
                     EditorTyping.newline(
                         in: cachedString, selection: scalarSelection(), rules: parent.typing))
@@ -445,6 +449,18 @@ struct SQLEditor: NSViewRepresentable {
             return apply(
                 EditorTyping.pairedInsertion(
                     of: typed, in: cachedString, selection: scalarSelection(),
+                    rules: parent.typing))
+        }
+
+        /// Lifts the keyword the caret just finished, called as a separator is
+        /// typed. Apart from `pair` because the two answer different questions
+        /// about the same keystroke: this rewrites the word behind the caret,
+        /// that decides what the typed character becomes.
+        fileprivate func upcaseKeyword() {
+            guard !accepting else { return }
+            _ = apply(
+                EditorTyping.keywordUpcase(
+                    in: cachedString, selection: scalarSelection(), scheme: parent.scheme,
                     rules: parent.typing))
         }
 
@@ -864,10 +880,16 @@ final class EditorTextView: NSTextView {
     /// applying a pair from re-entering this override.
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
         if replacementRange.location == NSNotFound, !hasMarkedText(),
-            let typed = insertString as? String,
-            editor?.pair(typed) == true
+            let typed = insertString as? String
         {
-            return
+            // A space is a word being finished, which is the keyword lift's
+            // moment — before the separator lands, so the word is still the
+            // one ending at the caret. Return takes the same lift on its own
+            // path through `doCommandBy`.
+            if let first = typed.unicodeScalars.first, CharacterSet.whitespaces.contains(first) {
+                editor?.upcaseKeyword()
+            }
+            if editor?.pair(typed) == true { return }
         }
         super.insertText(insertString, replacementRange: replacementRange)
     }

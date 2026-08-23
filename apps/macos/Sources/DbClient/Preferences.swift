@@ -160,6 +160,19 @@ final class Preferences {
         didSet { store.set(editorAutoPairs, forKey: Key.editorAutoPairs) }
     }
 
+    /// Whether SQL keywords are lifted to upper case as they are typed.
+    ///
+    /// Off, Sequel Ace's default, and the only editor habit here that rewrites
+    /// characters the user typed — which is why it starts off: an editor that
+    /// changes your text is a claim to know better, made on every word. On,
+    /// finishing a word with a space or Return uppercases it when the core's
+    /// lexer calls it a keyword — the same opinion the colours run on — and
+    /// the lexer reads without context, so an unquoted column deliberately
+    /// named `order` is lifted too.
+    var editorUppercasesKeywords: Bool {
+        didSet { store.set(editorUppercasesKeywords, forKey: Key.editorUppercasesKeywords) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -191,7 +204,8 @@ final class Preferences {
         Key.editorTabWidth: EditorTabWidth.four.rawValue,
         Key.editorSoftTabs: false,
         Key.editorAutoIndent: true,
-        Key.editorAutoPairs: true
+        Key.editorAutoPairs: true,
+        Key.editorUppercasesKeywords: false
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -213,6 +227,7 @@ final class Preferences {
         static let editorSoftTabs = "dev.dbclient.editorSoftTabs"
         static let editorAutoIndent = "dev.dbclient.editorAutoIndent"
         static let editorAutoPairs = "dev.dbclient.editorAutoPairs"
+        static let editorUppercasesKeywords = "dev.dbclient.editorUppercasesKeywords"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -240,7 +255,8 @@ final class Preferences {
             tabWidth: editorTabWidth.rawValue,
             softTabs: editorSoftTabs,
             autoIndent: editorAutoIndent,
-            autoPairs: editorAutoPairs)
+            autoPairs: editorAutoPairs,
+            uppercasesKeywords: editorUppercasesKeywords)
     }
 
     /// The store is injectable so that a check can be given a scratch one; see
@@ -271,6 +287,7 @@ final class Preferences {
         editorSoftTabs = store.bool(forKey: Key.editorSoftTabs)
         editorAutoIndent = store.bool(forKey: Key.editorAutoIndent)
         editorAutoPairs = store.bool(forKey: Key.editorAutoPairs)
+        editorUppercasesKeywords = store.bool(forKey: Key.editorUppercasesKeywords)
     }
 }
 
