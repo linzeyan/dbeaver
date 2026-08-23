@@ -33,6 +33,8 @@ enum MCPChecks {
         checkTheToolListIsTheWholeOffer()
         checkAToolFailureIsAnAnswerNotAProtocolError()
         checkAQueryComesBackAsRowsWithHonestNames()
+        checkTheWallsStandInOrder()
+        checkASessionIsStartedNamedAndEnded()
         if failures == 0 {
             fputs("mcp: all checks passed\n", stderr)
         } else {
@@ -411,6 +413,82 @@ enum MCPChecks {
         expect(
             text.contains("\"truncated\" : true"), true,
             "a capped result says it is not the whole answer")
+    }
+
+    // MARK: - The server's rules
+
+    private static let configuration = MCPServer.Configuration(
+        token: "tok", source: FakeSource(), rowCap: 100, serverVersion: "0.0")
+
+    private static func ask(
+        _ method: String, _ path: String, headers: [String: String] = [:], body: String = "",
+        session: String? = nil
+    ) -> (status: Int, session: String?, reply: String) {
+        let request = MCPHTTP.Request(
+            method: method, path: path, query: [:], headers: headers, body: Data(body.utf8))
+        let (reply, newSession) = MCPServer.respond(
+            to: request, session: session, configuration: configuration,
+            minting: { "minted-session" })
+        let text = String(decoding: reply, as: UTF8.self)
+        let status = Int(text.split(separator: " ").dropFirst().first ?? "") ?? -1
+        return (status, newSession, text)
+    }
+
+    private static let bearer = ["authorization": "Bearer tok"]
+
+    /// The order is the contract: route, then origin, then token, then
+    /// session — a browser page learns nothing about the token from its 403,
+    /// and a stranger learns nothing about sessions from its 401.
+    private static func checkTheWallsStandInOrder() {
+        expect(ask("GET", "/health").status, 200, "health answers with no token at all")
+        expect(
+            ask(
+                "POST", "/mcp",
+                headers: ["origin": "https://evil.example", "authorization": "Bearer tok"]
+            ).status,
+            403, "a browser origin is refused before the token is even read")
+        expect(ask("POST", "/mcp").status, 401, "no token is no entry")
+        expect(
+            ask("POST", "/mcp", headers: ["authorization": "Bearer wrong"]).status, 401,
+            "and a wrong one the same")
+        expect(ask("GET", "/mcp", headers: bearer).status, 405, "GET has nothing at /mcp")
+        expect(ask("GET", "/elsewhere").status, 404, "and elsewhere is nowhere")
+    }
+
+    private static func checkASessionIsStartedNamedAndEnded() {
+        let initialize = ask(
+            "POST", "/mcp", headers: bearer,
+            body: #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)
+        expect(initialize.status, 200, "initialize opens the conversation")
+        expect(initialize.session, "minted-session", "and mints the session")
+        expect(
+            initialize.reply.contains("Mcp-Session-Id: minted-session"), true,
+            "which the reply hands back")
+
+        let unnamed = ask(
+            "POST", "/mcp", headers: bearer,
+            body: #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, session: "minted-session")
+        expect(
+            unnamed.status, 404,
+            "a call that names no session is told to initialize, not humoured")
+        var named = bearer
+        named["mcp-session-id"] = "minted-session"
+        expect(
+            ask(
+                "POST", "/mcp", headers: named,
+                body: #"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, session: "minted-session"
+            ).status,
+            200, "the same call with the session runs")
+        expect(
+            ask(
+                "POST", "/mcp", headers: named,
+                body: #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                session: "minted-session"
+            ).status,
+            202, "a notification is accepted with no body")
+        let ended = ask("DELETE", "/mcp", headers: bearer, session: "minted-session")
+        expect(ended.status, 200, "DELETE ends the session")
+        expect(ended.session == nil, true, "and forgets it")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
