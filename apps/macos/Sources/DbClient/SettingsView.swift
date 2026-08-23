@@ -298,6 +298,8 @@ struct SettingsView: View {
                 + "typed — the only setting here that does — and an unquoted "
                 + "column named order is lifted along with the real keywords.",
             isOn: $preferences.editorUppercasesKeywords)
+
+        SettingsEditorColours(preferences: preferences)
     }
 
     /// The object tree down the left of the window.
@@ -503,6 +505,147 @@ private struct SettingsNumber: View {
                 value = digits.isEmpty ? 0 : (Int(digits) ?? 0)
             })
     }
+}
+
+/// The editor's colours: the theme they follow, a well per slot, and the way
+/// back.
+///
+/// The menu holds two answers because two exist — the palette, and whatever
+/// the wells now hold. It is derived from the colours rather than stored
+/// beside them: it is a fact about them, and a stored copy could go on saying
+/// Default over customised wells. Choosing Default is Reset by another name;
+/// Custom is not chosen, it is what touching any well makes true. The button
+/// says the same thing for the reader who does not think to ask a menu to
+/// undo.
+private struct SettingsEditorColours: View {
+    @Bindable var preferences: Preferences
+
+    /// What customising costs, said once above the wells rather than once per
+    /// well: the Default palette's contrast is measured in `Theme`, and a
+    /// custom colour walks out from under those measurements.
+    private static let explanation =
+        "One well per thing the editor colours: the syntax tokens, the "
+        + "paper they sit on, the caret, the selection, and the band "
+        + "under the statement ⌘R would run in a script. The Default "
+        + "palette is checked for contrast against its background; a "
+        + "Custom theme is trusted to have done its own checking."
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text("Colours")
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(Theme.text.color)
+            Text(Self.explanation)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .fixedSize(horizontal: false, vertical: true)
+            controls
+            wells
+        }
+    }
+
+    private var controls: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Picker("", selection: themeChoice) {
+                Text("Default").tag(EditorThemeChoice.standard)
+                Text("Custom").tag(EditorThemeChoice.custom)
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(width: 120)
+            .accessibilityLabel("Editor theme")
+            Button("Reset") { preferences.resetEditorTheme() }
+                .disabled(!preferences.editorThemeIsCustom)
+                .accessibilityHint("Returns every colour to the Default theme.")
+        }
+        .padding(.bottom, Theme.Space.xs)
+    }
+
+    /// A `Grid` rather than a lazy one: the Settings panel is sized to this
+    /// view's `fittingSize`, and laziness is exactly the promise not to know
+    /// your height until scrolled to.
+    private var wells: some View {
+        Grid(
+            alignment: .leading, horizontalSpacing: Theme.Space.lg,
+            verticalSpacing: Theme.Space.xs
+        ) {
+            GridRow {
+                well("Background", $preferences.editorBackgroundColor, \.background)
+                well("Text", $preferences.editorTextColor, \.text)
+            }
+            GridRow {
+                well("Keywords", $preferences.editorKeywordColor, \.keyword)
+                well("Strings", $preferences.editorStringColor, \.string)
+            }
+            GridRow {
+                well("Dollar quotes", $preferences.editorDollarQuotedColor, \.dollarQuoted)
+                well("Numbers", $preferences.editorNumberColor, \.number)
+            }
+            GridRow {
+                well(
+                    "Quoted identifiers", $preferences.editorQuotedIdentifierColor,
+                    \.quotedIdentifier)
+                well("Comments", $preferences.editorCommentColor, \.comment)
+            }
+            GridRow {
+                well("Caret", $preferences.editorCaretColor, \.caret)
+                well("Selection", $preferences.editorSelectionColor, \.selection)
+            }
+            GridRow {
+                well("Current statement", $preferences.editorStatementColor, \.statement)
+            }
+        }
+    }
+
+    /// Derived, not stored: see the type comment. Setting it to Default is a
+    /// reset; setting it to Custom changes nothing, because Custom is a state
+    /// the wells put the theme in, not one to opt into.
+    private var themeChoice: Binding<EditorThemeChoice> {
+        Binding(
+            get: { preferences.editorThemeIsCustom ? .custom : .standard },
+            set: { choice in
+                if choice == .standard { preferences.resetEditorTheme() }
+            })
+    }
+
+    /// One slot: the well, then its name. The label rides on the control for
+    /// VoiceOver and stands beside it for everyone else, the way
+    /// `SettingsStepper` does it.
+    private func well(
+        _ label: String, _ hex: Binding<String>, _ slot: KeyPath<EditorTheme, Theme.Tone>
+    ) -> some View {
+        HStack(spacing: Theme.Space.xs) {
+            ColorPicker("", selection: colour(of: hex, or: EditorTheme.defaults[keyPath: slot]))
+                .labelsHidden()
+                .accessibilityLabel("\(label) colour")
+            Text(label)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// The hex string as the `Color` a well speaks, canonical both ways.
+    ///
+    /// Reading cannot fail after `Preferences.init` folded the store's values,
+    /// but a binding that could show black would be one bug away from doing
+    /// it, so the fallback is the slot's default. Writing keeps the old value
+    /// for a colour with no sRGB reading, which the system picker does not
+    /// offer anyway.
+    private func colour(of hex: Binding<String>, or fallback: Theme.Tone) -> Binding<Color> {
+        Binding(
+            get: { (Theme.Tone(hex: hex.wrappedValue) ?? fallback).color },
+            set: { picked in
+                if let tone = Theme.Tone(picked) { hex.wrappedValue = tone.hex }
+            })
+    }
+}
+
+/// The two answers the Theme menu offers. `standard` rather than `default`,
+/// which is a keyword worth more than backticks here.
+private enum EditorThemeChoice {
+    case standard
+    case custom
 }
 
 /// One setting: its name, what it does to the window, and the switch.
