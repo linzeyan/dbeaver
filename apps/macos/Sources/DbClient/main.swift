@@ -161,6 +161,9 @@ if CommandLine.arguments.contains("--verify-keep-alive") {
 if CommandLine.arguments.contains("--verify-editor-theme") {
     exit(MainActor.assumeIsolated { EditorThemeChecks.run() } ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-mcp") {
+    exit(MCPChecks.run() ? 0 : 1)
+}
 
 // The three that have to state their isolation. `Preferences`, the grid's
 // accessibility tree and the sentences put to somebody quitting are main-actor
