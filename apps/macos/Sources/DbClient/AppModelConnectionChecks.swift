@@ -55,6 +55,7 @@ enum AppModelConnectionChecks {
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
+        checkTheDdlSectionIsThereFromTheFirstFrameOfTheLoad()
         checkTheLevelIsNamedByTheCapabilityAndNotTheScheme()
         checkTheTabSaysWhatItIsWithoutSayingTheSecret()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
@@ -799,6 +800,39 @@ enum AppModelConnectionChecks {
             expect(
                 model.editObstacle == nil, true,
                 "a database with a grammar has nothing to explain")
+        }
+    }
+
+    /// The strip must not reshape when the relation's details land.
+    ///
+    /// On a database whose DDL the core writes, the section is there from the
+    /// first frame of the load — every dialect the app speaks has a renderer,
+    /// so the statement is coming. On one whose DDL it cannot write, it never
+    /// appears at all, which is what stops the placeholder outliving the load.
+    private static func checkTheDdlSectionIsThereFromTheFirstFrameOfTheLoad() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.sessions[0].selected = RelationInfo(
+                schema: "public", name: "orders", kind: .table, estimatedRows: nil)
+            model.sessions[0].isBusy = true
+            model.sessions[0].capabilities = Capabilities(
+                transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
+                writesStatements: true, schemaIsTheDatabase: false)
+            expect(
+                model.structureSections.contains(.ddl), true,
+                "a loading relation on a dialect the core writes offers DDL at once")
+
+            model.sessions[0].capabilities = Capabilities(
+                transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
+                writesStatements: false, schemaIsTheDatabase: false)
+            expect(
+                model.structureSections.contains(.ddl), false,
+                "and one the core writes nothing for never grows the section")
+
+            model.sessions[0].isBusy = false
+            expect(
+                model.structureSections.contains(.ddl), false,
+                "settled with no statement, the section is not offered")
         }
     }
 

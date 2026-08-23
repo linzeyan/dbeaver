@@ -3341,8 +3341,18 @@ final class AppModel {
     /// that has none of them, and an empty section still answers a question; a
     /// DDL section with nothing under it would offer to show a statement this
     /// build cannot write.
+    ///
+    /// While the details are still on their way it is offered wherever the core
+    /// writes statements for this database: every dialect the app speaks has a
+    /// DDL renderer, so the statement is coming, and a strip that gains DDL only
+    /// when it lands reshapes under the cursor at that moment. Where the core
+    /// writes no statements the placeholder never appears, so it cannot outlive
+    /// the load and vanish.
     var structureSections: [StructureDetail] {
-        StructureDetail.allCases.filter { $0 != .ddl || ddl != nil }
+        StructureDetail.allCases.filter {
+            $0 != .ddl || ddl != nil
+                || (isLoadingRelationDetail && capabilities.writesStatements)
+        }
     }
 
     /// How many rows a section holds, or nil for one that is not a list.
