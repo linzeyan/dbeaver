@@ -2923,6 +2923,19 @@ struct StatusBar: View {
                 .foregroundStyle(Theme.textSecondary.color)
                 .lineLimit(1)
 
+            // Attached to the sentence it acts on, like Stop and Load more
+            // below: "Disconnected — …" is the status line's sentence about
+            // this tab's connection, and the button that dials it again
+            // belongs beside the sentence rather than in a menu. The one way
+            // back besides ⌘K, and never pressed by anything but a person —
+            // there is no automatic reconnection anywhere.
+            if model.canRedial {
+                Button("Reconnect") { model.redial() }
+                    .buttonStyle(.link)
+                    .font(Theme.Typography.micro)
+                    .help("Dial the same server again — same bastion, timeout and keep-alive")
+            }
+
             // Attached to the sentence it acts on, for the reason Load more is
             // below: "8,192 rows → orders on staging…" is a sentence about
             // something still happening, and the button that ends it belongs

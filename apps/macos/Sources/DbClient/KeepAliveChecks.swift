@@ -31,6 +31,8 @@ enum KeepAliveChecks {
         checkOnlyOptedInIdleSessionsComeDue()
         checkASentPingMovesTheClockWhetherOrNotItAnswers()
         checkTheNoticeFiresOncePerDropAndOnlyInTheBackground()
+        checkReconnectIsOfferedExactlyToTheDroppedTab()
+        checkReconnectRedialsWhatThisTabWasOpenedWith()
         if failures == 0 {
             fputs("keep-alive: all checks passed\n", stderr)
         } else {
@@ -318,6 +320,109 @@ enum KeepAliveChecks {
         expect(
             session.connectionState, .failed,
             "while the dot still tells the truth — only the notice is off")
+    }
+
+    // MARK: - Reconnect
+
+    /// The button stands next to the disconnect sentence and nowhere else:
+    /// red with a handle. A tab whose connect attempt was refused has no
+    /// handle and gets the form, which is already the retry.
+    private static func checkReconnectIsOfferedExactlyToTheDroppedTab() {
+        let model = makeModel()
+        let session = model.sessions[0]
+
+        session.connectionState = .failed
+        expect(
+            model.canRedial, false,
+            "a tab that never held a connection is not offered a redial of nothing")
+
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-redial-\(UUID().uuidString).db")
+        defer { try? FileManager.default.removeItem(at: file) }
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        guard let db = try? Database(connString: "sqlite://\(file.path)") else {
+            failures += 1
+            fputs("keep-alive FAIL: a SQLite file would not open\n", stderr)
+            return
+        }
+        session.db = db
+
+        session.connectionState = .connected
+        expect(model.canRedial, false, "a healthy connection has nothing to reconnect")
+        session.connectionState = .failed
+        expect(model.canRedial, true, "a dropped one is offered the way back")
+    }
+
+    /// Reconnect re-dials what this tab was opened with — string, bastion,
+    /// patience, keep-alive rate, saved name — not what the form is showing.
+    ///
+    /// The two failure shapes this pins are both silent: a redial that read
+    /// the chooser's current row would dial whatever somebody happened to be
+    /// looking at, under this tab's name; and one that dropped staged edits on
+    /// the way would lose typing that a recovered server could still accept.
+    private static func checkReconnectRedialsWhatThisTabWasOpenedWith() {
+        let model = makeModel()
+        let dropped = model.sessions[0]
+        let file = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-redial-\(UUID().uuidString).db")
+        defer { try? FileManager.default.removeItem(at: file) }
+        FileManager.default.createFile(atPath: file.path, contents: nil)
+        guard let db = try? Database(connString: "sqlite://\(file.path)") else {
+            failures += 1
+            fputs("keep-alive FAIL: a SQLite file would not open\n", stderr)
+            return
+        }
+        dropped.db = db
+        dropped.connString = "sqlite://\(file.path)"
+        dropped.bastion = SshConfig(
+            host: "bastion.example", port: 2222, user: "ana", password: nil,
+            keyPath: "/home/ana/.ssh/id", passphrase: nil, knownHosts: "")
+        dropped.timeoutSeconds = 42
+        dropped.keepAliveSeconds = 45
+        dropped.savedName = "staging"
+        dropped.connectionColor = .red
+        dropped.safety = ConnectionSafety(isReadOnly: true, isProduction: true)
+        dropped.connectionState = .failed
+        // The chooser has moved on: the draft names a different server, which
+        // is exactly what a redial must not dial.
+        model.connectionDraft = SavedConnection(
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "other.example", port: "5432", database: "d",
+                user: "u"))
+
+        // Typing first: a redial with edits staged is refused by name, and the
+        // tab is left exactly as it was — Revert and a recovered server are
+        // both still on the table.
+        dropped.staged.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "typed")
+        model.redial()
+        expect(
+            model.sessions[0] === dropped, true,
+            "a redial that would lose staged edits does not happen")
+        expect(
+            model.errorMessage?.contains("1 change") ?? false, true,
+            "and the refusal counts what stopped it")
+
+        dropped.staged = StagedChanges()
+        model.redial()
+        let arriving = model.sessions[0]
+        expect(arriving === dropped, false, "the redial arrives in a fresh session")
+        expect(model.sessions.count, 1, "in the same tab, not a new one")
+        expect(
+            arriving.connString, dropped.connString,
+            "dialling the string this tab was opened with, not the form's row")
+        expect(
+            arriving.bastion?.host, "bastion.example",
+            "through the same bastion")
+        expect(arriving.timeoutSeconds, 42, "with the same patience")
+        expect(arriving.keepAliveSeconds, 45, "the same keep-alive rate")
+        expect(arriving.savedName, "staging", "and the same saved name")
+        expect(
+            arriving.connectionState, .connecting,
+            "as an attempt somebody can watch — never a silent background retry")
+        expect(arriving.connectionColor, .red, "the colour crosses, being the person's mark")
+        expect(
+            arriving.safety.isReadOnly && arriving.safety.isProduction, true,
+            "and so do the safety marks, for the same reason")
     }
 
     // MARK: - The unsaved-edits sentence

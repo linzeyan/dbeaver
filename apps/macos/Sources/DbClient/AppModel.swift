@@ -1684,6 +1684,60 @@ final class AppModel {
         return (databases ?? []).contains { $0.name == name && !$0.isCurrent }
     }
 
+    /// Whether the status bar's Reconnect has a dropped connection to dial.
+    ///
+    /// Red, and still holding a handle. The handle is what proves this tab
+    /// once had a connection to lose — a connect attempt that was refused has
+    /// no `db` and gets the form back instead, and the form is already the
+    /// place to retry it. Not while an attempt is in the air, which includes
+    /// the one this button just started.
+    var canRedial: Bool { connectionState == .failed && db != nil && !isConnecting }
+
+    /// Dials the connection this tab lost, with everything it was opened with.
+    ///
+    /// The same string, the same bastion, the same patience, the same
+    /// keep-alive rate, the same saved name — read off the session rather than
+    /// the form, for the reason `openDatabase` reads its own tab: by now the
+    /// chooser may be showing anything. And only ever from the button; the
+    /// probes and the keep-alive timer move the dot and stop, because dialling
+    /// a server on somebody's behalf is the decision this application does not
+    /// make.
+    ///
+    /// A fresh `Session` in the same tab, which is `switchDatabase`'s shape
+    /// for its reason: nearly every field on the old one describes rows read
+    /// over a connection that is gone. Staged edits are the one thing worth
+    /// stopping for — they are the person's typing, and a pooled driver that
+    /// redials on its own can still send them if the server came back — so
+    /// they refuse the redial by name. The dead transaction does not: it
+    /// ended when the connection did, and a refusal demanding a ROLLBACK
+    /// first would be demanding it of a socket that cannot carry one.
+    func redial() {
+        guard canRedial else { return }
+        if let work = staged.lostOnQuitting(withOpenTransaction: false) {
+            errorMessage =
+                "Send or revert \(Self.pluralized(work.changes, "change")) before reconnecting. "
+                + "If the server is back, the dot turns green and Save can still send them."
+            return
+        }
+        let leaving = session
+        let arriving = Session()
+        // The carry list is `switchDatabase`'s, and its rule: what moves is
+        // the person's, not the server's.
+        arriving.bastion = leaving.bastion
+        arriving.connectionColor = leaving.connectionColor
+        arriving.safety = leaving.safety
+        arriving.queryBuffers = leaving.queryBuffers
+        arriving.activeQueryBufferIndex = leaving.activeQueryBufferIndex
+        arriving.activeTab = leaving.activeTab
+        sessions[activeSession] = arriving
+        // In this order, for the reason `switchDatabase` gives: the tab is
+        // already the new session when the old one is let go of.
+        drain(leaving)
+        open(
+            leaving.connString, through: leaving.bastion, waiting: leaving.timeoutSeconds,
+            pinging: leaving.keepAliveSeconds, named: leaving.savedName)
+    }
+
     /// The bastion these settings describe, or nothing when they describe none.
     ///
     /// `nonisolated` and static because it is values in and a value out: it
