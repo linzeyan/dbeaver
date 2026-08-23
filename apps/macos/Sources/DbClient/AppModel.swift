@@ -5377,19 +5377,46 @@ final class AppModel {
     func recordHealth(_ alive: Bool, of asked: Session) {
         applying(to: asked) {
             switch (alive, connectionState) {
-            case (false, _):
+            case (false, let was):
                 connectionState = .failed
                 // Said in the status line as well as the dot, because the banner
                 // above it is showing the driver's own message and that message
                 // is about a statement. This is the sentence that is about the
                 // connection.
                 status = "Disconnected — Connect… (⌘K) opens it again"
+                // And said off screen, exactly once per drop, when nobody is
+                // looking at either. The transition is what gates it — a keep-
+                // alive pings a dead session every interval, and each failure
+                // lands here, so answering them all would turn one drop into a
+                // notification a minute. In front the dot and the sentence
+                // above already say it, which is why the front stays quiet.
+                if was != .failed, !isAppFrontmost(), preferences.notifiesOnDisconnect {
+                    deliverDisconnectNotice(connectionLabel)
+                }
             case (true, .failed):
                 connectionState = .connected
             case (true, _):
                 break
             }
         }
+    }
+
+    /// Whether this application's window is the one the person is looking at.
+    ///
+    /// Injectable for the reason the alert closures are: the answer gates the
+    /// disconnect notice, and a check has no way to genuinely background a
+    /// process that never made a window.
+    @ObservationIgnored
+    var isAppFrontmost: @MainActor () -> Bool = { NSApplication.shared.isActive }
+
+    /// Delivers the disconnect notice, given the dropped connection's label.
+    ///
+    /// The seam in front of `DisconnectNotice.deliver`, injectable so the rule
+    /// above — transition only, background only, setting on — stays pinned by
+    /// checks that count deliveries, whatever the delivery grows into.
+    @ObservationIgnored
+    var deliverDisconnectNotice: @MainActor (String) -> Void = { label in
+        DisconnectNotice.deliver(about: label)
     }
 
     /// Says where the server found the trouble, and puts the editor's selection

@@ -187,6 +187,19 @@ final class Preferences {
         didSet { store.set(keepAliveSeconds, forKey: Key.keepAliveSeconds) }
     }
 
+    /// Whether a connection going red while the window is in the background
+    /// posts a system notification.
+    ///
+    /// On, because the person who switched away is exactly the person the
+    /// window's own signals cannot reach: the dot turns red and the status
+    /// line names the way back, and nobody is looking at either. Off is for
+    /// whoever finds any notification too many — it is their notification
+    /// centre — and turning it off costs only that the dead tab waits to be
+    /// discovered, which is what it did before this existed.
+    var notifiesOnDisconnect: Bool {
+        didSet { store.set(notifiesOnDisconnect, forKey: Key.notifiesOnDisconnect) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -220,7 +233,8 @@ final class Preferences {
         Key.editorAutoIndent: true,
         Key.editorAutoPairs: true,
         Key.editorUppercasesKeywords: false,
-        Key.keepAliveSeconds: 60
+        Key.keepAliveSeconds: 60,
+        Key.notifiesOnDisconnect: true
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -237,6 +251,7 @@ final class Preferences {
         static let connectionStorage = "dev.dbclient.connectionStorage"
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let keepAliveSeconds = "dev.dbclient.keepAliveSeconds"
+        static let notifiesOnDisconnect = "dev.dbclient.notifiesOnDisconnect"
         static let shutConnectionFolders = "dev.dbclient.shutConnectionFolders"
         static let editorFontSize = "dev.dbclient.editorFontSize"
         static let editorTabWidth = "dev.dbclient.editorTabWidth"
@@ -296,6 +311,7 @@ final class Preferences {
         // rather than as an interval: there is no pinging backwards in time.
         let pinging = store.integer(forKey: Key.keepAliveSeconds)
         keepAliveSeconds = pinging < 0 ? 60 : pinging
+        notifiesOnDisconnect = store.bool(forKey: Key.notifiesOnDisconnect)
         shutConnectionFolders = Set(store.stringArray(forKey: Key.shutConnectionFolders) ?? [])
         editorFontSize = min(
             max(store.integer(forKey: Key.editorFontSize), Self.editorFontSizes.lowerBound),

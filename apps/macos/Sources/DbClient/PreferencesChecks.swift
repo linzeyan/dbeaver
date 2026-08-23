@@ -107,6 +107,9 @@ enum PreferencesChecks {
             fresh.keepAliveSeconds, 60,
             "an idle connection is pinged once a minute unless its entry says otherwise")
         expect(
+            fresh.notifiesOnDisconnect, true,
+            "a drop while the window is in the background is announced")
+        expect(
             fresh.shutConnectionFolders, [], "every connection folder starts open")
         expect(fresh.editorFontSize, 13, "the editor draws at the size it always has")
         expect(fresh.editorTabWidth, .four, "a tab is worth four columns, as Sequel Ace ships")
@@ -131,6 +134,7 @@ enum PreferencesChecks {
         first.passwordStorage = .thisMac
         first.connectionStorage = .iCloud
         first.keepAliveSeconds = 0
+        first.notifiesOnDisconnect = false
         first.shutConnectionFolders = ["clients/acme"]
         first.editorFontSize = 16
         first.editorTabWidth = .eight
@@ -151,6 +155,7 @@ enum PreferencesChecks {
         // could shadow: a store that dropped the write would read back as the
         // default, and "off" is the answer that must survive.
         expect(second.keepAliveSeconds, 0, "keep-alive switched off was kept")
+        expect(second.notifiesOnDisconnect, false, "the notice switched off was kept")
         expect(
             second.shutConnectionFolders, ["clients/acme"],
             "a folder somebody shut is still shut on the next launch")

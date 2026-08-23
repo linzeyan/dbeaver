@@ -30,6 +30,7 @@ enum KeepAliveChecks {
         checkTheDraftNamesKeepAliveAmongUnsavedEdits()
         checkOnlyOptedInIdleSessionsComeDue()
         checkASentPingMovesTheClockWhetherOrNotItAnswers()
+        checkTheNoticeFiresOncePerDropAndOnlyInTheBackground()
         if failures == 0 {
             fputs("keep-alive: all checks passed\n", stderr)
         } else {
@@ -264,6 +265,59 @@ enum KeepAliveChecks {
         expect(
             model.connectionsDueForKeepAlive(at: now.addingTimeInterval(30)).count, 1,
             "and the session is due again one whole interval later")
+    }
+
+    // MARK: - The disconnect notice
+
+    /// The notice fires on the transition to red, in the background, with the
+    /// setting on — and under no other combination.
+    ///
+    /// Counted through the seam rather than observed, because there is nothing
+    /// to observe: a notification posted over the window somebody is watching,
+    /// or one per failing ping against a session that is already dead, are
+    /// both wrong in ways no assertion on the model's own state can see. The
+    /// per-drop half matters most — keep-alive pings a dead session every
+    /// interval, and every failure runs through `recordHealth`.
+    private static func checkTheNoticeFiresOncePerDropAndOnlyInTheBackground() {
+        let model = makeModel()
+        let session = model.sessions[0]
+        session.connectionLabel = "sales@db.example"
+        session.connectionState = .connected
+
+        var delivered: [String] = []
+        model.deliverDisconnectNotice = { delivered.append($0) }
+        model.isAppFrontmost = { false }
+
+        model.recordHealth(false, of: session)
+        expect(
+            delivered, ["sales@db.example"],
+            "a drop in the background posts one notice, naming the connection")
+
+        model.recordHealth(false, of: session)
+        expect(
+            delivered.count, 1,
+            "a session already red is not re-announced by every failing ping")
+
+        // The pooled-driver recovery and a second drop: a new red is new news.
+        model.recordHealth(true, of: session)
+        model.recordHealth(false, of: session)
+        expect(delivered.count, 2, "a connection that recovered and dropped again is announced")
+
+        // In front, the dot and the status line already say it.
+        model.isAppFrontmost = { true }
+        model.recordHealth(true, of: session)
+        model.recordHealth(false, of: session)
+        expect(delivered.count, 2, "nothing is posted over the window somebody is watching")
+
+        // And the setting is a real off switch, not a suggestion.
+        model.isAppFrontmost = { false }
+        model.preferences.notifiesOnDisconnect = false
+        model.recordHealth(true, of: session)
+        model.recordHealth(false, of: session)
+        expect(delivered.count, 2, "with the setting off, the background stays quiet too")
+        expect(
+            session.connectionState, .failed,
+            "while the dot still tells the truth — only the notice is off")
     }
 
     // MARK: - The unsaved-edits sentence

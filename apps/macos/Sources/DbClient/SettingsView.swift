@@ -203,6 +203,14 @@ struct SettingsView: View {
                 + "cloud warehouses a ping is a billed API call keeping nothing alive.",
             unit: "seconds",
             value: $preferences.keepAliveSeconds)
+
+        SettingsToggle(
+            title: "Notify when a connection drops",
+            explanation:
+                "If a connection goes red while this window is in the background, macOS "
+                + "posts one notification naming it. Nothing is posted while the window "
+                + "is in front — the red dot and the status line already say it there.",
+            isOn: $preferences.notifiesOnDisconnect)
     }
 
     /// The data surface: what it leaves out, and what it asks before sending.
