@@ -71,9 +71,22 @@ pub enum ColumnType {
     /// carries no zone of its own.
     DateTime,
     Binary,
+    /// A field whose values are nested — a document or an array — as the JSON a
+    /// person would write.
+    ///
+    /// Utf8 like `Text`, and a separate type for one reason: so that something
+    /// downstream can tell a document from a string that happens to look like
+    /// one. `metadata::columns` reports this name, and the value viewer
+    /// re-indents a column that declares it rather than sniffing the value —
+    /// which would eventually meet a `Text` column holding `{}`.
+    ///
+    /// A field holding a document in one record and a string in another unifies
+    /// to `Text`, where no such promise is made.
+    Document,
     /// The catch-all, and the honest one. An ObjectId is its 24 hex digits, a
-    /// nested document is its JSON, a `Decimal128` is its digits — see
-    /// `type_of` for why each ended up here.
+    /// `Decimal128` is its digits, a field that held two irreconcilable types is
+    /// whichever text each value renders as — see `type_of` for why each ended
+    /// up here.
     Text,
 }
 
@@ -86,7 +99,7 @@ impl ColumnType {
             ColumnType::Float64 => DataType::Float64,
             ColumnType::DateTime => DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             ColumnType::Binary => DataType::Binary,
-            ColumnType::Text => DataType::Utf8,
+            ColumnType::Document | ColumnType::Text => DataType::Utf8,
         }
     }
 
@@ -122,7 +135,9 @@ impl ColumnType {
 ///   the strength of a sample and silently rescaling every value that disagrees.
 ///   For a type whose entire purpose is money, the digits as written are the
 ///   only safe answer. This is the sharpest loss in this file.
-/// - **Document and Array** are the top-level-only rule above.
+/// - **Document and Array** are the top-level-only rule above, and get a type of
+///   their own rather than falling into `Text`: the text is JSON, and saying so
+///   is what lets the value viewer re-indent it without guessing from the string.
 /// - **Regex, JavaScript, Symbol, DbPointer, MinKey, MaxKey, Timestamp** are
 ///   either operational internals or have no numeric or temporal reading. BSON's
 ///   `Timestamp` in particular is a replication counter, not a date, and showing
@@ -136,6 +151,7 @@ fn type_of(value: &Bson) -> Option<ColumnType> {
         Bson::Double(_) => Some(ColumnType::Float64),
         Bson::DateTime(_) => Some(ColumnType::DateTime),
         Bson::Binary(_) => Some(ColumnType::Binary),
+        Bson::Document(_) | Bson::Array(_) => Some(ColumnType::Document),
         _ => Some(ColumnType::Text),
     }
 }
@@ -220,6 +236,11 @@ fn fits(value: &Bson, ty: ColumnType) -> bool {
         (ColumnType::Float64, Bson::Double(_) | Bson::Int32(_)) => true,
         (ColumnType::DateTime, Bson::DateTime(_)) => true,
         (ColumnType::Binary, Bson::Binary(_)) => true,
+        // Narrower than `Text` on purpose. A string in a column that declares
+        // itself JSON would be a document the viewer then failed to parse, so it
+        // goes to `_extra` instead — where a value that did not fit its column
+        // has always gone.
+        (ColumnType::Document, Bson::Document(_) | Bson::Array(_)) => true,
         // Text takes anything, which is why `unify` falls back to it.
         (ColumnType::Text, _) => true,
         _ => false,
@@ -410,6 +431,21 @@ impl Shape {
                 for v in values {
                     match v {
                         Some(Bson::Binary(x)) => b.append_value(&x.bytes),
+                        _ => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            ColumnType::Document => {
+                let mut b = StringBuilder::new();
+                for v in values {
+                    match v {
+                        // The pair `fits` names: anything else in this column is
+                        // a null here and a JSON object in `_extra`, rather than
+                        // a bare string sitting under a type that says JSON.
+                        Some(nested @ (Bson::Document(_) | Bson::Array(_))) => {
+                            b.append_value(text_of(nested))
+                        }
                         _ => b.append_null(),
                     }
                 }
@@ -664,6 +700,52 @@ mod tests {
             .downcast_ref::<StringArray>()
             .expect("text");
         assert_eq!(cell.value(0), r#"{"city":"Taipei","zip":100}"#);
+    }
+
+    #[test]
+    fn a_nested_field_says_it_holds_a_document_rather_than_text() {
+        // The name `metadata::columns` reports, and the only thing that tells the
+        // value viewer this cell is worth re-indenting. As `Text` it stayed the
+        // one long line the grid cannot show either.
+        let docs = vec![doc! { "address": doc! { "city": "Taipei" } }];
+        assert_eq!(shape_of(&docs).columns()[0].1, ColumnType::Document);
+
+        // An array is the same kind of value and gets the same answer: `[1,2]`
+        // is JSON, and a reader opening it wants it laid out.
+        let arrays = vec![doc! { "tags": vec!["a", "b"] }];
+        assert_eq!(shape_of(&arrays).columns()[0].1, ColumnType::Document);
+    }
+
+    #[test]
+    fn a_field_holding_a_document_and_a_string_is_text_rather_than_either() {
+        // The type's whole promise is that the cell parses as JSON, and this
+        // field cannot keep it. Text promises nothing, so both values render.
+        let docs = vec![
+            doc! { "note": doc! { "body": "hi" } },
+            doc! { "note": "hi" },
+        ];
+        assert_eq!(shape_of(&docs).columns()[0].1, ColumnType::Text);
+    }
+
+    #[test]
+    fn a_string_arriving_in_a_document_column_goes_to_the_overflow() {
+        // The 1001st document, which is the case `_extra` is unconditional for:
+        // a uniform sample gives the column its type, and the string that turns
+        // up afterwards still has to be somewhere the reader can see it. If
+        // `fits` and the builder ever disagree about this pair, the value is a
+        // null cell and nothing else.
+        let sample = vec![doc! { "note": doc! { "body": "hi" } }];
+        let batch = shape_of(&sample)
+            .batch(&[doc! { "note": "plain text" }])
+            .expect("batch");
+        assert!(batch.column_by_name("note").expect("note").is_null(0));
+        let extra = batch
+            .column_by_name(EXTRA)
+            .expect("present")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("text");
+        assert_eq!(extra.value(0), r#"{"note":"plain text"}"#);
     }
 
     #[test]

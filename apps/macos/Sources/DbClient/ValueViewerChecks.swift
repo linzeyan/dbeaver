@@ -25,6 +25,7 @@ enum ValueViewerChecks {
         failures = 0
         MainActor.assumeIsolated {
             checkTheBoxStartsFromWhatIsStoredAndNotFromTheRendering()
+            checkAMongoDocumentColumnIsReadAsJSONAndItsNeighbourIsNot()
             checkAMultiLineValueArrivesWithItsLineBreaks()
             checkANullCellStartsEmptyRatherThanWithTheWord()
             checkABinaryValueIsRefusedRatherThanOfferedItsPreview()
@@ -59,6 +60,33 @@ enum ValueViewerChecks {
         expect(
             RenderedValue.make(from: cell).text == stored, false,
             "and the pane is showing something else, which is what makes this matter")
+    }
+
+    /// MongoDB's inferred `document` type gets the JSON rendering, and the text
+    /// catch-all beside it does not.
+    ///
+    /// The two halves of this agreement are in different languages — `shape.rs`
+    /// names the type, this file reads the name — and nothing carries the string
+    /// between them, so a check is the only thing holding them together. The
+    /// second assertion is the one that matters as much: a collection's ObjectId
+    /// columns arrive as `text`, and a rule loose enough to catch those would
+    /// hand every one of them to a JSON parser that fails.
+    @MainActor private static func checkAMongoDocumentColumnIsReadAsJSONAndItsNeighbourIsNot() {
+        expect(
+            ValueRendering.isJSONType("document"), true,
+            "the name `ColumnType::Document` reports, spelled the same on this side")
+        expect(
+            ValueRendering.isJSONType("text"), false,
+            "and the catch-all it was split out of stays text")
+
+        let stored = "{\"city\":\"Taipei\",\"zip\":100}"
+        let cell = cell(value: stored, type: "document", rendering: .json)
+        expect(
+            RenderedValue.make(from: cell).text.contains("\n"), true,
+            "a document is laid out over lines rather than left as the one the driver sent")
+        expect(
+            ValueEdit.offered(for: cell, obstacle: nil), .editable(stored),
+            "and the box still starts from what is stored, indentation and all")
     }
 
     /// A value with newlines in it arrives whole.

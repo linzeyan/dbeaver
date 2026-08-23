@@ -345,6 +345,34 @@ async fn a_collections_fields_are_found_by_looking_at_documents() {
 
 #[tokio::test]
 #[ignore = "requires a MongoDB server"]
+async fn a_nested_field_reports_the_type_name_the_value_viewer_reads() {
+    // The seam between the two halves of one decision. `ColumnType::Document` is
+    // a Rust variant; what crosses to the app is the string `metadata::columns`
+    // derives from its name, and `ValueRendering.isJSONType` matches that string
+    // to decide whether to lay the document out over lines. Nothing carries the
+    // name across, so renaming the variant would leave the unit tests on this
+    // side and the checks on that one both passing, with every document back on
+    // the single line the viewer exists to escape.
+    let (src, db) = fixture("a_nested_field_reports_the_type_name_the_viewer_reads").await;
+    let columns = src.columns(&db, "kinds").await.expect("columns");
+    let named = |name: &str| {
+        columns
+            .iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("{name} should be a column of kinds"))
+            .data_type
+            .clone()
+    };
+
+    assert_eq!(named("nested"), "document");
+    assert_eq!(named("list"), "document", "an array is nested too");
+    // And the catch-all this was split out of keeps its own name: a column of
+    // ObjectIds must never be handed to a JSON parser.
+    assert_eq!(named("text"), "text");
+}
+
+#[tokio::test]
+#[ignore = "requires a MongoDB server"]
 async fn a_view_states_what_it_is_a_view_on() {
     let (src, db) = fixture("a_view_states_what_it_is_a_view_on").await;
     let definition = src

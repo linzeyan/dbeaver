@@ -26,22 +26,34 @@ import SwiftUI
 /// worse, would eventually meet a value that looks like JSON and is not.
 enum ValueRendering {
     case text
-    /// A `json`/`jsonb` column, by PostgreSQL's declared type. The Arrow schema
-    /// cannot say it — the driver maps both to Utf8 — so this is only known for
-    /// a browsed relation. The Query pane gets `.text` for the same reason the
-    /// grid header falls back there: a statement's columns need not come from
-    /// any relation, and matching them by name against the browsed one would
-    /// claim a type they do not have.
+    /// A column whose declared type says its values are JSON. The Arrow schema
+    /// cannot say it — every driver maps these to Utf8 — so this is only known
+    /// for a browsed relation. The Query pane gets `.text` for the same reason
+    /// the grid header falls back there: a statement's columns need not come
+    /// from any relation, and matching them by name against the browsed one
+    /// would claim a type they do not have.
     case json
     /// An Arrow binary column, with the cell's bytes. Carried here rather than
     /// re-read on demand because the read has to happen while the batch is
     /// alive, and the view is drawn after the model has finished with it.
     case binary([UInt8])
 
-    /// Whether a declared PostgreSQL type is one whose values are JSON.
+    /// Whether a declared type is one whose values are JSON.
+    ///
+    /// `json` and `jsonb` are PostgreSQL's, and MySQL, ClickHouse and DuckDB all
+    /// spell theirs `json` too. `document` is MongoDB's, which has no declared
+    /// types of its own: its columns are inferred from a sample, and a field
+    /// whose values were all documents or arrays says so rather than falling
+    /// into the text catch-all with the ObjectIds — see `ColumnType::Document`
+    /// in `shape.rs` for the other half of this agreement. The name is the
+    /// contract, spelled in both places because nothing carries it across.
+    ///
+    /// The list is of types, never of what a value looks like. A `text` column
+    /// holding `{}` is text, and the day one holds something that is nearly JSON
+    /// is the day sniffing puts a parse failure where a value used to be.
     static func isJSONType(_ declared: String) -> Bool {
         let name = declared.lowercased()
-        return name == "json" || name == "jsonb"
+        return name == "json" || name == "jsonb" || name == "document"
     }
 
     /// The one-line form of a binary cell, for the strip.
