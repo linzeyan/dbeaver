@@ -23,6 +23,7 @@ enum EditorTyping {
         var tabWidth: Int
         var softTabs: Bool
         var autoIndent: Bool
+        var autoPairs: Bool
     }
 
     /// One replacement to make instead of the keystroke's default: `insert`
@@ -83,6 +84,71 @@ enum EditorTyping {
             repeating: " ", count: rules.tabWidth - column % rules.tabWidth)
         let after = selection.lowerBound + insert.unicodeScalars.count
         return Edit(replacing: selection, insert: insert, selection: after..<after)
+    }
+
+    /// What typing one character becomes when brackets and quotes pair: the
+    /// partner arrives around the caret, a selection is wrapped instead of
+    /// replaced, and typing a closer that is already at the caret walks past
+    /// it. Nil whenever the plain insertion is right — including for every
+    /// character that is not `(`, `[`, `'` or `"`.
+    ///
+    /// Walking past is what makes the pair cost nothing to people who type
+    /// both halves out of habit: their closing keystroke lands where their
+    /// hands expect the caret, instead of minting a second closer. The rule is
+    /// by adjacency rather than by remembering which closer this editor
+    /// inserted — Sequel Ace tracks that with a text attribute, and the
+    /// machinery buys one distinction (walking past a closer somebody typed
+    /// themselves) that adjacency gets wrong in no case anyone has named.
+    ///
+    /// A quote does not pair against a word — `don` + `'` must be `don'`, not
+    /// `don''` — where a bracket does, because `f(` opening a call is exactly
+    /// where the pair earns its keep. Same exception Sequel Ace makes.
+    static func pairedInsertion(
+        of typed: String, in text: String, selection: Range<Int>, rules: Rules
+    ) -> Edit? {
+        guard rules.autoPairs, typed.unicodeScalars.count == 1,
+            let scalar = typed.unicodeScalars.first
+        else { return nil }
+        let scalars = Array(text.unicodeScalars)
+
+        if selection.isEmpty, ")]'\"".unicodeScalars.contains(scalar),
+            selection.lowerBound < scalars.count, scalars[selection.lowerBound] == scalar
+        {
+            let after = selection.lowerBound + 1
+            return Edit(replacing: selection, insert: "", selection: after..<after)
+        }
+
+        let closer: Unicode.Scalar
+        switch scalar {
+        case "(": closer = ")"
+        case "[": closer = "]"
+        case "'", "\"": closer = scalar
+        default: return nil
+        }
+
+        if !selection.isEmpty {
+            guard selection.upperBound <= scalars.count else { return nil }
+            let wrapped = String(
+                String.UnicodeScalarView(scalars[selection.lowerBound..<selection.upperBound]))
+            return Edit(
+                replacing: selection,
+                insert: typed + wrapped + String(closer),
+                selection: (selection.lowerBound + 1)..<(selection.upperBound + 1))
+        }
+
+        if scalar == "'" || scalar == "\"" {
+            let caret = selection.lowerBound
+            if caret > 0, caret <= scalars.count, isWord(scalars[caret - 1]) { return nil }
+            if caret < scalars.count, isWord(scalars[caret]) { return nil }
+        }
+
+        let caret = selection.lowerBound + 1
+        return Edit(
+            replacing: selection, insert: typed + String(closer), selection: caret..<caret)
+    }
+
+    private static func isWord(_ scalar: Unicode.Scalar) -> Bool {
+        scalar == "_" || CharacterSet.alphanumerics.contains(scalar)
     }
 
     private static func startOfLine(before offset: Int, in scalars: [Unicode.Scalar]) -> Int {

@@ -25,6 +25,10 @@ enum EditorTypingChecks {
         checkReturnReplacesTheSelectionItLandsOn()
         checkTabBecomesSpacesOnlyWhileTheSettingSaysSo()
         checkSoftTabsStopAtTheColumnsHardTabsWouldReach()
+        checkAnOpeningCharacterBringsItsPartnerOnlyWhileTheSettingSaysSo()
+        checkTypingTheCloserWalksPastInsteadOfDoubling()
+        checkASelectionIsWrappedNotReplaced()
+        checkAQuoteStaysSingleAgainstAWord()
         if failures == 0 {
             fputs("editor-typing: all checks passed\n", stderr)
         } else {
@@ -118,18 +122,99 @@ enum EditorTypingChecks {
             "and the count starts at this line, not at the top of the buffer")
     }
 
+    // MARK: - Auto-pair
+
+    /// Each of the four pairs arrives whole with the caret inside it, and none
+    /// of them arrives with the setting off.
+    private static func checkAnOpeningCharacterBringsItsPartnerOnlyWhileTheSettingSaysSo() {
+        expect(
+            EditorTyping.pairedInsertion(of: "(", in: "select ", selection: 7..<7, rules: pairing),
+            EditorTyping.Edit(replacing: 7..<7, insert: "()", selection: 8..<8),
+            "a parenthesis brings its partner, caret between them")
+        expect(
+            EditorTyping.pairedInsertion(of: "[", in: "", selection: 0..<0, rules: pairing),
+            EditorTyping.Edit(replacing: 0..<0, insert: "[]", selection: 1..<1),
+            "and so does a bracket")
+        expect(
+            EditorTyping.pairedInsertion(of: "'", in: "x = ", selection: 4..<4, rules: pairing),
+            EditorTyping.Edit(replacing: 4..<4, insert: "''", selection: 5..<5),
+            "and a single quote")
+        expect(
+            EditorTyping.pairedInsertion(of: "\"", in: "x = ", selection: 4..<4, rules: pairing),
+            EditorTyping.Edit(replacing: 4..<4, insert: "\"\"", selection: 5..<5),
+            "and a double quote")
+        expect(
+            EditorTyping.pairedInsertion(of: "a", in: "", selection: 0..<0, rules: pairing),
+            nil, "an ordinary character is none of the rule's business")
+        expect(
+            EditorTyping.pairedInsertion(of: "(", in: "select ", selection: 7..<7, rules: plain),
+            nil, "and with the setting off the rule stands aside entirely")
+    }
+
+    /// Typing the closer that is already at the caret moves past it.
+    ///
+    /// This is what makes the pair free for people who type both halves out of
+    /// habit: their closing keystroke lands where their hands expect the
+    /// caret, instead of minting `))`.
+    private static func checkTypingTheCloserWalksPastInsteadOfDoubling() {
+        expect(
+            EditorTyping.pairedInsertion(of: ")", in: "f()", selection: 2..<2, rules: pairing),
+            EditorTyping.Edit(replacing: 2..<2, insert: "", selection: 3..<3),
+            "a closing parenthesis at the caret is walked past, not doubled")
+        expect(
+            EditorTyping.pairedInsertion(of: "'", in: "''", selection: 1..<1, rules: pairing),
+            EditorTyping.Edit(replacing: 1..<1, insert: "", selection: 2..<2),
+            "and so is the closing half of a quote pair")
+        expect(
+            EditorTyping.pairedInsertion(of: ")", in: "f(x", selection: 3..<3, rules: pairing),
+            nil, "a closer with nothing to walk past is typed as itself")
+    }
+
+    /// An opening character over a selection wraps it, still selected, so a
+    /// second pair can be stacked without re-selecting.
+    private static func checkASelectionIsWrappedNotReplaced() {
+        expect(
+            EditorTyping.pairedInsertion(of: "(", in: "abc", selection: 0..<3, rules: pairing),
+            EditorTyping.Edit(replacing: 0..<3, insert: "(abc)", selection: 1..<4),
+            "the selection survives inside the pair instead of being typed over")
+        expect(
+            EditorTyping.pairedInsertion(of: "'", in: "abc", selection: 0..<3, rules: pairing),
+            EditorTyping.Edit(replacing: 0..<3, insert: "'abc'", selection: 1..<4),
+            "quotes wrap too — the fastest way to turn a word into a literal")
+    }
+
+    /// A quote against a word stays single — `don` + `'` is `don'`, not
+    /// `don''` — while a bracket pairs there, because `f(` opening a call is
+    /// exactly where the pair earns its keep.
+    private static func checkAQuoteStaysSingleAgainstAWord() {
+        expect(
+            EditorTyping.pairedInsertion(of: "'", in: "don", selection: 3..<3, rules: pairing),
+            nil, "an apostrophe after a word is an apostrophe")
+        expect(
+            EditorTyping.pairedInsertion(of: "'", in: "x", selection: 0..<0, rules: pairing),
+            nil, "and before a word, the head of a quote being typed around it")
+        expect(
+            EditorTyping.pairedInsertion(of: "(", in: "f", selection: 1..<1, rules: pairing),
+            EditorTyping.Edit(replacing: 1..<1, insert: "()", selection: 2..<2),
+            "a parenthesis after a word still pairs — that is a call being opened")
+    }
+
     // MARK: - Harness
 
-    /// Auto-indent alone, which is the shipped default.
+    /// Auto-indent alone, so each suite exercises its own rule.
     private static let indenting = EditorTyping.Rules(
-        tabWidth: 4, softTabs: false, autoIndent: true)
+        tabWidth: 4, softTabs: false, autoIndent: true, autoPairs: false)
+
+    /// Auto-pair alone, likewise.
+    private static let pairing = EditorTyping.Rules(
+        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: true)
 
     /// Every rule off, for the nil half of each check.
     private static let plain = EditorTyping.Rules(
-        tabWidth: 4, softTabs: false, autoIndent: false)
+        tabWidth: 4, softTabs: false, autoIndent: false, autoPairs: false)
 
     private static func soft(_ width: Int) -> EditorTyping.Rules {
-        EditorTyping.Rules(tabWidth: width, softTabs: true, autoIndent: true)
+        EditorTyping.Rules(tabWidth: width, softTabs: true, autoIndent: true, autoPairs: false)
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

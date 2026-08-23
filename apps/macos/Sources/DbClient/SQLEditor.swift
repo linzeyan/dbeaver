@@ -433,6 +433,21 @@ struct SQLEditor: NSViewRepresentable {
             }
         }
 
+        /// Offers a typed string to the auto-pair rule and applies its answer.
+        /// False when the plain insertion is right, which hands the keystroke
+        /// back to the text view.
+        ///
+        /// Guarded against `accepting` because an accepted completion arrives
+        /// through `insertText` too, and an offer ending in `(` must not grow
+        /// a second parenthesis on the way in.
+        fileprivate func pair(_ typed: String) -> Bool {
+            guard !accepting else { return false }
+            return apply(
+                EditorTyping.pairedInsertion(
+                    of: typed, in: cachedString, selection: scalarSelection(),
+                    rules: parent.typing))
+        }
+
         /// The selection as the scalar offsets the typing rules read.
         private func scalarSelection() -> Range<Int> {
             guard let textView else { return 0..<0 }
@@ -837,5 +852,23 @@ final class EditorTextView: NSTextView {
 
     override func complete(_ sender: Any?) {
         editor?.askForOffers(unprompted: true)
+    }
+
+    /// Where auto-pair intercepts a keystroke, because a plain character does
+    /// not come through `doCommandBy` — this is the first override it reaches.
+    ///
+    /// Only typed text with no explicit range is offered to the rule: an IME
+    /// composition and the coordinator's own edits both name a range, and a
+    /// composition must reach AppKit whole or dead keys stop composing. The
+    /// coordinator's insertions pass a concrete range too, which is what keeps
+    /// applying a pair from re-entering this override.
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        if replacementRange.location == NSNotFound, !hasMarkedText(),
+            let typed = insertString as? String,
+            editor?.pair(typed) == true
+        {
+            return
+        }
+        super.insertText(insertString, replacementRange: replacementRange)
     }
 }

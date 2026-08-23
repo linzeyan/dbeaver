@@ -147,6 +147,19 @@ final class Preferences {
         didSet { store.set(editorAutoIndent, forKey: Key.editorAutoIndent) }
     }
 
+    /// Whether typing an opening bracket or quote in the SQL editor also
+    /// writes its partner.
+    ///
+    /// On, Sequel Ace's default. The partner arrives around the caret, a
+    /// selection is wrapped instead of replaced, and typing the closer walks
+    /// past the one already there. The cost falls on the habit of typing both
+    /// halves oneself — the closing keystroke moves the caret instead of
+    /// adding a character, which reads as a swallowed key until the habit
+    /// adjusts.
+    var editorAutoPairs: Bool {
+        didSet { store.set(editorAutoPairs, forKey: Key.editorAutoPairs) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -177,7 +190,8 @@ final class Preferences {
         Key.editorFontSize: 13,
         Key.editorTabWidth: EditorTabWidth.four.rawValue,
         Key.editorSoftTabs: false,
-        Key.editorAutoIndent: true
+        Key.editorAutoIndent: true,
+        Key.editorAutoPairs: true
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -198,6 +212,7 @@ final class Preferences {
         static let editorTabWidth = "dev.dbclient.editorTabWidth"
         static let editorSoftTabs = "dev.dbclient.editorSoftTabs"
         static let editorAutoIndent = "dev.dbclient.editorAutoIndent"
+        static let editorAutoPairs = "dev.dbclient.editorAutoPairs"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -224,7 +239,8 @@ final class Preferences {
         EditorTyping.Rules(
             tabWidth: editorTabWidth.rawValue,
             softTabs: editorSoftTabs,
-            autoIndent: editorAutoIndent)
+            autoIndent: editorAutoIndent,
+            autoPairs: editorAutoPairs)
     }
 
     /// The store is injectable so that a check can be given a scratch one; see
@@ -254,6 +270,7 @@ final class Preferences {
             EditorTabWidth(rawValue: store.integer(forKey: Key.editorTabWidth)) ?? .four
         editorSoftTabs = store.bool(forKey: Key.editorSoftTabs)
         editorAutoIndent = store.bool(forKey: Key.editorAutoIndent)
+        editorAutoPairs = store.bool(forKey: Key.editorAutoPairs)
     }
 }
 
