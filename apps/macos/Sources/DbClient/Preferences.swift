@@ -200,6 +200,62 @@ final class Preferences {
         didSet { store.set(notifiesOnDisconnect, forKey: Key.notifiesOnDisconnect) }
     }
 
+    /// The colours the SQL editor draws with, each kept as a hex string —
+    /// `#RRGGBB`, or `#RRGGBBAA` where the tone is translucent.
+    ///
+    /// Eleven properties rather than a theme object in the store, because that
+    /// is what every preference here is: a key somebody can read and edit in
+    /// the plist, defaulted in `registered`, one line each. Hex rather than the
+    /// archived `NSColor` data Sequel Ace keeps under its
+    /// `SPCustomQueryEditor*Color` keys, because a colour a person can read in
+    /// a plist is one they can carry in dotfiles and fix by hand. The resolved
+    /// layer the editor draws from is `editorTheme`, below; a value that fails
+    /// to parse is folded back to the default at init, the way an out-of-range
+    /// font size is, so no misspelt plist draws black.
+    var editorBackgroundColor: String {
+        didSet { store.set(editorBackgroundColor, forKey: Key.editorBackgroundColor) }
+    }
+
+    var editorTextColor: String {
+        didSet { store.set(editorTextColor, forKey: Key.editorTextColor) }
+    }
+
+    var editorKeywordColor: String {
+        didSet { store.set(editorKeywordColor, forKey: Key.editorKeywordColor) }
+    }
+
+    var editorStringColor: String {
+        didSet { store.set(editorStringColor, forKey: Key.editorStringColor) }
+    }
+
+    var editorDollarQuotedColor: String {
+        didSet { store.set(editorDollarQuotedColor, forKey: Key.editorDollarQuotedColor) }
+    }
+
+    var editorNumberColor: String {
+        didSet { store.set(editorNumberColor, forKey: Key.editorNumberColor) }
+    }
+
+    var editorQuotedIdentifierColor: String {
+        didSet { store.set(editorQuotedIdentifierColor, forKey: Key.editorQuotedIdentifierColor) }
+    }
+
+    var editorCommentColor: String {
+        didSet { store.set(editorCommentColor, forKey: Key.editorCommentColor) }
+    }
+
+    var editorCaretColor: String {
+        didSet { store.set(editorCaretColor, forKey: Key.editorCaretColor) }
+    }
+
+    var editorSelectionColor: String {
+        didSet { store.set(editorSelectionColor, forKey: Key.editorSelectionColor) }
+    }
+
+    var editorStatementColor: String {
+        didSet { store.set(editorStatementColor, forKey: Key.editorStatementColor) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -234,7 +290,18 @@ final class Preferences {
         Key.editorAutoPairs: true,
         Key.editorUppercasesKeywords: false,
         Key.keepAliveSeconds: 60,
-        Key.notifiesOnDisconnect: true
+        Key.notifiesOnDisconnect: true,
+        Key.editorBackgroundColor: EditorTheme.defaults.background.hex,
+        Key.editorTextColor: EditorTheme.defaults.text.hex,
+        Key.editorKeywordColor: EditorTheme.defaults.keyword.hex,
+        Key.editorStringColor: EditorTheme.defaults.string.hex,
+        Key.editorDollarQuotedColor: EditorTheme.defaults.dollarQuoted.hex,
+        Key.editorNumberColor: EditorTheme.defaults.number.hex,
+        Key.editorQuotedIdentifierColor: EditorTheme.defaults.quotedIdentifier.hex,
+        Key.editorCommentColor: EditorTheme.defaults.comment.hex,
+        Key.editorCaretColor: EditorTheme.defaults.caret.hex,
+        Key.editorSelectionColor: EditorTheme.defaults.selection.hex,
+        Key.editorStatementColor: EditorTheme.defaults.statement.hex
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -259,6 +326,17 @@ final class Preferences {
         static let editorAutoIndent = "dev.dbclient.editorAutoIndent"
         static let editorAutoPairs = "dev.dbclient.editorAutoPairs"
         static let editorUppercasesKeywords = "dev.dbclient.editorUppercasesKeywords"
+        static let editorBackgroundColor = "dev.dbclient.editorBackgroundColor"
+        static let editorTextColor = "dev.dbclient.editorTextColor"
+        static let editorKeywordColor = "dev.dbclient.editorKeywordColor"
+        static let editorStringColor = "dev.dbclient.editorStringColor"
+        static let editorDollarQuotedColor = "dev.dbclient.editorDollarQuotedColor"
+        static let editorNumberColor = "dev.dbclient.editorNumberColor"
+        static let editorQuotedIdentifierColor = "dev.dbclient.editorQuotedIdentifierColor"
+        static let editorCommentColor = "dev.dbclient.editorCommentColor"
+        static let editorCaretColor = "dev.dbclient.editorCaretColor"
+        static let editorSelectionColor = "dev.dbclient.editorSelectionColor"
+        static let editorStatementColor = "dev.dbclient.editorStatementColor"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -288,6 +366,68 @@ final class Preferences {
             autoIndent: editorAutoIndent,
             autoPairs: editorAutoPairs,
             uppercasesKeywords: editorUppercasesKeywords)
+    }
+
+    /// What the editor draws with, resolved: each slot the user's colour where
+    /// one was set, the palette's where not. Gathered once, for the reason
+    /// `editorTyping` is.
+    ///
+    /// A stored value equal to the default's own spelling resolves to the
+    /// palette tone itself rather than through the codec, so the Default theme
+    /// is *exactly* the colours this build has always drawn — not a copy
+    /// quantised through hex digits, which for the translucent selection band
+    /// would be off by a part in a thousand. The parse fallback is that same
+    /// palette tone: after init the two cannot disagree, but a resolver that
+    /// could hand back black would be one bug away from doing it.
+    var editorTheme: EditorTheme {
+        EditorTheme(
+            background: Self.tone(editorBackgroundColor, or: EditorTheme.defaults.background),
+            text: Self.tone(editorTextColor, or: EditorTheme.defaults.text),
+            keyword: Self.tone(editorKeywordColor, or: EditorTheme.defaults.keyword),
+            string: Self.tone(editorStringColor, or: EditorTheme.defaults.string),
+            dollarQuoted: Self.tone(editorDollarQuotedColor, or: EditorTheme.defaults.dollarQuoted),
+            number: Self.tone(editorNumberColor, or: EditorTheme.defaults.number),
+            quotedIdentifier: Self.tone(
+                editorQuotedIdentifierColor, or: EditorTheme.defaults.quotedIdentifier),
+            comment: Self.tone(editorCommentColor, or: EditorTheme.defaults.comment),
+            caret: Self.tone(editorCaretColor, or: EditorTheme.defaults.caret),
+            selection: Self.tone(editorSelectionColor, or: EditorTheme.defaults.selection),
+            statement: Self.tone(editorStatementColor, or: EditorTheme.defaults.statement))
+    }
+
+    /// Whether any editor colour differs from the palette: the fact the Theme
+    /// menu shows. Derived rather than stored, so it cannot disagree with the
+    /// colours — a kept "Custom" flag would be a twelfth value to reset.
+    var editorThemeIsCustom: Bool { editorTheme != EditorTheme.defaults }
+
+    /// Every editor colour back to the palette: the Reset control, and what
+    /// choosing Default in the Theme menu means.
+    func resetEditorTheme() {
+        editorBackgroundColor = EditorTheme.defaults.background.hex
+        editorTextColor = EditorTheme.defaults.text.hex
+        editorKeywordColor = EditorTheme.defaults.keyword.hex
+        editorStringColor = EditorTheme.defaults.string.hex
+        editorDollarQuotedColor = EditorTheme.defaults.dollarQuoted.hex
+        editorNumberColor = EditorTheme.defaults.number.hex
+        editorQuotedIdentifierColor = EditorTheme.defaults.quotedIdentifier.hex
+        editorCommentColor = EditorTheme.defaults.comment.hex
+        editorCaretColor = EditorTheme.defaults.caret.hex
+        editorSelectionColor = EditorTheme.defaults.selection.hex
+        editorStatementColor = EditorTheme.defaults.statement.hex
+    }
+
+    /// One slot resolved; see `editorTheme`.
+    private static func tone(_ kept: String, or fallback: Theme.Tone) -> Theme.Tone {
+        kept == fallback.hex ? fallback : (Theme.Tone(hex: kept) ?? fallback)
+    }
+
+    /// What a colour read off the disk becomes: its canonical spelling, or the
+    /// default's where it does not parse. Canonical because "is this still the
+    /// default?" is asked of strings, and `#a78bfa` hand-typed in lower case
+    /// is the default keyword colour, not a custom theme.
+    private static func colour(_ raw: String?, or fallback: Theme.Tone) -> String {
+        guard let raw, let parsed = Theme.Tone(hex: raw) else { return fallback.hex }
+        return parsed.hex
     }
 
     /// The store is injectable so that a check can be given a scratch one; see
@@ -324,6 +464,33 @@ final class Preferences {
         editorAutoIndent = store.bool(forKey: Key.editorAutoIndent)
         editorAutoPairs = store.bool(forKey: Key.editorAutoPairs)
         editorUppercasesKeywords = store.bool(forKey: Key.editorUppercasesKeywords)
+        // A colour that does not parse reads as the palette's own, for the
+        // reason `passwordStorage` gives — and never as black, which is what
+        // most colour APIs quietly make of a misspelt string.
+        editorBackgroundColor = Self.colour(
+            store.string(forKey: Key.editorBackgroundColor), or: EditorTheme.defaults.background)
+        editorTextColor = Self.colour(
+            store.string(forKey: Key.editorTextColor), or: EditorTheme.defaults.text)
+        editorKeywordColor = Self.colour(
+            store.string(forKey: Key.editorKeywordColor), or: EditorTheme.defaults.keyword)
+        editorStringColor = Self.colour(
+            store.string(forKey: Key.editorStringColor), or: EditorTheme.defaults.string)
+        editorDollarQuotedColor = Self.colour(
+            store.string(forKey: Key.editorDollarQuotedColor),
+            or: EditorTheme.defaults.dollarQuoted)
+        editorNumberColor = Self.colour(
+            store.string(forKey: Key.editorNumberColor), or: EditorTheme.defaults.number)
+        editorQuotedIdentifierColor = Self.colour(
+            store.string(forKey: Key.editorQuotedIdentifierColor),
+            or: EditorTheme.defaults.quotedIdentifier)
+        editorCommentColor = Self.colour(
+            store.string(forKey: Key.editorCommentColor), or: EditorTheme.defaults.comment)
+        editorCaretColor = Self.colour(
+            store.string(forKey: Key.editorCaretColor), or: EditorTheme.defaults.caret)
+        editorSelectionColor = Self.colour(
+            store.string(forKey: Key.editorSelectionColor), or: EditorTheme.defaults.selection)
+        editorStatementColor = Self.colour(
+            store.string(forKey: Key.editorStatementColor), or: EditorTheme.defaults.statement)
     }
 }
 

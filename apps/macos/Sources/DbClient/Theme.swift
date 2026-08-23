@@ -224,6 +224,11 @@ enum Theme {
         /// the page" tone rather than a colour of its own: this mark says where the
         /// partner is, and a hue would compete with the token colours it sits under.
         static let bracketMatch = Theme.surfaceRaised
+        /// The band behind the statement ⌘R would run, when the buffer holds
+        /// several. The same "lifted off the page" family as `bracketMatch`,
+        /// one step below it: this mark covers whole lines of tokens, and at
+        /// `surfaceRaised`'s strength it would read as a selection.
+        static let statement = Theme.surface
     }
 
     // MARK: - Spacing

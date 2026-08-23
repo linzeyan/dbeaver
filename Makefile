@@ -348,6 +348,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-editor-typing
 	./$(APP_BIN) --verify-find-bar
 	./$(APP_BIN) --verify-keep-alive
+	./$(APP_BIN) --verify-editor-theme
 
 # The settings checked against a live window rather than as rules on their own.
 # Separate from `test-swift`, which is the set of checks that need no server:
