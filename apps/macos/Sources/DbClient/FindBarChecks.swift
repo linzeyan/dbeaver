@@ -71,7 +71,9 @@ enum FindBarChecks {
         let hosting = NSHostingView(
             rootView: SQLEditor(
                 text: .constant("select 1"), selection: .constant(nil), scheme: "postgres",
-                fontSize: 13, offers: { _, _, _ in }))
+                fontSize: 13,
+                typing: EditorTyping.Rules(tabWidth: 4, softTabs: false, autoIndent: true),
+                offers: { _, _, _ in }))
         hosting.frame = NSRect(x: 0, y: 0, width: 400, height: 200)
         hosting.layoutSubtreeIfNeeded()
         guard let textView = textView(under: hosting) else {

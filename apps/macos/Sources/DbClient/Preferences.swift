@@ -113,6 +113,40 @@ final class Preferences {
         didSet { store.set(editorFontSize, forKey: Key.editorFontSize) }
     }
 
+    /// How many columns a tab is worth in the SQL editor: the width a hard tab
+    /// displays at, and the stop soft tabs indent to.
+    ///
+    /// Four, which is Sequel Ace's default and the width most SQL in
+    /// circulation is formatted to; eight is offered because it is the other
+    /// answer terminals have ever given. A choice of two rather than a number
+    /// field, because every value in between is a width nobody's files use and
+    /// a control that offers it invites drift from what the rest of the team
+    /// sees.
+    var editorTabWidth: EditorTabWidth {
+        didSet { store.set(editorTabWidth.rawValue, forKey: Key.editorTabWidth) }
+    }
+
+    /// Whether Tab in the SQL editor writes spaces up to the next tab stop
+    /// instead of a tab character.
+    ///
+    /// Off, which is the tab character — Sequel Ace's default. Soft tabs make
+    /// the indentation the same columns in every editor the file ever visits,
+    /// at the cost that Backspace undoes it a space at a time.
+    var editorSoftTabs: Bool {
+        didSet { store.set(editorSoftTabs, forKey: Key.editorSoftTabs) }
+    }
+
+    /// Whether Return in the SQL editor carries the current line's leading
+    /// whitespace onto the new line.
+    ///
+    /// On, Sequel Ace's default: multi-line SQL is written indented under its
+    /// clause, and re-typing the indent on every line is the cost of turning
+    /// this off. The cost of on is one habit — leaving an indented block means
+    /// deleting the indent Return just gave you.
+    var editorAutoIndent: Bool {
+        didSet { store.set(editorAutoIndent, forKey: Key.editorAutoIndent) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -140,7 +174,10 @@ final class Preferences {
         Key.usesTranslucentSidebar: false,
         Key.connectionStorage: ConnectionStorage.thisMac.rawValue,
         Key.shutConnectionFolders: [String](),
-        Key.editorFontSize: 13
+        Key.editorFontSize: 13,
+        Key.editorTabWidth: EditorTabWidth.four.rawValue,
+        Key.editorSoftTabs: false,
+        Key.editorAutoIndent: true
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -158,6 +195,9 @@ final class Preferences {
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let shutConnectionFolders = "dev.dbclient.shutConnectionFolders"
         static let editorFontSize = "dev.dbclient.editorFontSize"
+        static let editorTabWidth = "dev.dbclient.editorTabWidth"
+        static let editorSoftTabs = "dev.dbclient.editorSoftTabs"
+        static let editorAutoIndent = "dev.dbclient.editorAutoIndent"
     }
 
     /// Where the remembered connection is kept, read straight out of a store.
@@ -176,6 +216,16 @@ final class Preferences {
     }
 
     @ObservationIgnored private let store: UserDefaults
+
+    /// What the editor's typing rules read, gathered once. The editor takes
+    /// this value rather than the object around it, so the rules stay checkable
+    /// as plain data — see `EditorTyping.Rules`.
+    var editorTyping: EditorTyping.Rules {
+        EditorTyping.Rules(
+            tabWidth: editorTabWidth.rawValue,
+            softTabs: editorSoftTabs,
+            autoIndent: editorAutoIndent)
+    }
 
     /// The store is injectable so that a check can be given a scratch one; see
     /// `--verify-preferences`, which has to set each of these both ways and must
@@ -198,5 +248,24 @@ final class Preferences {
         editorFontSize = min(
             max(store.integer(forKey: Key.editorFontSize), Self.editorFontSizes.lowerBound),
             Self.editorFontSizes.upperBound)
+        // A width the window never offered reads as the default rather than as
+        // a crash or a zero, for the reason `passwordStorage` gives.
+        editorTabWidth =
+            EditorTabWidth(rawValue: store.integer(forKey: Key.editorTabWidth)) ?? .four
+        editorSoftTabs = store.bool(forKey: Key.editorSoftTabs)
+        editorAutoIndent = store.bool(forKey: Key.editorAutoIndent)
     }
+}
+
+/// What "tab width" is allowed to mean, as the Settings window offers it. See
+/// `Preferences.editorTabWidth` for why there are two answers and not a number
+/// field. Top level like `ConnectionStorage`, so the Settings window's radio
+/// group can conform it without crossing the class's isolation.
+enum EditorTabWidth: Int, CaseIterable, Identifiable {
+    case four = 4
+    case eight = 8
+
+    var id: Int { rawValue }
+
+    var label: String { "\(rawValue) columns" }
 }

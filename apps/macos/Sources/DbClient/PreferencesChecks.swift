@@ -105,6 +105,9 @@ enum PreferencesChecks {
         expect(
             fresh.shutConnectionFolders, [], "every connection folder starts open")
         expect(fresh.editorFontSize, 13, "the editor draws at the size it always has")
+        expect(fresh.editorTabWidth, .four, "a tab is worth four columns, as Sequel Ace ships")
+        expect(fresh.editorSoftTabs, false, "Tab writes a tab character until asked otherwise")
+        expect(fresh.editorAutoIndent, true, "Return carries the indent, as Sequel Ace ships")
     }
 
     /// A setting has to outlive the window, or the Settings window is a switch
@@ -121,6 +124,9 @@ enum PreferencesChecks {
         first.connectionStorage = .iCloud
         first.shutConnectionFolders = ["clients/acme"]
         first.editorFontSize = 16
+        first.editorTabWidth = .eight
+        first.editorSoftTabs = true
+        first.editorAutoIndent = false
 
         // A second reader over the same store, which is what the next launch is.
         let second = Preferences(store: store)
@@ -134,6 +140,9 @@ enum PreferencesChecks {
             second.shutConnectionFolders, ["clients/acme"],
             "a folder somebody shut is still shut on the next launch")
         expect(second.editorFontSize, 16, "the editor's type size was kept")
+        expect(second.editorTabWidth, .eight, "the tab width was kept")
+        expect(second.editorSoftTabs, true, "soft tabs being on was kept")
+        expect(second.editorAutoIndent, false, "auto-indent being off was kept")
     }
 
     /// A size the Settings window could never have written reads back as the

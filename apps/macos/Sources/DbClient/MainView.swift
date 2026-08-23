@@ -1908,6 +1908,7 @@ struct QueryPane: View {
                         text: $model.queryText, selection: $model.querySelection,
                         scheme: model.scheme,
                         fontSize: model.preferences.editorFontSize,
+                        typing: model.preferences.editorTyping,
                         offers: { text, caret, then in
                             model.completions(in: text, caret: caret, then: then)
                         }

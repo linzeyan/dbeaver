@@ -148,6 +148,9 @@ if CommandLine.arguments.contains("--verify-driver-badge") {
 if CommandLine.arguments.contains("--verify-sidebar") {
     exit(SidebarChecks.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-editor-typing") {
+    exit(EditorTypingChecks.run() ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-find-bar") {
     exit(MainActor.assumeIsolated { FindBarChecks.run() } ? 0 : 1)
 }

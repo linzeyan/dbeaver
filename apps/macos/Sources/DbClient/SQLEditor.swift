@@ -34,6 +34,11 @@ struct SQLEditor: NSViewRepresentable {
     /// depends on.
     let fontSize: Int
 
+    /// The typing habits the key handling reads — indent, tabs and their
+    /// widths. One value, for the reason `fontSize` is a number: the rules stay
+    /// checkable as data, and the pane's dependencies stay visible to SwiftUI.
+    let typing: EditorTyping.Rules
+
     /// Asks the core what could be typed at `caret`, and calls back on the main
     /// actor when the answer arrives.
     ///
@@ -219,31 +224,45 @@ struct SQLEditor: NSViewRepresentable {
         /// font in them is now sized by a preference.
         private(set) var baseAttributes: [NSAttributedString.Key: Any] = [:]
 
-        /// The point size last applied, so the SwiftUI updates that have
-        /// nothing to do with type — which is most of them — cost a comparison
-        /// rather than a re-attribution of the whole buffer.
-        private var appliedFontSize = 0
+        /// The size and tab width last applied, so the SwiftUI updates that
+        /// have nothing to do with either — which is most of them — cost a
+        /// comparison rather than a re-attribution of the whole buffer.
+        private var applied: (fontSize: Int, tabWidth: Int) = (0, 0)
 
         init(_ parent: SQLEditor) {
             self.parent = parent
         }
 
-        /// Puts the preferred type size onto the view, the typing attributes
-        /// and every character already in the buffer.
+        /// Puts the preferred type size and tab width onto the view, the
+        /// typing attributes and every character already in the buffer.
         ///
         /// The buffer is restyled through the storage rather than by `setText`,
         /// which would also reset the selection and the undo stack — a size
         /// change is a change to how the text looks, not to what it says.
+        ///
+        /// The tab width rides in the paragraph style because that is the only
+        /// place AppKit reads one: a hard tab advances to the next multiple of
+        /// `defaultTabInterval`, and the interval has to be restated whenever
+        /// the font is, since it is that font's space that measures a column.
         func applyStyle() {
-            guard let textView, appliedFontSize != parent.fontSize else { return }
-            appliedFontSize = parent.fontSize
+            guard let textView,
+                applied != (parent.fontSize, parent.typing.tabWidth)
+            else { return }
+            applied = (parent.fontSize, parent.typing.tabWidth)
             let font = NSFont.monospacedSystemFont(
                 ofSize: CGFloat(parent.fontSize), weight: .regular)
+            let paragraph = NSMutableParagraphStyle()
+            paragraph.tabStops = []
+            paragraph.defaultTabInterval =
+                (" " as NSString).size(withAttributes: [.font: font]).width
+                * CGFloat(parent.typing.tabWidth)
             baseAttributes = [
                 .font: font,
-                .foregroundColor: Theme.Editor.text.nsColor
+                .foregroundColor: Theme.Editor.text.nsColor,
+                .paragraphStyle: paragraph
             ]
             textView.font = font
+            textView.defaultParagraphStyle = paragraph
             textView.typingAttributes = baseAttributes
             popup.fontSize = CGFloat(parent.fontSize)
             if let storage = textView.textStorage, storage.length > 0 {
@@ -367,7 +386,8 @@ struct SQLEditor: NSViewRepresentable {
 
         // MARK: - Completion
 
-        /// Intercepts the keys the list answers to, and only while it is up.
+        /// Intercepts the keys the list answers to while it is up, and the two
+        /// the typing rules may claim when it is not.
         ///
         /// Returning true takes the key: ↑ and ↓ move the selection instead of
         /// the caret, Return and Tab accept, Escape dismisses. Every one of them
@@ -375,21 +395,69 @@ struct SQLEditor: NSViewRepresentable {
         /// taken when there is no list to take it for — an editor where Return
         /// sometimes does not insert a newline is worse than one with no
         /// completion at all.
+        ///
+        /// With no list up, Return and Tab are offered to `EditorTyping`, whose
+        /// answer is nil exactly when the plain keystroke is right — so the
+        /// default path stays the default rather than being re-implemented
+        /// here.
         func textView(
             _ textView: NSTextView, doCommandBy command: Selector
         ) -> Bool {
-            guard popup.isVisible else { return false }
+            if popup.isVisible {
+                switch command {
+                case #selector(NSResponder.moveUp(_:)):
+                    popup.move(by: -1)
+                case #selector(NSResponder.moveDown(_:)):
+                    popup.move(by: 1)
+                case #selector(NSResponder.insertNewline(_:)),
+                    #selector(NSResponder.insertTab(_:)):
+                    accept()
+                case #selector(NSResponder.cancelOperation(_:)):
+                    popup.hide()
+                default:
+                    return false
+                }
+                return true
+            }
             switch command {
-            case #selector(NSResponder.moveUp(_:)):
-                popup.move(by: -1)
-            case #selector(NSResponder.moveDown(_:)):
-                popup.move(by: 1)
-            case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
-                accept()
-            case #selector(NSResponder.cancelOperation(_:)):
-                popup.hide()
+            case #selector(NSResponder.insertNewline(_:)):
+                return apply(
+                    EditorTyping.newline(
+                        in: cachedString, selection: scalarSelection(), rules: parent.typing))
+            case #selector(NSResponder.insertTab(_:)):
+                return apply(
+                    EditorTyping.tab(
+                        in: cachedString, selection: scalarSelection(), rules: parent.typing))
             default:
                 return false
+            }
+        }
+
+        /// The selection as the scalar offsets the typing rules read.
+        private func scalarSelection() -> Range<Int> {
+            guard let textView else { return 0..<0 }
+            return Self.scalarRange(of: textView.selectedRange(), in: cachedString)
+        }
+
+        /// Carries one of the rules' edits into the buffer through the path
+        /// typing takes, so it is undoable and reaches the model like any
+        /// keystroke. False for no edit, which hands the key back to AppKit.
+        ///
+        /// The selection is converted against `cachedString` *after* the
+        /// insertion, because `insertText` has already run `textDidChange` by
+        /// the time it returns — the edit's offsets index the text it produced,
+        /// not the one it replaced.
+        private func apply(_ edit: EditorTyping.Edit?) -> Bool {
+            guard let edit, let textView,
+                let replacing = SQLCompletion.utf16Range(of: edit.replacing, in: cachedString)
+            else { return false }
+            if !edit.insert.isEmpty || !edit.replacing.isEmpty {
+                textView.insertText(edit.insert, replacementRange: replacing)
+            }
+            if let target = SQLCompletion.utf16Range(of: edit.selection, in: cachedString),
+                target != textView.selectedRange()
+            {
+                textView.setSelectedRange(target)
             }
             return true
         }
