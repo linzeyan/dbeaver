@@ -93,7 +93,19 @@ struct SettingsView: View {
     /// Which pane is showing. Not remembered between openings: the panel is
     /// opened to change one particular thing, and the pane it was last left on
     /// is a worse guess at that thing than the first one is.
-    @State private var pane = SettingsPane.general
+    @State private var pane: SettingsPane
+
+    /// The window always opens on General; the parameter exists for
+    /// `--verify-preferences`, which measures a pane it cannot click to.
+    init(
+        preferences: Preferences, syncCaveat: String?,
+        onPaneChange: @escaping () -> Void = {}, pane: SettingsPane = .general
+    ) {
+        self.preferences = preferences
+        self.syncCaveat = syncCaveat
+        self.onPaneChange = onPaneChange
+        _pane = State(initialValue: pane)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -103,6 +115,7 @@ struct SettingsView: View {
                 switch pane {
                 case .general: general
                 case .grid: grid
+                case .editor: editor
                 case .sidebar: sidebar
                 }
             }
@@ -205,6 +218,65 @@ struct SettingsView: View {
             isOn: $preferences.insertsRowOfDefaults)
     }
 
+    /// The SQL editor's habits: its type, its indentation, what typing does.
+    @ViewBuilder private var editor: some View {
+        SettingsStepper(
+            title: "Editor font size",
+            explanation:
+                "The size the SQL editor and its completion list draw at. Bigger "
+                + "type is fewer lines on screen: the editor pane holds about ten "
+                + "at 13 points and about seven at 18.",
+            unit: "pt",
+            range: Preferences.editorFontSizes,
+            value: $preferences.editorFontSize)
+
+        SettingsChoice(
+            title: "Tab width",
+            explanation:
+                "How many columns a tab is worth: the width a tab character "
+                + "displays at, and the stop indentation lands on. Four is what "
+                + "most SQL in circulation is formatted to; a file written at one "
+                + "width reads differently at the other.",
+            caveat: nil,
+            selection: $preferences.editorTabWidth)
+
+        SettingsToggle(
+            title: "Indent with spaces",
+            explanation:
+                "Tab writes spaces up to the next tab stop instead of a tab "
+                + "character, so the indentation holds its columns in every editor "
+                + "the SQL ever visits. Deleting it is space by space, and the Tab "
+                + "key no longer types the character itself.",
+            isOn: $preferences.editorSoftTabs)
+
+        SettingsToggle(
+            title: "Auto-indent new lines",
+            explanation:
+                "Return carries the current line's leading whitespace onto the new "
+                + "line, so a clause stays under its clause without retyping the "
+                + "indent. Leaving an indented block means deleting the indent "
+                + "Return just gave you.",
+            isOn: $preferences.editorAutoIndent)
+
+        SettingsToggle(
+            title: "Pair brackets and quotes",
+            explanation:
+                "Typing ( [ ' or \" also writes its partner, around the caret or "
+                + "around the selection, and typing the closer walks past the one "
+                + "already there. That last part is the cost: the closing keystroke "
+                + "moves the caret instead of adding a character.",
+            isOn: $preferences.editorAutoPairs)
+
+        SettingsToggle(
+            title: "Uppercase keywords as you type",
+            explanation:
+                "Finishing a word with a space or Return lifts it to upper case "
+                + "when the dialect calls it a keyword. This rewrites text you "
+                + "typed — the only setting here that does — and an unquoted "
+                + "column named order is lifted along with the real keywords.",
+            isOn: $preferences.editorUppercasesKeywords)
+    }
+
     /// The object tree down the left of the window.
     @ViewBuilder private var sidebar: some View {
         SettingsToggle(
@@ -226,6 +298,7 @@ struct SettingsView: View {
 enum SettingsPane: String, CaseIterable, Identifiable {
     case general = "General"
     case grid = "Grid"
+    case editor = "Editor"
     case sidebar = "Sidebar"
 
     var id: String { rawValue }
@@ -234,6 +307,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape"
         case .grid: return "tablecells"
+        case .editor: return "text.cursor"
         case .sidebar: return "sidebar.left"
         }
     }
@@ -262,6 +336,7 @@ private protocol SettingsOption: CaseIterable, Identifiable, Hashable {
 
 extension ConnectionStorage: SettingsOption {}
 extension PasswordStorage: SettingsOption {}
+extension EditorTabWidth: SettingsOption {}
 
 private struct SettingsChoice<Option: SettingsOption>: View
 where Option.AllCases: RandomAccessCollection {
@@ -306,6 +381,47 @@ where Option.AllCases: RandomAccessCollection {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
+            }
+        }
+    }
+}
+
+/// One setting that is a number from a short range: its name, what moving it
+/// costs, and a stepper with the value spelled out beside it.
+///
+/// A stepper rather than a slider or a field, because the range is nine
+/// integers: every value is one click from its neighbour, nothing needs
+/// typing, and — unlike a slider — the control cannot land between answers.
+private struct SettingsStepper: View {
+    let title: String
+    let explanation: String
+    let unit: String
+    let range: ClosedRange<Int>
+    @Binding var value: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text(title)
+                .font(Theme.Typography.bodyEmphasis)
+                .foregroundStyle(Theme.text.color)
+            Text(explanation)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Theme.Space.sm) {
+                // The label, value and hint ride on the control itself, so
+                // VoiceOver lands on something it can actually increment; the
+                // text beside it repeats the value and is hidden from the
+                // tree rather than read twice.
+                Stepper("", value: $value, in: range)
+                    .labelsHidden()
+                    .accessibilityLabel(title)
+                    .accessibilityValue("\(value) \(unit)")
+                    .accessibilityHint(explanation)
+                Text("\(value) \(unit)")
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.text.color)
+                    .accessibilityHidden(true)
             }
         }
     }

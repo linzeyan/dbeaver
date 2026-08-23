@@ -38,6 +38,7 @@ enum PreferencesChecks {
         checkAConnectionSurvivesAnICloudThatIsNotAvailable()
         checkTheFileGoesWhereXDGSaysItDoes()
         checkTheSettingsPanelHasRoomForTheICloudCaveat()
+        checkTheEditorPaneIsOfferedAndHoldsItsRows()
         checkAPasswordKeptOnThisMacIsNotInTheFileAsText()
         checkAnEmptyColumnIsOnlyHiddenWhenTheSettingSaysSo()
         checkAColumnThatFillsUpLaterComesBackWhileTheEvidenceIsOpen()
@@ -309,6 +310,28 @@ enum PreferencesChecks {
         expect(
             warned.fittingSize.height > quiet.fittingSize.height, true,
             "the caveat is inside the height the panel is sized to")
+    }
+
+    /// The Editor pane is in the switcher, and switching to it shows the six
+    /// editor settings.
+    ///
+    /// The second half is measured rather than assumed because the pane body
+    /// is a `switch` whose new case would compile perfectly well empty — the
+    /// one mistake that leaves a working switcher button opening a blank
+    /// panel. Six rows against the sidebar's one is a height difference no
+    /// font change plausibly erases.
+    private static func checkTheEditorPaneIsOfferedAndHoldsItsRows() {
+        expect(
+            SettingsPane.allCases.contains(.editor), true,
+            "the Editor pane is one the switcher offers")
+        let preferences = scratch()
+        let editor = NSHostingView(
+            rootView: SettingsView(preferences: preferences, syncCaveat: nil, pane: .editor))
+        let sidebar = NSHostingView(
+            rootView: SettingsView(preferences: preferences, syncCaveat: nil, pane: .sidebar))
+        expect(
+            editor.fittingSize.height > sidebar.fittingSize.height, true,
+            "six settings stand taller than one — the pane's case is not empty")
     }
 
     // MARK: - Hiding a column that is null in every row
