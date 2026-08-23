@@ -118,6 +118,7 @@ struct SettingsView: View {
                 case .grid: grid
                 case .editor: editor
                 case .sidebar: sidebar
+                case .mcp: mcp
                 }
             }
             .padding(Theme.Space.xl)
@@ -134,7 +135,9 @@ struct SettingsView: View {
     /// its preference tabs for twenty years — and at 460 points a sidebar would
     /// take a third of the width these explanations need.
     private var switcher: some View {
-        HStack(spacing: Theme.Space.lg) {
+        // The tightest spacing, because six 72-point buttons at any looser
+        // one no longer fit the window's 460 points.
+        HStack(spacing: Theme.Space.xs) {
             ForEach(SettingsPane.allCases) { candidate in
                 Button {
                     pane = candidate
@@ -302,6 +305,42 @@ struct SettingsView: View {
         SettingsEditorColours(preferences: preferences)
     }
 
+    /// The MCP server: the switch, its two numbers, and — while it runs —
+    /// the two strings a client needs to connect.
+    @ViewBuilder private var mcp: some View {
+        SettingsToggle(
+            title: "Serve exposed connections over MCP",
+            explanation:
+                "An HTTP server on this Mac lets AI tools — Claude Code, Cursor and "
+                + "anything else that speaks MCP — read the connections you have marked "
+                + "Expose to MCP on their forms. Reads only: statements that write are "
+                + "refused before any database sees them. The cost is a listening port "
+                + "on 127.0.0.1 and, for passwords kept in the Keychain, an "
+                + "authorisation panel the first time each connection opens.",
+            isOn: $preferences.mcpServerEnabled)
+
+        SettingsNumber(
+            title: "Port",
+            explanation:
+                "Where the server listens on 127.0.0.1. Changing it restarts the "
+                + "server, which mints a new token.",
+            unit: "1024–65535",
+            value: $preferences.mcpServerPort)
+
+        SettingsNumber(
+            title: "Row cap",
+            explanation:
+                "The most rows one query answers with. These rows land in a model's "
+                + "context window, where more is not better — a truncated result says "
+                + "so, and the model can ask a narrower question.",
+            unit: "rows",
+            value: $preferences.mcpRowCap)
+
+        if preferences.mcpServerEnabled {
+            MCPStatus(port: preferences.mcpServerPort)
+        }
+    }
+
     /// The object tree down the left of the window.
     @ViewBuilder private var sidebar: some View {
         SettingsToggle(
@@ -326,6 +365,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
     case grid = "Grid"
     case editor = "Editor"
     case sidebar = "Sidebar"
+    case mcp = "MCP"
 
     var id: String { rawValue }
 
@@ -336,6 +376,7 @@ enum SettingsPane: String, CaseIterable, Identifiable {
         case .grid: return "tablecells"
         case .editor: return "text.cursor"
         case .sidebar: return "sidebar.left"
+        case .mcp: return "server.rack"
         }
     }
 }
@@ -646,6 +687,61 @@ private struct SettingsEditorColours: View {
 private enum EditorThemeChoice {
     case standard
     case custom
+}
+
+/// What a running MCP server tells the person pairing a client to it: the
+/// endpoint, the token, and a Copy button for each.
+///
+/// The token appears here and nowhere else — never on disk, never in a log —
+/// so this row is the pairing ceremony: copy, paste into the client, done.
+/// Shown only while the box above is ticked, and read fresh from the
+/// coordinator on every render, which the tick itself forces.
+private struct MCPStatus: View {
+    let port: Int
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            if let token = MCPCoordinator.shared.token {
+                credential("Endpoint", value: "http://127.0.0.1:\(port)/mcp")
+                credential("Token", value: token)
+            } else {
+                HStack(alignment: .top, spacing: Theme.Space.xs) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.warning.color)
+                        .padding(.top, 1)
+                    Text(
+                        "Not running. Usually the port: something else already "
+                            + "listens there, or the number is out of range."
+                    )
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.warning.color)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private func credential(_ name: String, value: String) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            Text(name)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textSecondary.color)
+                .frame(width: 64, alignment: .leading)
+            Text(value)
+                .font(Theme.Typography.mono)
+                .foregroundStyle(Theme.text.color)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Button("Copy") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+            }
+            .font(Theme.Typography.caption)
+            .accessibilityLabel("Copy \(name)")
+        }
+    }
 }
 
 /// One setting: its name, what it does to the window, and the switch.

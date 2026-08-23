@@ -256,6 +256,38 @@ final class Preferences {
         didSet { store.set(editorStatementColor, forKey: Key.editorStatementColor) }
     }
 
+    /// Whether the MCP server is listening.
+    ///
+    /// Off, and everything else about it is fenced behind this: no port is
+    /// bound, no token exists, and the exposed connections are exposed to
+    /// nothing. On, agents on this machine can read the connections somebody
+    /// marked — reads only, localhost only, bearer token required — and the
+    /// costs are a listening port and, for Keychain-stored passwords, an
+    /// authorisation panel the first time each connection is opened.
+    var mcpServerEnabled: Bool {
+        didSet { store.set(mcpServerEnabled, forKey: Key.mcpServerEnabled) }
+    }
+
+    /// The port the MCP server binds on 127.0.0.1.
+    ///
+    /// 8765, and folded into 1024–65535 on read: below 1024 needs privileges
+    /// this process does not have, and a hand-edited plist should move the
+    /// port, not disable the server in a way nothing reports.
+    var mcpServerPort: Int {
+        didSet { store.set(mcpServerPort, forKey: Key.mcpServerPort) }
+    }
+
+    /// The most rows one MCP query answers with.
+    ///
+    /// 1000, deliberately a tenth of what Sequel Ace allows: these rows land
+    /// in a language model's context, where ten thousand rows of JSON do not
+    /// inform, they drown. The reply says when it was cut short, and an agent
+    /// that needs more can ask a narrower question. Zero reads as the default
+    /// rather than as "no rows ever".
+    var mcpRowCap: Int {
+        didSet { store.set(mcpRowCap, forKey: Key.mcpRowCap) }
+    }
+
     /// Which connection folders the sidebar draws shut.
     ///
     /// Not a setting — no row in the Settings window sets it, a folder's own
@@ -301,7 +333,10 @@ final class Preferences {
         Key.editorCommentColor: EditorTheme.defaults.comment.hex,
         Key.editorCaretColor: EditorTheme.defaults.caret.hex,
         Key.editorSelectionColor: EditorTheme.defaults.selection.hex,
-        Key.editorStatementColor: EditorTheme.defaults.statement.hex
+        Key.editorStatementColor: EditorTheme.defaults.statement.hex,
+        Key.mcpServerEnabled: false,
+        Key.mcpServerPort: 8765,
+        Key.mcpRowCap: 1000
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -319,6 +354,9 @@ final class Preferences {
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let keepAliveSeconds = "dev.dbclient.keepAliveSeconds"
         static let notifiesOnDisconnect = "dev.dbclient.notifiesOnDisconnect"
+        static let mcpServerEnabled = "dev.dbclient.mcpServerEnabled"
+        static let mcpServerPort = "dev.dbclient.mcpServerPort"
+        static let mcpRowCap = "dev.dbclient.mcpRowCap"
         static let shutConnectionFolders = "dev.dbclient.shutConnectionFolders"
         static let editorFontSize = "dev.dbclient.editorFontSize"
         static let editorTabWidth = "dev.dbclient.editorTabWidth"
@@ -452,6 +490,13 @@ final class Preferences {
         let pinging = store.integer(forKey: Key.keepAliveSeconds)
         keepAliveSeconds = pinging < 0 ? 60 : pinging
         notifiesOnDisconnect = store.bool(forKey: Key.notifiesOnDisconnect)
+        mcpServerEnabled = store.bool(forKey: Key.mcpServerEnabled)
+        // Folded rather than trusted, for the reason the font size is: a port
+        // this process cannot bind, read literally, would be the server failing
+        // every start over a number nothing on screen can show is wrong.
+        mcpServerPort = min(max(store.integer(forKey: Key.mcpServerPort), 1024), 65535)
+        let cap = store.integer(forKey: Key.mcpRowCap)
+        mcpRowCap = cap <= 0 ? 1000 : cap
         shutConnectionFolders = Set(store.stringArray(forKey: Key.shutConnectionFolders) ?? [])
         editorFontSize = min(
             max(store.integer(forKey: Key.editorFontSize), Self.editorFontSizes.lowerBound),

@@ -2885,6 +2885,11 @@ if benchMode {
         // is about to run a run loop has any business owning a repeating
         // timer: the `--verify-*` suites build models by the dozen and exit.
         model.startKeepAliveTimer()
+        // Beside the timer for the timer's reason: a server belongs to the
+        // process that will run a run loop, not to every model a check builds.
+        MCPCoordinator.shared.follow(
+            preferences: model.preferences,
+            connections: { [weak model] in model?.connections.connections ?? [] })
         window.contentView = NSHostingView(rootView: MainView(model: model))
         window.center()
         window.makeKeyAndOrderFront(nil)

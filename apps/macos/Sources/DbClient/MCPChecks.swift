@@ -18,6 +18,7 @@ enum MCPChecks {
 
     static func run() -> Bool {
         failures = 0
+        defer { ScratchDefaults.release() }
         checkARequestIsWhatItsBytesSay()
         checkAnIncompleteRequestWaitsAndAMalformedOneDoesNot()
         checkTheRouteAnswersMethodAndPathTogether()
@@ -35,6 +36,9 @@ enum MCPChecks {
         checkAQueryComesBackAsRowsWithHonestNames()
         checkTheWallsStandInOrder()
         checkASessionIsStartedNamedAndEnded()
+        checkOnlyMarkedConnectionsAreExposed()
+        checkTheExposureFlagSurvivesTheFile()
+        checkTheDesiredStateIsThePreferences()
         if failures == 0 {
             fputs("mcp: all checks passed\n", stderr)
         } else {
@@ -489,6 +493,79 @@ enum MCPChecks {
         let ended = ask("DELETE", "/mcp", headers: bearer, session: "minted-session")
         expect(ended.status, 200, "DELETE ends the session")
         expect(ended.session == nil, true, "and forgets it")
+    }
+
+    // MARK: - The live side's pure edges
+
+    private static func saved(_ name: String, exposed: Bool) -> SavedConnection {
+        SavedConnection(
+            name: name, exposedToMCP: exposed,
+            settings: ConnectionSettings(
+                scheme: "postgres", host: "h", port: "1", database: "d", user: "u"))
+    }
+
+    /// Membership is the flag and nothing else — not read-only, not
+    /// production, not anything inferable. A connection nobody marked does
+    /// not exist as far as MCP is concerned.
+    private static func checkOnlyMarkedConnectionsAreExposed() {
+        let entries = MCPLiveSource.entries(of: [
+            saved("prod", exposed: false),
+            saved("dev", exposed: true),
+            saved("dev", exposed: true),
+            saved("scratch", exposed: false)
+        ])
+        expect(entries.map(\.name), ["dev", "dev"], "the flag alone decides membership")
+        expect(
+            MCPDispatch.uniqued(entries.map(\.name)), ["dev", "dev_2"],
+            "twin titles are told apart the way a join's twin columns are")
+    }
+
+    /// The flag's file behaviour, pinned in both directions: absent reads as
+    /// closed — a hand-edited file must not open a door by leaving a key out
+    /// — and false is still written, because a door nobody can discover from
+    /// the file is a door nobody can audit either.
+    private static func checkTheExposureFlagSurvivesTheFile() {
+        let minimal = #"{"scheme":"postgres","host":"h","port":"1","database":"d","user":"u"}"#
+        let bare = try? JSONDecoder().decode(SavedConnection.Raw.self, from: Data(minimal.utf8))
+        expect(
+            bare?.toSavedConnection().exposedToMCP, false,
+            "a file that never heard of the flag exposes nothing")
+
+        let written = String(
+            decoding: (try? JSONEncoder().encode(
+                SavedConnection.Raw(from: saved("n", exposed: false))))
+                ?? Data(), as: UTF8.self)
+        expect(written.contains("\"exposedToMCP\":false"), true, "false is written, not omitted")
+
+        let back = try? JSONDecoder().decode(
+            SavedConnection.Raw.self,
+            from: (try? JSONEncoder().encode(SavedConnection.Raw(from: saved("n", exposed: true))))
+                ?? Data())
+        expect(
+            back?.toSavedConnection().exposedToMCP, true,
+            "and a marked connection comes back marked")
+    }
+
+    /// The coordinator's whole input, as a value: what the preferences say,
+    /// including the port fold that keeps a hand-edited plist from disabling
+    /// the server in a way nothing on screen reports.
+    private static func checkTheDesiredStateIsThePreferences() {
+        MainActor.assumeIsolated {
+            let store = ScratchDefaults.store("verify-mcp")
+            store.set(true, forKey: "dev.dbclient.mcpServerEnabled")
+            store.set(9000, forKey: "dev.dbclient.mcpServerPort")
+            store.set(50, forKey: "dev.dbclient.mcpRowCap")
+            expect(
+                MCPCoordinator.desiredState(of: Preferences(store: store)),
+                MCPCoordinator.DesiredState(enabled: true, port: 9000, rowCap: 50),
+                "the desired state is the preferences, read once")
+
+            store.set(80, forKey: "dev.dbclient.mcpServerPort")
+            store.set(-5, forKey: "dev.dbclient.mcpRowCap")
+            let folded = MCPCoordinator.desiredState(of: Preferences(store: store))
+            expect(folded.port, 1024, "a privileged port folds up to the floor")
+            expect(folded.rowCap, 1000, "a nonsense cap folds to the default, not to no rows ever")
+        }
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
