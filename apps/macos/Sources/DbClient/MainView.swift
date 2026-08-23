@@ -1912,13 +1912,17 @@ struct QueryPane: View {
                         scheme: model.scheme,
                         fontSize: model.preferences.editorFontSize,
                         typing: model.preferences.editorTyping,
+                        theme: model.preferences.editorTheme,
                         offers: { text, caret, then in
                             model.completions(in: text, caret: caret, then: then)
                         }
                     )
                     .padding(.horizontal, Theme.Space.md)
                     .padding(.vertical, Theme.Space.sm)
-                    .background(Theme.background.color)
+                    // The theme's background, not the window's: this is the
+                    // margin around the text view, and a themed editor inside
+                    // a strip of the old colour would name the seam.
+                    .background(model.preferences.editorTheme.background.color)
                     .focused($focus, equals: .editor)
                     .accessibilityLabel("SQL editor")
 

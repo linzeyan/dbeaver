@@ -39,6 +39,12 @@ struct SQLEditor: NSViewRepresentable {
     /// checkable as data, and the pane's dependencies stay visible to SwiftUI.
     let typing: EditorTyping.Rules
 
+    /// The colours this editor draws with, resolved from the user's overrides
+    /// by `Preferences.editorTheme`. One value, for the reason `typing` is one:
+    /// the editor is handed what it needs and nothing else, and a theme edit
+    /// reaches it as a SwiftUI update like any other.
+    let theme: EditorTheme
+
     /// Asks the core what could be typed at `caret`, and calls back on the main
     /// actor when the answer arrives.
     ///
@@ -87,13 +93,10 @@ struct SQLEditor: NSViewRepresentable {
         textView.maxSize = CGSize(
             width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainerInset = .zero
+        // Every colour on this view is `applyStyle`'s to set, below, because
+        // each of them is now the theme's: stating a default here would be a
+        // second statement of it, wrong the day the theme changes first.
         textView.drawsBackground = true
-        textView.backgroundColor = Theme.background.nsColor
-        textView.insertionPointColor = Theme.Editor.caret.nsColor
-        textView.selectedTextAttributes = [
-            .backgroundColor: Theme.Editor.selection.nsColor
-        ]
-        textView.textColor = Theme.Editor.text.nsColor
 
         // Every one of these is on by default in an `NSTextView`, and every one
         // of them corrupts SQL. Smart quotes are the dangerous one: it replaces
@@ -123,7 +126,6 @@ struct SQLEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = true
-        scrollView.backgroundColor = Theme.background.nsColor
         scrollView.borderType = .noBorder
 
         coordinator.attach(textView)
@@ -193,6 +195,12 @@ struct SQLEditor: NSViewRepresentable {
         /// nothing where there is no pair to mark.
         private var brackets: (Int, Int)?
 
+        /// The statement the caret stands in when the buffer holds several, in
+        /// the UTF-16 units the band is painted in, or nothing where a band
+        /// would say nothing. See `SQLScript.Target.highlightedStatement` for
+        /// the rule.
+        private var statementBand: NSRange?
+
         /// A caret the model moved that has not been scrolled to yet. See
         /// `reveal()`.
         private var pendingReveal: NSRange?
@@ -221,24 +229,34 @@ struct SQLEditor: NSViewRepresentable {
 
         /// The attributes every character starts from. Instance state rebuilt
         /// by `applyStyle` rather than the constant it used to be, because the
-        /// font in them is now sized by a preference.
+        /// font in them is sized by one preference and coloured by another.
         private(set) var baseAttributes: [NSAttributedString.Key: Any] = [:]
 
-        /// The size and tab width last applied, so the SwiftUI updates that
-        /// have nothing to do with either — which is most of them — cost a
-        /// comparison rather than a re-attribution of the whole buffer.
-        private var applied: (fontSize: Int, tabWidth: Int) = (0, 0)
+        /// One attribute dictionary per token kind, in the theme's colours.
+        /// Instance state rebuilt by `applyStyle` for the reason
+        /// `baseAttributes` is; the alternative spells an `NSColor` and a
+        /// dictionary into existence per token per repaint, which is a few
+        /// hundred allocations every time the viewport moves a line.
+        private var colours: [SQLScript.Token.Kind: [NSAttributedString.Key: Any]] = [:]
+
+        /// The size, tab width and theme last applied, so the SwiftUI updates
+        /// that have nothing to do with any of them — which is most of them —
+        /// cost a comparison rather than a re-attribution of the whole buffer.
+        /// The impossible size 0 is what makes the first call always apply.
+        private var applied: (fontSize: Int, tabWidth: Int, theme: EditorTheme) =
+            (0, 0, .defaults)
 
         init(_ parent: SQLEditor) {
             self.parent = parent
         }
 
-        /// Puts the preferred type size and tab width onto the view, the
-        /// typing attributes and every character already in the buffer.
+        /// Puts the preferred type size, tab width and colours onto the view,
+        /// the typing attributes and every character already in the buffer.
         ///
         /// The buffer is restyled through the storage rather than by `setText`,
-        /// which would also reset the selection and the undo stack — a size
-        /// change is a change to how the text looks, not to what it says.
+        /// which would also reset the selection and the undo stack — a size or
+        /// colour change is a change to how the text looks, not to what it
+        /// says.
         ///
         /// The tab width rides in the paragraph style because that is the only
         /// place AppKit reads one: a hard tab advances to the next multiple of
@@ -246,9 +264,10 @@ struct SQLEditor: NSViewRepresentable {
         /// the font is, since it is that font's space that measures a column.
         func applyStyle() {
             guard let textView,
-                applied != (parent.fontSize, parent.typing.tabWidth)
+                applied != (parent.fontSize, parent.typing.tabWidth, parent.theme)
             else { return }
-            applied = (parent.fontSize, parent.typing.tabWidth)
+            applied = (parent.fontSize, parent.typing.tabWidth, parent.theme)
+            let theme = parent.theme
             let font = NSFont.monospacedSystemFont(
                 ofSize: CGFloat(parent.fontSize), weight: .regular)
             let paragraph = NSMutableParagraphStyle()
@@ -258,17 +277,36 @@ struct SQLEditor: NSViewRepresentable {
                 * CGFloat(parent.typing.tabWidth)
             baseAttributes = [
                 .font: font,
-                .foregroundColor: Theme.Editor.text.nsColor,
+                .foregroundColor: theme.text.nsColor,
                 .paragraphStyle: paragraph
             ]
             textView.font = font
             textView.defaultParagraphStyle = paragraph
             textView.typingAttributes = baseAttributes
+            textView.textColor = theme.text.nsColor
+            textView.backgroundColor = theme.background.nsColor
+            textView.enclosingScrollView?.backgroundColor = theme.background.nsColor
+            textView.insertionPointColor = theme.caret.nsColor
+            textView.selectedTextAttributes = [.backgroundColor: theme.selection.nsColor]
+            colours = [
+                .keyword: [.foregroundColor: theme.keyword.nsColor],
+                .string: [.foregroundColor: theme.string.nsColor],
+                .quotedIdentifier: [.foregroundColor: theme.quotedIdentifier.nsColor],
+                .number: [.foregroundColor: theme.number.nsColor],
+                .comment: [.foregroundColor: theme.comment.nsColor],
+                .dollarQuoted: [.foregroundColor: theme.dollarQuoted.nsColor]
+            ]
             popup.fontSize = CGFloat(parent.fontSize)
             if let storage = textView.textStorage, storage.length > 0 {
                 storage.addAttributes(
                     baseAttributes, range: NSRange(location: 0, length: storage.length))
             }
+            // The token colours live in the layout manager's temporary
+            // attributes, which the re-attribution above does not reach, so
+            // the repaint is asked for explicitly — and deferred, for the
+            // reason `viewportMoved` gives: this runs inside SwiftUI's own
+            // update pass.
+            scheduleViewportRefresh()
         }
 
         func attach(_ textView: NSTextView) {
@@ -315,6 +353,13 @@ struct SQLEditor: NSViewRepresentable {
                 guard let self else { return }
                 refreshScheduled = false
                 reveal()
+                // Recomputed here as well as on the delegate paths, because a
+                // caret the *model* moved — `pointAtSyntaxError`, a restored
+                // buffer — arrives through `applySelection`, whose guarded
+                // write fires no delegate callback. The scan underneath is
+                // memoized, so the scroll ticks that also land here pay a
+                // lookup, not a re-lex.
+                markBrackets(in: cachedString)
                 highlight()
             }
         }
@@ -659,20 +704,26 @@ struct SQLEditor: NSViewRepresentable {
 
         // MARK: - Colour
 
-        /// Works out which pair `highlight()` should mark, from where the caret
-        /// is now.
+        /// Works out what `highlight()` should mark around the caret — the
+        /// bracket pair beside it and the statement band under it — from where
+        /// the caret is now.
         ///
         /// The scan is memoized on its arguments, so asking for it here costs
         /// nothing on a keystroke that already lexed — which is why this reads
         /// the selection the same way `relex` does rather than being handed the
-        /// answer.
+        /// answer. The band rides on the same scan because the caret moves
+        /// that change it are exactly the ones that change the pair.
         private func markBrackets(in string: String) {
             guard let textView else { return }
             let selection = Self.scalarRange(of: textView.selectedRange(), in: string)
-            brackets = SQLScript.scan(
-                string, scheme: parent.scheme,
-                selection: selection
-            ).brackets(atCaret: selection.lowerBound, in: string)
+            let scan = SQLScript.scan(string, scheme: parent.scheme, selection: selection)
+            brackets = scan.brackets(atCaret: selection.lowerBound, in: string)
+            statementBand = nil
+            if let band = scan.target?.highlightedStatement,
+                let indices = SQLScript.range(band, in: string)
+            {
+                statementBand = NSRange(indices, in: string)
+            }
         }
 
         /// Asks the core to read the buffer again and repaints what is on
@@ -746,6 +797,14 @@ struct SQLEditor: NSViewRepresentable {
             guard visible.length > 0 else { return }
 
             layout.setTemporaryAttributes([:], forCharacterRange: visible)
+            // The statement band goes down first: it is a background and the
+            // token colours are foregrounds, so they merge where they overlap,
+            // and the bracket band painted after it wins the spot they share.
+            if let band = statementBand {
+                layout.addTemporaryAttributes(
+                    [.backgroundColor: parent.theme.statement.nsColor],
+                    forCharacterRange: NSIntersectionRange(band, visible))
+            }
             // Tokens do not overlap and arrive in order, so the first one that
             // can matter is the first whose end is past the top of the viewport
             // — which is not the same as the first that starts there. A function
@@ -754,7 +813,7 @@ struct SQLEditor: NSViewRepresentable {
             var i = Self.firstTokenEnding(after: visible.location, in: painted)
             while i < painted.count, painted[i].range.location < NSMaxRange(visible) {
                 layout.addTemporaryAttributes(
-                    Self.colours[painted[i].kind] ?? [:],
+                    colours[painted[i].kind] ?? [:],
                     forCharacterRange: NSIntersectionRange(painted[i].range, visible))
                 i += 1
             }
@@ -774,18 +833,6 @@ struct SQLEditor: NSViewRepresentable {
                 }
             }
         }
-
-        /// Built once. The alternative spells an `NSColor` and a dictionary into
-        /// existence per token per repaint, which is a few hundred allocations
-        /// every time the viewport moves a line.
-        private static let colours: [SQLScript.Token.Kind: [NSAttributedString.Key: Any]] = [
-            .keyword: [.foregroundColor: Theme.Editor.keyword.nsColor],
-            .string: [.foregroundColor: Theme.Editor.string.nsColor],
-            .quotedIdentifier: [.foregroundColor: Theme.Editor.quotedIdentifier.nsColor],
-            .number: [.foregroundColor: Theme.Editor.number.nsColor],
-            .comment: [.foregroundColor: Theme.Editor.comment.nsColor],
-            .dollarQuoted: [.foregroundColor: Theme.Editor.dollarQuoted.nsColor]
-        ]
 
         /// The characters on screen, widened by a screen's worth either way.
         ///

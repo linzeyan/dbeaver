@@ -29,6 +29,7 @@ enum EditorThemeChecks {
         checkResetRestoresEveryDefault()
         checkAnUnparseableColourFallsBackToTheDefault()
         checkAHandEditedSpellingIsFoldedToCanonical()
+        checkTheBandMarksAStatementAmongSeveral()
         if failures == 0 {
             fputs("editor-theme: all checks passed\n", stderr)
         } else {
@@ -206,6 +207,21 @@ enum EditorThemeChecks {
         let preferences = Preferences(store: store)
         expect(preferences.editorKeywordColor, "#A78BFA", "the spelling reads back canonical")
         expect(preferences.editorThemeIsCustom, false, "and the theme still reads Default")
+    }
+
+    /// Which statement the editor bands, pinned as the rule rather than as
+    /// pixels: the drawn colour is `editorTheme.statement`'s, and this is the
+    /// only decision between the two.
+    private static func checkTheBandMarksAStatementAmongSeveral() {
+        expect(
+            SQLScript.Target(range: 3..<9, origin: .statement(2, of: 5)).highlightedStatement,
+            3..<9, "the caret's statement is banded when the buffer holds several")
+        expect(
+            SQLScript.Target(range: 0..<8, origin: .whole).highlightedStatement, nil,
+            "a lone statement is not — there are no competitors for ⌘R")
+        expect(
+            SQLScript.Target(range: 2..<6, origin: .selection).highlightedStatement, nil,
+            "and a selection already shows itself")
     }
 
     // MARK: - Harness

@@ -75,6 +75,7 @@ enum FindBarChecks {
                 typing: EditorTyping.Rules(
                     tabWidth: 4, softTabs: false, autoIndent: true, autoPairs: true,
                     uppercasesKeywords: false),
+                theme: .defaults,
                 offers: { _, _, _ in }))
         hosting.frame = NSRect(x: 0, y: 0, width: 400, height: 200)
         hosting.layoutSubtreeIfNeeded()

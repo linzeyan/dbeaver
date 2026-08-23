@@ -61,6 +61,20 @@ enum SQLScript {
             case .selection: return "⌘R runs the selection"
             }
         }
+
+        /// The statement the editor bands, or nil where a band would say
+        /// nothing new.
+        ///
+        /// Only a caret standing in one statement of several is a place where
+        /// "which one runs" has a wrong answer worth preventing — the same
+        /// fact `hint` numbers in the corner, made findable without reading
+        /// the corner. Sequel Ace bands the query at the caret
+        /// unconditionally; here a lone statement or an explicit selection
+        /// would put the band under exactly what the user already sees.
+        var highlightedStatement: Range<Int>? {
+            guard case .statement = origin else { return nil }
+            return range
+        }
     }
 
     /// A run of the buffer worth giving a colour of its own.
