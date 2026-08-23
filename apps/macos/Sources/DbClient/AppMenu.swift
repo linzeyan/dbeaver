@@ -294,7 +294,12 @@ enum AppMenu {
 
     /// Standard editing commands, sent down the responder chain. The field
     /// editor implements every one of these; the menu exists only to bind them.
-    private static func editMenu() -> NSMenuItem {
+    ///
+    /// Internal rather than private so `--verify-find-bar` can build this one
+    /// submenu and read the wiring back: the find items carry their meaning in
+    /// a tag AppKit reads at dispatch time, which is exactly the kind of number
+    /// a compiler cannot check and a screenshot cannot show.
+    static func editMenu() -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Edit")
 
@@ -310,6 +315,40 @@ enum AppMenu {
         menu.addItem(
             withTitle: "Select All",
             action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        menu.addItem(.separator())
+        // The four faces of the system find bar, sent with no target so the
+        // responder chain delivers them to whichever text view is focused —
+        // which is what disables them while the grid has the keyboard, without
+        // a line of validation here. One selector serves all four; the tag is
+        // what AppKit reads to tell them apart, and a wrong tag is a menu item
+        // that quietly does a different find command, which is why the tags are
+        // pinned by `--verify-find-bar`. The keys are the ones the platform has
+        // always meant by them: ⌘F opens the bar, ⌘G and ⇧⌘G walk the matches,
+        // ⌘E seeds the search with the selection.
+        let find = menu.addItem(
+            withTitle: "Find…",
+            action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "f")
+        find.keyEquivalentModifierMask = .command
+        find.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+
+        let findNext = menu.addItem(
+            withTitle: "Find Next",
+            action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "g")
+        findNext.keyEquivalentModifierMask = .command
+        findNext.tag = Int(NSFindPanelAction.next.rawValue)
+
+        let findPrevious = menu.addItem(
+            withTitle: "Find Previous",
+            action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "g")
+        findPrevious.keyEquivalentModifierMask = [.command, .shift]
+        findPrevious.tag = Int(NSFindPanelAction.previous.rawValue)
+
+        let useSelection = menu.addItem(
+            withTitle: "Use Selection for Find",
+            action: #selector(NSTextView.performFindPanelAction(_:)), keyEquivalent: "e")
+        useSelection.keyEquivalentModifierMask = .command
+        useSelection.tag = Int(NSFindPanelAction.setFindString.rawValue)
 
         menu.addItem(.separator())
         // The editor opens its list of names by itself while a name is being
@@ -351,10 +390,8 @@ enum AppMenu {
     /// Filter Objects is here on the same grounds — it narrows what this window
     /// lists without touching the database — and takes ⌥⌘F rather than ⌘F. The
     /// main pane is a text editor, and a plain ⌘F in an editor means find in the
-    /// text; binding it to the sidebar would claim a key this application will
-    /// want for the obvious thing later, and teach the wrong reflex until then.
-    /// ⌥⌘F is also where Sequel Ace, which this window's layout follows, keeps
-    /// its own table filter.
+    /// text, which is what the Edit menu binds it to. ⌥⌘F is also where Sequel
+    /// Ace, which this window's layout follows, keeps its own table filter.
     ///
     /// The three panes lead it, because which one the window is showing is the
     /// largest thing View decides. ⌘1/⌘2/⌘3 were declared on the tab buttons

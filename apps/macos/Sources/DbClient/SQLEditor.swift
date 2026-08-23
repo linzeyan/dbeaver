@@ -99,6 +99,15 @@ struct SQLEditor: NSViewRepresentable {
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false
 
+        // The system find bar, not a search field drawn here. AppKit's bar
+        // brings the whole behaviour with it — case-insensitive contains, the
+        // match count, wrap-around, incremental highlighting — and presents
+        // itself inside the enclosing scroll view, so nothing in this layout
+        // has to make room for it. The Edit menu's four find items reach it
+        // down the responder chain through `performFindPanelAction(_:)`.
+        textView.usesFindBar = true
+        textView.isIncrementalSearchingEnabled = true
+
         let scrollView = NSScrollView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
