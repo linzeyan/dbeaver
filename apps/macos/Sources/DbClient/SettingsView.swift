@@ -16,7 +16,9 @@ import SwiftUI
 final class SettingsWindow {
     private var window: NSWindow?
 
-    func present(_ preferences: Preferences) {
+    /// `pane` exists for `--settings`, which captures a pane it cannot click
+    /// to; the menu's own call never names one.
+    func present(_ preferences: Preferences, pane: SettingsPane = .general) {
         if let window {
             window.makeKeyAndOrderFront(nil)
             return
@@ -36,7 +38,7 @@ final class SettingsWindow {
         let view = NSHostingView(
             rootView: SettingsView(
                 preferences: preferences, syncCaveat: ConnectionStore.syncCaveat(),
-                onPaneChange: { [weak self] in self?.fitToPane() }))
+                onPaneChange: { [weak self] in self?.fitToPane() }, pane: pane))
         // The window takes its height from the rows rather than a number written
         // here, so an explanation that wraps to a third line is not clipped.
         panel.setContentSize(view.fittingSize)

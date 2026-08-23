@@ -42,6 +42,18 @@ do {
 }
 let pid = proc.processIdentifier
 
+// The size floor keeps palettes and popups from being mistaken for the window,
+// and 600×400 is the main window's. The Settings panel is 460 wide and takes
+// its height from whichever pane is showing, so a capture of it says so
+// through the environment rather than by loosening the floor for everything.
+let minWidth = ProcessInfo.processInfo.environment["CAPTURE_MIN_WIDTH"].flatMap(Double.init) ?? 600
+let minHeight =
+    ProcessInfo.processInfo.environment["CAPTURE_MIN_HEIGHT"].flatMap(Double.init) ?? 400
+// Naming the window beats sizing it when the app has two: the poll below runs
+// from launch, and whichever window the server registers first wins a race
+// the caller never meant to enter.
+let wantedTitle = ProcessInfo.processInfo.environment["CAPTURE_WINDOW_TITLE"]
+
 func mainWindowID() -> CGWindowID? {
     guard let list = CGWindowListCopyWindowInfo(
         [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]
@@ -53,8 +65,9 @@ func mainWindowID() -> CGWindowID? {
               let num = w[kCGWindowNumber as String] as? CGWindowID,
               let b = w[kCGWindowBounds as String] as? [String: Any],
               let h = b["Height"] as? Double, let width = b["Width"] as? Double,
-              h >= 400, width >= 600
+              h >= minHeight, width >= minWidth
         else { continue }
+        if let wantedTitle, (w[kCGWindowName as String] as? String) != wantedTitle { continue }
         return num
     }
     return nil

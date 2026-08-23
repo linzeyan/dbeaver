@@ -789,6 +789,22 @@ let collapseSidebar = CommandLine.arguments.contains("--collapse-sidebar")
 /// that works in the model and fails on screen.
 let filterObjects = CommandLine.arguments.contains("--filter-objects")
 
+/// `--find-bar` opens the editor's find bar once the connection is up, with a
+/// term already in it. Exists because the bar appears in answer to ⌘F and a
+/// capture cannot type one; the term goes through the find pasteboard — which
+/// is where the bar reads it from anyway — so the shot shows matches and a
+/// count instead of an empty field.
+let showFindBar = CommandLine.arguments.contains("--find-bar")
+
+/// `--settings <pane>` opens the Settings window on the named pane, for the
+/// captures that show it. The whole run is pointed at a scratch defaults suite
+/// — a capture must not edit the person's real settings — and the MCP pane is
+/// captured with its server switched on, because the pane's lower half, the
+/// endpoint and token being paired from, exists only while one runs.
+let capturePane = argument("--settings").flatMap { name in
+    SettingsPane.allCases.first { $0.rawValue.lowercased() == name.lowercased() }
+}
+
 /// `--history-pick 2` recalls the nth-newest statement into the editor.
 ///
 /// Both exist for the reason `--cell` does: the panel is opened with a keystroke
@@ -1884,6 +1900,43 @@ func firstEditorTextView(_ view: NSView) -> EditorTextView? {
     return nil
 }
 
+/// Drives `--find-bar`: opens the bar over the editor the way ⌘F does, once
+/// the connection is up. Waits for the connection although the bar itself
+/// needs none, because the capture that wants the bar wants the window behind
+/// it populated too.
+@MainActor
+func showFindBarWhenReady(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    func poll() {
+        guard !model.schemas.isEmpty, !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("find-bar probe timed out waiting for a connection\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        // Focused by hand for the reason `completeWhenReady` gives: on the
+        // unattended machine a capture runs on, SwiftUI's focus never lands.
+        let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first(where: \.isVisible)
+        guard let editor = window?.contentView.flatMap(firstEditorTextView) else {
+            fputs("no editor text view to open the find bar over\n", stderr)
+            exit(1)
+        }
+        window?.makeFirstResponder(editor)
+        let board = NSPasteboard(name: .find)
+        board.clearContents()
+        board.setString("select", forType: .string)
+        // The menu item's shape without the menu: the action reads the tag.
+        let command = NSMenuItem()
+        command.tag = Int(NSFindPanelAction.showFindPanel.rawValue)
+        editor.performFindPanelAction(command)
+    }
+    poll()
+}
+
 /// Drives `--complete`: opens the list of names under the editor's caret, the
 /// way ⌥⎋ does, once the connection is up.
 ///
@@ -2865,8 +2918,18 @@ if benchMode {
         } else {
             history = QueryHistory()
         }
+        let preferences: Preferences
+        if let capturePane {
+            let store = ScratchDefaults.store("capture-settings")
+            if capturePane == .mcp {
+                store.set(true, forKey: "dev.dbclient.mcpServerEnabled")
+            }
+            preferences = Preferences(store: store)
+        } else {
+            preferences = Preferences()
+        }
         let model = AppModel(
-            history: history, favorites: QueryFavorites(), preferences: Preferences(),
+            history: history, favorites: QueryFavorites(), preferences: preferences,
             initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
@@ -2919,6 +2982,20 @@ if benchMode {
         if transferPicker { openTransferPicker(model: model) }
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
+        if showFindBar { showFindBarWhenReady(model: model) }
+        if let capturePane {
+            // A local is enough to keep: `present` hands the panel to AppKit,
+            // whose window list retains it, and nothing here switches panes
+            // after the shutter.
+            SettingsWindow().present(model.preferences, pane: capturePane)
+            // Said out loud for the reason the probes say things: the capture
+            // runs unattended, and a pane that failed to appear should name
+            // itself in the log rather than in a screenshot of the wrong
+            // window.
+            for w in NSApp.windows where w.isVisible {
+                fputs("capture: window \"\(w.title)\" \(w.frame)\n", stderr)
+            }
+        }
         if preferencesProbe { probePreferences(model: model) }
         if historyProbe { probeHistory(model: model) }
         if sessionsProbe { probeSessions(model: model) }
