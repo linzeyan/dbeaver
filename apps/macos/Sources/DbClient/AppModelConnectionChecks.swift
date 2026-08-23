@@ -573,6 +573,8 @@ enum AppModelConnectionChecks {
             model.sessions[0].schemas = [SchemaInfo(name: "public")]
             model.renameQueryBuffer(0, to: "the work")
             model.queryText = "select 1"
+            model.sessions[0].savedName = "prod-pg"
+            model.sessions[0].timeoutSeconds = 42
 
             expect(
                 model.canSwitchDatabase(to: "bench"), false,
@@ -593,6 +595,15 @@ enum AppModelConnectionChecks {
             expect(
                 model.schemas.isEmpty, true,
                 "and nothing of the tree of the database it left")
+            expect(
+                model.sessions[0].savedName, "prod-pg",
+                "the saved entry's name rides along")
+            expect(
+                model.sessions[0].connectionLabel, "prod-pg",
+                "and the moved tab is still called by it")
+            expect(
+                model.sessions[0].timeoutSeconds, 42,
+                "given the patience the person gave the tab it moved from")
         }
     }
 

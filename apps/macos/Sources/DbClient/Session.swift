@@ -62,9 +62,17 @@ final class Session: Identifiable {
     /// worth showing, and worth showing as provisional.
     var isTreeStale = false
 
-    /// What the tab is called. The default is what a tab holding nothing but
-    /// the connection form is called, which is the only time it is read: every
-    /// other path sets it from the string the connection was opened with.
+    /// The name on the saved entry this connection was opened from, or nil off
+    /// the paths that have no entry — quick connect and `--conn`. Carried on
+    /// the session so another database opened or switched to from this tab
+    /// keeps the name; like the safety marks, a rename in the sidebar reaches
+    /// this tab's title at its next connection, not before.
+    var savedName: String?
+
+    /// What the tab is called: the saved entry's name where there is one, the
+    /// address in the connection string otherwise. The default is what a tab
+    /// holding nothing but the connection form is called, which is the only
+    /// time it is read: every other path sets it when a connection is opened.
     var connectionLabel = "New Connection"
     var connectionState: StatusDot.State = .connecting
 

@@ -1510,7 +1510,8 @@ final class AppModel {
             through: Self.bastion(
                 for: connectionDraft.settings,
                 secret: CredentialFile.shared.sshSecret(for: connectionDraft.id) ?? ""),
-            waiting: connectionDraft.settings.timeoutSeconds)
+            waiting: connectionDraft.settings.timeoutSeconds,
+            named: connectionDraft.name.isEmpty ? nil : connectionDraft.name)
     }
 
     /// Connects to a raw connection URL, from `--conn`.
@@ -1540,7 +1541,8 @@ final class AppModel {
         // `make screenshot` reaching a database through somebody's SSH key would
         // be this application deciding on its own to use a credential it was
         // never handed.
-        open(connString, through: nil, waiting: connectionDraft.settings.timeoutSeconds)
+        // A raw URL has no entry and so no name; the tab is called by address.
+        open(connString, through: nil, waiting: connectionDraft.settings.timeoutSeconds, named: nil)
     }
 
     /// Opens another database on this server, in a tab of its own.
@@ -1552,7 +1554,9 @@ final class AppModel {
         // This session's bastion rather than the form's: the tab this was
         // started from is the one being copied, and the chooser may since have
         // moved to a row with a different bastion or none at all.
-        open(rewritten, through: session.bastion, waiting: session.timeoutSeconds)
+        open(
+            rewritten, through: session.bastion, waiting: session.timeoutSeconds,
+            named: session.savedName)
     }
 
     /// Moves this tab onto another database.
@@ -1616,7 +1620,12 @@ final class AppModel {
         // let go of, so nothing that lands late from the connection being closed
         // can be reported against the tab it used to be in.
         drain(leaving)
-        open(rewritten, through: arriving.bastion, waiting: arriving.timeoutSeconds)
+        // `leaving`'s patience and name, not `arriving`'s: the fresh session
+        // still holds its defaults at this point, and both belong to the person
+        // rather than the server, like everything else carried over above.
+        open(
+            rewritten, through: arriving.bastion, waiting: leaving.timeoutSeconds,
+            named: leaving.savedName)
     }
 
     /// Moves the session itself, for a connection whose databases are containers
@@ -1805,10 +1814,18 @@ final class AppModel {
     /// dials the same server through the same bastion, and it would be odd for it
     /// to be given a different amount of patience than the connection it was
     /// started from.
-    private func open(_ connString: String, through bastion: SshConfig?, waiting: Int) {
+    ///
+    /// `savedName` is a parameter rather than a read of `connectionDraft` for
+    /// the same reason the bastion is: on the paths that dial a server again —
+    /// another database, a switch — the chooser may since have moved to a
+    /// different row, and the name must be the one this tab was opened under.
+    private func open(
+        _ connString: String, through bastion: SshConfig?, waiting: Int, named savedName: String?
+    ) {
         let filling = sessionToFill()
         sessionBeingOpened = filling
         filling.timeoutSeconds = waiting
+        filling.savedName = savedName
         // Onto that session directly rather than through the forwarding
         // properties, which reach the tab in front — and the tab in front is the
         // connection still answering queries while this one is in the air.
@@ -1831,7 +1848,7 @@ final class AppModel {
             filling.relations = tree.relations
             filling.isTreeStale = true
         }
-        filling.connectionLabel = Self.label(for: connString)
+        filling.connectionLabel = savedName ?? Self.label(for: connString)
         filling.connectionState = .connecting
         filling.status = "Connecting…"
         filling.isBusy = true
@@ -1867,7 +1884,7 @@ final class AppModel {
         relations = inventory.relations
         isTreeStale = false
         remember(inventory)
-        connectionLabel = Self.label(for: connString)
+        connectionLabel = session.savedName ?? Self.label(for: connString)
         connectionColor = connectionDraft.color
         safety = ConnectionSafety(of: connectionDraft)
         // Both: the entry remembers it for the next time the list is drawn, and
