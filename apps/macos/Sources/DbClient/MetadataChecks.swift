@@ -131,7 +131,7 @@ enum MetadataChecks {
         let both: Capabilities? = decode(
             #"""
             {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
-             "writes_statements":true,"schema_is_the_database":false}
+             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -140,13 +140,14 @@ enum MetadataChecks {
         expect(
             both?.schemaIsTheDatabase, false,
             "and that its schemas are schemas, since it has a level of databases above them")
+        expect(both?.reportsRoutines, true, "and that it can list its functions and procedures")
 
         // Cassandra's answer, which is the one `cancel_stops_the_statement`
         // exists to carry — and Redis's for the field beside it.
         let neither: Capabilities? = decode(
             #"""
             {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
-             "writes_statements":false,"schema_is_the_database":true}
+             "writes_statements":false,"schema_is_the_database":true,"reports_routines":false}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -155,6 +156,9 @@ enum MetadataChecks {
         expect(
             neither?.schemaIsTheDatabase, true,
             "while its one level of containers is what Redis itself calls databases")
+        expect(
+            neither?.reportsRoutines, false,
+            "and that there are no routines to list, Redis having no such object")
 
         // A field the core stopped writing is refused rather than read as false,
         // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
@@ -162,7 +166,7 @@ enum MetadataChecks {
         let renamed: Capabilities? = decode(
             #"""
             {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
-             "writes_statements":true,"schema_is_the_database":false}
+             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 

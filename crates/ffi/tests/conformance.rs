@@ -49,10 +49,11 @@ use dbffi::{
     db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
     db_foreign_keys_json, db_free, db_import, db_indexes_json, db_names_forget, db_query,
     db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
-    db_relations_json, db_row_identity_json, db_schemas_json, db_sql_error_offset, db_sql_format,
-    db_sql_scan_json, db_string_free, db_transfer_cancel, db_transfer_free, db_transfer_start,
-    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
-    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
+    db_schemas_json, db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free,
+    db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step, db_triggers_json,
+    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
+    db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -209,6 +210,57 @@ fn test_relations_invalid_utf8_schema() {
     let result = unsafe { db_relations_json(ptr::null_mut(), invalid_cstring.as_ptr(), &mut err) };
     assert!(result.is_null());
     assert!(!err.is_null(), "db_relations_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_routines_json with null handle
+#[test]
+fn test_routines_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_routines_json(ptr::null_mut(), ptr::null(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_routines_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_routines_json with invalid UTF-8 schema
+#[test]
+fn test_routines_invalid_utf8_schema() {
+    let invalid_cstring = CString::new(vec![b'v', b'a', b'l', b'i', b'd', 0xff, 0xfe]).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_routines_json(ptr::null_mut(), invalid_cstring.as_ptr(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_routines_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_routine_definition_json with null handle
+#[test]
+fn test_routine_definition_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result =
+        unsafe { db_routine_definition_json(ptr::null_mut(), ptr::null(), ptr::null(), &mut err) };
+    assert!(result.is_null());
+    assert!(
+        !err.is_null(),
+        "db_routine_definition_json must say why it failed"
+    );
+    unsafe { db_string_free(err) };
+}
+
+// Test db_routine_definition_json with null id
+#[test]
+fn test_routine_definition_null_id() {
+    let schema = CString::new("public").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_routine_definition_json(ptr::null_mut(), schema.as_ptr(), ptr::null(), &mut err)
+    };
+    assert!(result.is_null());
+    assert!(
+        !err.is_null(),
+        "db_routine_definition_json must say why it failed"
+    );
     unsafe { db_string_free(err) };
 }
 
@@ -870,6 +922,88 @@ fn test_relations_json() {
     assert!(!json_str.is_empty());
 
     unsafe { db_string_free(result) };
+    unsafe { db_free(handle) };
+}
+
+/// The pair round-trips: an id this side got out of `db_routines_json` is one
+/// `db_routine_definition_json` takes back.
+///
+/// The null-argument tests above cannot see this. The id is opaque and
+/// driver-defined — an oid here, a `FUNCTION name` pair on MySQL — so the only
+/// way to know the two calls agree on its spelling is to carry one across.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn test_routines_json_round_trips_an_id() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+    assert!(err.is_null(), "db_connect should not set err on success");
+
+    let schema_cstring = CString::new("public").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_routines_json(handle, schema_cstring.as_ptr(), &mut err) };
+    assert!(!result.is_null());
+    assert!(
+        err.is_null(),
+        "db_routines_json should not set err on success"
+    );
+
+    let listed = unsafe { CStr::from_ptr(result) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    unsafe { db_string_free(result) };
+    assert!(
+        listed.contains("bench_child_touch"),
+        "the trigger function the benchmark schema defines should be listed: {listed}"
+    );
+
+    // Pulled out of the JSON rather than looked up, because the point is that
+    // the id crossing the boundary is the one that comes back.
+    let id = listed
+        .split("\"id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a listed routine carries an id");
+    let id_cstring = CString::new(id).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let source = unsafe {
+        db_routine_definition_json(
+            handle,
+            schema_cstring.as_ptr(),
+            id_cstring.as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(!source.is_null());
+    assert!(
+        err.is_null(),
+        "db_routine_definition_json should not set err on success"
+    );
+    let source_str = unsafe { CStr::from_ptr(source) }.to_str().unwrap();
+    assert_ne!(
+        source_str, "null",
+        "the id this side was just handed is not one the driver disowns"
+    );
+    unsafe { db_string_free(source) };
+
+    // An id that names nothing is JSON null, not a failure: a routine dropped
+    // between the list and the click is an ordinary thing to find.
+    let stranger = CString::new("no_such_routine_anywhere").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let missing = unsafe {
+        db_routine_definition_json(handle, schema_cstring.as_ptr(), stranger.as_ptr(), &mut err)
+    };
+    assert!(!missing.is_null());
+    assert!(err.is_null());
+    assert_eq!(
+        unsafe { CStr::from_ptr(missing) }.to_str().unwrap(),
+        "null",
+        "an id that names nothing is nothing, not an error"
+    );
+    unsafe { db_string_free(missing) };
+
     unsafe { db_free(handle) };
 }
 

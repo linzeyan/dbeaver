@@ -1017,39 +1017,81 @@ pub unsafe extern "C" fn db_relations_json(
     }
 }
 
-/// Defines one `(handle, schema, relation, err) -> JSON` entry point.
+/// Functions and procedures in `schema` as a JSON array. Release with
+/// `db_string_free`.
 ///
-/// The relation-scoped metadata calls differ only in which method they
+/// Fails on a connection whose `reports_routines` is false, rather than
+/// answering with an empty array: a front end that cannot tell "none here" from
+/// "this driver was never taught to look" draws an empty group and calls it the
+/// truth.
+///
+/// # Safety
+/// `handle` must be live; `schema` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_routines_json(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() {
+        unsafe { set_err(err, "null handle or schema") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let s = match unsafe { CStr::from_ptr(schema) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    match runtime().block_on(h.driver.routines(s)) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Defines one `(handle, schema, name, err) -> JSON` entry point.
+///
+/// The schema-and-one-name metadata calls differ only in which method they
 /// dispatch to. Written out one at a time, the null checks and the UTF-8
 /// handling become three copies of the same unsafe block — three places for
 /// one mistake to be fixed in two of them.
-macro_rules! relation_metadata {
+///
+/// The second string is a relation for all but one of them, and a routine id
+/// for `db_routine_definition_json`, which is why nothing here calls it a
+/// relation: an error message naming the wrong kind of thing is how a caller
+/// spends an afternoon looking in the wrong place.
+macro_rules! schema_and_name_metadata {
     ($(#[$doc:meta])* $name:ident => $method:ident) => {
         $(#[$doc])*
         ///
         /// # Safety
-        /// `handle` must be live; `schema` and `relation` must be valid
+        /// `handle` must be live; `schema` and `name` must be valid
         /// NUL-terminated C strings.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(
             handle: *mut DbHandle,
             schema: *const c_char,
-            relation: *const c_char,
+            name: *const c_char,
             err: *mut *mut c_char,
         ) -> *mut c_char {
-            if handle.is_null() || schema.is_null() || relation.is_null() {
-                unsafe { set_err(err, "null handle, schema, or relation") };
+            if handle.is_null() || schema.is_null() || name.is_null() {
+                unsafe { set_err(err, "null handle, schema, or name") };
                 return ptr::null_mut();
             }
             let h = unsafe { &*handle };
             let (s, r) = unsafe {
                 match (
                     CStr::from_ptr(schema).to_str(),
-                    CStr::from_ptr(relation).to_str(),
+                    CStr::from_ptr(name).to_str(),
                 ) {
                     (Ok(s), Ok(r)) => (s, r),
                     _ => {
-                        set_err(err, "schema or relation is not valid UTF-8");
+                        set_err(err, "schema or name is not valid UTF-8");
                         return ptr::null_mut();
                     }
                 }
@@ -1065,42 +1107,50 @@ macro_rules! relation_metadata {
     };
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// Columns of one relation as a JSON array. Release with `db_string_free`.
     db_columns_json => columns
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// Indexes on one relation as a JSON array. Release with `db_string_free`.
     db_indexes_json => indexes
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// The statement a view is defined by, as a JSON string, or JSON `null` for
     /// a relation that has none. Release with `db_string_free`.
     db_definition_json => definition
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// Foreign keys of one relation as a JSON array. Release with `db_string_free`.
     db_foreign_keys_json => foreign_keys
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// Foreign keys pointing at one relation, as a JSON array. Release with
     /// `db_string_free`.
     db_referenced_by_json => referenced_by
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// CHECK, UNIQUE and EXCLUDE constraints as a JSON array. Release with
     /// `db_string_free`.
     db_constraints_json => constraints
 }
 
-relation_metadata! {
+schema_and_name_metadata! {
     /// User-defined triggers as a JSON array. Release with `db_string_free`.
     db_triggers_json => triggers
+}
+
+schema_and_name_metadata! {
+    /// The source of one function or procedure, as a JSON string, or JSON `null`
+    /// for an id that names nothing. The second argument is the `id` a routine
+    /// reported, not its name — overloading means a name can stand for several.
+    /// Release with `db_string_free`.
+    db_routine_definition_json => routine_definition
 }
 
 /// What a browse is asking for, as it crosses the boundary.

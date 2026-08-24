@@ -291,6 +291,14 @@ char* db_constraints_json(DbHandle* handle, const char* schema, const char* rela
                           char** err);
 char* db_triggers_json(DbHandle* handle, const char* schema, const char* relation,
                        char** err);
+// Functions and procedures. Fails, rather than answering an empty array, on a
+// connection whose capabilities report reports_routines false: ask before you
+// call, or an untaught driver and a schema with none read the same.
+char* db_routines_json(DbHandle* handle, const char* schema, char** err);
+// A JSON string, or JSON null for an id that names nothing. `id` is what a
+// routine reported, not its name — one name can stand for several overloads.
+char* db_routine_definition_json(DbHandle* handle, const char* schema, const char* id,
+                                 char** err);
 
 // The statements that would recreate one relation, as plain text — released with
 // db_string_free like the JSON above, and unlike it in being the value itself.

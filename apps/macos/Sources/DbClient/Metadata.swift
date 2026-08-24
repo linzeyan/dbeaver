@@ -75,16 +75,25 @@ struct Capabilities: Codable, Hashable {
     /// the word every sentence about it uses. See `AppModel.containerNoun`.
     let schemaIsTheDatabase: Bool
 
+    /// Whether this connection can list its functions and procedures.
+    ///
+    /// False covers two unrelated cases and the navigator must not tell them
+    /// apart by guessing: Redis and MongoDB have no such object, while SQL
+    /// Server and Snowflake have plenty and this build has not been taught to
+    /// read them. Either way the group is not drawn — an empty `Routines` node
+    /// under a schema full of them is a claim, not a blank.
+    let reportsRoutines: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
     /// transaction control it might not have, promises no cancel it might not be
     /// able to deliver, claims no switch it might have to take back, draws no
-    /// control that writes, and calls the level it has not read yet by the
-    /// neutral word.
+    /// control that writes, calls the level it has not read yet by the neutral
+    /// word, and lists no routines it has not been told are there.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
-        writesStatements: false, schemaIsTheDatabase: false)
+        writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -92,6 +101,7 @@ struct Capabilities: Codable, Hashable {
         case switchesDatabase = "switches_database"
         case writesStatements = "writes_statements"
         case schemaIsTheDatabase = "schema_is_the_database"
+        case reportsRoutines = "reports_routines"
     }
 }
 
@@ -186,6 +196,59 @@ struct RelationInfo: Codable, Hashable, Identifiable {
         case schema, name, kind
         case estimatedRows = "estimated_rows"
     }
+}
+
+enum RoutineKind: String, Codable, Hashable {
+    case function
+    case procedure
+
+    /// SF Symbol used in the navigator. Both are code; the distinction worth
+    /// drawing is that one is called for its answer and the other for what it
+    /// does.
+    var symbol: String {
+        switch self {
+        case .function: return "function"
+        case .procedure: return "gearshape.2"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .function: return "Function"
+        case .procedure: return "Procedure"
+        }
+    }
+}
+
+/// One function or procedure in a schema.
+///
+/// Only where `Capabilities.reportsRoutines` — every other connection refuses
+/// the call rather than answering an empty list, so nothing here has to stand
+/// for "not asked".
+struct RoutineInfo: Codable, Hashable, Identifiable {
+    let schema: String
+    let name: String
+    let kind: RoutineKind
+
+    /// What to hand back to ask for the source. Opaque and driver-defined: a
+    /// PostgreSQL oid, a `FUNCTION name` pair on MySQL. Overloading is the
+    /// reason it is not the name — `age(date)` and `age(timestamp)` are two
+    /// routines and one word.
+    let id: String
+
+    /// The parameter list as the database renders it, parentheses excluded.
+    /// Empty for a routine that takes none.
+    let arguments: String
+
+    /// Absent for a procedure, which returns nothing to describe.
+    let returns: String?
+
+    /// `plpgsql`, `sql`, `c` — absent where the engine does not say.
+    let language: String?
+
+    /// Name and parameters as one line, which is what distinguishes two
+    /// overloads in a list.
+    var signature: String { "\(name)(\(arguments))" }
 }
 
 struct IndexInfo: Decodable, Hashable, Identifiable {

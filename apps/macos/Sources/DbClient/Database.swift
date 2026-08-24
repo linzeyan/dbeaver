@@ -190,6 +190,27 @@ final class Database: @unchecked Sendable {
         try decodeJSON(db_relations_json(handle, schema, &errOut), as: [RelationInfo].self)
     }
 
+    /// Functions and procedures in one schema.
+    ///
+    /// Only ask where `capabilities().reportsRoutines`. Every other connection
+    /// throws here rather than answering an empty array, which is the point of
+    /// the flag: "this schema has none" and "this driver was never taught to
+    /// look" are different facts and an empty list would tell them apart wrong.
+    func routines(schema: String) throws -> [RoutineInfo] {
+        try decodeJSON(db_routines_json(handle, schema, &errOut), as: [RoutineInfo].self)
+    }
+
+    /// The source of one routine, or nil where `id` names nothing.
+    ///
+    /// `id` is what `routines` reported and not the name — one name can stand
+    /// for several overloads, and the driver is the only side that knows which
+    /// of its own ids it will take back.
+    func routineDefinition(schema: String, id: String) throws -> String? {
+        try decodeJSON(
+            db_routine_definition_json(handle, schema, id, &errOut), as: MaybeString.self
+        ).value
+    }
+
     func columns(schema: String, relation: String) throws -> [ColumnInfo] {
         try decodeJSON(
             db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)
@@ -456,6 +477,18 @@ final class Database: @unchecked Sendable {
     /// the caller (all metadata access happens on one background queue), so a
     /// single slot is sufficient and keeps the call sites readable.
     private var errOut: UnsafeMutablePointer<CChar>?
+
+    /// A JSON string that may be `null`, which `String?` cannot express:
+    /// `Optional` is not `Decodable`, so a call answering one value or none has
+    /// nowhere to decode into without a type of its own.
+    private struct MaybeString: Decodable {
+        let value: String?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            value = container.decodeNil() ? nil : try container.decode(String.self)
+        }
+    }
 
     private func decodeJSON<T: Decodable>(
         _ raw: UnsafeMutablePointer<CChar>?, as type: T.Type
