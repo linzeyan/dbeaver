@@ -102,12 +102,18 @@ struct MainView: View {
         .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
         .sheet(isPresented: $model.isGoToOpen) { GoToPalette(model: model) }
         .sheet(isPresented: $model.isTransferPickerOpen) { TransferSheet(model: model) }
-        .navigationTitle(model.selected?.name ?? "DbClient")
+        // The routine first, matching the panes: while one is selected it is
+        // what the window is about, and the table underneath is only what it
+        // will go back to.
+        .navigationTitle(model.selectedRoutine?.name ?? model.selected?.name ?? "DbClient")
         // Nothing rather than the connection's name when no object is selected.
         // The name was here because, with no selection, the titlebar was the
         // only place saying which database the window was pointed at; the tab
         // strip says it now, and says it beside the tabs it can be switched to.
-        .navigationSubtitle(model.selected.map { "\($0.kind.label) · \($0.schema)" } ?? "")
+        // The routine first, matching the title above it. Reading `selected`
+        // here while a routine was showing put "Materialized View" under a
+        // function's name — the previous selection describing the current one.
+        .navigationSubtitle(model.objectSubtitle)
     }
 
     /// The left column: the tree, the rail it collapses to, or — on a tab with
@@ -329,24 +335,47 @@ struct NavigatorView: View {
         let first = firstDrawnSchema
         ForEach(model.schemas) { schema in
             let relations = model.visibleRelations(in: schema.name)
-            if !relations.isEmpty {
+            let routines = model.visibleRoutines(in: schema.name)
+            if !relations.isEmpty || !routines.isEmpty {
                 DisclosureGroup(isExpanded: expansion(for: schema.name)) {
                     ForEach(relations) { relation in
                         NavigatorRow(relation: relation)
-                            .tag(relation)
+                            .tag(NavigatorNode.relation(relation))
                             // The window's own selected tone, now that the
                             // system's is switched off below. A shade stronger
                             // than the grid's 0.18, which is read with a
                             // brighter cell cursor over it; this band is the
                             // only layer there is.
                             .listRowBackground(
-                                relation == model.navigatorSelection
+                                model.navigatorSelection == .relation(relation)
                                     ? Theme.accent.opacity(0.22).color
                                     : Color.clear)
                     }
+                    // The tables stay where they were, at the schema's own
+                    // indent, and only the routines are behind a group. Two more
+                    // groups for Tables and Views were the other shape, and they
+                    // cost a click on the row every session opens with in order
+                    // to separate two kinds the icon already tells apart. What
+                    // earns this one is that a routine is not browsable at all:
+                    // it is the row whose click does something else.
+                    if !routines.isEmpty {
+                        DisclosureGroup(isExpanded: routineExpansion(for: schema.name)) {
+                            ForEach(routines) { routine in
+                                RoutineRow(routine: routine)
+                                    .tag(NavigatorNode.routine(routine))
+                                    .listRowBackground(
+                                        model.navigatorSelection == .routine(routine)
+                                            ? Theme.accent.opacity(0.22).color
+                                            : Color.clear)
+                            }
+                        } label: {
+                            GroupLabel(
+                                title: "Routines", symbol: "function", count: routines.count)
+                        }
+                    }
                 } label: {
                     SchemaLabel(
-                        name: schema.name, count: relations.count,
+                        name: schema.name, count: relations.count + routines.count,
                         noun: model.containerNoun
                     )
                     .background(highlightOff(ifFirst: schema.name == first))
@@ -369,7 +398,7 @@ struct NavigatorView: View {
     /// The first schema that draws a row, which is not always the first schema:
     /// one holding nothing visible is skipped entirely.
     private var firstDrawnSchema: String? {
-        model.schemas.first { !model.visibleRelations(in: $0.name).isEmpty }?.name
+        model.schemas.first { model.hasVisibleObjects(in: $0.name) }?.name
     }
 
     /// Where `ListSelectionHighlightOff` rides now that the connection root row
@@ -397,7 +426,7 @@ struct NavigatorView: View {
                     symbol: "server.rack",
                     title: "No \(model.containerNoun)s",
                     hint: "Nothing to browse on this connection yet.")
-            } else if model.matchedRelationCount == 0, model.isFiltering,
+            } else if model.matchedObjectCount == 0, model.isFiltering,
                 model.visibleDatabases.isEmpty
             {
                 // A filtered tree that matched nothing has to say so. Left
@@ -413,14 +442,14 @@ struct NavigatorView: View {
                     symbol: "magnifyingglass",
                     title: "No matches",
                     hint: noMatchesHint)
-            } else if model.matchedRelationCount == 0, model.visibleDatabases.isEmpty {
+            } else if model.matchedObjectCount == 0, model.visibleDatabases.isEmpty {
                 // Same shape, different fact: the schemas are there and hold
                 // nothing. Saying "no matches" here would blame a filter that
                 // is not switched on.
                 EmptyState(
                     symbol: "square.stack.3d.up",
                     title: "No objects",
-                    hint: "These \(model.containerNoun)s hold no tables or views.")
+                    hint: "These \(model.containerNoun)s hold nothing to browse.")
             } else {
                 // No row for the connection at the top. The strip across the
                 // window names it, in the control that also switches between
@@ -567,8 +596,8 @@ struct NavigatorView: View {
     }
 
     private var countLabel: String {
-        let matched = model.matchedRelationCount
-        let total = model.totalRelationCount
+        let matched = model.matchedObjectCount
+        let total = model.totalObjectCount
         let counted =
             matched == total
             ? AppModel.pluralized(total, "object")
@@ -592,6 +621,20 @@ struct NavigatorView: View {
             set: { isOpen in
                 guard !model.isFiltering else { return }
                 isDatabaseExpanded = isOpen
+            })
+    }
+
+    /// The same arrangement as `expansion(for:)`, one level further in.
+    private func routineExpansion(for schema: String) -> Binding<Bool> {
+        Binding(
+            get: { model.isRoutineGroupExpanded(schema) },
+            set: { isOpen in
+                guard !model.isFiltering else { return }
+                if isOpen {
+                    model.expandedRoutineGroups.insert(schema)
+                } else {
+                    model.expandedRoutineGroups.remove(schema)
+                }
             })
     }
 
@@ -753,6 +796,156 @@ struct NavigatorRow: View {
     }
 }
 
+/// A group inside a schema: a word, a glyph, and how many are behind it.
+///
+/// Not a `SchemaLabel` with a different noun. That row is a place — it has a
+/// name somebody typed in a CREATE statement — and this one is a heading this
+/// application invented, so it is set in the secondary tone rather than in the
+/// emphasis a name gets.
+private struct GroupLabel: View {
+    let title: String
+    let symbol: String
+    let count: Int
+
+    var body: some View {
+        HStack(spacing: Theme.Space.xs + 2) {
+            Image(systemName: symbol)
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.textTertiary.color)
+            Text(title)
+                .font(Theme.Typography.body)
+                .foregroundStyle(Theme.textSecondary.color)
+            Spacer(minLength: Theme.Space.xs)
+            Text("\(count)")
+                .font(Theme.Typography.digits)
+                .foregroundStyle(Theme.textTertiary.color)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), \(count)")
+    }
+}
+
+/// One function or procedure.
+///
+/// The parameters are on the row and not only in the tooltip, because they are
+/// what tells two overloads apart: a list showing `age` twice is a list with a
+/// bug in it as far as anybody reading it can tell.
+struct RoutineRow: View {
+    let routine: RoutineInfo
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: routine.kind.symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary.color)
+                .frame(width: 14)
+
+            Text(routine.signature)
+                .font(Theme.Typography.body)
+                .lineLimit(1)
+                // From the middle, so the name at the front and the closing
+                // parenthesis both survive: truncating the tail of
+                // `settle_invoice(uuid, numeric, …` leaves every overload of a
+                // long name looking identical.
+                .truncationMode(.middle)
+
+            Spacer(minLength: Theme.Space.xs)
+        }
+        .padding(.vertical, 1)
+        .help(help)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(routine.signature), \(routine.kind.label)")
+    }
+
+    private var help: String {
+        var parts = [routine.kind.label]
+        if let returns = routine.returns { parts.append("returns \(returns)") }
+        if let language = routine.language { parts.append(language) }
+        return parts.joined(separator: " · ")
+    }
+}
+
+/// The Structure tab for a function or procedure: what it is, then its source.
+///
+/// No `VSplitView`. The relation pane splits because its two halves are both
+/// lists somebody scrolls independently; here the head is four short facts and
+/// the body is one block of text, so a draggable divider would be a control
+/// whose only use is to hide the four lines.
+struct RoutineStructureView: View {
+    let routine: RoutineInfo
+    let source: String?
+    let isLoading: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            body_
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.background.color)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text(routine.signature)
+                .font(Theme.Typography.mono)
+                .foregroundStyle(Theme.text.color)
+                .textSelection(.enabled)
+                .lineLimit(2)
+            HStack(spacing: Theme.Space.md) {
+                fact(routine.kind.label)
+                // Only what the database said. A procedure returns nothing and a
+                // driver that does not report the language says nothing, and a
+                // dash in either slot would be this window inventing an answer.
+                if let returns = routine.returns { fact("returns \(returns)") }
+                if let language = routine.language { fact(language) }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.sm)
+    }
+
+    private func fact(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.Typography.caption)
+            .foregroundStyle(Theme.textTertiary.color)
+    }
+
+    /// Named with the underscore because `body` is taken by the protocol.
+    @ViewBuilder private var body_: some View {
+        if let source, !source.isEmpty {
+            ScrollView([.vertical, .horizontal]) {
+                Text(source)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .textSelection(.enabled)
+                    .fixedSize()
+                    .padding(.horizontal, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.sm)
+            }
+            // The anchor `ddlText` needs, for the reason it needs it: a
+            // two-axis scroll view centres content smaller than its viewport.
+            .defaultScrollAnchor(.topLeading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilityLabel("\(routine.kind.label) source")
+        } else if isLoading {
+            RunningPane()
+        } else {
+            // Three ways to arrive here and one sentence for all of them: a
+            // driver with no source to give, a read that failed — the banner
+            // above says so — and a routine whose body the server keeps to
+            // itself. None of the three is something the user can act on, and
+            // guessing which it was would be worse than not saying.
+            EmptyState(
+                symbol: "doc.text",
+                title: "No source",
+                hint: "This connection did not return a definition for \(routine.name).")
+        }
+    }
+}
+
 // MARK: - Detail
 
 struct DetailPane: View {
@@ -858,7 +1051,15 @@ struct StructurePane: View {
     @State private var detail: StructureDetail = .indexes
 
     var body: some View {
-        if model.columns.isEmpty {
+        if let routine = model.selectedRoutine {
+            // Ahead of every branch below, all of which describe a relation.
+            // `selected` is still set underneath — the table this routine was
+            // reached from — and asking about its columns first would draw that
+            // table's structure under a function's name.
+            RoutineStructureView(
+                routine: routine, source: model.routineSource,
+                isLoading: model.isLoadingRoutineSource)
+        } else if model.columns.isEmpty {
             // Three states rather than one. The sentence below was shown for
             // all three, including the wait between picking a relation and its
             // columns arriving — a pane instructing the user to do the thing
@@ -1302,7 +1503,17 @@ struct ContentPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if model.selected == nil {
+            if let routine = model.selectedRoutine {
+                // Reached by switching here deliberately: picking a routine while
+                // this tab is showing moves to Structure instead. The rows of the
+                // table underneath are still loaded and one click away, which is
+                // what the hint is pointing at.
+                EmptyState(
+                    symbol: routine.kind.symbol,
+                    title: "\(routine.kind.label)s have no rows",
+                    hint: "\(routine.signature) is code, not a table. "
+                        + "Its source is on the Structure tab.")
+            } else if model.selected == nil {
                 EmptyState(
                     symbol: "tablecells",
                     title: "Nothing selected",

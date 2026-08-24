@@ -219,8 +219,35 @@ final class Session: Identifiable {
     /// and is the right thing to draw before the first answer arrives.
     var databases: [DatabaseInfo]?
     var relations: [String: [RelationInfo]] = [:]
+
+    /// Functions and procedures, by schema. Empty on a connection whose
+    /// `capabilities.reportsRoutines` is false, which is why the navigator reads
+    /// that flag and not this: a driver never taught to look and a schema with
+    /// none to find leave behind the same empty dictionary.
+    var routines: [String: [RoutineInfo]] = [:]
     var expanded: Set<String> = []
+
+    /// Schemas whose Routines group is open, kept apart from `expanded` so that
+    /// opening a schema and opening the group inside it are two arrangements
+    /// rather than one — the second survives collapsing and reopening the first.
+    var expandedRoutineGroups: Set<String> = []
     var selected: RelationInfo?
+
+    /// The routine the detail panes are describing, or nil while they are
+    /// describing `selected`.
+    ///
+    /// Beside `selected` rather than replacing it. A routine and a relation are
+    /// selected from the same tree and only one of them at a time, but they are
+    /// not the same kind of thing — a relation carries browsed rows, a paging
+    /// position, a staged edit and a WHERE clause, and folding the two into one
+    /// property would mean clicking a function throws all of that away. Clicking
+    /// back onto the table finds it exactly as it was.
+    var selectedRoutine: RoutineInfo?
+
+    /// The source of `selectedRoutine`, nil while it is on its way and nil for a
+    /// routine the driver hands back nothing for. The two are told apart by
+    /// `AppModel.isLoadingRoutineSource`, the same way an empty `columns` is.
+    var routineSource: String?
 
     /// Set while `refresh` swaps `selected` for the freshly read value naming
     /// the same relation. The two are the same object to a user but not to

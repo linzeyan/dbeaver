@@ -744,14 +744,14 @@ enum AppModelConnectionChecks {
             expect(
                 model.visibleDatabases.map(\.name), ["bench"],
                 "a filter matching a relation keeps the database holding it")
-            expect(model.matchedRelationCount, 1, "and narrows the relations under it")
+            expect(model.matchedObjectCount, 1, "and narrows the relations under it")
 
             model.navigatorFilter = "arch"
             expect(
                 model.visibleDatabases.map(\.name), ["archive"],
                 "a database is reached by its own name")
             expect(
-                model.matchedRelationCount, 0,
+                model.matchedObjectCount, 0,
                 "and the database the connection is on goes with its relations")
 
             model.navigatorFilter = "bench"
@@ -759,7 +759,7 @@ enum AppModelConnectionChecks {
                 model.visibleDatabases.map(\.name), ["bench"],
                 "the open database answers to its own name too")
             expect(
-                model.matchedRelationCount, 2,
+                model.matchedObjectCount, 2,
                 "keeping everything under it, the rule a schema's own name follows")
 
             model.navigatorFilter = "no such thing"
@@ -1234,7 +1234,8 @@ enum AppModelConnectionChecks {
                         RelationInfo(
                             schema: schema, name: relation, kind: .table, estimatedRows: nil)
                     ]
-                ])
+                ],
+                routines: [:])
         }
 
         let home = URL(filePath: "/Users/nobody")
@@ -1307,6 +1308,13 @@ enum AppModelConnectionChecks {
                             RelationInfo(
                                 schema: "public", name: "orders", kind: .table, estimatedRows: nil)
                         ]
+                    ],
+                    routines: [
+                        "public": [
+                            RoutineInfo(
+                                schema: "public", name: "settle", kind: .function, id: "1",
+                                arguments: "uuid", returns: "numeric", language: "plpgsql")
+                        ]
                     ]),
                 for: NavigatorCacheKey(connection: connection.id, database: "sales"))
 
@@ -1322,6 +1330,9 @@ enum AppModelConnectionChecks {
             expect(
                 model.relations["public"]?.map(\.name), ["orders"],
                 "with the objects under it, which is the part that is worth waiting less for")
+            expect(
+                model.routines["public"]?.map(\.signature), ["settle(uuid)"],
+                "and the functions with them, since they were drawn last time too")
             expect(model.isTreeStale, true, "and the window knows it is not the live one")
             expect(
                 model.connectionDescription.hasSuffix(

@@ -72,7 +72,7 @@ struct SidebarRail: View {
     /// order, so the two sit at the same heights they do when the tree is open.
     private var footer: some View {
         VStack(spacing: 2) {
-            Text(AppModel.formatted(model.matchedRelationCount))
+            Text(AppModel.formatted(model.matchedObjectCount))
                 .font(Theme.Typography.digits)
                 .foregroundStyle(Theme.textTertiary.color)
                 .lineLimit(1)
@@ -104,7 +104,7 @@ struct SidebarRail: View {
     /// to say of what — and to carry the "from last time" the tree's dimming
     /// stands for, which no amount of dimming a number would say.
     private var countHelp: String {
-        let counted = AppModel.pluralized(model.matchedRelationCount, "object")
+        let counted = AppModel.pluralized(model.matchedObjectCount, "object")
         return model.isTreeStale ? "\(counted), from the last time this was open" : counted
     }
 }

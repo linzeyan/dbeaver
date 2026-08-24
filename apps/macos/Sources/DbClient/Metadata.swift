@@ -251,6 +251,19 @@ struct RoutineInfo: Codable, Hashable, Identifiable {
     var signature: String { "\(name)(\(arguments))" }
 }
 
+/// One selectable row of the navigator.
+///
+/// A `List` selection is one `Hashable` type and the tree now holds two kinds of
+/// object, so this is what the rows tag themselves with. It goes no further than
+/// the tree: `AppModel.navigatorSelection` unpacks it into the two properties the
+/// rest of the window reads, because a relation and a routine are not
+/// interchangeable anywhere below the sidebar and a pane that had to unwrap this
+/// on every access would be asking the same question a hundred times.
+enum NavigatorNode: Hashable {
+    case relation(RelationInfo)
+    case routine(RoutineInfo)
+}
+
 struct IndexInfo: Decodable, Hashable, Identifiable {
     let name: String
     /// Key expressions in index order, not plain column names: an index on

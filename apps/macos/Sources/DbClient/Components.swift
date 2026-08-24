@@ -251,8 +251,11 @@ struct SidebarFilterField: View {
 
             // Named for what it matches. "Filter" alone, over a tree of two
             // levels, leaves the user to discover by experiment that the schema
-            // row is searched too.
-            TextField("Filter tables and \(noun)s", text: $text)
+            // row is searched too. "Objects" rather than "tables" since the
+            // routines joined the tree: it is the collective noun the footer
+            // beneath already counts in, and naming all three kinds would not
+            // fit a column this narrow.
+            TextField("Filter objects and \(noun)s", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
                 .foregroundStyle(Theme.text.color)
@@ -289,7 +292,7 @@ struct SidebarFilterField: View {
         // the hands already know; a filter is easy to leave switched on by
         // accident, and both of them end with the whole tree back.
         .onExitCommand { text = "" }
-        .help("Show only \(noun)s and relations whose name contains this (⌥⌘F)")
+        .help("Show only \(noun)s, tables and routines whose name contains this (⌥⌘F)")
     }
 }
 

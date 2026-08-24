@@ -39,14 +39,18 @@ struct NavigatorCache {
 
     /// What the navigator was drawing, for one database on one connection.
     ///
-    /// The three things `AppModel.Inventory` carries that describe the tree, and
-    /// not the two that do not: the server label belongs to the connection list
-    /// and is already kept there, and what a connection can do is answered by the
+    /// The things `AppModel.Inventory` carries that describe the tree, and not
+    /// the two that do not: the server label belongs to the connection list and
+    /// is already kept there, and what a connection can do is answered by the
     /// connection rather than remembered about it.
     struct Tree: Codable {
         let schemas: [SchemaInfo]
         let databases: [DatabaseInfo]?
         let relations: [String: [RelationInfo]]
+        /// Empty on a connection that does not report them, which is also what a
+        /// file written before this field existed decodes to — nothing, because
+        /// the version below refuses it outright.
+        let routines: [String: [RoutineInfo]]
     }
 
     /// One file per connection, holding one tree per database on it.
@@ -66,7 +70,7 @@ struct NavigatorCache {
     /// the one file in the application where that is the right answer: the cost
     /// of ignoring it is one slow first look at a server, and the code that would
     /// migrate it is code that has to be right about a format nobody can see.
-    private static let version = 1
+    private static let version = 2
 
     func load(_ key: NavigatorCacheKey) -> Tree? {
         stored(key.connection)?.trees[key.database]

@@ -149,6 +149,9 @@ if CommandLine.arguments.contains("--verify-driver-badge") {
 if CommandLine.arguments.contains("--verify-sidebar") {
     exit(SidebarChecks.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-navigator-groups") {
+    exit(NavigatorGroupChecks.run() ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-editor-typing") {
     exit(EditorTypingChecks.run() ? 0 : 1)
 }

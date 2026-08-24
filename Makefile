@@ -345,6 +345,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-query-buffers
 	./$(APP_BIN) --verify-driver-badge
 	./$(APP_BIN) --verify-sidebar
+	./$(APP_BIN) --verify-navigator-groups
 	./$(APP_BIN) --verify-editor-typing
 	./$(APP_BIN) --verify-find-bar
 	./$(APP_BIN) --verify-keep-alive
