@@ -2936,7 +2936,17 @@ if benchMode {
         }
         let preferences: Preferences
         if capturePane != nil || mcpProbePort != nil {
-            let store = ScratchDefaults.store("capture-settings")
+            // One fixed suite, emptied on the way in, the way `--history-store`
+            // does it: `ScratchDefaults` is for checks, which release what they
+            // mint, and a window that runs until somebody kills it never
+            // reaches a `defer` — so a suite per run would leave one plist per
+            // capture behind for good.
+            let name = "dev.dbclient.captureprefs"
+            UserDefaults.standard.removePersistentDomain(forName: name)
+            guard let store = UserDefaults(suiteName: name) else {
+                fputs("could not open the capture defaults suite\n", stderr)
+                exit(1)
+            }
             if capturePane == .mcp || mcpProbePort != nil {
                 store.set(true, forKey: "dev.dbclient.mcpServerEnabled")
             }

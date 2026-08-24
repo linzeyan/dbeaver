@@ -49,6 +49,13 @@ enum ScratchDefaults {
         for (name, store) in minted {
             store.removePersistentDomain(forName: name)
             store.synchronize()
+            // And then the domain itself, or the file comes back. Emptying a
+            // suite leaves `cfprefsd` still holding it, and what it holds it
+            // writes out again when the process ends — measured on
+            // 2026-08-24 as one 42-byte plist per store minted, on every run
+            // of every suite, which is where the six thousand that had
+            // accumulated came from.
+            UserDefaults.standard.removeSuite(named: name)
             // And then the file, because the call above does not remove it.
             // Emptying a domain leaves the plist `cfprefsd` wrote for it on
             // disk — 42 bytes holding no keys, which `defaults read` reports as
