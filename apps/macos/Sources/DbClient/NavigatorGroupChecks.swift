@@ -49,7 +49,7 @@ enum NavigatorGroupChecks {
     private static func checkASchemaHoldingOnlyRoutinesIsStillDrawn() {
         MainActor.assumeIsolated {
             let model = makeModel()
-            model.sessions[0].schemas = [SchemaInfo(name: "util")]
+            model.sessions[0].schemas = [schema("util")]
             model.sessions[0].routines = ["util": [routine("slugify")]]
             expect(model.hasVisibleObjects(in: "util"), true, "a schema of functions is drawn")
             expect(
@@ -67,7 +67,7 @@ enum NavigatorGroupChecks {
     private static func checkTheCountsAddUpBothKinds() {
         MainActor.assumeIsolated {
             let model = makeModel()
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [schema("public")]
             model.sessions[0].relations = ["public": [relation("orders"), relation("invoices")]]
             model.sessions[0].routines = ["public": [routine("settle"), routine("slugify")]]
             expect(model.totalObjectCount, 4, "two tables and two functions are four objects")
@@ -81,7 +81,7 @@ enum NavigatorGroupChecks {
     private static func checkTheFilterReachesTheRoutines() {
         MainActor.assumeIsolated {
             let model = makeModel()
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [schema("public")]
             model.sessions[0].relations = ["public": [relation("orders")]]
             model.sessions[0].routines = ["public": [routine("settle"), routine("slugify")]]
 
@@ -117,7 +117,7 @@ enum NavigatorGroupChecks {
         MainActor.assumeIsolated {
             let model = makeModel()
             let orders = relation("orders")
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [schema("public")]
             model.sessions[0].relations = ["public": [orders]]
             model.sessions[0].selected = orders
 
@@ -137,7 +137,7 @@ enum NavigatorGroupChecks {
         MainActor.assumeIsolated {
             let model = makeModel()
             let orders = relation("orders")
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [schema("public")]
             model.sessions[0].relations = ["public": [orders]]
             model.sessions[0].selected = orders
             model.navigatorSelection = .routine(routine("settle"))
@@ -199,7 +199,7 @@ enum NavigatorGroupChecks {
     private static func checkAFilterThatHidesTheSelectedRoutineDoesNotClearIt() {
         MainActor.assumeIsolated {
             let model = makeModel()
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [schema("public")]
             model.sessions[0].routines = ["public": [routine("settle"), routine("slugify")]]
             model.navigatorSelection = .routine(routine("settle"))
 
@@ -255,7 +255,7 @@ enum NavigatorGroupChecks {
     private static func checkASchemaOfNothingButSequencesIsDrawn() {
         MainActor.assumeIsolated {
             let model = makeModel()
-            model.sessions[0].schemas = [SchemaInfo(name: "counters")]
+            model.sessions[0].schemas = [schema("counters")]
             model.sessions[0].sequences = ["counters": [sequence("order_id_seq")]]
             expect(model.hasVisibleObjects(in: "counters"), true, "a schema of sequences is drawn")
             expect(model.totalObjectCount, 1, "and its one sequence is one object")
@@ -338,6 +338,12 @@ enum NavigatorGroupChecks {
         SequenceInfo(
             schema: "public", name: name, lastValue: "41", increment: "1", minValue: "1",
             maxValue: "9223372036854775807", cycles: false, cache: "1")
+    }
+
+    /// A schema of somebody's own. The system ones have a check of their own
+    /// below, which is the only place that wants the other answer.
+    private static func schema(_ name: String) -> SchemaInfo {
+        SchemaInfo(name: name, isSystem: false)
     }
 
     private static func relation(_ name: String) -> RelationInfo {

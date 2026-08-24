@@ -21,6 +21,8 @@ use dbconn::{ColumnInfo, DbResult, Driver, RelationInfo};
 use dbsql::{Completion, Dialect, Expect};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tokio::sync::RwLock;
 
 /// One thing that could be typed.
@@ -55,6 +57,13 @@ pub struct Names {
     columns: RwLock<HashMap<(String, String), Vec<ColumnInfo>>>,
     /// Where an unqualified relation is looked for.
     default_schema: RwLock<Option<String>>,
+    /// Whether the engine's own schemas are among the names suggested.
+    ///
+    /// Follows the same setting the navigator's tree does, so the editor
+    /// completes what the tree is showing. Off by default: `pg_catalog` holds a
+    /// few thousand names and a completion list is read in a popup ten rows
+    /// tall.
+    include_system: AtomicBool,
 }
 
 impl Names {
@@ -66,7 +75,23 @@ impl Names {
             relations: RwLock::new(HashMap::new()),
             columns: RwLock::new(HashMap::new()),
             default_schema: RwLock::new(None),
+            include_system: AtomicBool::new(false),
         }
+    }
+
+    /// Sets whether system schemas are suggested, and forgets what was cached
+    /// under the previous answer.
+    ///
+    /// The forgetting is the point. `schemas` is cached filtered, so a flag
+    /// flipped without it would leave the previous list in place until something
+    /// else invalidated it — a setting that takes effect at a moment nobody
+    /// chose, which is what `forget`'s own note is about.
+    pub async fn set_include_system(&self, include: bool) {
+        if self.include_system.swap(include, Ordering::Relaxed) == include {
+            return;
+        }
+        *self.schemas.write().await = None;
+        *self.default_schema.write().await = None;
     }
 
     /// The SQL this connection is written in.
@@ -117,11 +142,13 @@ impl Names {
         if let Some(known) = self.schemas.read().await.clone() {
             return Ok(known);
         }
+        let include_system = self.include_system.load(Ordering::Relaxed);
         let fetched: Vec<String> = self
             .driver
             .schemas()
             .await?
             .into_iter()
+            .filter(|s| include_system || !s.is_system)
             .map(|s| s.name)
             .collect();
         *self.schemas.write().await = Some(fetched.clone());

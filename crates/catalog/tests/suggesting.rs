@@ -41,8 +41,11 @@ impl Driver for Fake {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(["public", "archive"]
             .into_iter()
+            // Neither is the engine's own; the double is standing in for a
+            // connection whose tree is all user data.
             .map(|name| SchemaInfo {
                 name: name.to_string(),
+                is_system: false,
             })
             .collect())
     }

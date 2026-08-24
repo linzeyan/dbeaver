@@ -117,8 +117,12 @@ impl AthenaSource {
                     .database_list
                     .into_iter()
                     .filter(|database| !database.name.is_empty())
+                    // A Glue catalog holds the databases somebody registered
+                    // and nothing of Athena's own; `information_schema` is
+                    // queryable but is not one of them.
                     .map(|database| SchemaInfo {
                         name: database.name,
+                        is_system: false,
                     }),
             );
             if listing.next_token.is_empty() {

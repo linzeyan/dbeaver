@@ -106,8 +106,15 @@ impl TrinoSource {
             .await?;
         Ok(rows
             .iter()
-            .map(|row| SchemaInfo {
-                name: format!("{}.{}", text(row, 0), text(row, 1)),
+            // The name here is `catalog.schema`, so the two halves are tested
+            // separately: every connector presents an `information_schema`, and
+            // the whole `system` catalog is the cluster describing itself.
+            .map(|row| {
+                let (catalog, schema) = (text(row, 0), text(row, 1));
+                SchemaInfo {
+                    is_system: catalog == "system" || schema == "information_schema",
+                    name: format!("{catalog}.{schema}"),
+                }
             })
             .collect())
     }

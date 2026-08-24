@@ -15,6 +15,21 @@ use serde::Serialize;
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaInfo {
     pub name: String,
+
+    /// Whether this container is the engine's own rather than anybody's data.
+    ///
+    /// Decided by the driver and not by the name, because the rule is a rule
+    /// about a product: `pg_toast_16384` is a system schema and `pg_dumps` is
+    /// not, and a client matching prefixes would have to carry fifteen such
+    /// rules and get the edges wrong. Every driver answers it where it builds
+    /// this, with a sentence saying what its engine calls system.
+    ///
+    /// Reported rather than filtered out. It used to be filtered — four drivers
+    /// had the list in their `WHERE` clause — and a schema left out of the
+    /// answer is one no setting can put back, which made "show me `pg_catalog`"
+    /// a thing this client could not do at all. Whoever draws the tree decides;
+    /// the driver only says which is which.
+    pub is_system: bool,
 }
 
 /// One database on the server this connection reached.

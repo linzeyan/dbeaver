@@ -336,7 +336,7 @@ struct NavigatorView: View {
     /// styling to drift apart.
     @ViewBuilder private var schemaRows: some View {
         let first = firstDrawnSchema
-        ForEach(model.schemas) { schema in
+        ForEach(model.visibleSchemas) { schema in
             let relations = model.visibleRelations(in: schema.name)
             let routines = model.visibleRoutines(in: schema.name)
             let sequences = model.visibleSequences(in: schema.name)
@@ -418,7 +418,7 @@ struct NavigatorView: View {
     /// The first schema that draws a row, which is not always the first schema:
     /// one holding nothing visible is skipped entirely.
     private var firstDrawnSchema: String? {
-        model.schemas.first { model.hasVisibleObjects(in: $0.name) }?.name
+        model.visibleSchemas.first { model.hasVisibleObjects(in: $0.name) }?.name
     }
 
     /// Where `ListSelectionHighlightOff` rides now that the connection root row
@@ -441,7 +441,7 @@ struct NavigatorView: View {
             .padding(.horizontal, Theme.Space.sm)
             .padding(.vertical, Theme.Space.sm)
 
-            if model.schemas.isEmpty, !model.hasDatabaseLevel {
+            if model.visibleSchemas.isEmpty, !model.hasDatabaseLevel {
                 EmptyState(
                     symbol: "server.rack",
                     title: "No \(model.containerNoun)s",

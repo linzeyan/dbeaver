@@ -79,9 +79,19 @@ final class MCPLiveSource: MCPDataSource {
         MCPDispatch.uniqued(entriesProvider().map(\.name))
     }
 
+    /// The schemas an agent is told about, which are never the engine's own.
+    ///
+    /// Not the window's setting. That switch is about a tree somebody is looking
+    /// at and can collapse; this list goes into a context window, where
+    /// `pg_catalog`'s few thousand relations are three thousand four hundred
+    /// tokens of noise between a model and the table it was asked about. The
+    /// same argument the row cap is set by.
+    ///
+    /// An agent that genuinely wants a catalog table can still reach it: the
+    /// query tool runs whatever it is given, `pg_catalog` included.
     func schemas(connection: String) throws -> [String] {
         try withDatabase(connection) { db in
-            let schemas = try db.schemas()
+            let schemas = try db.schemas().filter { !$0.isSystem }
             if !schemas.isEmpty { return schemas.map(\.name) }
             // A family with no schema level answers with its databases, as
             // the tool description promises; one with neither answers empty.
@@ -92,7 +102,11 @@ final class MCPLiveSource: MCPDataSource {
 
     func relations(connection: String, schema: String?) throws -> [MCPRelation] {
         try withDatabase(connection) { db in
-            let schemas = try schema.map { [$0] } ?? db.schemas().map(\.name)
+            // An explicitly named schema is honoured whatever it is — an agent
+            // that asked for `pg_catalog` gets it. Only the unqualified sweep
+            // leaves the engine's own out, for the reason `schemas` does.
+            let schemas =
+                try schema.map { [$0] } ?? db.schemas().filter { !$0.isSystem }.map(\.name)
             return try schemas.flatMap { name in
                 try db.relations(schema: name).map {
                     MCPRelation(schema: $0.schema, name: $0.name, kind: $0.kind.rawValue)
@@ -160,7 +174,10 @@ final class MCPLiveSource: MCPDataSource {
         throws -> String
     {
         if let schema { return schema }
-        let matches = try db.schemas().map(\.name).filter { name in
+        // The engine's own left out, so that a relation named like a catalog
+        // table does not come back as "exists in more than one schema" against a
+        // schema this tool never lists.
+        let matches = try db.schemas().filter { !$0.isSystem }.map(\.name).filter { name in
             (try? db.relations(schema: name).contains { $0.name == relation }) ?? false
         }
         guard let only = matches.first else {

@@ -72,6 +72,18 @@ final class Preferences {
     /// makes it a setting; off by default because a stripe through the tree at
     /// the y of a control in a different pane reads as a rendering fault, and
     /// nothing on screen would explain it.
+    /// Whether the tree draws the schemas the engine keeps for itself.
+    ///
+    /// Off. `pg_catalog` alone is a few thousand objects and the tree is for
+    /// getting to a table, so on by default would bury every user schema under
+    /// the server's own. It is a setting rather than a fixed rule because
+    /// reading `pg_catalog` is a real thing to want, and the previous
+    /// arrangement — four drivers with the list in their `WHERE` clause — made
+    /// it a thing this client could not do at all.
+    var showsSystemSchemas: Bool {
+        didSet { store.set(showsSystemSchemas, forKey: Key.showsSystemSchemas) }
+    }
+
     var usesTranslucentSidebar: Bool {
         didSet { store.set(usesTranslucentSidebar, forKey: Key.usesTranslucentSidebar) }
     }
@@ -328,6 +340,7 @@ final class Preferences {
         Key.insertsRowOfDefaults: false,
         Key.passwordStorage: PasswordStorage.never.rawValue,
         Key.usesTranslucentSidebar: false,
+        Key.showsSystemSchemas: false,
         Key.connectionStorage: ConnectionStorage.thisMac.rawValue,
         Key.shutConnectionFolders: [String](),
         Key.editorFontSize: 13,
@@ -365,6 +378,7 @@ final class Preferences {
         static let confirmsDeletions = "dev.dbclient.confirmsDeletions"
         static let insertsRowOfDefaults = "dev.dbclient.insertsRowOfDefaults"
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
+        static let showsSystemSchemas = "dev.dbclient.showsSystemSchemas"
         static let connectionStorage = "dev.dbclient.connectionStorage"
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let keepAliveSeconds = "dev.dbclient.keepAliveSeconds"
@@ -494,6 +508,7 @@ final class Preferences {
         confirmsDeletions = store.bool(forKey: Key.confirmsDeletions)
         insertsRowOfDefaults = store.bool(forKey: Key.insertsRowOfDefaults)
         usesTranslucentSidebar = store.bool(forKey: Key.usesTranslucentSidebar)
+        showsSystemSchemas = store.bool(forKey: Key.showsSystemSchemas)
         // An unrecognised value reads as "ask every time" rather than as a
         // crash, which is what a plist edited by hand or written by a later
         // version offering a fourth place would otherwise be.

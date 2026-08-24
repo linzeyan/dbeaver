@@ -358,6 +358,16 @@ struct SettingsView: View {
                 + "so full-width bands on the right — the Structure tab's section strip — "
                 + "show through the object tree as a stripe at their own height.",
             isOn: $preferences.usesTranslucentSidebar)
+
+        SettingsToggle(
+            title: "Show system schemas",
+            explanation:
+                "The schemas the engine keeps for itself — pg_catalog, information_schema, "
+                + "MySQL's four, Mongo's admin and local — appear in the tree, sorted after "
+                + "your own. They are worth reading and there are a lot of them: pg_catalog "
+                + "alone holds a few thousand objects, and the editor completes from the "
+                + "same names.",
+            isOn: $preferences.showsSystemSchemas)
     }
 }
 

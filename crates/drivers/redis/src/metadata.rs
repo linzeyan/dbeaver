@@ -51,8 +51,12 @@ impl RedisSource {
             Err(_) => DATABASES,
         };
         Ok((0..count.max(1))
+            // None of them is the server's own. Redis keeps its configuration
+            // in the process rather than in a numbered database, so all sixteen
+            // hold keys and nothing else.
             .map(|n| SchemaInfo {
                 name: format!("db{n}"),
+                is_system: false,
             })
             .collect())
     }

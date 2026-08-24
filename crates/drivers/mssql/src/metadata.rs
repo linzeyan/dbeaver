@@ -141,13 +141,24 @@ pub(crate) async fn schemas(client: &mut Tds) -> Result<Vec<SchemaInfo>, MsSqlEr
     // client shows, and the alternative — hiding a schema until the user is
     // granted something in it — makes a permission problem look like a missing
     // object.
+    //
+    // The `NOT IN` that used to be here is now a column: same list, and the
+    // reason for moving it is the one the PostgreSQL driver gives. `guest` and
+    // the twelve `db_*` roles are in it for a second reason — they are fixed
+    // database roles that own a schema each, not places anybody keeps a table —
+    // and they are system in exactly the sense this field means.
     let sql = format!(
-        "SELECT s.name FROM sys.schemas s WHERE s.name NOT IN ({HIDDEN_SCHEMAS}) ORDER BY s.name"
+        "SELECT s.name, CASE WHEN s.name IN ({HIDDEN_SCHEMAS}) THEN 1 ELSE 0 END \
+         FROM sys.schemas s \
+         ORDER BY CASE WHEN s.name IN ({HIDDEN_SCHEMAS}) THEN 1 ELSE 0 END, s.name"
     );
     let rows = rows(client, &sql, &[]).await?;
     Ok(rows
         .iter()
-        .map(|r| SchemaInfo { name: text(r, 0) })
+        .map(|r| SchemaInfo {
+            name: text(r, 0),
+            is_system: r.get::<i32, _>(1).unwrap_or(0) != 0,
+        })
         .collect())
 }
 

@@ -570,7 +570,7 @@ enum AppModelConnectionChecks {
                 DatabaseInfo(name: "bench", isCurrent: true),
                 DatabaseInfo(name: "archive", isCurrent: false)
             ]
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [SchemaInfo(name: "public", isSystem: false)]
             model.renameQueryBuffer(0, to: "the work")
             model.queryText = "select 1"
             model.sessions[0].savedName = "prod-pg"
@@ -727,7 +727,7 @@ enum AppModelConnectionChecks {
                 DatabaseInfo(name: "bench", isCurrent: true),
                 DatabaseInfo(name: "archive", isCurrent: false)
             ]
-            model.sessions[0].schemas = [SchemaInfo(name: "public")]
+            model.sessions[0].schemas = [SchemaInfo(name: "public", isSystem: false)]
             model.sessions[0].relations = [
                 "public": [
                     RelationInfo(
@@ -1227,7 +1227,7 @@ enum AppModelConnectionChecks {
     private static func checkTheNavigatorCacheKeepsOneTreePerDatabase() {
         func tree(schema: String, relation: String) -> NavigatorCache.Tree {
             NavigatorCache.Tree(
-                schemas: [SchemaInfo(name: schema)],
+                schemas: [SchemaInfo(name: schema, isSystem: false)],
                 databases: [DatabaseInfo(name: "sales", isCurrent: true)],
                 relations: [
                     schema: [
@@ -1301,7 +1301,7 @@ enum AppModelConnectionChecks {
             defer { NavigatorCache.shared.forget(connection.id) }
             NavigatorCache.shared.save(
                 NavigatorCache.Tree(
-                    schemas: [SchemaInfo(name: "public")],
+                    schemas: [SchemaInfo(name: "public", isSystem: false)],
                     databases: [DatabaseInfo(name: "sales", isCurrent: true)],
                     relations: [
                         "public": [

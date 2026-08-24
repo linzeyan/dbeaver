@@ -216,6 +216,15 @@ final class Database: @unchecked Sendable {
     /// Only ask where `capabilities().reportsSequences`, under the rule
     /// `routines` is asked under. One call and no second one: a sequence has no
     /// source, so everything about it is in the row.
+    /// Whether completion suggests the engine's own schemas.
+    ///
+    /// Sent rather than asked, because the answer is a setting in this window and
+    /// not a fact about the connection. Idempotent, so the caller sends it on
+    /// connect and on every change without tracking which it is.
+    func setCompletionIncludesSystemSchemas(_ include: Bool) {
+        db_names_include_system(handle, include ? 1 : 0)
+    }
+
     func sequences(schema: String) throws -> [SequenceInfo] {
         try decodeJSON(db_sequences_json(handle, schema, &errOut), as: [SequenceInfo].self)
     }

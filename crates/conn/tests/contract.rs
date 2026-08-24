@@ -1503,7 +1503,44 @@ async fn every_check(subject: &Subject) {
     draws_its_databases_at_one_level_or_the_other(subject).await;
     reports_its_routines_only_where_it_says_it_does(subject).await;
     reports_its_sequences_only_where_it_says_it_does(subject).await;
+    marks_the_engines_own_schemas_without_hiding_them(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// `is_system` marks schemas without making them unreachable.
+///
+/// Two claims, and the first is the one that would take the whole tree down. A
+/// driver that marked everything would leave a navigator that draws nothing at
+/// all by default, and there is no error anywhere to say why — the schemas were
+/// reported, and something above chose not to draw them.
+///
+/// The second is what the setting exists to allow. A schema this driver calls
+/// the engine's own is still one somebody can be shown, so `relations` has to
+/// take it: a driver that marks `pg_catalog` and then refuses to list what is in
+/// it gives the switch nothing to switch on. Empty is a fine answer; failing is
+/// not.
+async fn marks_the_engines_own_schemas_without_hiding_them(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    let schemas = driver.schemas().await.expect("the connection answers");
+    if schemas.is_empty() {
+        return;
+    }
+
+    assert!(
+        schemas.iter().any(|s| !s.is_system),
+        "a driver that calls every one of its schemas the engine's own leaves a tree \
+         that draws nothing, and says nothing about why"
+    );
+
+    for schema in schemas.iter().filter(|s| s.is_system) {
+        driver.relations(&schema.name).await.unwrap_or_else(|e| {
+            panic!(
+                "{} is marked as the engine's own, which is a thing the user can ask to \
+                 see — so listing what is in it has to work: {e}",
+                schema.name
+            )
+        });
+    }
 }
 
 /// `sequences` and `capabilities().reports_sequences` say the same thing.

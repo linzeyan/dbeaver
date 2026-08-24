@@ -92,7 +92,17 @@ pub(crate) fn schemas(conn: &Connection, database: &str) -> Result<Vec<SchemaInf
          WHERE database_name = ? \
          ORDER BY schema_name",
     )?;
-    let rows = stmt.query_map([database], |row| Ok(SchemaInfo { name: row.get(0)? }))?;
+    // By name and not by `internal`, which is the same trap the doc comment
+    // above describes: `main` is flagged internal and is the one schema
+    // everything the user made is in. The two that really are the engine's are
+    // named, and every DuckDB database has exactly these two.
+    let rows = stmt.query_map([database], |row| {
+        let name: String = row.get(0)?;
+        Ok(SchemaInfo {
+            is_system: name == "information_schema" || name == "pg_catalog",
+            name,
+        })
+    })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 

@@ -2409,6 +2409,21 @@ final class AppModel {
         return all.filter { $0.name.lowercased().contains(needle) }
     }
 
+    /// The schemas the tree draws: all of them, or only the ones that are not
+    /// the engine's own.
+    ///
+    /// One property rather than a filter at each of the places that walks the
+    /// list. There are five — the tree, the first-drawn-schema hint, the two
+    /// counts and the Go To palette — and a setting honoured in four of them is
+    /// a count that disagrees with the rows above it.
+    ///
+    /// Not applied to `schemas` itself. What is stored is what the driver said,
+    /// so turning the setting on shows them at once instead of waiting for a
+    /// reconnect to fetch what was already fetched.
+    var visibleSchemas: [SchemaInfo] {
+        preferences.showsSystemSchemas ? schemas : schemas.filter { !$0.isSystem }
+    }
+
     /// Sequences in `schema` matching the filter. The rules `visibleRoutines`
     /// follows, for the reason it follows them: one field, one claim.
     func visibleSequences(in schema: String) -> [SequenceInfo] {
@@ -2463,7 +2478,7 @@ final class AppModel {
     /// somebody can see, and the empty states that read it would offer "No
     /// matches" over a schema whose functions matched.
     var matchedObjectCount: Int {
-        schemas.reduce(0) {
+        visibleSchemas.reduce(0) {
             $0 + visibleRelations(in: $1.name).count + visibleRoutines(in: $1.name).count
                 + visibleSequences(in: $1.name).count
         }
@@ -2499,9 +2514,15 @@ final class AppModel {
     /// against. Both halves of the tree, for the reason `matchedObjectCount`
     /// counts both.
     var totalObjectCount: Int {
-        relations.values.reduce(0) { $0 + $1.count }
-            + routines.values.reduce(0) { $0 + $1.count }
-            + sequences.values.reduce(0) { $0 + $1.count }
+        // Over the visible schemas rather than over the dictionaries, which are
+        // keyed by every schema the driver reported. Reducing the dictionaries
+        // would put "3 of 4,812" under a tree showing forty rows, because
+        // `pg_catalog` is in them whether or not it is drawn.
+        visibleSchemas.reduce(0) { total, schema in
+            total + (relations[schema.name]?.count ?? 0)
+                + (routines[schema.name]?.count ?? 0)
+                + (sequences[schema.name]?.count ?? 0)
+        }
     }
 
     /// Whether the filter is currently hiding the relation the detail panes are
@@ -2751,7 +2772,12 @@ final class AppModel {
     /// its name — and the ones this connection is not offered are left out
     /// here for the same reason the panel leaves them out.
     var goToTargets: [GoToTarget] {
-        relations.values.flatMap { $0 }.map { GoToTarget(schema: $0.schema, name: $0.name) }
+        // Over the visible schemas, so ⇧⌘O offers what the tree offers. Reading
+        // the dictionary would put `pg_catalog`'s few thousand tables into a
+        // palette that ranks by how well a name matched — where a list that long
+        // is the same as no list.
+        visibleSchemas.flatMap { relations[$0.name] ?? [] }
+            .map { GoToTarget(schema: $0.schema, name: $0.name) }
             + offeredFavorites.map {
                 GoToTarget(schema: "", name: $0.name, kind: .favorite, sql: $0.sql)
             }
@@ -4315,7 +4341,15 @@ final class AppModel {
             apply(.none)
             return
         }
+        // Sent here rather than observed from the setting, because here is where
+        // it is needed and the call costs nothing when it is already what the
+        // core holds. Observing it would mean an `onChange` in a window that has
+        // several connections open, each with a catalog of its own, to keep them
+        // all in step with a checkbox — plumbing to arrive at the same answer
+        // this line already has.
+        let includesSystem = preferences.showsSystemSchemas
         queue.async {
+            db.setCompletionIncludesSystemSchemas(includesSystem)
             let answer = (try? db.completions(in: text, caret: caret)) ?? .none
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { apply(answer) }

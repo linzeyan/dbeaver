@@ -134,8 +134,14 @@ impl FlightSqlSource {
                 if !self.catalog().is_empty() && catalog != self.catalog() {
                     continue;
                 }
+                // False for everything, and not because none of them is: the
+                // protocol has no field saying which, and behind it may be any
+                // engine at all. Guessing at names would be this driver
+                // pretending to know which product answered — the same reason
+                // `reports_routines` is false here.
                 out.push(SchemaInfo {
                     name: qualified(catalog, value(schemas, row)),
+                    is_system: false,
                 });
             }
         }

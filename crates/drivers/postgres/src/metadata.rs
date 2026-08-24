@@ -120,19 +120,39 @@ fn referential_action(c: i8) -> String {
     .to_string()
 }
 
+/// Every schema, with the engine's own marked rather than dropped.
+///
+/// The `WHERE` clause that used to be here is now the `is_system` column: the
+/// same rule, moved from "these do not exist" to "these are the server's". What
+/// it buys is a `pg_catalog` somebody can ask to see — the old shape left it out
+/// of the answer, so no setting above could put it back.
+///
+/// Two prefixes and one name. Everything `pg_` is the server's, which catches
+/// `pg_catalog`, the per-session `pg_temp_3` and the `pg_toast` schemas in one
+/// rule; `information_schema` is the standard's and is nobody's data either. The
+/// escape in the pattern is there because `_` is a wildcard in `LIKE` — without
+/// it, `pgadmin` would be a system schema.
+///
+/// The system ones sort last rather than by name. They are the minority nobody
+/// asked for, and a tree that opens with `information_schema` above `public`
+/// puts the least interesting row first.
 pub(crate) async fn schemas(client: &Client) -> Result<Vec<SchemaInfo>, PgError> {
-    // Excludes catalog and toast schemas; `pg_temp`/`pg_toast_temp` are matched
-    // by the same prefix.
     let rows = client
         .query(
-            "SELECT nspname \
+            "SELECT nspname, \
+                    (nspname LIKE 'pg\\_%' OR nspname = 'information_schema') AS is_system \
              FROM pg_catalog.pg_namespace \
-             WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
-             ORDER BY nspname",
+             ORDER BY (nspname LIKE 'pg\\_%' OR nspname = 'information_schema'), nspname",
             &[],
         )
         .await?;
-    Ok(rows.iter().map(|r| SchemaInfo { name: r.get(0) }).collect())
+    Ok(rows
+        .iter()
+        .map(|r| SchemaInfo {
+            name: r.get(0),
+            is_system: r.get(1),
+        })
+        .collect())
 }
 
 /// Every database this login may open, and which one it is on.

@@ -137,7 +137,13 @@ impl BigQuerySource {
                 .await?;
             out.extend(listing.datasets.into_iter().filter_map(|entry| {
                 let name = entry.dataset_reference.dataset_id;
-                (!name.is_empty()).then_some(SchemaInfo { name })
+                // None of them is BigQuery's own. `INFORMATION_SCHEMA` is
+                // queryable inside each dataset but is not itself a dataset, so
+                // it never appears in this listing.
+                (!name.is_empty()).then_some(SchemaInfo {
+                    name,
+                    is_system: false,
+                })
             }));
             if listing.next_page_token.is_empty() {
                 return Ok(out);

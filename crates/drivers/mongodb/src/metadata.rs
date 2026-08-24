@@ -37,8 +37,19 @@ impl MongoSource {
     /// database in the phase-2 set that needed no level flattened away or
     /// invented.
     pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, MongoError> {
+        // Three of them belong to the deployment rather than to anybody's
+        // application: `admin` holds the users and roles, `config` is the
+        // sharding metadata, and `local` is the replication oplog. They were
+        // listed beside the data until the tree learned to tell them apart, and
+        // on a fresh deployment they were most of what it listed.
         let names = self.client().list_database_names().await?;
-        Ok(names.into_iter().map(|name| SchemaInfo { name }).collect())
+        Ok(names
+            .into_iter()
+            .map(|name| SchemaInfo {
+                is_system: matches!(name.as_str(), "admin" | "config" | "local"),
+                name,
+            })
+            .collect())
     }
 
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, MongoError> {

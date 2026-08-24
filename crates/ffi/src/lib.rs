@@ -894,6 +894,29 @@ pub unsafe extern "C" fn db_names_forget(handle: *mut DbHandle) {
     runtime().block_on(h.names.forget());
 }
 
+/// Sets whether the editor's completion suggests the engine's own schemas.
+///
+/// The same setting the navigator's tree reads, sent here so the two agree: a
+/// tree showing `pg_catalog` beside an editor that will not complete
+/// `pg_catalog.pg_class` is half a feature. Off is the default and is what a
+/// connection starts with, so a front end that never calls this behaves as it
+/// always did.
+///
+/// Cheap to call with the value it already holds — it returns without touching
+/// the cache — so the front end can send it on every connect rather than
+/// tracking whether it has.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_names_include_system(handle: *mut DbHandle, include: c_int) {
+    if handle.is_null() {
+        return;
+    }
+    let h = unsafe { &*handle };
+    runtime().block_on(h.names.set_include_system(include != 0));
+}
+
 /// The databases on this server as a JSON array, or JSON `null` where the
 /// engine has no level above schemas. Release with `db_string_free`.
 ///

@@ -2071,7 +2071,7 @@ func refreshWhenReady(model: AppModel, after seconds: Double) {
         // Padded so the two reports line up in a terminal; the whole point of
         // printing twice is that the difference is read by eye.
         let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
-        let objects = model.schemas
+        let objects = model.visibleSchemas
             .flatMap { model.relations[$0.name] ?? [] }
             .map(\.id).sorted()
         fputs("\(tag) objects  \(objects.joined(separator: ", "))\n", stderr)
@@ -2296,7 +2296,7 @@ func switchDatabaseWhenReady(model: AppModel, to name: String) {
 
     func report(_ phase: String) {
         let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
-        let objects = model.schemas
+        let objects = model.visibleSchemas
             .flatMap { model.relations[$0.name] ?? [] }
             .map(\.id).sorted()
         let current = (model.databases ?? []).first(where: \.isCurrent)?.name ?? "(none)"
@@ -2634,7 +2634,7 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
         // Padded so the two reports line up in a terminal; the whole point of
         // printing twice is that the difference is read by eye.
         let tag = phase.padding(toLength: 6, withPad: " ", startingAt: 0)
-        let objects = model.schemas
+        let objects = model.visibleSchemas
             .flatMap { model.relations[$0.name] ?? [] }
             .map(\.id).sorted()
         fputs("\(tag) label    \(model.connectionLabel)\n", stderr)

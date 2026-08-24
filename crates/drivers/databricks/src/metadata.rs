@@ -81,8 +81,15 @@ impl DatabricksSource {
         Ok(answer
             .rows()
             .iter()
-            .map(|row| SchemaInfo {
-                name: format!("{}.{}", answer.text(row, catalog), answer.text(row, schema)),
+            // `catalog.schema`, in halves. The `system` catalog is the one
+            // this very query reads, and each catalog carries an
+            // `information_schema` of its own.
+            .map(|row| {
+                let (catalog, schema) = (answer.text(row, catalog), answer.text(row, schema));
+                SchemaInfo {
+                    is_system: catalog == "system" || schema == "information_schema",
+                    name: format!("{catalog}.{schema}"),
+                }
             })
             .collect())
     }

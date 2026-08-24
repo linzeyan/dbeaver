@@ -89,7 +89,16 @@ fn quote_ident(name: &str) -> String {
 /// tables, so here it can never have anything under it.
 pub(crate) fn schemas(conn: &Connection) -> Result<Vec<SchemaInfo>, SqliteError> {
     let mut stmt = conn.prepare("SELECT name FROM pragma_database_list WHERE name <> 'temp'")?;
-    let rows = stmt.query_map([], |row| Ok(SchemaInfo { name: row.get(0)? }))?;
+    // Nothing here is the engine's own. `main` is the file that was opened and
+    // the rest are files somebody attached; SQLite's own catalog lives in
+    // `sqlite_master` inside each of them, which is a table rather than a
+    // schema, and `relations` already leaves the `sqlite_` tables out.
+    let rows = stmt.query_map([], |row| {
+        Ok(SchemaInfo {
+            name: row.get(0)?,
+            is_system: false,
+        })
+    })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 

@@ -99,7 +99,14 @@ impl CassandraSource {
         let mut out = Vec::new();
         for row in result.rows::<(String,)>().map_err(text)? {
             let (name,) = row.map_err(text)?;
-            out.push(SchemaInfo { name });
+            // Every keyspace Cassandra ships is named `system` or begins
+            // `system_`: the schema catalog this file reads, the auth tables,
+            // the traces, the virtual tables. One prefix covers them, and a
+            // keyspace an application called `system_of_record` would be caught
+            // by it — accepted, because the alternative is a list of seven names
+            // that a version bump adds an eighth to.
+            let is_system = name == "system" || name.starts_with("system_");
+            out.push(SchemaInfo { name, is_system });
         }
         Ok(out)
     }

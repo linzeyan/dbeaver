@@ -23,6 +23,8 @@ enum SidebarChecks {
             checkFilteringObjectsPutsTheTreeBack()
             checkFilteringObjectsStillAsksWhenTheTreeIsAlreadyThere()
             checkTheRailIsNotDrawnOverTheForm()
+            checkTheEnginesOwnSchemasAreHiddenUntilAskedFor()
+            checkTheCountsAndGoToFollowTheSetting()
         }
         if failures == 0 {
             fputs("sidebar: all checks passed\n", stderr)
@@ -33,6 +35,71 @@ enum SidebarChecks {
     }
 
     // MARK: - Cases
+
+    /// The default is off, and turning it on shows what was already fetched.
+    ///
+    /// The second half is the design being pinned. `schemas` holds everything
+    /// the driver reported and `visibleSchemas` narrows it, so the setting takes
+    /// effect at once — an arrangement that would be indistinguishable from
+    /// filtering at the fetch until somebody flipped the switch and waited for a
+    /// reconnect that never came.
+    @MainActor private static func checkTheEnginesOwnSchemasAreHiddenUntilAskedFor() {
+        guard let model = makeModel() else { return }
+        model.sessions[0].schemas = [
+            SchemaInfo(name: "public", isSystem: false),
+            SchemaInfo(name: "pg_catalog", isSystem: true)
+        ]
+
+        expect(
+            model.visibleSchemas.map(\.name), ["public"],
+            "the tree opens on the schemas somebody made, not on the server's")
+        expect(
+            model.schemas.count, 2,
+            "and both are held, because hiding is not the same as never having asked")
+
+        model.preferences.showsSystemSchemas = true
+        expect(
+            model.visibleSchemas.map(\.name), ["public", "pg_catalog"],
+            "turning the setting on draws what was already fetched, with no reconnect")
+
+        model.preferences.showsSystemSchemas = false
+        expect(model.visibleSchemas.count, 1, "and turning it off puts it back")
+    }
+
+    /// Everything that walks the schema list has to walk the same one.
+    ///
+    /// The count in the footer and the Go To palette read the object
+    /// dictionaries, which are keyed by every schema the driver reported. Left
+    /// to read those directly they would say "4 objects" over a tree drawing
+    /// two, and ⇧⌘O would offer a table the tree does not list.
+    @MainActor private static func checkTheCountsAndGoToFollowTheSetting() {
+        guard let model = makeModel() else { return }
+        model.sessions[0].schemas = [
+            SchemaInfo(name: "public", isSystem: false),
+            SchemaInfo(name: "pg_catalog", isSystem: true)
+        ]
+        model.sessions[0].relations = [
+            "public": [
+                RelationInfo(schema: "public", name: "orders", kind: .table, estimatedRows: nil)
+            ],
+            "pg_catalog": [
+                RelationInfo(
+                    schema: "pg_catalog", name: "pg_class", kind: .table, estimatedRows: nil)
+            ]
+        ]
+
+        expect(model.totalObjectCount, 1, "the footer counts what the tree draws")
+        expect(model.matchedObjectCount, 1, "and so does the figure the filter narrows")
+        expect(
+            model.goToTargets.contains { $0.name == "pg_class" }, false,
+            "and Go To does not offer a table the tree is not listing")
+
+        model.preferences.showsSystemSchemas = true
+        expect(model.totalObjectCount, 2, "asking for them adds them to the count")
+        expect(
+            model.goToTargets.contains { $0.name == "pg_class" }, true,
+            "and puts them within reach of the palette")
+    }
 
     /// ⌥⌘F against a rail has to bring the tree back, because the field it puts
     /// the caret in is in the tree. Without this the command is a keystroke that

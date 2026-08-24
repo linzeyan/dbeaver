@@ -143,7 +143,21 @@ struct DatabaseInfo: Codable, Hashable, Identifiable {
 
 struct SchemaInfo: Codable, Hashable, Identifiable {
     let name: String
+
+    /// Whether this container is the engine's own rather than anybody's data.
+    ///
+    /// Decided by the driver, which is the only side that knows its engine's
+    /// rule — `pg_toast_16384` is the server's and `pg_dumps` is not. The tree
+    /// hides these unless `Preferences.showsSystemSchemas`; nothing here
+    /// filters, and the driver reports them all either way.
+    let isSystem: Bool
+
     var id: String { name }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case isSystem = "is_system"
+    }
 }
 
 enum RelationKind: String, Codable, Hashable {

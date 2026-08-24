@@ -70,9 +70,13 @@ pub struct Storage {
     pub comment: Option<String>,
 }
 
+/// A database and whether it is the server's own. ClickHouse answers a
+/// predicate as `UInt8`, so the boolean arrives as a number and is compared
+/// here rather than deserialized as one.
 #[derive(Row, Deserialize)]
-struct NameRow {
+struct SchemaRow {
     name: String,
+    is_system: u8,
 }
 
 #[derive(Row, Deserialize)]
@@ -144,26 +148,34 @@ fn some_unless_empty(text: String) -> Option<String> {
 }
 
 impl ChSource {
-    /// The databases on this server, minus the two that are catalog rather than
-    /// data.
+    /// The databases on this server, with the three that are catalog rather than
+    /// data marked as such.
     ///
     /// Upstream reads `SHOW DATABASES` instead, with a comment naming a JDBC
     /// catalog bug as the reason. We are not on JDBC, and the system table is
-    /// the better source anyway: it takes a `WHERE` and `SHOW` does not.
+    /// the better source anyway: it takes a `WHERE` and `SHOW` does not — which
+    /// is now what puts the marked ones last instead of leaving them out. Both
+    /// spellings of the standard's schema are in the list because ClickHouse
+    /// really does present it twice, once in each case.
     pub async fn schemas(&self) -> Result<Vec<SchemaInfo>, ChError> {
         let rows = self
             .client
             .query(
-                "SELECT name FROM system.databases \
-                 WHERE name NOT IN ('system', 'INFORMATION_SCHEMA', 'information_schema') \
-                 ORDER BY name",
+                "SELECT name, \
+                        name IN ('system', 'INFORMATION_SCHEMA', 'information_schema') \
+                          AS is_system \
+                 FROM system.databases \
+                 ORDER BY is_system, name",
             )
-            .fetch_all::<NameRow>()
+            .fetch_all::<SchemaRow>()
             .await
             .map_err(|e| ChError::from_server(e, None))?;
         Ok(rows
             .into_iter()
-            .map(|r| SchemaInfo { name: r.name })
+            .map(|r| SchemaInfo {
+                name: r.name,
+                is_system: r.is_system != 0,
+            })
             .collect())
     }
 

@@ -96,8 +96,17 @@ impl SnowflakeSource {
         let mut schemas: Vec<SchemaInfo> = answer
             .rows()
             .iter()
-            .map(|row| SchemaInfo {
-                name: format!("{}.{}", answer.text(row, database), answer.text(row, name)),
+            // `database.schema`, tested in halves for the reason the Trino
+            // driver gives. `SNOWFLAKE` is the account's own shared database —
+            // usage history, roles, the data dictionary — and is the engine's in
+            // the same sense the per-database `INFORMATION_SCHEMA` is.
+            .map(|row| {
+                let (database, schema) = (answer.text(row, database), answer.text(row, name));
+                SchemaInfo {
+                    is_system: database.eq_ignore_ascii_case("SNOWFLAKE")
+                        || schema.eq_ignore_ascii_case("INFORMATION_SCHEMA"),
+                    name: format!("{database}.{schema}"),
+                }
             })
             .collect();
         // `SHOW` has an `ORDER BY` of its own only through a `RESULT_SCAN`, which

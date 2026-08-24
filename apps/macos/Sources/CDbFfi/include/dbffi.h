@@ -263,6 +263,11 @@ char* db_complete_json(DbHandle* handle, const char* text, uint32_t caret, char*
 // user is the one who knows a migration just ran.
 void db_names_forget(DbHandle* handle);
 
+// Whether completion suggests the engine's own schemas — the same setting the
+// tree reads, so the two agree about what exists. Zero is the default and what a
+// connection starts with; calling with the value already held costs nothing.
+void db_names_include_system(DbHandle* handle, int include);
+
 // Metadata crosses as JSON, not Arrow: it is small, and Arrow buys nothing for
 // a few thousand short rows. Returned strings are released with db_string_free.
 // Null where the engine has no level above schemas, which is not the same as an

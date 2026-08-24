@@ -173,15 +173,32 @@ fn accepted(outcome: Result<(), mysql_async::Error>) -> Result<bool, MySqlError>
 /// rather than upstream's: it is a set of helper views over
 /// `performance_schema` and belongs in a sidebar no more than that does.
 pub async fn schemas(conn: &mut Conn) -> Result<Vec<SchemaInfo>, MySqlError> {
-    let names: Vec<String> = conn
+    // Marked rather than excluded, which is the change the PostgreSQL driver
+    // explains: a name left out of the answer is one no setting can put back.
+    // The four are still the four; only what is done with them moved.
+    //
+    // System last, then by name, so a tree that opens on a fresh server does not
+    // open on `information_schema`.
+    let rows: Vec<(String, i32)> = conn
         .query(
-            "SELECT SCHEMA_NAME FROM information_schema.SCHEMATA \
-             WHERE SCHEMA_NAME NOT IN \
-               ('information_schema', 'performance_schema', 'mysql', 'sys') \
-             ORDER BY SCHEMA_NAME",
+            "SELECT SCHEMA_NAME, \
+                    SCHEMA_NAME IN \
+                      ('information_schema', 'performance_schema', 'mysql', 'sys') \
+             FROM information_schema.SCHEMATA \
+             ORDER BY SCHEMA_NAME IN \
+                        ('information_schema', 'performance_schema', 'mysql', 'sys'), \
+                      SCHEMA_NAME",
         )
         .await?;
-    Ok(names.into_iter().map(|name| SchemaInfo { name }).collect())
+    Ok(rows
+        .into_iter()
+        .map(|(name, is_system)| SchemaInfo {
+            name,
+            // MySQL answers a predicate with 1 or 0 rather than with a boolean,
+            // and the crate maps that to an integer.
+            is_system: is_system != 0,
+        })
+        .collect())
 }
 
 /// `TABLE_TYPE`, and the one kind that is not in it.
