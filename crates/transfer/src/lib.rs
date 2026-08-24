@@ -14,7 +14,7 @@ mod sql_script;
 mod target;
 
 pub use delimited::{DelimitedReader, DelimitedWriter};
-pub use import::import;
+pub use import::{Import, ImportStopper, import};
 pub use moving::{Step, Stopper, Transfer};
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;

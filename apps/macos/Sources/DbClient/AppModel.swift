@@ -752,6 +752,10 @@ final class AppModel {
         get { session.importStatus }
         set { session.importStatus = newValue }
     }
+    private var importHandle: Import? {
+        get { session.importHandle }
+        set { session.importHandle = newValue }
+    }
     private(set) var isTransferring: Bool {
         get { session.isTransferring }
         set { session.isTransferring = newValue }
@@ -5281,23 +5285,81 @@ final class AppModel {
                 "Nothing here reads \(named). Import reads CSV, TSV, JSON Lines and Parquet."
             return
         }
+        let named = url.lastPathComponent
+        let source = session
         isImporting = true
-        importStatus = "Reading \(url.lastPathComponent) into \(table)…"
+        importStatus = "Reading \(named) into \(table)…"
         // A new import supersedes the previous failure, as a new query does.
         errorMessage = nil
-        run { db -> Int64 in
-            try db.importFile(from: url, format: format, table: table)
-        } then: { [self] rows in
-            isImporting = false
+        run { [self] db -> ImportOutcome in
+            let reading = try db.startImport(from: url, format: format, table: table)
+            // Published before the first step, so Stop has something to press
+            // for all of it — the same reason the transfer publishes its handle
+            // early. Everything that could have refused this import has already
+            // refused it, so a handle here is a job that has really begun.
+            DispatchQueue.main.async { [self] in
+                MainActor.assumeIsolated { applying(to: source) { importHandle = reading } }
+            }
+            while true {
+                let step = try reading.step()
+                let rows = step.rows
+                DispatchQueue.main.async { [self] in
+                    MainActor.assumeIsolated {
+                        applying(to: source) {
+                            importStatus =
+                                "\(Self.formatted(Int(rows))) rows from \(named) → \(table)…"
+                        }
+                    }
+                }
+                if step.isFinished {
+                    if case .stopped = step { return ImportOutcome(rows: rows, stopped: true) }
+                    return ImportOutcome(rows: rows, stopped: false)
+                }
+            }
+        } then: { [self] outcome in
+            endImport()
+            let rows = Self.pluralized(Int(outcome.rows), "row")
             // Left in `importStatus` and not in `status`, because `refresh` sets
             // `status` on the next line and the count would be gone before it
             // could be read. What tells the user the rows arrived is the table
             // itself reloading under them, which is better evidence anyway.
-            importStatus = "\(Self.pluralized(Int(rows), "row")) read into \(table)"
+            importStatus =
+                outcome.stopped
+                ? "Stopped after \(rows) into \(table)"
+                : "\(rows) read into \(table)"
             // The grid is showing the table as it was a moment ago. Nothing else
             // will notice the rows arrived, because nothing else knows they did.
+            // A stopped import refreshes too: the rows that did arrive are in
+            // the table, and leaving the grid on the version before them would
+            // be the one place saying Stop undid something.
             refresh()
         }
+    }
+
+    /// What a finished import answers with, for the reason `TransferOutcome`
+    /// exists: a row count alone cannot say whether it finished or was stopped.
+    private struct ImportOutcome: Sendable {
+        let rows: Int64
+        let stopped: Bool
+    }
+
+    /// Stops an import part way through.
+    ///
+    /// One end, unlike `stopTransfer`: the other end is a file, which has
+    /// nothing to interrupt. The rows already read stay in the table — see
+    /// `db_import_cancel`.
+    func stopImport() {
+        guard let reading = importHandle else { return }
+        DispatchQueue.global(qos: .userInitiated).async { reading.cancel() }
+    }
+
+    /// Puts the window back after an import, however it ended.
+    ///
+    /// Called from the success path and from `fail`, so a failed import cannot
+    /// leave the Stop button over a job that is no longer running.
+    private func endImport() {
+        isImporting = false
+        importHandle = nil
     }
 
     // MARK: - Query execution
@@ -5623,7 +5685,10 @@ final class AppModel {
         let message = String(describing: statement?.error ?? error)
         isBusy = false
         isExporting = false
-        isImporting = false
+        // Through `endImport` rather than by clearing the flag, so a failure
+        // takes the handle down with it: a Stop button over an import that is no
+        // longer running is a button that does nothing and says nothing.
+        endImport()
         // The core queue is serial, so at most one of these was running; clearing
         // both saves threading the target through the generic dispatch helper.
         browseResult.abandonLoading()

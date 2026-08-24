@@ -1366,6 +1366,188 @@ func probeSessions(model: AppModel) {
     poll()
 }
 
+/// How many rows `--import-probe` reads.
+///
+/// A hundred thousand for the reason `transferProbeRows` is: the reader hands
+/// over 4,096 rows at a time, so a file small enough to arrive in one batch is
+/// an import with no middle for Stop to land in. Twenty-four batches is a middle
+/// the poll below can see without racing it.
+let importProbeRows = 100_000
+
+/// `--import-probe` reads a file into a table on `--conn`, twice: once to the
+/// end, and once with Stop pressed part way.
+let importProbe = CommandLine.arguments.contains("--import-probe")
+
+/// Drives `--import-probe`. Reads a generated CSV into a table on `--conn`,
+/// watching the count climb, and then does it again and stops it part way.
+///
+/// One connection, unlike the transfer probe: an import has a file at one end,
+/// and the file is not a thing the window holds a handle to. What is under test
+/// is the same three claims — a handle that can be stepped, a running total the
+/// status bar publishes between batches, and a Stop that reaches a job already
+/// in flight — with the reading end replaced.
+///
+/// It writes, and it drops what it wrote. Point `--conn` at a scratch database.
+@MainActor
+func probeImport(model: AppModel) {
+    guard let conn = connArgument else {
+        fputs("import: --import-probe needs --conn\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 300
+    let table = "import_probe"
+    let path = FileManager.default.temporaryDirectory
+        .appendingPathComponent("import-probe-\(ProcessInfo.processInfo.processIdentifier).csv")
+
+    /// Runs `sql` on a connection of its own, for the reason the transfer probe
+    /// opens one: the window's connection is the one doing the importing, and a
+    /// probe that borrowed it would be measuring its own interference.
+    func ran(_ sql: String) -> Int? {
+        guard let db = try? Database(connString: conn),
+            let query = try? db.query(sql, batchRows: 1)
+        else { return nil }
+        while (try? query.nextBatch()) ?? nil != nil {}
+        return query.rowsAffected
+    }
+
+    func fail(_ why: String) -> Never {
+        fputs("import FAIL: \(why)\n", stderr)
+        fputs("  status=\(model.statusLine) error=\(model.errorMessage ?? "(none)")\n", stderr)
+        exit(1)
+    }
+
+    /// Empties the table and reports what was in it — a DELETE rather than a
+    /// count for the reason the transfer probe gives.
+    func emptied(_ what: String) -> Int {
+        guard let rows = ran("DELETE FROM \(table)") else {
+            fail("could not read \(table) back")
+        }
+        fputs("import \(what): \(rows) rows had arrived\n", stderr)
+        return rows
+    }
+
+    func settled() -> Bool {
+        guard let first = model.sessions.first else { return false }
+        return first.db != nil && !first.isBusy
+    }
+
+    /// Every distinct progress line this run has shown. An import that reported
+    /// only at the end would leave one.
+    var progress: Set<String> = []
+
+    enum Phase { case building, reading, restarting, stopping, stopped }
+    var phase = Phase.building
+
+    func poll() {
+        switch phase {
+        case .building:
+            guard settled() else { return again() }
+            guard ran("DROP TABLE IF EXISTS \(table)") != nil,
+                ran("CREATE TABLE \(table) (id int, note varchar(32))") != nil
+            else {
+                fail("could not build the fixture")
+            }
+            var body = "id,note\n"
+            body.reserveCapacity(importProbeRows * 16)
+            for n in 1...importProbeRows {
+                body += "\(n),row \(n)\n"
+            }
+            do {
+                try body.write(to: path, atomically: true, encoding: .utf8)
+            } catch {
+                fail("could not write the file: \(error)")
+            }
+            // Selected rather than navigated to. The navigator read its
+            // inventory at connect time and has never heard of this table; what
+            // the import needs from the selection is the name it writes into.
+            model.sessions[0].selected = RelationInfo(
+                schema: "public", name: table, kind: .table, estimatedRows: nil)
+            model.activeTab = .content
+            guard model.canImport else { fail("a freshly built table is not importable into") }
+            model.importFile(from: path)
+            guard model.isImporting else {
+                fail("the import did not start: \(model.errorMessage ?? "no reason given")")
+            }
+            phase = .reading
+            return again()
+
+        case .reading:
+            if model.isImporting {
+                progress.insert(model.importStatus)
+                // The other half of the claim: a running total the status bar
+                // outranks is a window that still looks stuck.
+                guard model.statusLine == model.importStatus else {
+                    fail("the status bar is showing \(model.statusLine), not the import")
+                }
+                return again()
+            }
+            guard settled() else { return again() }
+            guard progress.count > 1 else {
+                fail("the import published no running total: \(progress.sorted())")
+            }
+            guard !model.importStatus.hasPrefix("Stopped") else {
+                fail("an import nobody stopped reported itself stopped: \(model.importStatus)")
+            }
+            fputs("import finished: \(model.importStatus)\n", stderr)
+            let read = emptied("after the whole file")
+            guard read == importProbeRows else {
+                fail("\(importProbeRows) rows were in the file and \(read) arrived")
+            }
+            phase = .restarting
+            return again()
+
+        case .restarting:
+            guard settled(), model.canImport else { return again() }
+            progress.removeAll()
+            model.importFile(from: path)
+            guard model.isImporting else {
+                fail("the second import did not start: \(model.errorMessage ?? "no reason given")")
+            }
+            phase = .stopping
+            return again()
+
+        case .stopping:
+            // Stopped as soon as there is a handle to stop it by. What had
+            // already arrived stays in the table, so the count this ends on is
+            // deliberately not pinned to a number.
+            guard model.sessions[0].importHandle != nil else { return again() }
+            model.stopImport()
+            phase = .stopped
+            return again()
+
+        case .stopped:
+            guard !model.isImporting, settled() else { return again() }
+            guard model.importStatus.hasPrefix("Stopped") else {
+                fail("the window did not say it had been stopped: \(model.importStatus)")
+            }
+            guard model.errorMessage == nil else {
+                fail("Stop was reported as a failure: \(model.errorMessage ?? "")")
+            }
+            let partial = emptied("after Stop")
+            guard partial < importProbeRows else {
+                fail("Stop stopped nothing: all \(partial) rows were read")
+            }
+            fputs("import stopped: \(model.importStatus)\n", stderr)
+            _ = ran("DROP TABLE IF EXISTS \(table)")
+            try? FileManager.default.removeItem(at: path)
+            exit(0)
+        }
+    }
+
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fail("nothing arrived within the deadline, waiting in \(phase)")
+        }
+        // Twenty milliseconds, for the reason the transfer probe polls that
+        // often: a sampler slower than the batches it samples reads one progress
+        // line and concludes there was only ever one.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// Drives `--transfer-probe`. Moves a table's rows from the connection in the
 /// first tab into a table on the connection in the second, twice: once to the
 /// end, and once with Stop pressed part way.
@@ -3043,6 +3225,7 @@ if benchMode {
         if historyProbe { probeHistory(model: model) }
         if sessionsProbe { probeSessions(model: model) }
         if transferProbe { probeTransfer(model: model) }
+        if importProbe { probeImport(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }

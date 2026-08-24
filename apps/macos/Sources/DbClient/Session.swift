@@ -507,6 +507,10 @@ final class Session: Identifiable {
     /// "1,000 rows read into orders" is overwritten before it is legible.
     var isImporting = false
     var importStatus = ""
+    /// The handle a Stop is delivered through, held for the same reason
+    /// `transferHandle` below is: the import runs on the core queue, and the
+    /// button that ends it is pressed on the main one.
+    var importHandle: Import?
 
     /// Rows on their way to another connection in this window, and what the
     /// status bar says while they are.
