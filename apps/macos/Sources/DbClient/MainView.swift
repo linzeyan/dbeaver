@@ -102,6 +102,7 @@ struct MainView: View {
         .onChange(of: model.filterFocusRequests) { focus = .navigatorFilter }
         .sheet(isPresented: $model.isGoToOpen) { GoToPalette(model: model) }
         .sheet(isPresented: $model.isTransferPickerOpen) { TransferSheet(model: model) }
+        .sheet(isPresented: $model.isImportSheetOpen) { ImportSheet(model: model) }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.

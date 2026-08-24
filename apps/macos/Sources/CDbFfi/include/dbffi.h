@@ -640,6 +640,14 @@ int db_transfer_cancel(DbTransfer* transfer, char** err);
 // Releases the transfer and the cursor it took.
 void db_transfer_free(DbTransfer* transfer);
 
+// What a file calls its own columns, as a JSON array of strings. Released with
+// db_string_free.
+//
+// No handle: a file has columns whether or not anything is connected. Pair it
+// with the table's own columns to offer a mapping. An empty array is a success —
+// an empty file has no columns.
+char* db_file_columns_json(const char* format, const char* path, char** err);
+
 // Starts reading a file into an existing table on `target`, one batch per call.
 //
 // A batch at a time, so a multi-gigabyte CSV is no heavier than a small one.
@@ -653,8 +661,11 @@ void db_transfer_free(DbTransfer* transfer);
 // Null on failure with `err` set: a missing file, a format nothing reads, a
 // table that is not there, or a build with no dialect for this database. All of
 // that is settled here, before the first row moves.
+// `mapping` is a JSON array with one entry per column of the file, in the file's
+// order: the name of the table column it feeds, or null to skip it. Pass NULL to
+// read the file into the table's own columns by position.
 DbImport* db_import_start(DbHandle* target, const char* format, const char* path,
-                          const char* table, char** err);
+                          const char* table, const char* mapping, char** err);
 
 // Reads one batch and sends it. Returns 1 when a batch went across, 0 when the
 // file is exhausted and everything is on the target, -1 on failure, -2 when

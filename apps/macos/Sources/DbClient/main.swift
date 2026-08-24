@@ -844,6 +844,50 @@ let exportPath = argument("--export")
 /// exits. The format follows the extension, as it does through the menu.
 let importPath = argument("--import")
 
+/// `--map-import <file>` opens the import sheet on a file and leaves it there.
+///
+/// Exists for the reason `--cell` does: the sheet is reachable by a menu item and
+/// an open panel, and a capture can click neither. Unlike `--import` it presses
+/// nothing — what is being photographed is the mapping, and a sheet that starts
+/// the import would be gone before the shutter.
+let mapImportPath = argument("--map-import")
+
+/// Drives `--map-import`. Polls for the reason `openValueViewer` does, and like
+/// it does not exit: the window has to stay up for the shutter.
+@MainActor
+func openImportSheet(model: AppModel, from path: String) {
+    let url = URL(fileURLWithPath: path)
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("import sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let plan = model.importPlan {
+            fputs(
+                "import mapping  "
+                    + zip(plan.fileColumns, plan.mapping)
+                    .map { "\($0) → \($1 ?? "(skipped)")" }
+                    .joined(separator: ", ") + "\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("import sheet timed out waiting for a table\n", stderr)
+            exit(1)
+        }
+        if !asked, model.importTableName != nil {
+            asked = true
+            model.prepareImport(from: url)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// `--refresh-after 4` reloads the navigator that many seconds in, printing its
 /// contents before and after, then exits.
 ///
@@ -924,18 +968,29 @@ func importWhenReady(model: AppModel, from path: String) {
             fputs("import timed out waiting for a table\n", stderr)
             exit(1)
         }
-        if started {
+        // The sheet, answered. A capture cannot press its Import button, and the
+        // mapping it opens with is the one this is checking reaches the table —
+        // so what is pressed here is the same call the button makes, once the
+        // plan the sheet would have shown exists.
+        if let plan = model.importPlan {
+            fputs(
+                "import mapping  "
+                    + zip(plan.fileColumns, plan.mapping)
+                    .map { "\($0) → \($1 ?? "(skipped)")" }
+                    .joined(separator: ", ") + "\n", stderr)
+            model.startPlannedImport()
+        } else if started {
             // `isImporting` and not `isBusy`: the refresh that follows a
             // successful import sets `isBusy` itself, so waiting on that would
             // report whatever sentence the reload had reached.
-            if !model.isImporting {
+            if !model.isImporting, !model.isBusy {
                 fputs("import result   \(model.importStatus)\n", stderr)
                 exit(0)
             }
         } else if let table = model.importTableName {
             started = true
             fputs("import table    \(table)\n", stderr)
-            model.importFile(from: url)
+            model.prepareImport(from: url)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -1368,11 +1423,14 @@ func probeSessions(model: AppModel) {
 
 /// How many rows `--import-probe` reads.
 ///
-/// A hundred thousand for the reason `transferProbeRows` is: the reader hands
-/// over 4,096 rows at a time, so a file small enough to arrive in one batch is
-/// an import with no middle for Stop to land in. Twenty-four batches is a middle
-/// the poll below can see without racing it.
-let importProbeRows = 100_000
+/// Four times what the transfer probe moves, and the difference is the sheet.
+/// An import goes through one now, and presenting or dismissing a sheet runs the
+/// main run loop in a mode that does not drain the main queue — so for a couple
+/// of hundred milliseconds either side of the button, the model's published
+/// counts do not reach a poll that lives on that queue. A file that arrives
+/// inside that window is one this probe watches with its eyes shut: no progress
+/// line to sample, and no middle left for Stop to land in.
+let importProbeRows = 400_000
 
 /// `--import-probe` reads a file into a table on `--conn`, twice: once to the
 /// end, and once with Stop pressed part way.
@@ -1435,7 +1493,7 @@ func probeImport(model: AppModel) {
     /// only at the end would leave one.
     var progress: Set<String> = []
 
-    enum Phase { case building, reading, restarting, stopping, stopped }
+    enum Phase { case building, planning, reading, restarting, replanning, stopping, stopped }
     var phase = Phase.building
 
     func poll() {
@@ -1447,10 +1505,15 @@ func probeImport(model: AppModel) {
             else {
                 fail("could not build the fixture")
             }
-            var body = "id,note\n"
+            // Written in the other order from the table's columns, on purpose.
+            // Read by position this file puts "row 1" in an integer column and
+            // fails at the first batch, so an import that lands is one where the
+            // mapping crossed the boundary and was honoured — which is not
+            // something the sheet's own state can show.
+            var body = "note,id\n"
             body.reserveCapacity(importProbeRows * 16)
             for n in 1...importProbeRows {
-                body += "\(n),row \(n)\n"
+                body += "row \(n),\(n)\n"
             }
             do {
                 try body.write(to: path, atomically: true, encoding: .utf8)
@@ -1464,7 +1527,25 @@ func probeImport(model: AppModel) {
                 schema: "public", name: table, kind: .table, estimatedRows: nil)
             model.activeTab = .content
             guard model.canImport else { fail("a freshly built table is not importable into") }
-            model.importFile(from: path)
+            model.prepareImport(from: path)
+            phase = .planning
+            return again()
+
+        case .planning:
+            // The sheet's own state, checked rather than skipped past: the
+            // columns of this file are named for the table's, so a mapping that
+            // came back with anything unmapped would mean the default matching
+            // never ran.
+            guard let plan = model.importPlan else {
+                guard model.errorMessage == nil else {
+                    fail("the file could not be read: \(model.errorMessage ?? "")")
+                }
+                return again()
+            }
+            guard plan.mapping == ["note", "id"] else {
+                fail("the columns were not matched by name: \(plan.mapping)")
+            }
+            model.startPlannedImport()
             guard model.isImporting else {
                 fail("the import did not start: \(model.errorMessage ?? "no reason given")")
             }
@@ -1499,7 +1580,13 @@ func probeImport(model: AppModel) {
         case .restarting:
             guard settled(), model.canImport else { return again() }
             progress.removeAll()
-            model.importFile(from: path)
+            model.prepareImport(from: path)
+            phase = .replanning
+            return again()
+
+        case .replanning:
+            guard model.importPlan != nil else { return again() }
+            model.startPlannedImport()
             guard model.isImporting else {
                 fail("the second import did not start: \(model.errorMessage ?? "no reason given")")
             }
@@ -3228,6 +3315,7 @@ if benchMode {
         if importProbe { probeImport(model: model) }
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
+        if let mapImportPath { openImportSheet(model: model, from: mapImportPath) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
 }

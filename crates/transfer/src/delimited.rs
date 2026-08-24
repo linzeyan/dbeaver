@@ -6,7 +6,7 @@
 
 use arrow::array::{ArrayRef, RecordBatch, StringArray};
 use arrow::compute::{CastOptions, cast_with_options};
-use arrow::datatypes::{DataType, SchemaRef};
+use arrow::datatypes::{DataType, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use std::io::{BufReader, Read, Write};
@@ -420,6 +420,32 @@ impl<R: Read> DelimitedReader<R> {
 fn text(bytes: Vec<u8>, start_line: u64) -> Result<String, ArrowError> {
     String::from_utf8(bytes)
         .map_err(|_| ArrowError::CsvError(format!("line {start_line}: not valid UTF-8")))
+}
+
+/// The names in a delimited file's first record.
+///
+/// Built by hand rather than through `DelimitedReader::new`, because there is no
+/// schema yet — this is what runs before there is one, so that somebody can be
+/// shown which of the file's columns is going where. Nothing below the record
+/// splitter is touched: no width is checked and no value is cast.
+///
+/// An empty field in a header comes back as an empty name, which is what the
+/// file says. Inventing "column 3" here would put a name in the picker that is
+/// not in the file.
+pub fn header_names<R: Read>(input: R, delimiter: u8) -> Result<Vec<String>, ArrowError> {
+    let mut reader = DelimitedReader {
+        input: BufReader::new(input).bytes(),
+        peeked: None,
+        delimiter,
+        schema: Arc::new(Schema::empty()),
+        line: 1,
+        header_done: false,
+        finished: false,
+    };
+    let Some((_, fields)) = reader.record()? else {
+        return Ok(Vec::new());
+    };
+    Ok(fields.into_iter().map(|f| f.unwrap_or_default()).collect())
 }
 
 impl<R: Read> Iterator for DelimitedReader<R> {

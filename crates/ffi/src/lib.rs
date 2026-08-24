@@ -2573,6 +2573,55 @@ pub unsafe extern "C" fn db_transfer_free(transfer: *mut DbTransfer) {
     }
 }
 
+/// What a file calls its own columns, as a JSON array of strings.
+///
+/// No handle: a file has columns whether or not anything is connected, and
+/// asking a connection about them would be a round trip that answers nothing.
+/// The caller pairs this with the table's own columns, which it already has, to
+/// offer a mapping.
+///
+/// Null on failure with `err` set: a missing file, a format nothing reads, or a
+/// file this build cannot parse the head of. An empty array is a success — an
+/// empty file has no columns, which is a thing to show rather than a failure.
+///
+/// # Safety
+/// `format` and `path` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_file_columns_json(
+    format: *const c_char,
+    path: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if format.is_null() || path.is_null() {
+        unsafe { set_err(err, "null format or path") };
+        return ptr::null_mut();
+    }
+    let (format_str, path_str) = unsafe {
+        match (
+            CStr::from_ptr(format).to_str(),
+            CStr::from_ptr(path).to_str(),
+        ) {
+            (Ok(f), Ok(p)) => (f, p),
+            _ => {
+                set_err(err, "format or path is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let Some(format) = dbtransfer::Format::from_extension(format_str) else {
+        unsafe { set_err(err, format!("no importer reads {format_str:?} files")) };
+        return ptr::null_mut();
+    };
+    match dbtransfer::file_columns(std::path::Path::new(path_str), format) {
+        Ok(names) => json_result(&names, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Starts reading a file into an existing table on `target`, one batch per call.
 ///
 /// The table must already exist: nothing here guesses a schema, because a file's
@@ -2581,20 +2630,27 @@ pub unsafe extern "C" fn db_transfer_free(transfer: *mut DbTransfer) {
 /// that can fail before a row moves: opening the file, refusing a format nothing
 /// reads, and asking the target what its columns are.
 ///
+/// `mapping` is a JSON array with one entry per column of the file, in the
+/// file's order: the name of the table column that column feeds, or `null` for
+/// one to skip. Pass null to read the file into the table's own columns by
+/// position, which is what this did before there was anything to map.
+///
 /// Null on failure with `err` set. The import holds a reference to the driver
 /// rather than to the handle, so `target` may be freed while it runs — the same
 /// arrangement `db_transfer_start` has, and for the same reason.
 ///
 /// # Safety
 /// `target` must come from `db_connect` and not have been freed. `format`,
-/// `path`, and `table` must be valid NUL-terminated C strings. `err` must be
-/// null or point to writable storage for one `char *`.
+/// `path`, and `table` must be valid NUL-terminated C strings. `mapping` must be
+/// null or a valid NUL-terminated C string. `err` must be null or point to
+/// writable storage for one `char *`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn db_import_start(
     target: *mut DbHandle,
     format: *const c_char,
     path: *const c_char,
     table: *const c_char,
+    mapping: *const c_char,
     err: *mut *mut c_char,
 ) -> *mut DbImport {
     if target.is_null() || format.is_null() || path.is_null() || table.is_null() {
@@ -2623,12 +2679,31 @@ pub unsafe extern "C" fn db_import_start(
         unsafe { set_err(err, "this build has no dialect for this database") };
         return ptr::null_mut();
     };
+    let mapping = if mapping.is_null() {
+        None
+    } else {
+        let text = match unsafe { CStr::from_ptr(mapping) }.to_str() {
+            Ok(m) => m,
+            Err(_) => {
+                unsafe { set_err(err, "the mapping is not valid UTF-8") };
+                return ptr::null_mut();
+            }
+        };
+        match serde_json::from_str::<dbtransfer::ColumnMapping>(text) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                unsafe { set_err(err, format!("the mapping is not readable: {e}")) };
+                return ptr::null_mut();
+            }
+        }
+    };
     match runtime().block_on(dbtransfer::Import::open(
         std::path::Path::new(path_str),
         format,
         t.driver.clone(),
         dialect,
         table_str.to_string(),
+        mapping,
     )) {
         Ok(reading) => {
             let stopper = reading.stopper();
