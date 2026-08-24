@@ -30,6 +30,8 @@ struct GoToPalette: View {
             field
             Rectangle().fill(Theme.separator.color).frame(height: 1)
             list
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            footer
         }
         .frame(width: 460, height: 320)
         .background(Theme.surface.color)
@@ -37,6 +39,29 @@ struct GoToPalette: View {
         // no Cancel button, so without this the only way out is to pick
         // something — which is a palette that punishes opening it by accident.
         .onExitCommand { model.isGoToOpen = false }
+    }
+
+    /// The count and the three keys, along the bottom.
+    ///
+    /// A sheet has no title bar, and this one has no Cancel button — the way
+    /// out is a key nothing on screen mentions. The arrows and Return are in
+    /// the same position: they work, and a palette opened by somebody who has
+    /// not read the source has no way to find out that they do.
+    private var footer: some View {
+        HStack(spacing: Theme.Space.sm) {
+            // Spelled out: the default plural is the singular plus an s, and
+            // "matchs" is not a word.
+            Text(AppModel.pluralized(matches.count, "match", "matches"))
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+            Spacer(minLength: Theme.Space.sm)
+            Text("↑↓ move · ↩ open · ⎋ close")
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 22)
+        .accessibilityHidden(true)
     }
 
     private var field: some View {

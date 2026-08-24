@@ -1560,7 +1560,17 @@ private struct CellEditorRow: View {
                     .lineLimit(1)
             } else {
                 if let cell {
-                    FieldLabel(text: cell.column)
+                    // `FieldLabel`'s own text, without its uppercasing. That
+                    // caption style is for the words this window chose —
+                    // Custom, Order by, Filters — and a column name is not one
+                    // of them: on the engines here `sku` and `SKU` are two
+                    // identifiers, and a bar that prints the second while the
+                    // grid header above it prints the first is naming a column
+                    // that may not exist.
+                    Text(cell.column)
+                        .font(Theme.Typography.micro.weight(.semibold))
+                        .foregroundStyle(Theme.textTertiary.color)
+                        .accessibilityHidden(true)
                     // The window's own field rather than a bare `TextField`.
                     // This is the one control in the application that writes to
                     // the database and it was drawn with no border, no fill and
@@ -2165,6 +2175,11 @@ private struct QueryPanel: View {
                 Button("Save") { keep() }
                     .controlSize(.small)
                     .buttonStyle(.borderedProminent)
+                    // The window's accent rather than the system's, which is
+                    // whatever the person picked in System Settings and is not
+                    // in this palette. The Stage button in the value editor
+                    // carries the same pair.
+                    .tint(Theme.accent.color)
                     .disabled(typedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             } else {
                 // A segmented control rather than two buttons: these are two

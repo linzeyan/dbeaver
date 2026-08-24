@@ -47,6 +47,8 @@ struct TransferSheet: View {
             field
             Rectangle().fill(Theme.separator.color).frame(height: 1)
             list
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            footer
         }
         .frame(width: 460, height: 360)
         .background(Theme.surface.color)
@@ -85,6 +87,25 @@ struct TransferSheet: View {
         }
         .padding(Theme.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The count and the three keys, as on `GoToPalette`, and for the reason
+    /// given there. It matters more here: picking a row starts an `INSERT` into
+    /// a database the person is not looking at, and a sheet with no stated way
+    /// out is one where the safe move is not obvious.
+    private var footer: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Text(AppModel.pluralized(matches.count, "table"))
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+            Spacer(minLength: Theme.Space.sm)
+            Text("↑↓ move · ↩ send · ⎋ close")
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 22)
+        .accessibilityHidden(true)
     }
 
     private var field: some View {

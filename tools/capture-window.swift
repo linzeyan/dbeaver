@@ -43,9 +43,9 @@ do {
 let pid = proc.processIdentifier
 
 // The size floor keeps palettes and popups from being mistaken for the window,
-// and 600×400 is the main window's. The Settings panel is 460 wide and takes
-// its height from whichever pane is showing, so a capture of it says so
-// through the environment rather than by loosening the floor for everything.
+// and 600×400 is the main window's. The Settings panel is 460×560 and scrolls
+// what does not fit, so a capture of it says so through the environment rather
+// than by loosening the floor for everything.
 let minWidth = ProcessInfo.processInfo.environment["CAPTURE_MIN_WIDTH"].flatMap(Double.init) ?? 600
 let minHeight =
     ProcessInfo.processInfo.environment["CAPTURE_MIN_HEIGHT"].flatMap(Double.init) ?? 400

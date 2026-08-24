@@ -574,6 +574,15 @@ struct CellValueEditor: View {
             // Return puts a line break in the box, which is the whole point of
             // the box, so the key that commits has to be a different one.
             .keyboardShortcut(.return, modifiers: .command)
+            // Filled, because it is the one of the two that changes something.
+            // Drawn identically to Cancel, this pair asked the reader to know
+            // which word meant "keep" — and the window already has a prominent
+            // button, on the Save that names a favorite, so the plain pair was
+            // also the odd one out. Tinted rather than left to the system
+            // accent for the reason `Theme` gives about the sidebar: a colour
+            // nobody chose is the one thing this palette does not allow.
+            .buttonStyle(.borderedProminent)
+            .tint(Theme.accent.color)
             .help("Hold this value for the cell (⌘↩); nothing is sent until Save")
         }
         .padding(.horizontal, Theme.Space.md)

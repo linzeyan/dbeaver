@@ -7,3 +7,6 @@
 # Symlink into the dev_docs repository, where documentation is managed.
 /docs
 tools/baseline/.cache/
+
+# Assistant drive transcripts; they belong to the run, not the repo.
+drive-logs/
