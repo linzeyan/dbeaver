@@ -583,7 +583,8 @@ final class Database: @unchecked Sendable {
         return Transfer(handle: t)
     }
 
-    /// Reads `url` into `table`, and answers how many rows arrived.
+    /// Opens `url` for reading into `table`, and hands back the handle that
+    /// steps it.
     ///
     /// On the connection rather than on a `Cursor`, because there is no result
     /// to read from: the rows are coming the other way. The core reads a batch,
@@ -593,11 +594,15 @@ final class Database: @unchecked Sendable {
     /// being read into already have types, and the core asks this connection for
     /// them before it parses a line.
     ///
-    /// Blocks for the length of the import.
-    func importFile(from url: URL, format: ExportFormat, table: String) throws -> Int64 {
+    /// Blocks only for that asking. Everything that can be refused — a missing
+    /// file, a format nothing reads, a table that is not there — is refused
+    /// here, before the window says it is importing anything.
+    func startImport(from url: URL, format: ExportFormat, table: String) throws -> Import {
         var err: UnsafeMutablePointer<CChar>?
-        let rows = db_import(handle, format.wireName, url.path, table, &err)
-        return try Cursor.written(rows, &err, or: "import failed")
+        guard let reading = db_import_start(handle, format.wireName, url.path, table, &err) else {
+            throw DbError(description: Database.take(&err) ?? "import failed")
+        }
+        return Import(handle: reading)
     }
 
     /// Consumes an error out-parameter, releasing the Rust-owned string.
@@ -722,6 +727,32 @@ final class Cursor: @unchecked Sendable {
     }
 }
 
+/// What one step of a batched job did.
+///
+/// Shared by the transfer and the import below, because the two answer the same
+/// three things and the core says so with the same 1/0/-2. A second copy of it
+/// would be a second place for "stopped is not a failure" to be got wrong.
+enum BatchStep {
+    /// A batch went across; the number is the running total.
+    case moved(Int64)
+    /// Everything the source had is on the target.
+    case done(Int64)
+    /// Somebody stopped it. What had already gone stays there — neither of
+    /// these is a transaction, and the target may not have one.
+    case stopped(Int64)
+
+    var rows: Int64 {
+        switch self {
+        case .moved(let n), .done(let n), .stopped(let n): return n
+        }
+    }
+
+    var isFinished: Bool {
+        if case .moved = self { return false }
+        return true
+    }
+}
+
 /// Rows on their way from one connection to another.
 ///
 /// A handle rather than a call that returns when it is finished, which is the
@@ -729,28 +760,6 @@ final class Cursor: @unchecked Sendable {
 /// out: `step` moves one batch and answers with the running total, so the count
 /// on screen is the count on the target.
 final class Transfer: @unchecked Sendable {
-    /// What one step did.
-    enum Step {
-        /// A batch went across; the number is the running total.
-        case moved(Int64)
-        /// Everything the source had is on the target.
-        case done(Int64)
-        /// Somebody stopped it. What had already gone stays there — a transfer
-        /// is not a transaction, and the target may not have one.
-        case stopped(Int64)
-
-        var rows: Int64 {
-            switch self {
-            case .moved(let n), .done(let n), .stopped(let n): return n
-            }
-        }
-
-        var isFinished: Bool {
-            if case .moved = self { return false }
-            return true
-        }
-    }
-
     private let handle: OpaquePointer
 
     fileprivate init(handle: OpaquePointer) {
@@ -762,7 +771,7 @@ final class Transfer: @unchecked Sendable {
     deinit { db_transfer_free(handle) }
 
     /// Moves one batch. Blocks for one fetch and one round of INSERTs.
-    func step() throws -> Step {
+    func step() throws -> BatchStep {
         var rows: Int64 = 0
         var err: UnsafeMutablePointer<CChar>?
         switch db_transfer_step(handle, &rows, &err) {
@@ -791,6 +800,55 @@ final class Transfer: @unchecked Sendable {
         if db_transfer_cancel(handle, &err) != 0 {
             let message = Database.take(&err) ?? "cancel failed"
             fputs("transfer cancel request failed: \(message)\n", stderr)
+        }
+    }
+}
+
+/// A file's rows on their way into a table.
+///
+/// The transfer's shape, one end different: what is being read is a file rather
+/// than a cursor, so there is nothing to cancel on that side and nothing for two
+/// pieces of Swift to free. `step` reads one batch and answers with the running
+/// total, which is what lets the status line count up instead of going quiet for
+/// the length of a two-gigabyte CSV.
+final class Import: @unchecked Sendable {
+    private let handle: OpaquePointer
+
+    fileprivate init(handle: OpaquePointer) {
+        self.handle = handle
+    }
+
+    /// Frees the import and closes the file. Off the main thread, like the
+    /// others here: it may be releasing a batch that is still being written.
+    deinit { db_import_free(handle) }
+
+    /// Reads one batch and sends it. Blocks for one read and one round of
+    /// INSERTs.
+    func step() throws -> BatchStep {
+        var rows: Int64 = 0
+        var err: UnsafeMutablePointer<CChar>?
+        switch db_import_step(handle, &rows, &err) {
+        case 1:
+            return .moved(rows)
+        case 0:
+            return .done(rows)
+        case -2:
+            // Not thrown, for the reason `Transfer.step` gives: a stop is a
+            // button that worked, and the rows that arrived are the answer.
+            _ = Database.take(&err)
+            return .stopped(rows)
+        default:
+            throw DbError(description: Database.take(&err) ?? "import failed")
+        }
+    }
+
+    /// Stops it. Called from off the queue the step is blocking, and silent on
+    /// failure, for the reasons `Cursor.cancel` gives.
+    func cancel() {
+        var err: UnsafeMutablePointer<CChar>?
+        if db_import_cancel(handle, &err) != 0 {
+            let message = Database.take(&err) ?? "cancel failed"
+            fputs("import cancel request failed: \(message)\n", stderr)
         }
     }
 }

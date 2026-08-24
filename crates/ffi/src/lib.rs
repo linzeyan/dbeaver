@@ -120,6 +120,17 @@ pub struct DbTransfer {
     stopper: dbtransfer::Stopper,
 }
 
+/// An import in flight: the reading and the stop somebody may press.
+///
+/// Two fields for the reason `DbTransfer` has three — `db_import_cancel` runs
+/// while a `db_import_step` is in flight on another thread, and each entry point
+/// borrows only its own field. There is no source to hold here: the file is
+/// inside the import, because a file is not a thing two entry points can close.
+pub struct DbImport {
+    import: dbtransfer::Import,
+    stopper: dbtransfer::ImportStopper,
+}
+
 /// An SSH bastion to reach the database through, as the caller fills it in.
 ///
 /// Flat fields rather than a tagged union, because this struct is written by
@@ -2562,82 +2573,154 @@ pub unsafe extern "C" fn db_transfer_free(transfer: *mut DbTransfer) {
     }
 }
 
-/// Reads a file into an existing table on `target`.
+/// Starts reading a file into an existing table on `target`, one batch per call.
 ///
-/// The file is read in batches so a multi-gigabyte CSV is no heavier than a
-/// small one — the same property `transfer` has, and the reason both live in
-/// this crate rather than in the caller. The table must already exist: this
-/// does not guess a schema, because a file's types are only meaningful in the
-/// context of the table they are being read into.
+/// The table must already exist: nothing here guesses a schema, because a file's
+/// types are only meaningful in the context of the table they are being read
+/// into — and that table already knows them. What this call does is everything
+/// that can fail before a row moves: opening the file, refusing a format nothing
+/// reads, and asking the target what its columns are.
 ///
-/// Returns the row count on success. Returns -1 when the target refused the
-/// statement (a table that does not exist, a type mismatch, a constraint
-/// violation) and -2 when the operation was cancelled — the same convention
-/// `db_transfer` uses, so a caller that already handles one can handle the
-/// other without a second branch.
+/// Null on failure with `err` set. The import holds a reference to the driver
+/// rather than to the handle, so `target` may be freed while it runs — the same
+/// arrangement `db_transfer_start` has, and for the same reason.
 ///
 /// # Safety
 /// `target` must come from `db_connect` and not have been freed. `format`,
 /// `path`, and `table` must be valid NUL-terminated C strings. `err` must be
 /// null or point to writable storage for one `char *`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn db_import(
+pub unsafe extern "C" fn db_import_start(
     target: *mut DbHandle,
     format: *const c_char,
     path: *const c_char,
     table: *const c_char,
     err: *mut *mut c_char,
-) -> i64 {
+) -> *mut DbImport {
     if target.is_null() || format.is_null() || path.is_null() || table.is_null() {
         unsafe { set_err(err, "null target, format, path, or table") };
-        return -1;
+        return ptr::null_mut();
     }
-    let format_str = match unsafe { CStr::from_ptr(format) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            unsafe { set_err(err, e) };
-            return -1;
+    let (format_str, path_str, table_str) = unsafe {
+        match (
+            CStr::from_ptr(format).to_str(),
+            CStr::from_ptr(path).to_str(),
+            CStr::from_ptr(table).to_str(),
+        ) {
+            (Ok(f), Ok(p), Ok(t)) => (f, p, t),
+            _ => {
+                set_err(err, "format, path, or table is not valid UTF-8");
+                return ptr::null_mut();
+            }
         }
     };
-    let path_str = match unsafe { CStr::from_ptr(path) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            unsafe { set_err(err, e) };
-            return -1;
-        }
-    };
-    let table_str = match unsafe { CStr::from_ptr(table) }.to_str() {
-        Ok(s) => s,
-        Err(e) => {
-            unsafe { set_err(err, e) };
-            return -1;
-        }
-    };
-    let format = match dbtransfer::Format::from_extension(format_str) {
-        Some(f) => f,
-        None => {
-            unsafe { set_err(err, format!("no importer reads {format_str:?} files")) };
-            return -1;
-        }
+    let Some(format) = dbtransfer::Format::from_extension(format_str) else {
+        unsafe { set_err(err, format!("no importer reads {format_str:?} files")) };
+        return ptr::null_mut();
     };
     let t = unsafe { &*target };
     let Some(dialect) = t.dialect else {
         unsafe { set_err(err, "this build has no dialect for this database") };
-        return -1;
+        return ptr::null_mut();
     };
-    match runtime().block_on(dbtransfer::import(
+    match runtime().block_on(dbtransfer::Import::open(
         std::path::Path::new(path_str),
         format,
-        t.driver.as_ref(),
+        t.driver.clone(),
         dialect,
         table_str.to_string(),
     )) {
-        Ok(n) => i64::try_from(n).unwrap_or(i64::MAX),
+        Ok(reading) => {
+            let stopper = reading.stopper();
+            Box::into_raw(Box::new(DbImport {
+                import: reading,
+                stopper,
+            }))
+        }
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Reads one batch and sends it, writing the running row count into `rows`.
+///
+/// Returns 1 when a batch went across, 0 when the file is exhausted and
+/// everything is on the target, -1 on failure with `err` set, and -2 when
+/// somebody has stopped it — the convention `db_transfer_step` and
+/// `db_cursor_next` use.
+///
+/// `rows` is written on every answer including the failures, for the reason
+/// `db_transfer_step` gives: a step that failed half way still leaves the
+/// batches before it on the target, and an import is not a transaction.
+///
+/// # Safety
+/// `import` must come from `db_import_start` and not have been freed. It must
+/// not be stepped from two threads at once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_import_step(
+    import: *mut DbImport,
+    rows: *mut i64,
+    err: *mut *mut c_char,
+) -> c_int {
+    if import.is_null() {
+        unsafe { set_err(err, "null import") };
+        return -1;
+    }
+    // Only the reading half is borrowed, so the stopper next door stays
+    // reachable by a cancel arriving on another thread — see `DbImport`.
+    let reading = unsafe { &mut (*import).import };
+    let outcome = runtime().block_on(reading.step());
+    if !rows.is_null() {
+        unsafe { *rows = i64::try_from(reading.loaded()).unwrap_or(i64::MAX) };
+    }
+    match outcome {
+        Ok(dbtransfer::Step::Moved(_)) => 1,
+        Ok(dbtransfer::Step::Done(_)) => 0,
+        Ok(dbtransfer::Step::Stopped(_)) => -2,
         Err(e) => {
             let cancelled = e.is_cancelled();
             unsafe { set_err(err, e) };
             if cancelled { -2 } else { -1 }
         }
+    }
+}
+
+/// Stops the import. Returns 0 when the request was delivered, -1 when it could
+/// not be.
+///
+/// May be called while a step is in flight, and has to be: a step blocks for a
+/// read and a write. One end rather than the transfer's two, because the other
+/// end here is a file — see `dbtransfer::ImportStopper`.
+///
+/// # Safety
+/// `import` must come from `db_import_start` and not have been freed. It must
+/// not be freed concurrently with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_import_cancel(import: *mut DbImport, err: *mut *mut c_char) -> c_int {
+    if import.is_null() {
+        unsafe { set_err(err, "null import") };
+        return -1;
+    }
+    let stopper = unsafe { &(*import).stopper };
+    match runtime().block_on(stopper.stop()) {
+        Ok(()) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
+        }
+    }
+}
+
+/// Releases the import and closes the file it was reading.
+///
+/// # Safety
+/// `import` must come from `db_import_start` and not have been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_import_free(import: *mut DbImport) {
+    if !import.is_null() {
+        drop(unsafe { Box::from_raw(import) });
     }
 }
 

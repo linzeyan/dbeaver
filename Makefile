@@ -397,6 +397,11 @@ test-transfer: release db-check ## Move a table between two connections, then st
 	./$(APP_BIN) --transfer-probe --conn "$(PG_CONN)" \
 		--history-store dev.dbclient.transferprobe
 
+.PHONY: test-import
+test-import: release db-check ## Read a large file into a table, then stop one part way
+	./$(APP_BIN) --import-probe --conn "$(PG_CONN)" \
+		--history-store dev.dbclient.importprobe
+
 # The one MCP coverage that involves a socket. `--verify-mcp` holds the rules
 # as pure functions — parser, router, walls, dispatcher — and a fake data
 # source, so the listener, the read loop and the connections the server opens
@@ -408,7 +413,7 @@ test-mcp: release ## Talk to the MCP server over a real socket
 	bash $(TOOLS)/mcp-smoke.sh ./$(APP_BIN) $(or $(PORT),8791)
 
 .PHONY: test-all
-test-all: test test-integration test-swift test-preferences test-history test-sessions test-transfer test-mcp ## Every test
+test-all: test test-integration test-swift test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
 
 ##@ Quality
 

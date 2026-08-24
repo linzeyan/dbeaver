@@ -47,13 +47,14 @@ use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
     db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
-    db_foreign_keys_json, db_free, db_import, db_indexes_json, db_names_forget, db_query,
-    db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
-    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
-    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
-    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
-    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_foreign_keys_json, db_free, db_import_cancel, db_import_free, db_import_start,
+    db_import_step, db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
+    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
+    db_routine_definition_json, db_routines_json, db_row_identity_json, db_schemas_json,
+    db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free,
+    db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
+    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
+    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -2876,6 +2877,13 @@ fn a_transfer_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     unsafe { db_free(handle_tgt) };
 }
 
+/// One import, stepped to the end, with the count read between the steps.
+///
+/// The count is the reason the entry point hands back a handle rather than a
+/// total: a two-gigabyte CSV that reports nothing until it is finished is a
+/// window that looks stuck. What is pinned here is that the number climbs and
+/// that it is the number of rows on the target, not the number read out of the
+/// file — those differ the moment a statement is refused.
 #[test]
 fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
@@ -2892,8 +2900,8 @@ fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
     let format = CString::new("csv").unwrap();
     let path_c = CString::new(path.to_str().unwrap()).unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let rows = unsafe {
-        db_import(
+    let reading = unsafe {
+        db_import_start(
             handle,
             format.as_ptr(),
             path_c.as_ptr(),
@@ -2901,6 +2909,25 @@ fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
             &mut err,
         )
     };
+    assert!(!reading.is_null(), "the import should start");
+    assert!(
+        err.is_null(),
+        "db_import_start should not set err on success"
+    );
+
+    let mut rows: i64 = 0;
+    let mut steps = 0;
+    loop {
+        let mut err: *mut c_char = ptr::null_mut();
+        let step = unsafe { db_import_step(reading, &mut rows, &mut err) };
+        assert!(step >= 0, "the import should not fail");
+        steps += 1;
+        if step == 0 {
+            break;
+        }
+        assert!(steps < 100, "three rows should not take a hundred batches");
+    }
+    unsafe { db_import_free(reading) };
     assert_eq!(rows, 3, "every CSV row was reported written");
 
     assert_eq!(ran(handle, "SELECT id FROM people"), 3);
@@ -2919,130 +2946,36 @@ fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
     unsafe { db_free(handle) };
 }
 
+/// A stop between two batches leaves the first one on the target.
+///
+/// The rows that arrived stay: an import is not a transaction, and the target
+/// may not have one. What Stop promises is that nothing further is sent, and the
+/// count the last step reported is the count in the table — which is the number
+/// the window puts in "Stopped after N rows".
+///
+/// Two batches take 4,097 rows, one over `BATCH_ROWS`. A file of one batch would
+/// pass this test by finishing before the cancel could matter.
 #[test]
-fn an_import_without_a_target_says_so_instead_of_crashing() {
+fn an_import_stopped_between_batches_keeps_what_had_already_arrived() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join(format!("dbffi-import-stop-{}.csv", std::process::id()));
+    let mut body = String::from("id\n");
+    for n in 1..=4097 {
+        body.push_str(&format!("{n}\n"));
+    }
+    std::fs::write(&path, body).expect("write csv");
+
+    ran(handle, "CREATE TABLE many (id INTEGER)");
+    let table = CString::new("many").unwrap();
     let format = CString::new("csv").unwrap();
-    let path = std::env::temp_dir().join("dbffi-import-null-target.csv");
-    std::fs::write(&path, "id\n1\n").expect("write csv");
     let path_c = CString::new(path.to_str().unwrap()).unwrap();
-    let table = CString::new("t").unwrap();
-
     let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
-            ptr::null_mut(),
-            format.as_ptr(),
-            path_c.as_ptr(),
-            table.as_ptr(),
-            &mut err,
-        )
-    };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    unsafe { db_string_free(err) };
-    let _ = std::fs::remove_file(&path);
-}
-
-#[test]
-fn an_import_without_a_format_says_so_instead_of_crashing() {
-    let conn_str = CString::new("duckdb://:memory:").unwrap();
-    let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
-    assert!(!handle.is_null());
-
-    let path = std::env::temp_dir().join("dbffi-import-null-format.csv");
-    std::fs::write(&path, "id\n1\n").expect("write csv");
-    let path_c = CString::new(path.to_str().unwrap()).unwrap();
-    let table = CString::new("t").unwrap();
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
-            handle,
-            ptr::null_mut(),
-            path_c.as_ptr(),
-            table.as_ptr(),
-            &mut err,
-        )
-    };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    unsafe { db_string_free(err) };
-    let _ = std::fs::remove_file(&path);
-    unsafe { db_free(handle) };
-}
-
-#[test]
-fn an_import_without_a_path_says_so_instead_of_crashing() {
-    let conn_str = CString::new("duckdb://:memory:").unwrap();
-    let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
-    assert!(!handle.is_null());
-
-    let format = CString::new("csv").unwrap();
-    let table = CString::new("t").unwrap();
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
-            handle,
-            format.as_ptr(),
-            ptr::null_mut(),
-            table.as_ptr(),
-            &mut err,
-        )
-    };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    unsafe { db_string_free(err) };
-    unsafe { db_free(handle) };
-}
-
-#[test]
-fn an_import_without_a_table_name_says_so_instead_of_crashing() {
-    let conn_str = CString::new("duckdb://:memory:").unwrap();
-    let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
-    assert!(!handle.is_null());
-
-    let format = CString::new("csv").unwrap();
-    let path = std::env::temp_dir().join("dbffi-import-null-table.csv");
-    std::fs::write(&path, "id\n1\n").expect("write csv");
-    let path_c = CString::new(path.to_str().unwrap()).unwrap();
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
-            handle,
-            format.as_ptr(),
-            path_c.as_ptr(),
-            ptr::null_mut(),
-            &mut err,
-        )
-    };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    unsafe { db_string_free(err) };
-    let _ = std::fs::remove_file(&path);
-    unsafe { db_free(handle) };
-}
-
-#[test]
-fn an_import_of_a_format_nothing_reads_names_the_format() {
-    let conn_str = CString::new("duckdb://:memory:").unwrap();
-    let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
-    assert!(!handle.is_null());
-
-    let path = std::env::temp_dir().join("dbffi-import-unknown.fmt");
-    std::fs::write(&path, "id\n1\n").expect("write file");
-    let path_c = CString::new(path.to_str().unwrap()).unwrap();
-    let format = CString::new("xyzzy").unwrap();
-    let table = CString::new("t").unwrap();
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
+    let reading = unsafe {
+        db_import_start(
             handle,
             format.as_ptr(),
             path_c.as_ptr(),
@@ -3050,85 +2983,167 @@ fn an_import_of_a_format_nothing_reads_names_the_format() {
             &mut err,
         )
     };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    let message = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    assert!(
-        message.contains("xyzzy"),
-        "error should mention the format, got: {message}"
+    assert!(!reading.is_null(), "the import should start");
+
+    let mut rows: i64 = 0;
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_import_step(reading, &mut rows, &mut err) },
+        1,
+        "the first batch goes across"
     );
-    unsafe { db_string_free(err) };
+    let after_first = rows;
+    assert!(after_first > 0, "and it carried rows");
+
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_import_cancel(reading, &mut err) },
+        0,
+        "the stop is delivered"
+    );
+
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_import_step(reading, &mut rows, &mut err) },
+        -2,
+        "and the next step reports the stop rather than sending"
+    );
+    assert_eq!(rows, after_first, "with the count it already had");
+    unsafe { db_import_free(reading) };
+
+    assert_eq!(
+        ran(handle, "SELECT id FROM many"),
+        after_first,
+        "the rows that arrived before the stop are still there"
+    );
+
     let _ = std::fs::remove_file(&path);
     unsafe { db_free(handle) };
 }
 
+/// The four ways an import is refused before it starts.
+///
+/// One test rather than four, because every one of them is the same sentence —
+/// `db_import_start` answers null and says why — and four copies of it was four
+/// places to forget the `err` check. A refusal that came back as a live handle
+/// would be a window reporting progress against a file that is not there.
 #[test]
-fn an_import_of_a_file_that_is_not_there_says_so_before_touching_the_server() {
+fn an_import_that_cannot_start_says_so_instead_of_handing_back_a_handle() {
     let conn_str = CString::new("duckdb://:memory:").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
     assert!(!handle.is_null());
 
-    let format = CString::new("csv").unwrap();
-    let path = std::env::temp_dir().join("dbffi-import-nonexistent.csv");
-    let path_c = CString::new(path.to_str().unwrap()).unwrap();
-    let table = CString::new("t").unwrap();
-
-    let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
-            handle,
-            format.as_ptr(),
-            path_c.as_ptr(),
-            table.as_ptr(),
-            &mut err,
-        )
-    };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    unsafe { db_string_free(err) };
-    unsafe { db_free(handle) };
-}
-
-#[test]
-fn an_import_into_a_table_that_is_not_there_reports_the_servers_refusal() {
-    let conn_str = CString::new("duckdb://:memory:").unwrap();
-    let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
-    assert!(!handle.is_null());
-
-    let path = std::env::temp_dir().join("dbffi-import-no-table.csv");
+    let path = std::env::temp_dir().join(format!("dbffi-import-bad-{}.csv", std::process::id()));
     std::fs::write(&path, "id\n1\n").expect("write csv");
     let path_c = CString::new(path.to_str().unwrap()).unwrap();
-    let format = CString::new("csv").unwrap();
-    let table = CString::new("ghost_table").unwrap();
+    let missing = std::env::temp_dir().join("dbffi-import-nonexistent.csv");
+    let missing_c = CString::new(missing.to_str().unwrap()).unwrap();
+    let csv = CString::new("csv").unwrap();
+    let unknown = CString::new("xyzzy").unwrap();
+    let table = CString::new("t").unwrap();
+    let ghost = CString::new("ghost_table").unwrap();
 
-    let mut err: *mut c_char = ptr::null_mut();
-    let result = unsafe {
-        db_import(
-            handle,
-            format.as_ptr(),
+    type Case = (
+        &'static str,
+        *mut dbffi::DbHandle,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+    );
+    let cases: [Case; 7] = [
+        (
+            "no target",
+            ptr::null_mut(),
+            csv.as_ptr(),
             path_c.as_ptr(),
             table.as_ptr(),
-            &mut err,
-        )
-    };
-    assert_eq!(result, -1);
-    assert!(!err.is_null(), "db_import must say why it failed");
-    let message = unsafe { CStr::from_ptr(err) }
-        .to_string_lossy()
-        .into_owned();
-    assert!(
-        message.contains("ghost_table")
-            || message.contains("not exist")
-            || message.contains("relation"),
-        "error should mention the missing table, got: {message}"
-    );
-    unsafe { db_string_free(err) };
+        ),
+        (
+            "no format",
+            handle,
+            ptr::null(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+        ),
+        ("no path", handle, csv.as_ptr(), ptr::null(), table.as_ptr()),
+        (
+            "no table",
+            handle,
+            csv.as_ptr(),
+            path_c.as_ptr(),
+            ptr::null(),
+        ),
+        (
+            "a format nothing reads",
+            handle,
+            unknown.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+        ),
+        (
+            "a file that is not there",
+            handle,
+            csv.as_ptr(),
+            missing_c.as_ptr(),
+            table.as_ptr(),
+        ),
+        (
+            "a table that is not there",
+            handle,
+            csv.as_ptr(),
+            path_c.as_ptr(),
+            ghost.as_ptr(),
+        ),
+    ];
+
+    for (what, target, format, path_arg, table_arg) in cases {
+        let mut err: *mut c_char = ptr::null_mut();
+        let reading = unsafe { db_import_start(target, format, path_arg, table_arg, &mut err) };
+        assert!(reading.is_null(), "{what} should not start an import");
+        assert!(!err.is_null(), "{what} should say why it was refused");
+        let message = unsafe { CStr::from_ptr(err) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { db_string_free(err) };
+        match what {
+            "a format nothing reads" => assert!(
+                message.contains("xyzzy"),
+                "the refusal names the format, got: {message}"
+            ),
+            "a table that is not there" => assert!(
+                message.contains("ghost_table")
+                    || message.contains("not exist")
+                    || message.contains("Table"),
+                "the refusal names the table, got: {message}"
+            ),
+            _ => {}
+        }
+    }
+
     let _ = std::fs::remove_file(&path);
     unsafe { db_free(handle) };
+}
+
+/// Stepping or stopping a null import says so rather than dereferencing it.
+#[test]
+fn a_null_import_is_refused_by_every_call_that_takes_one() {
+    let mut rows: i64 = 0;
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(
+        unsafe { db_import_step(ptr::null_mut(), &mut rows, &mut err) },
+        -1
+    );
+    assert!(!err.is_null(), "db_import_step must say why it failed");
+    unsafe { db_string_free(err) };
+
+    let mut err: *mut c_char = ptr::null_mut();
+    assert_eq!(unsafe { db_import_cancel(ptr::null_mut(), &mut err) }, -1);
+    assert!(!err.is_null(), "db_import_cancel must say why it failed");
+    unsafe { db_string_free(err) };
+
+    // Freeing nothing is not a failure and has nowhere to report one.
+    unsafe { db_import_free(ptr::null_mut()) };
 }
 
 /// A relation the server knows answers with fields; a name that names nothing

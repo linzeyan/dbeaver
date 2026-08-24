@@ -53,6 +53,7 @@ typedef struct DbHandle DbHandle;
 typedef struct DbQuery DbQuery;
 typedef struct DbCursor DbCursor;
 typedef struct DbTransfer DbTransfer;
+typedef struct DbImport DbImport;
 
 // All calls block. Do not call from the main thread.
 // Any `err` out-parameter, when set, must be released with db_string_free.
@@ -639,7 +640,7 @@ int db_transfer_cancel(DbTransfer* transfer, char** err);
 // Releases the transfer and the cursor it took.
 void db_transfer_free(DbTransfer* transfer);
 
-// Reads a file into an existing table on `target`.
+// Starts reading a file into an existing table on `target`, one batch per call.
 //
 // A batch at a time, so a multi-gigabyte CSV is no heavier than a small one.
 // The table has to exist already: nothing here guesses a type, because a
@@ -649,10 +650,29 @@ void db_transfer_free(DbTransfer* transfer);
 // `format` is a file extension — "csv", "tsv", "jsonl", "parquet". There is no
 // "sql", because a SQL script is something to run rather than to import.
 //
-// Returns the row count on success, -1 on error, -2 when the operation was
-// cancelled. Fails if this build has no dialect for the target database.
-int64_t db_import(DbHandle* target, const char* format, const char* path,
-                  const char* table, char** err);
+// Null on failure with `err` set: a missing file, a format nothing reads, a
+// table that is not there, or a build with no dialect for this database. All of
+// that is settled here, before the first row moves.
+DbImport* db_import_start(DbHandle* target, const char* format, const char* path,
+                          const char* table, char** err);
+
+// Reads one batch and sends it. Returns 1 when a batch went across, 0 when the
+// file is exhausted and everything is on the target, -1 on failure, -2 when
+// somebody stopped it.
+//
+// `rows` is written on every answer, failures included: it describes the
+// target, and an import is not a transaction.
+int db_import_step(DbImport* import, int64_t* rows, char** err);
+
+// Stops the import. Returns 0 when the request was delivered, -1 when it could
+// not be. May be called while a step is in flight.
+//
+// One end, where a transfer has two: the other end here is a file, which has
+// nothing to interrupt. What is promised is that no further batch is sent.
+int db_import_cancel(DbImport* import, char** err);
+
+// Releases the import and closes the file it was reading.
+void db_import_free(DbImport* import);
 
 #ifdef __cplusplus
 }

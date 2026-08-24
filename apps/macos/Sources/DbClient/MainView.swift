@@ -3372,6 +3372,11 @@ struct StatusBar: View {
                     .buttonStyle(.link)
                     .font(Theme.Typography.micro)
                     .help("Stop the export. The file keeps the rows already written.")
+            } else if model.isImporting {
+                Button("Stop") { model.stopImport() }
+                    .buttonStyle(.link)
+                    .font(Theme.Typography.micro)
+                    .help("Stop reading the file. The rows already read stay in the table.")
             }
 
             // Attached to the sentence it acts on, so "first 100,000 of
