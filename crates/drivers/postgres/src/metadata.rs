@@ -277,8 +277,10 @@ pub(crate) async fn routines(client: &Client, schema: &str) -> Result<Vec<Routin
 /// The row estimate is here as well as on the navigator row, and it is here with
 /// the thing the navigator has no room for: when it was last taken. `reltuples`
 /// is whatever the last ANALYZE saw and every write since has drifted from it,
-/// so "≈5,000, analysed 3 days ago" is the answer to "why does the count in the
-/// grid not match the sidebar" — which is otherwise a bug report.
+/// so a date beside the "≈5,000" in the tree is the answer to "why does the
+/// count in the grid not match the sidebar" — which is otherwise a bug report.
+/// Truncated to the second, because the question it answers is how stale the
+/// estimate is and microseconds are six digits of noise across that.
 ///
 /// `pg_total_relation_size` rather than `pg_relation_size`: the number somebody
 /// wants when they ask how big a table is includes its indexes and its TOAST,
@@ -291,10 +293,12 @@ pub(crate) async fn table_info(
     let rows = client
         .query(
             "SELECT pg_catalog.pg_get_userbyid(c.relowner), \
-                    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)), \
+                    CASE WHEN c.relkind IN ('v', 'f') THEN NULL \
+                         ELSE pg_catalog.pg_size_pretty( \
+                                  pg_catalog.pg_total_relation_size(c.oid)) END, \
                     c.relpersistence::text, \
                     pg_catalog.obj_description(c.oid, 'pg_class'), \
-                    GREATEST(s.last_analyze, s.last_autoanalyze)::text \
+                    date_trunc('second', GREATEST(s.last_analyze, s.last_autoanalyze))::text \
              FROM pg_catalog.pg_class c \
              JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
              LEFT JOIN pg_catalog.pg_stat_all_tables s ON s.relid = c.oid \
@@ -314,8 +318,10 @@ pub(crate) async fn table_info(
             value: owner,
         });
     }
-    // Null for a view, which occupies nothing: the size of a view is the size of
-    // the query, and printing "0 bytes" would say it is an empty table.
+    // Asked for only where there is storage to measure. `pg_total_relation_size`
+    // answers 0 for a view rather than null, and "Size: 0 bytes" under a view
+    // reads as a table that has been emptied — the size of a view is the size of
+    // the query behind it, which is a thing the DDL section shows.
     let size: Option<String> = row.get(1);
     if let Some(size) = size {
         out.push(InfoField {

@@ -1421,7 +1421,12 @@ struct StructurePane: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textSecondary.color)
             }
-            .width(min: 90, ideal: 130)
+            // Fixed, unlike the other sections' columns. Two columns share the
+            // pane's whole width, so a flexible label column takes half of it
+            // and puts every value a third of the way across the window from
+            // the word it belongs to; a range wide enough to stop that left the
+            // longest label truncated instead.
+            .width(140)
 
             TableColumn("Value") { field in
                 Text(field.value)
