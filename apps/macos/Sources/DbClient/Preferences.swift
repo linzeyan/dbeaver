@@ -282,11 +282,26 @@ final class Preferences {
     /// 1000, deliberately a tenth of what Sequel Ace allows: these rows land
     /// in a language model's context, where ten thousand rows of JSON do not
     /// inform, they drown. The reply says when it was cut short, and an agent
-    /// that needs more can ask a narrower question. Zero reads as the default
-    /// rather than as "no rows ever".
+    /// that needs more can ask a narrower question.
+    ///
+    /// Held as typed, and folded by `foldedRowCap` wherever it is used — the
+    /// field can hold a 0 for as long as somebody is mid-edit, and 0 is the
+    /// one number this must never be read as: it would answer every query
+    /// with no rows and a `truncated: true`, which is a server that looks
+    /// like it is working.
     var mcpRowCap: Int {
         didSet { store.set(mcpRowCap, forKey: Key.mcpRowCap) }
     }
+
+    /// What a row cap outside the sensible range is read as.
+    ///
+    /// Stated once because two places ask: this type at launch, reading a
+    /// plist somebody may have edited, and the coordinator on every keystroke
+    /// in the field. A rule spelled in both would drift the day one is
+    /// corrected — which is the same reason `registered` is the only
+    /// statement of the defaults.
+    static let defaultRowCap = 1000
+    static func foldedRowCap(_ raw: Int) -> Int { raw <= 0 ? defaultRowCap : raw }
 
     /// Which connection folders the sidebar draws shut.
     ///
@@ -336,7 +351,7 @@ final class Preferences {
         Key.editorStatementColor: EditorTheme.defaults.statement.hex,
         Key.mcpServerEnabled: false,
         Key.mcpServerPort: 8765,
-        Key.mcpRowCap: 1000
+        Key.mcpRowCap: defaultRowCap
     ]
 
     /// The sizes the Settings window offers, and therefore the sizes the value
@@ -495,8 +510,7 @@ final class Preferences {
         // this process cannot bind, read literally, would be the server failing
         // every start over a number nothing on screen can show is wrong.
         mcpServerPort = min(max(store.integer(forKey: Key.mcpServerPort), 1024), 65535)
-        let cap = store.integer(forKey: Key.mcpRowCap)
-        mcpRowCap = cap <= 0 ? 1000 : cap
+        mcpRowCap = Self.foldedRowCap(store.integer(forKey: Key.mcpRowCap))
         shutConnectionFolders = Set(store.stringArray(forKey: Key.shutConnectionFolders) ?? [])
         editorFontSize = min(
             max(store.integer(forKey: Key.editorFontSize), Self.editorFontSizes.lowerBound),

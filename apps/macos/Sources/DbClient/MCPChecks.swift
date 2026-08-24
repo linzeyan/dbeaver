@@ -565,6 +565,16 @@ enum MCPChecks {
             let folded = MCPCoordinator.desiredState(of: Preferences(store: store))
             expect(folded.port, 1024, "a privileged port folds up to the floor")
             expect(folded.rowCap, 1000, "a nonsense cap folds to the default, not to no rows ever")
+
+            // The path a launch-time fold cannot reach: the field is emptied
+            // while the server runs, which writes a 0 straight onto the live
+            // property. A cap of 0 answers every query with no rows and calls
+            // the result truncated — a server that looks like it is working.
+            let live = Preferences(store: ScratchDefaults.store("verify-mcp-live"))
+            live.mcpRowCap = 0
+            expect(
+                MCPCoordinator.desiredState(of: live).rowCap, 1000,
+                "an emptied field is folded where it is used, not only where it is loaded")
         }
     }
 

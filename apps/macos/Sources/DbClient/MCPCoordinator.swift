@@ -23,7 +23,10 @@ final class MCPCoordinator {
         DesiredState(
             enabled: preferences.mcpServerEnabled,
             port: preferences.mcpServerPort,
-            rowCap: preferences.mcpRowCap)
+            // Folded here and not only at launch: the field holds whatever is
+            // typed, including the 0 an emptied box leaves behind, and a
+            // server carrying that cap answers every query with no rows.
+            rowCap: Preferences.foldedRowCap(preferences.mcpRowCap))
     }
 
     /// The running server's bearer token, for the Settings pane and nowhere
