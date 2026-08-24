@@ -36,7 +36,7 @@
 
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
-    RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
+    RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
@@ -53,6 +53,16 @@ type StatisticsRow = (
     Option<String>,
     Option<String>,
     Option<u32>,
+    Option<String>,
+);
+
+/// One routine as `information_schema.ROUTINES` reports it: name, type, return
+/// type, language, and the argument list assembled from `PARAMETERS`.
+type RoutineRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
     Option<String>,
 );
 
@@ -205,6 +215,19 @@ fn relation_kind(table_type: &str, create_options: &str) -> RelationKind {
     }
 }
 
+/// `information_schema.ROUTINES.ROUTINE_TYPE`, as the two-way split the
+/// navigator draws.
+///
+/// Anything but `PROCEDURE` is a function, for the reason the PostgreSQL
+/// driver's `routine_kind` gives: of the two wrong guesses, the one that invites
+/// a reader to `CALL` something they cannot is the worse.
+fn routine_kind(routine_type: &str) -> RoutineKind {
+    match routine_type {
+        "PROCEDURE" => RoutineKind::Procedure,
+        _ => RoutineKind::Function,
+    }
+}
+
 pub async fn relations(conn: &mut Conn, schema: &str) -> Result<Vec<RelationInfo>, MySqlError> {
     let listed: Vec<(String, String, Option<String>)> = conn
         .exec(
@@ -242,6 +265,83 @@ pub async fn relations(conn: &mut Conn, schema: &str) -> Result<Vec<RelationInfo
             name,
         })
         .collect())
+}
+
+/// The functions and procedures in a schema, without their bodies.
+///
+/// The argument list is assembled from `information_schema.PARAMETERS` rather
+/// than read off one column, because MySQL keeps no rendered signature — it
+/// keeps a row per parameter. `ORDINAL_POSITION = 0` is a function's *return*
+/// and is skipped here; `returns` comes from `DTD_IDENTIFIER` on the routine
+/// itself, which holds the same type and is NULL for a procedure.
+///
+/// `GROUP_CONCAT` has a length ceiling (`group_concat_max_len`, 1024 by
+/// default) and a signature long enough to hit it comes back cut off. Left as
+/// it is: raising the limit is a session variable this driver would have to set
+/// on a pooled connection for every read, and a truncated argument list is a
+/// display defect on a routine with dozens of parameters, where the body — one
+/// click away — is the real answer.
+///
+/// `ROUTINE_BODY` is the language, and it is `SQL` for everything MySQL can
+/// create. It is read anyway rather than hard-coded: MariaDB and MySQL 8 both
+/// list the column, and a server that one day answers something else says so
+/// here rather than being described by a constant in this file.
+pub async fn routines(conn: &mut Conn, schema: &str) -> Result<Vec<RoutineInfo>, MySqlError> {
+    let rows: Vec<RoutineRow> = conn
+        .exec(
+            "SELECT r.ROUTINE_NAME, r.ROUTINE_TYPE, r.DTD_IDENTIFIER, r.ROUTINE_BODY, \
+                    (SELECT GROUP_CONCAT(p.DTD_IDENTIFIER ORDER BY p.ORDINAL_POSITION \
+                                         SEPARATOR ', ') \
+                       FROM information_schema.PARAMETERS p \
+                      WHERE p.SPECIFIC_SCHEMA = r.ROUTINE_SCHEMA \
+                        AND p.SPECIFIC_NAME = r.ROUTINE_NAME \
+                        AND p.ROUTINE_TYPE = r.ROUTINE_TYPE \
+                        AND p.ORDINAL_POSITION > 0) \
+             FROM information_schema.ROUTINES r \
+             WHERE r.ROUTINE_SCHEMA = ? \
+             ORDER BY r.ROUTINE_NAME, r.ROUTINE_TYPE",
+            (schema,),
+        )
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(name, routine_type, returns, body, arguments)| RoutineInfo {
+                schema: schema.to_string(),
+                kind: routine_kind(&routine_type),
+                // Type and name together, because a schema may hold a FUNCTION and
+                // a PROCEDURE of the same name — MySQL keeps them in separate
+                // namespaces — and the name alone would address both.
+                id: format!("{routine_type} {name}"),
+                name,
+                arguments: arguments.unwrap_or_default(),
+                returns,
+                language: body,
+            },
+        )
+        .collect())
+}
+
+/// One routine's source, by the `TYPE name` id `routines` reported.
+///
+/// `ROUTINE_DEFINITION` is the body only — MySQL keeps no `CREATE` header — and
+/// it is NULL for a caller without `SELECT` on `mysql.proc` or the routine's
+/// definer privileges. NULL comes back as `None`, which is the honest answer:
+/// the routine is there and this connection may not read it.
+pub async fn routine_definition(
+    conn: &mut Conn,
+    schema: &str,
+    id: &str,
+) -> Result<Option<String>, MySqlError> {
+    let rows: Vec<(Option<String>,)> = conn
+        .exec(
+            "SELECT ROUTINE_DEFINITION FROM information_schema.ROUTINES \
+             WHERE ROUTINE_SCHEMA = ? AND CONCAT(ROUTINE_TYPE, ' ', ROUTINE_NAME) = ?",
+            (schema, id),
+        )
+        .await?;
+    Ok(rows.into_iter().next().and_then(|(body,)| body))
 }
 
 pub async fn columns(

@@ -1501,7 +1501,74 @@ async fn every_check(subject: &Subject) {
     answers_for_a_relation_that_is_not_there(subject).await;
     moves_between_databases_only_where_it_says_it_can(subject).await;
     draws_its_databases_at_one_level_or_the_other(subject).await;
+    reports_its_routines_only_where_it_says_it_does(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// `routines` and `capabilities().reports_routines` say the same thing, and an
+/// id that came from one of them addresses a routine in the other.
+///
+/// The pairing is checked for the reason
+/// `moves_between_databases_only_where_it_says_it_can` checks its own: a driver
+/// that sets the field and keeps the trait's refusal gives the navigator a group
+/// it will draw and cannot fill, and one that implements the method and leaves
+/// the field false is never asked. Both are silent.
+///
+/// The third clause is about the id, and it is the one this design can get
+/// wrong. `RoutineInfo::id` is opaque and driver-defined — the only such handle
+/// in the metadata — so nothing but a round trip establishes that the string a
+/// driver hands out is a string it accepts back. And an id that is *not* one of
+/// its own has to come back as "no such routine" rather than as a failure: the
+/// front end holds ids across a refresh, and a routine dropped under it must
+/// leave an empty pane rather than an error banner.
+async fn reports_its_routines_only_where_it_says_it_does(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    if !driver.capabilities().reports_routines {
+        driver
+            .routines(&subject.schema)
+            .await
+            .expect_err("this driver says it does not report routines, so it should refuse to");
+        return;
+    }
+
+    let routines = driver
+        .routines(&subject.schema)
+        .await
+        .expect("a driver that says it reports routines has to answer");
+    for routine in &routines {
+        assert_eq!(
+            routine.schema, subject.schema,
+            "a routine is reported under the schema it was asked for"
+        );
+        assert!(
+            !routine.name.is_empty(),
+            "a routine has a name to draw in the tree"
+        );
+        assert!(
+            !routine.id.is_empty(),
+            "a routine has an id to be asked about again"
+        );
+        // Either answer is fine — a C function has no body to show — and the
+        // failure this rules out is the id not round-tripping at all.
+        driver
+            .routine_definition(&subject.schema, &routine.id)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the id this driver reported for {} was not one it accepts back: {e}",
+                    routine.name
+                )
+            });
+    }
+
+    let stranger = driver
+        .routine_definition(&subject.schema, "no_such_routine_anywhere")
+        .await
+        .expect("an id that names nothing is not a failure, it is nothing");
+    assert!(
+        stranger.is_none(),
+        "an id that names nothing cannot come back with somebody else's source"
+    );
 }
 
 /// `use_database` and `capabilities().switches_database` say the same thing.

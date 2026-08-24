@@ -44,6 +44,76 @@ pub struct DatabaseInfo {
     pub is_current: bool,
 }
 
+/// Whether a routine returns a value to an expression or is called as a
+/// statement.
+///
+/// Two, and not the database's own vocabulary. PostgreSQL 11 split `pg_proc`
+/// into `prokind` f/p/a/w, MySQL has FUNCTION and PROCEDURE, SQL Server has
+/// FN/IF/TF/P. What a reader of a navigator needs from the distinction is
+/// whether the thing can appear in a `SELECT` list or has to be `CALL`ed, and
+/// that is a two-way split in all of them.
+///
+/// Aggregates and window functions are `Function`. They are called in an
+/// expression, which is the question this answers; that they accumulate is a
+/// fact about the body, and the body is what the pane shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoutineKind {
+    Function,
+    Procedure,
+}
+
+/// One function or procedure, as much as can be said about it without reading
+/// its body.
+///
+/// The body is deliberately not here. A schema of two hundred PL/pgSQL
+/// functions is a few megabytes of source, and expanding a schema in the tree
+/// would pay for all of it to draw a list of names — so the list is this and
+/// the body comes from [`Driver::routine_definition`] when one is selected.
+/// That is the same split `relations` and `definition` already have, for the
+/// same reason.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutineInfo {
+    pub schema: String,
+    pub name: String,
+    pub kind: RoutineKind,
+
+    /// What the driver has to be given to find this routine again, spelled
+    /// however that driver likes.
+    ///
+    /// Opaque, and the first opaque handle in this file — everything else here
+    /// is addressed by the names the database itself uses. Overloading is why:
+    /// PostgreSQL allows `f(int)` and `f(text)` in one schema, so a name is not
+    /// an address there, and `pg_get_functiondef` takes an oid. A driver whose
+    /// routines cannot be overloaded puts the name here and nothing is lost.
+    ///
+    /// Valid only on the connection that produced it, and only until the
+    /// catalog changes under it. A caller holding one across a `DROP` gets a
+    /// failure from `routine_definition`, which is the honest answer — the
+    /// alternative is a body belonging to whatever took the oid next.
+    pub id: String,
+
+    /// The argument list as the database renders it: `integer, text`,
+    /// `IN a int, OUT b text`. Empty for a routine that takes none.
+    ///
+    /// The database's own rendering rather than a list of parsed arguments,
+    /// for the reason `ConstraintInfo::definition` gives: modes, defaults,
+    /// `VARIADIC` and type names spelled per dialect are formatting this would
+    /// have to reimplement and would get subtly wrong on the cases that
+    /// matter. A pane that needs to show which overload this is needs the text,
+    /// not the parts.
+    pub arguments: String,
+
+    /// What it returns, as the database renders it. `None` for a procedure
+    /// that returns nothing, which is not the same as a function returning
+    /// `void` — one has no return clause at all and the other declares one.
+    pub returns: Option<String>,
+
+    /// `plpgsql`, `sql`, `c`, `python`. `None` where the engine has one
+    /// language and does not name it.
+    pub language: Option<String>,
+}
+
 /// What kind of relation a navigator entry is.
 ///
 /// A closed set rather than the database's own word for it. A free string would

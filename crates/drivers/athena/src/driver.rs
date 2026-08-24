@@ -165,12 +165,18 @@ impl Driver for AthenaSource {
     /// to say to it.
     ///
     /// Cancel reaches the statement: one `StopQueryExecution` per query in flight.
+    ///
+    /// Routines are not reported, and there are none to report. An Athena UDF is
+    /// a Lambda function named in the statement that uses it — `USING EXTERNAL
+    /// FUNCTION` — so it belongs to the query rather than to the catalog, and the
+    /// Glue database this driver lists tables out of holds no such object.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: true,
+            reports_routines: false,
         }
     }
 

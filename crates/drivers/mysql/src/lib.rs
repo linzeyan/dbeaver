@@ -46,8 +46,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, SchemaInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, IndexInfo, RelationInfo, RelationshipInfo, RoutineInfo, SchemaInfo,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use metadata::Capabilities;
@@ -497,6 +497,24 @@ impl MySqlSource {
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, MySqlError> {
         let mut spare = self.acquire().await?;
         let out = metadata::relations(&mut spare.conn, schema).await;
+        self.release(spare, &out);
+        out
+    }
+
+    pub async fn routines(&self, schema: &str) -> Result<Vec<RoutineInfo>, MySqlError> {
+        let mut spare = self.acquire().await?;
+        let out = metadata::routines(&mut spare.conn, schema).await;
+        self.release(spare, &out);
+        out
+    }
+
+    pub async fn routine_definition(
+        &self,
+        schema: &str,
+        id: &str,
+    ) -> Result<Option<String>, MySqlError> {
+        let mut spare = self.acquire().await?;
+        let out = metadata::routine_definition(&mut spare.conn, schema, id).await;
         self.release(spare, &out);
         out
     }

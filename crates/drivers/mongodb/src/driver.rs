@@ -150,12 +150,18 @@ impl Driver for MongoSource {
     /// session's comments and `killOp` stops them. It needs `admin` permissions,
     /// and on an account without them it fails with that error rather than
     /// pretending — which is a failure of the call, not of this answer.
+    ///
+    /// Routines are not reported, and there are none to report. Server-side
+    /// JavaScript stored in `system.js` was how a Mongo database once held
+    /// something like a function, and it went with `db.eval` in 4.4. An
+    /// aggregation pipeline is written where it is used.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: true,
+            reports_routines: false,
         }
     }
 

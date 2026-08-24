@@ -152,12 +152,18 @@ impl Driver for MsSqlSource {
     /// database's tables while the editor was writing to another. Reporting
     /// false is what sends the front end down the path that moves all of it: a
     /// new connection with the other name in the string.
+    ///
+    /// Routines are not reported, and that is a gap — the largest of the ones
+    /// this field records, because SQL Server is where a reader most expects the
+    /// group. `sys.objects` marks the four kinds it has and `sys.sql_modules`
+    /// holds the source of each. Nothing here reads either yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

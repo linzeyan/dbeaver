@@ -301,6 +301,9 @@ impl Driver for Fixture {
             cancel_stops_the_statement: false,
             switches_database: false,
             schema_is_the_database: false,
+            // A rendered statement is read off the metadata it was
+            // handed; this double is never asked for routines.
+            reports_routines: false,
         }
     }
 

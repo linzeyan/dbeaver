@@ -11,7 +11,8 @@
 
 use dbconn::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
+    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo,
+    UniqueKeyInfo,
 };
 use tokio_postgres::Client;
 
@@ -38,6 +39,20 @@ fn relation_kind(c: &str) -> RelationKind {
         'f' => RelationKind::ForeignTable,
         'p' => RelationKind::PartitionedTable,
         _ => RelationKind::Unknown,
+    }
+}
+
+/// `pg_proc.prokind`, as the two-way split the navigator draws.
+///
+/// Aggregates (`a`) and window functions (`w`) are functions: they are called in
+/// an expression, which is what the distinction is for. Anything else is a
+/// version of PostgreSQL that has learned a fourth kind, and calling it a
+/// procedure — something a reader would then try to `CALL` — is the wrong guess
+/// of the two.
+fn routine_kind(c: &str) -> RoutineKind {
+    match c.chars().next().unwrap_or(' ') {
+        'p' => RoutineKind::Procedure,
+        _ => RoutineKind::Function,
     }
 }
 
@@ -183,6 +198,84 @@ pub(crate) async fn relations(client: &Client, schema: &str) -> Result<Vec<Relat
             }
         })
         .collect())
+}
+
+/// The functions and procedures in a schema, without their bodies.
+///
+/// `prokind` is PostgreSQL 11 and later. Before that the kind lived in two
+/// booleans, `proisagg` and `proiswindow`, and there were no procedures at all —
+/// so a server old enough to lack this column has nothing this function could
+/// report a procedure on. Reading it as `text` rather than as `"char"` for the
+/// reason `relation_kind` gives: the compatibility servers do not agree on which
+/// type that column arrives as.
+///
+/// `pg_get_function_result` answers NULL for a procedure, which is what
+/// `RoutineInfo::returns` wants — a procedure has no return clause, and `void`
+/// is a function that declares one.
+///
+/// Ordered by name and then by argument list, so that the overloads of one name
+/// sit together and in the same order on every read. A tree that reordered them
+/// between refreshes would move rows under the pointer.
+pub(crate) async fn routines(client: &Client, schema: &str) -> Result<Vec<RoutineInfo>, PgError> {
+    let rows = client
+        .query(
+            "SELECT p.oid::text, \
+                    p.proname, \
+                    p.prokind::text, \
+                    pg_catalog.pg_get_function_arguments(p.oid), \
+                    pg_catalog.pg_get_function_result(p.oid), \
+                    l.lanname \
+             FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             LEFT JOIN pg_catalog.pg_language l ON l.oid = p.prolang \
+             WHERE n.nspname = $1 \
+             ORDER BY p.proname, pg_catalog.pg_get_function_arguments(p.oid)",
+            &[&schema],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| RoutineInfo {
+            schema: schema.to_string(),
+            name: r.get(1),
+            kind: routine_kind(r.get(2)),
+            id: r.get(0),
+            arguments: r.get(3),
+            returns: r.get(4),
+            language: r.get(5),
+        })
+        .collect())
+}
+
+/// One routine's source, as the server renders it.
+///
+/// The oid is compared as text rather than cast to `oid`, because the id came
+/// back from `routines` as a string and a cast is the one place a stale or
+/// mistyped one would fail as a *statement* error rather than as "no such
+/// routine". `pg_proc` is small enough that giving up the index costs nothing
+/// measurable.
+///
+/// Restricted to `f` and `p`: `pg_get_functiondef` raises an error on an
+/// aggregate rather than answering, so asking it about one would turn a routine
+/// somebody clicked into a failed read. `None` is the honest answer there — an
+/// aggregate's definition is its transition and final functions, which are two
+/// other rows in this list.
+pub(crate) async fn routine_definition(
+    client: &Client,
+    schema: &str,
+    id: &str,
+) -> Result<Option<String>, PgError> {
+    let rows = client
+        .query(
+            "SELECT pg_catalog.pg_get_functiondef(p.oid) \
+             FROM pg_catalog.pg_proc p \
+             JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace \
+             WHERE n.nspname = $1 AND p.oid::text = $2 AND p.prokind IN ('f', 'p')",
+            &[&schema, &id],
+        )
+        .await?;
+    Ok(rows.first().map(|r| r.get(0)))
 }
 
 /// A column's place in the relation, and the types it is read as.

@@ -186,12 +186,17 @@ impl Driver for DatabricksSource {
     /// none.
     ///
     /// Cancel reaches the statement: one cancel per statement in flight.
+    ///
+    /// Routines are not reported, and that is a gap: Unity Catalog serves
+    /// `information_schema.routines`, and a schema on it can hold functions.
+    /// Nothing here reads it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

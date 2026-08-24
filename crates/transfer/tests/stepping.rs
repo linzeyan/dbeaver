@@ -255,6 +255,9 @@ impl Driver for Deaf {
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            // A transfer reads rows and writes rows; a routine is never either
+            // end of one.
+            reports_routines: false,
         }
     }
     async fn server_info(&self) -> DbResult<ServerInfo> {

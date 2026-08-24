@@ -189,12 +189,18 @@ impl Driver for BigQuerySource {
     /// Cancel reaches the statement, in whichever of its two states it is in: a
     /// job still running is stopped by `jobs.cancel`, and rows still being read
     /// are stopped on this side.
+    ///
+    /// Routines are not reported, and that is a gap rather than a fact about
+    /// BigQuery: a dataset can hold user-defined functions, table functions and
+    /// procedures, and `INFORMATION_SCHEMA.ROUTINES` lists them. Nothing here
+    /// reads it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

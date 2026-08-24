@@ -212,12 +212,19 @@ impl Driver for TrinoSource {
     /// Cancel reaches the statement: one `DELETE` to the coordinator per statement
     /// in flight, which is available because HTTP is stateless and a cancel
     /// contends with nothing.
+    ///
+    /// Routines are not reported, and that is a gap with a caveat. Trino grew
+    /// catalog functions late and most connectors have none, so the honest group
+    /// on a typical cluster would be empty on nearly every schema — which is a
+    /// reason to read the catalog before drawing it, not a reason to call the
+    /// concept absent.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

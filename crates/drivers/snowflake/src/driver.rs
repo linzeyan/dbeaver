@@ -205,12 +205,18 @@ impl Driver for SnowflakeSource {
     /// steps have nowhere to go regardless.
     ///
     /// Cancel reaches the statement: one cancel per statement in flight.
+    ///
+    /// Routines are not reported, and that is a gap: a Snowflake schema can hold
+    /// functions and procedures, and `information_schema.functions` and
+    /// `information_schema.procedures` list them separately. Nothing here reads
+    /// either yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, ServerInfo, TriggerInfo,
+    TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -56,6 +56,14 @@ impl Driver for PgSource {
 
     async fn relations(&self, schema: &str) -> DbResult<Vec<RelationInfo>> {
         Ok(PgSource::relations(self, schema).await?)
+    }
+
+    async fn routines(&self, schema: &str) -> DbResult<Vec<RoutineInfo>> {
+        Ok(PgSource::routines(self, schema).await?)
+    }
+
+    async fn routine_definition(&self, schema: &str, id: &str) -> DbResult<Option<String>> {
+        Ok(PgSource::routine_definition(self, schema, id).await?)
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>> {
@@ -124,12 +132,16 @@ impl Driver for PgSource {
     /// A database is not somewhere this session can move to. PostgreSQL settles
     /// it at connect and there is no statement that changes it, so the list this
     /// driver reports is a list of connections to open.
+    ///
+    /// Routines are reported: `pg_proc` holds functions and procedures, and
+    /// `pg_get_functiondef` hands back the source of either.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: true,
         }
     }
 

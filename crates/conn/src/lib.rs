@@ -48,7 +48,8 @@ mod metadata;
 
 pub use metadata::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, SchemaInfo, TriggerInfo, UniqueKeyInfo,
+    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo,
+    UniqueKeyInfo,
 };
 
 use arrow::array::RecordBatch;
@@ -305,6 +306,27 @@ pub struct Capabilities {
     /// A driver that answers true must answer `None` from `databases()`. Both
     /// at once is the doubling above, and `contract.rs` refuses it.
     pub schema_is_the_database: bool,
+
+    /// Whether `routines` lists this schema's functions and procedures.
+    ///
+    /// False means two quite different things, exactly as `transactional` does,
+    /// and both deserve a sentence where the driver is. Some engines have no
+    /// such object at all — SQLite has never had one, Redis runs scripts that
+    /// live nowhere in a catalog, Mongo dropped stored JavaScript — and the
+    /// navigator must not draw an empty `Routines` group under every schema of
+    /// one. Others have them and this driver does not read them yet, which is a
+    /// gap rather than a fact about the database, and a reader deserves to be
+    /// told which by the driver that knows.
+    ///
+    /// A flag rather than an `Option` return, for the reason `use_database` has
+    /// a default refusal: the per-driver answer is already forced here, once,
+    /// with room for the sentence — and folding "no such object" into the same
+    /// `None` as "not read yet" would make the two indistinguishable at the one
+    /// place a front end could tell a user about it.
+    ///
+    /// The front end draws no group where this is false, and does not call
+    /// `routines`.
+    pub reports_routines: bool,
 }
 
 /// One session against one database.
@@ -373,6 +395,44 @@ pub trait Driver: Send + Sync {
     async fn schemas(&self) -> DbResult<Vec<SchemaInfo>>;
 
     async fn relations(&self, schema: &str) -> DbResult<Vec<RelationInfo>>;
+
+    /// The functions and procedures in `schema`.
+    ///
+    /// Only where `capabilities().reports_routines` says so; the default is the
+    /// refusal every other driver would have written. The second method in this
+    /// trait with a default, and it may have one for the reason `use_database`
+    /// may: the per-driver answer is forced next door, where there is room for
+    /// the sentence saying which kind of "no" it is.
+    ///
+    /// An empty list is a real answer from a driver that reports them — a schema
+    /// can hold none — which is the whole reason the "this engine has no such
+    /// object" answer cannot live here too.
+    ///
+    /// Bodies are not included; see [`RoutineInfo`] for why, and
+    /// `routine_definition` for where they come from instead.
+    async fn routines(&self, _schema: &str) -> DbResult<Vec<RoutineInfo>> {
+        Err(DbError::new(
+            "this connection does not report functions and procedures",
+        ))
+    }
+
+    /// The source of one routine, addressed by the `id` its `RoutineInfo`
+    /// carried.
+    ///
+    /// `None` for a routine whose body this database will not hand back — a C
+    /// function is a symbol in a shared object, and there is nothing to show.
+    /// The default refusal is unreachable through the front end, which only
+    /// asks about a routine it was given by `routines`; it is here so that a
+    /// driver implements the pair or neither.
+    ///
+    /// How faithful the text is differs by database, exactly as `definition`
+    /// says of a view: some return what was typed, some render it back from a
+    /// parse tree.
+    async fn routine_definition(&self, _schema: &str, _id: &str) -> DbResult<Option<String>> {
+        Err(DbError::new(
+            "this connection does not report functions and procedures",
+        ))
+    }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>>;
 

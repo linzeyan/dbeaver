@@ -127,6 +127,8 @@ impl Driver for Fake {
             cancel_stops_the_statement: false,
             switches_database: false,
             schema_is_the_database: false,
+            // completion asks for relations and columns and nothing else.
+            reports_routines: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

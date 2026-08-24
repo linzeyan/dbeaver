@@ -125,12 +125,20 @@ impl Driver for ChSource {
     ///
     /// Cancel reaches the statement: one `KILL QUERY` naming every live statement
     /// of this session.
+    ///
+    /// Routines are not reported, and that is a gap with a complication in it.
+    /// `CREATE FUNCTION` exists and `system.functions` lists what it made — but
+    /// that table holds the fifteen hundred built-ins beside them and gives none
+    /// of them a database, so a per-database list needs a filter this driver does
+    /// not have yet. A group listing every built-in under every database would be
+    /// worse than no group.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: true,
+            reports_routines: false,
         }
     }
 

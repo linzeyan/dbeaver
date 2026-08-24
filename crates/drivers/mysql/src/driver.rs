@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, ServerInfo, TriggerInfo,
+    TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -72,6 +72,14 @@ impl Driver for MySqlSource {
 
     async fn relations(&self, schema: &str) -> DbResult<Vec<RelationInfo>> {
         Ok(MySqlSource::relations(self, schema).await?)
+    }
+
+    async fn routines(&self, schema: &str) -> DbResult<Vec<RoutineInfo>> {
+        Ok(MySqlSource::routines(self, schema).await?)
+    }
+
+    async fn routine_definition(&self, schema: &str, id: &str) -> DbResult<Option<String>> {
+        Ok(MySqlSource::routine_definition(self, schema, id).await?)
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>> {
@@ -146,12 +154,18 @@ impl Driver for MySqlSource {
     ///
     /// Cancel reaches the statement — `KILL QUERY` naming the connection it is
     /// running on.
+    ///
+    /// Routines are reported. `information_schema.ROUTINES` is one of the tables
+    /// every server down this wire implements, including the two that are not
+    /// MySQL: StarRocks and Doris answer it, with no rows, which is the right
+    /// answer for engines that have no `CREATE FUNCTION` of their own.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: MySqlSource::transactional(self),
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: true,
+            reports_routines: true,
         }
     }
 

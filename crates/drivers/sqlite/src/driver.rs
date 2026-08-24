@@ -120,12 +120,19 @@ impl Driver for SqliteSource {
     /// Cancel reaches the statement. There is no server to ask — the engine is in
     /// this process — and interrupting it is the same thing: the statement stops
     /// and reports that it was cancelled.
+    ///
+    /// Routines are not reported, and there is no such object to report. SQLite
+    /// has no `CREATE FUNCTION` and no procedures; the functions a statement can
+    /// call are the ones the host process registered, which belong to this
+    /// application rather than to the file it opened. Listing them would describe
+    /// the client.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: true,
+            reports_routines: false,
         }
     }
 

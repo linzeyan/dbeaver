@@ -140,12 +140,19 @@ impl Driver for DuckSource {
     ///
     /// Cancel reaches the statement, for the reason it does in the SQLite driver:
     /// the engine is in this process and interrupting it stops the work.
+    ///
+    /// Routines are not reported, and that is a gap: `CREATE MACRO` puts a scalar
+    /// or table macro in a schema, and `duckdb_functions()` names the schema each
+    /// one is in. Like ClickHouse's, that view also lists every built-in, so the
+    /// filter is the work — and DuckDB has no procedure at all, so the group
+    /// would be functions only.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: true,
             switches_database: true,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

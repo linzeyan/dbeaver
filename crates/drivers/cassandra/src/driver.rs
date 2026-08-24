@@ -183,12 +183,19 @@ impl Driver for CassandraSource {
     /// here where it does not. CQL has no cancel: `cancel` stops this side's
     /// reads, the fetch in flight resolves as cancelled, and the coordinator goes
     /// on assembling the page it was asked for and drops it on the floor.
+    ///
+    /// Routines are not reported, and that is a gap: a keyspace can hold
+    /// user-defined functions and aggregates, and `system_schema.functions` and
+    /// `system_schema.aggregates` are where they are. They would also arrive in
+    /// two lists rather than one, which is the part that needs deciding before
+    /// this can be true.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: false,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

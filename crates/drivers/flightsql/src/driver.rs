@@ -152,12 +152,19 @@ impl Driver for FlightSqlSource {
     /// does not. Flight SQL has an action for it that this build does not send:
     /// `cancel` stops this side's reads, the `DoGet` stream is dropped, and the
     /// reset that follows is the only thing the server hears.
+    ///
+    /// Routines are not reported, and here there is nothing to ask. Flight SQL
+    /// defines the catalog commands a client may send — `CommandGetTables`,
+    /// `CommandGetDbSchemas`, `CommandGetPrimaryKeys` and the rest — and none of
+    /// them is about a function or a procedure. A server behind this protocol may
+    /// well have them; the protocol has no way to say so.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
             cancel_stops_the_statement: false,
             switches_database: false,
             schema_is_the_database: false,
+            reports_routines: false,
         }
     }
 

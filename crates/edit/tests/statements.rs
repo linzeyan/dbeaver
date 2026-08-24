@@ -151,6 +151,8 @@ impl Driver for Fake {
             cancel_stops_the_statement: false,
             switches_database: false,
             schema_is_the_database: false,
+            // an edit is written against a relation, never against a routine.
+            reports_routines: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

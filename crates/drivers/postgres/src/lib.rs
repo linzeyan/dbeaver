@@ -13,7 +13,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, RelationInfo, RelationshipInfo,
-    SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    RoutineInfo, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -481,6 +481,26 @@ impl PgSource {
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, PgError> {
         let conn = self.acquire_connection().await?;
         let result = metadata::relations(&conn, schema).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
+    }
+
+    /// Functions and procedures within a schema, without their bodies.
+    pub async fn routines(&self, schema: &str) -> Result<Vec<RoutineInfo>, PgError> {
+        let conn = self.acquire_connection().await?;
+        let result = metadata::routines(&conn, schema).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
+    }
+
+    /// One routine's source, by the id `routines` reported.
+    pub async fn routine_definition(
+        &self,
+        schema: &str,
+        id: &str,
+    ) -> Result<Option<String>, PgError> {
+        let conn = self.acquire_connection().await?;
+        let result = metadata::routine_definition(&conn, schema, id).await;
         // Connection is automatically returned to pool when conn goes out of scope
         result
     }

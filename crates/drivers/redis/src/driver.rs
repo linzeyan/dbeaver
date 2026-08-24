@@ -168,12 +168,21 @@ impl Driver for RedisSource {
     ///
     /// Cancel reaches the server, which is asked to abandon what this session is
     /// running.
+    ///
+    /// Routines are not reported, and none of them belongs to a database here.
+    /// Redis has functions — a library loaded with `FUNCTION LOAD` and listed by
+    /// `FUNCTION LIST` — but they are loaded into the server and shared by every
+    /// numbered database on it, and the level this driver reports is the number
+    /// in `SELECT 4`, which contains keys and nothing else. Repeating one
+    /// server-wide list under each of sixteen databases would be sixteen wrong
+    /// answers.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
             cancel_stops_the_statement: true,
             switches_database: false,
             schema_is_the_database: true,
+            reports_routines: false,
         }
     }
 
