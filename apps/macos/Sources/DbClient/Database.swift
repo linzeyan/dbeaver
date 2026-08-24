@@ -287,6 +287,13 @@ final class Database: @unchecked Sendable {
             db_constraints_json(handle, schema, relation, &errOut), as: [ConstraintInfo].self)
     }
 
+    /// Whatever else this engine can say about one relation. Empty is a real
+    /// answer — see `InfoField` — and not a sign the call went wrong.
+    func tableInfo(schema: String, relation: String) throws -> [InfoField] {
+        try decodeJSON(
+            db_table_info_json(handle, schema, relation, &errOut), as: [InfoField].self)
+    }
+
     func triggers(schema: String, relation: String) throws -> [TriggerInfo] {
         try decodeJSON(
             db_triggers_json(handle, schema, relation, &errOut), as: [TriggerInfo].self)

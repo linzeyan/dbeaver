@@ -1149,6 +1149,10 @@ struct DetailPane: View {
 /// relation changes: someone comparing triggers across tables is doing exactly
 /// that, and snapping back to Indexes on every click would fight them.
 enum StructureDetail: String, CaseIterable, Identifiable {
+    /// First because it describes the relation itself rather than a list of
+    /// things attached to it. Offered only where the engine said something; see
+    /// `AppModel.structureSections`.
+    case info = "Info"
     case indexes = "Indexes"
     case foreignKeys = "Foreign keys"
     case referencedBy = "Referenced by"
@@ -1270,6 +1274,10 @@ struct StructurePane: View {
             RunningPane()
         } else {
             switch section {
+            case .info:
+                // Like DDL below: `section` only names this where there are
+                // fields, so the fallback is for the switch's sake.
+                table(model.tableInfo, empty: "Nothing else to report") { infoTable }
             case .indexes:
                 table(model.indexes, empty: "No indexes") { indexesTable }
             case .foreignKeys:
@@ -1398,6 +1406,36 @@ struct StructurePane: View {
         // tab opens with a ring on a control in a different pane.
         .focusable()
         .focused($focus, equals: .structureTable)
+    }
+
+    /// The engine's own description of the relation, label beside value.
+    ///
+    /// A table like the five sections beside it rather than a form, so switching
+    /// between them does not change the shape of the pane. The value is
+    /// selectable and the label is not: a size or an owner is a thing to paste
+    /// somewhere, while "Owner" is a word this window wrote.
+    private var infoTable: some View {
+        Table(model.tableInfo) {
+            TableColumn("Field") { field in
+                Text(field.label)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.textSecondary.color)
+            }
+            // Fixed, unlike the other sections' columns. Two columns share the
+            // pane's whole width, so a flexible label column takes half of it
+            // and puts every value a third of the way across the window from
+            // the word it belongs to; a range wide enough to stop that left the
+            // longest label truncated instead.
+            .width(140)
+
+            TableColumn("Value") { field in
+                Text(field.value)
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .textSelection(.enabled)
+            }
+        }
+        .structureTableSurface()
     }
 
     private var indexesTable: some View {

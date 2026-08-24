@@ -307,6 +307,10 @@ final class AppModel {
         get { session.triggers }
         set { session.triggers = newValue }
     }
+    private(set) var tableInfo: [InfoField] {
+        get { session.tableInfo }
+        set { session.tableInfo = newValue }
+    }
     /// The statements that would recreate the selected relation. Nil where the
     /// core cannot write them, which is what keeps the DDL section off a
     /// relation it would have nothing to show for.
@@ -3630,6 +3634,7 @@ final class AppModel {
         referencedBy = []
         constraints = []
         triggers = []
+        tableInfo = []
         ddl = nil
     }
 
@@ -3648,6 +3653,7 @@ final class AppModel {
                 referencedBy: try db.referencedBy(schema: schema, relation: name),
                 constraints: try db.constraints(schema: schema, relation: name),
                 triggers: try db.triggers(schema: schema, relation: name),
+                tableInfo: try db.tableInfo(schema: schema, relation: name),
                 // Swallowed rather than thrown: a database whose DDL the core
                 // has not learned, or a kind it cannot assemble one for, is a
                 // section with nothing in it — not a failure worth a banner
@@ -3659,6 +3665,7 @@ final class AppModel {
             referencedBy = detail.referencedBy
             constraints = detail.constraints
             triggers = detail.triggers
+            tableInfo = detail.tableInfo
             ddl = detail.ddl
         }
     }
@@ -3689,7 +3696,7 @@ final class AppModel {
 
     private var hasRelationDetail: Bool {
         !indexes.isEmpty || !foreignKeys.isEmpty || !referencedBy.isEmpty
-            || !constraints.isEmpty || !triggers.isEmpty || ddl != nil
+            || !constraints.isEmpty || !triggers.isEmpty || !tableInfo.isEmpty || ddl != nil
     }
 
     /// The sections the strip offers for the selected relation.
@@ -3705,10 +3712,19 @@ final class AppModel {
     /// when it lands reshapes under the cursor at that moment. Where the core
     /// writes no statements the placeholder never appears, so it cannot outlive
     /// the load and vanish.
+    /// Info is the other one, and it cannot be predicted the way DDL is. There
+    /// is no capability to ask — an engine that describes most relations still
+    /// has nothing to add about some of them — so the only way to know whether
+    /// there is anything to show is to have asked. It appears when the details
+    /// land, which is the moment the strip is already reshaping in.
     var structureSections: [StructureDetail] {
         StructureDetail.allCases.filter {
-            $0 != .ddl || ddl != nil
-                || (isLoadingRelationDetail && capabilities.writesStatements)
+            switch $0 {
+            case .info: return !tableInfo.isEmpty
+            case .ddl:
+                return ddl != nil || (isLoadingRelationDetail && capabilities.writesStatements)
+            default: return true
+            }
         }
     }
 
@@ -3731,7 +3747,11 @@ final class AppModel {
         case .referencedBy: return referencedBy.count
         case .constraints: return constraints.count
         case .triggers: return triggers.count
-        case .ddl: return nil
+        // Neither is a list of things the relation has: the DDL is one
+        // statement, and Info is this engine's description of the relation
+        // rather than a count of anything. "5" beside Info would invite the
+        // question of what five of.
+        case .info, .ddl: return nil
         }
     }
 
@@ -3741,6 +3761,7 @@ final class AppModel {
         let referencedBy: [RelationshipInfo]
         let constraints: [ConstraintInfo]
         let triggers: [TriggerInfo]
+        let tableInfo: [InfoField]
         let ddl: String?
     }
 

@@ -1504,7 +1504,43 @@ async fn every_check(subject: &Subject) {
     reports_its_routines_only_where_it_says_it_does(subject).await;
     reports_its_sequences_only_where_it_says_it_does(subject).await;
     marks_the_engines_own_schemas_without_hiding_them(subject).await;
+    describes_a_relation_without_saying_anything_twice(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// `table_info` answers, and every line of it is one line.
+///
+/// The one metadata call with no capability behind it, deliberately: an empty
+/// answer is true of every engine for some relation, so there is nothing for a
+/// driver to claim. What that costs is the pairing the two clauses above rely
+/// on, so what is checked here is the answer's shape instead.
+///
+/// Both halves are things the front end cannot defend itself against. It keys
+/// the rows by their label, so a driver that reports "Size" twice hands SwiftUI
+/// two rows with one identity — which draws as one row, silently losing the
+/// other. And a blank label or a blank value is a row of the pane that says
+/// nothing at all; a driver with nothing to say about a relation says it by
+/// leaving the field out, which is the state the Info section is hidden for.
+async fn describes_a_relation_without_saying_anything_twice(subject: &Subject) {
+    let fields = subject
+        .driver
+        .table_info(&subject.schema, &subject.relation)
+        .await
+        .expect("a driver with nothing to add says so with an empty answer, not an error");
+
+    let mut seen = std::collections::HashSet::new();
+    for field in &fields {
+        assert!(
+            !field.label.is_empty() && !field.value.is_empty(),
+            "a field of the Info pane is a label and a value, and {field:?} is missing one"
+        );
+        assert!(
+            seen.insert(field.label.as_str()),
+            "{} is reported twice, and the pane keys its rows by the label — the second \
+             would be drawn over the first",
+            field.label
+        );
+    }
 }
 
 /// `is_system` marks schemas without making them unreachable.

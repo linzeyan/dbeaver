@@ -298,6 +298,10 @@ final class Session: Identifiable {
     var referencedBy: [RelationshipInfo] = []
     var constraints: [ConstraintInfo] = []
     var triggers: [TriggerInfo] = []
+    /// What the engine says about the relation itself. Empty both before the
+    /// read and where the engine had nothing to add, which is why the section
+    /// is not offered until the details land.
+    var tableInfo: [InfoField] = []
 
     /// The statements that would recreate the selected relation. Nil where the
     /// core cannot write them, which is what keeps the DDL section off a

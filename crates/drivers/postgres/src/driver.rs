@@ -9,7 +9,7 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo, InfoField,
     RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, SequenceInfo,
     ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
@@ -68,6 +68,10 @@ impl Driver for PgSource {
 
     async fn sequences(&self, schema: &str) -> DbResult<Vec<SequenceInfo>> {
         Ok(PgSource::sequences(self, schema).await?)
+    }
+
+    async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
+        Ok(PgSource::table_info(self, schema, relation).await?)
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>> {

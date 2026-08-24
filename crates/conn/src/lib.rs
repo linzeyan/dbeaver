@@ -47,9 +47,9 @@
 mod metadata;
 
 pub use metadata::{
-    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, SequenceInfo,
-    TriggerInfo, UniqueKeyInfo,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, InfoField,
+    RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo,
+    SequenceInfo, TriggerInfo, UniqueKeyInfo,
 };
 
 use arrow::array::RecordBatch;
@@ -458,6 +458,21 @@ pub trait Driver: Send + Sync {
     /// already — which is also why nothing here takes an opaque id.
     async fn sequences(&self, _schema: &str) -> DbResult<Vec<SequenceInfo>> {
         Err(DbError::new("this connection does not report sequences"))
+    }
+
+    /// What this engine has to say about one relation, beyond its shape.
+    ///
+    /// The size on disk, who owns it, when the estimate the navigator prints was
+    /// last taken — facts a Structure tab shows and nothing computes from. See
+    /// [`InfoField`] for why they are label-and-text rather than named fields,
+    /// and why this needs no capability flag when `routines` does.
+    ///
+    /// Empty by default, which is the honest answer for a driver that has not
+    /// been taught to look: the section is not drawn, and nothing claims a table
+    /// has no owner. Ordered by the driver, most useful first, because the pane
+    /// shows them in the order they arrive.
+    async fn table_info(&self, _schema: &str, _relation: &str) -> DbResult<Vec<InfoField>> {
+        Ok(Vec::new())
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>>;

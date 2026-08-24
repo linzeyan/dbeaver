@@ -35,7 +35,7 @@
 //! though it were live.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, RelationInfo, RelationKind,
+    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, InfoField, RelationInfo, RelationKind,
     RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo, UniqueKeyInfo,
 };
 use mysql_async::Conn;
@@ -299,6 +299,99 @@ pub async fn relations(conn: &mut Conn, schema: &str) -> Result<Vec<RelationInfo
 /// display defect on a routine with dozens of parameters, where the body — one
 /// click away — is the real answer.
 ///
+/// One relation's row in `information_schema.TABLES`, as five facts.
+type TableInfoRow = (
+    Option<String>,
+    Option<String>,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+);
+
+/// What MySQL has to say about one relation.
+///
+/// The storage engine is the first line and is the one that is genuinely MySQL's
+/// own: InnoDB and MyISAM differ in whether there are transactions, whether
+/// there are foreign keys, and what a crash costs, and none of that is visible
+/// anywhere else in this window.
+///
+/// The size is computed here rather than by the server, which has no
+/// `pg_size_pretty`. Data plus indexes, for the reason the PostgreSQL driver
+/// totals the same two.
+///
+/// Left out where the server answers null, which is what a view answers for
+/// every one of these — a view has no engine, no rows and no bytes, and printing
+/// zeroes would describe it as an empty table.
+pub async fn table_info(
+    conn: &mut Conn,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<InfoField>, MySqlError> {
+    let rows: Vec<TableInfoRow> = conn
+        .exec(
+            "SELECT ENGINE, TABLE_COLLATION, DATA_LENGTH, INDEX_LENGTH, TABLE_COMMENT \
+             FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?",
+            (schema, relation),
+        )
+        .await?;
+    let Some((engine, collation, data, index, comment)) = rows.into_iter().next() else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    if let Some(engine) = engine {
+        out.push(InfoField {
+            label: "Storage engine".to_string(),
+            value: engine,
+        });
+    }
+    if let Some(collation) = collation {
+        out.push(InfoField {
+            label: "Collation".to_string(),
+            value: collation,
+        });
+    }
+    // Either half may be null on its own — a table with no index has no index
+    // length — so the two are added as zero-if-absent and the row is drawn only
+    // if the server gave at least one of them.
+    if data.is_some() || index.is_some() {
+        out.push(InfoField {
+            label: "Size".to_string(),
+            value: size_pretty(data.unwrap_or(0) + index.unwrap_or(0)),
+        });
+    }
+    // MySQL writes an empty string rather than null for a table nobody
+    // commented, so emptiness is what is tested and not nullness.
+    if let Some(comment) = comment.filter(|c| !c.is_empty()) {
+        out.push(InfoField {
+            label: "Comment".to_string(),
+            value: comment,
+        });
+    }
+    Ok(out)
+}
+
+/// Bytes as somebody reads them.
+///
+/// Powers of 1024 with the units the server's own documentation uses, and one
+/// decimal place above a kilobyte: "45.3 MB" is the number somebody wanted and
+/// "47,513,600 bytes" is a number they have to count the digits of.
+fn size_pretty(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 /// `ROUTINE_BODY` is the language, and it is `SQL` for everything MySQL can
 /// create. It is read anyway rather than hard-coded: MariaDB and MySQL 8 both
 /// list the column, and a server that one day answers something else says so

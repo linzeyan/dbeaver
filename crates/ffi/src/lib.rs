@@ -1204,6 +1204,16 @@ schema_and_name_metadata! {
 }
 
 schema_and_name_metadata! {
+    /// Whatever else this engine can say about one relation — owner, size,
+    /// storage engine, collation, comment — as a JSON array of `{label, value}`
+    /// in the order the driver chose to say them. No capability flag guards it:
+    /// unlike routines, an empty array here is a true answer everywhere, since
+    /// every engine has some relation it can say nothing extra about. Release
+    /// with `db_string_free`.
+    db_table_info_json => table_info
+}
+
+schema_and_name_metadata! {
     /// The source of one function or procedure, as a JSON string, or JSON `null`
     /// for an id that names nothing. The second argument is the `id` a routine
     /// reported, not its name — overloading means a name can stand for several.

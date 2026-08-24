@@ -296,6 +296,11 @@ char* db_constraints_json(DbHandle* handle, const char* schema, const char* rela
                           char** err);
 char* db_triggers_json(DbHandle* handle, const char* schema, const char* relation,
                        char** err);
+// Whatever else the engine can say about one relation, as a JSON array of
+// {label, value}. Labels and their order are the driver's; an empty array means
+// this engine has nothing to add about this relation, which is not an error.
+char* db_table_info_json(DbHandle* handle, const char* schema, const char* relation,
+                         char** err);
 // Functions and procedures. Fails, rather than answering an empty array, on a
 // connection whose capabilities report reports_routines false: ask before you
 // call, or an untaught driver and a schema with none read the same.

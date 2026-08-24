@@ -51,9 +51,9 @@ use dbffi::{
     db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
     db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
-    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
-    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
+    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
+    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -555,6 +555,16 @@ fn test_triggers_null_relation() {
     let result = unsafe { db_triggers_json(ptr::null_mut(), ptr::null(), ptr::null(), &mut err) };
     assert!(result.is_null());
     assert!(!err.is_null(), "db_triggers_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_table_info_json with null handle
+#[test]
+fn test_table_info_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_table_info_json(ptr::null_mut(), ptr::null(), ptr::null(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_table_info_json must say why it failed");
     unsafe { db_string_free(err) };
 }
 
@@ -3119,4 +3129,71 @@ fn an_import_into_a_table_that_is_not_there_reports_the_servers_refusal() {
     unsafe { db_string_free(err) };
     let _ = std::fs::remove_file(&path);
     unsafe { db_free(handle) };
+}
+
+/// A relation the server knows answers with fields; a name that names nothing
+/// answers with an empty array rather than an error.
+///
+/// Both halves matter and neither is visible from the null-argument tests. The
+/// first is that the call reaches the driver's query at all; the second is what
+/// the Swift side reads to decide whether to draw the section, so an error here
+/// would put a red banner where "this engine has nothing to add" belongs.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn test_table_info_json_says_nothing_rather_than_failing() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+    assert!(err.is_null(), "db_connect should not set err on success");
+
+    let schema_cstring = CString::new("public").unwrap();
+    let relation_cstring = CString::new("bench_child").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_table_info_json(
+            handle,
+            schema_cstring.as_ptr(),
+            relation_cstring.as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(!result.is_null());
+    assert!(
+        err.is_null(),
+        "db_table_info_json should not set err on success"
+    );
+    let described = unsafe { CStr::from_ptr(result) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    unsafe { db_string_free(result) };
+    assert!(
+        described.contains("Owner") && described.contains("Size"),
+        "PostgreSQL knows who owns a table and how big it is: {described}"
+    );
+    assert!(
+        described.contains("Comment"),
+        "the seeded table carries a comment: {described}"
+    );
+
+    let ghost_cstring = CString::new("no_such_relation").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_table_info_json(
+            handle,
+            schema_cstring.as_ptr(),
+            ghost_cstring.as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(!result.is_null());
+    assert!(err.is_null(), "a name that names nothing is not an error");
+    let described = unsafe { CStr::from_ptr(result) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    unsafe { db_string_free(result) };
+    unsafe { db_free(handle) };
+    assert_eq!(described, "[]", "nothing known reads as nothing said");
 }
