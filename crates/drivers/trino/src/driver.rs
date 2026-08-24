@@ -218,6 +218,10 @@ impl Driver for TrinoSource {
     /// on a typical cluster would be empty on nearly every schema — which is a
     /// reason to read the catalog before drawing it, not a reason to call the
     /// concept absent.
+    ///
+    /// Sequences are not reported, and Trino has no such object of its own. It
+    /// queries what its connectors hold, and a sequence inside one of those is
+    /// not something the engine exposes as a schema-level object.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -225,6 +229,7 @@ impl Driver for TrinoSource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

@@ -146,6 +146,11 @@ impl Driver for DuckSource {
     /// one is in. Like ClickHouse's, that view also lists every built-in, so the
     /// filter is the work — and DuckDB has no procedure at all, so the group
     /// would be functions only.
+    ///
+    /// Sequences are not reported, and that is a gap: `CREATE SEQUENCE` is real
+    /// here and `duckdb_sequences()` lists them with their schema, their
+    /// increment and their current value. Unlike the macros above there is no
+    /// wall of built-ins to filter out of it — this one is only unwritten.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -153,6 +158,7 @@ impl Driver for DuckSource {
             switches_database: true,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

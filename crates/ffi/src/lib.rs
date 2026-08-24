@@ -1054,6 +1054,41 @@ pub unsafe extern "C" fn db_routines_json(
     }
 }
 
+/// Sequences in `schema` as a JSON array. Release with `db_string_free`.
+///
+/// Fails on a connection whose `reports_sequences` is false, for the reason
+/// `db_routines_json` fails: an empty array cannot say whether the schema has
+/// none or the driver was never taught to look.
+///
+/// # Safety
+/// `handle` must be live; `schema` must be a valid NUL-terminated C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sequences_json(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() {
+        unsafe { set_err(err, "null handle or schema") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    let s = match unsafe { CStr::from_ptr(schema) }.to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            return ptr::null_mut();
+        }
+    };
+    match runtime().block_on(h.driver.sequences(s)) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Defines one `(handle, schema, name, err) -> JSON` entry point.
 ///
 /// The schema-and-one-name metadata calls differ only in which method they

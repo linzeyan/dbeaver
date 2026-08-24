@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, ServerInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, SequenceInfo,
+    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -64,6 +64,10 @@ impl Driver for PgSource {
 
     async fn routine_definition(&self, schema: &str, id: &str) -> DbResult<Option<String>> {
         Ok(PgSource::routine_definition(self, schema, id).await?)
+    }
+
+    async fn sequences(&self, schema: &str) -> DbResult<Vec<SequenceInfo>> {
+        Ok(PgSource::sequences(self, schema).await?)
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>> {
@@ -134,7 +138,9 @@ impl Driver for PgSource {
     /// driver reports is a list of connections to open.
     ///
     /// Routines are reported: `pg_proc` holds functions and procedures, and
-    /// `pg_get_functiondef` hands back the source of either.
+    /// `pg_get_functiondef` hands back the source of either. Sequences too —
+    /// `pg_sequences` is a documented catalog view, and a sequence here is a
+    /// first-class object rather than a property of a column.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -142,6 +148,7 @@ impl Driver for PgSource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: true,
+            reports_sequences: true,
         }
     }
 

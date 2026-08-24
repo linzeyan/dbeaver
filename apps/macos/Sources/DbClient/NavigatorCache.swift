@@ -51,6 +51,7 @@ struct NavigatorCache {
         /// file written before this field existed decodes to — nothing, because
         /// the version below refuses it outright.
         let routines: [String: [RoutineInfo]]
+        let sequences: [String: [SequenceInfo]]
     }
 
     /// One file per connection, holding one tree per database on it.
@@ -70,7 +71,7 @@ struct NavigatorCache {
     /// the one file in the application where that is the right answer: the cost
     /// of ignoring it is one slow first look at a server, and the code that would
     /// migrate it is code that has to be right about a format nobody can see.
-    private static let version = 2
+    private static let version = 3
 
     func load(_ key: NavigatorCacheKey) -> Tree? {
         stored(key.connection)?.trees[key.database]

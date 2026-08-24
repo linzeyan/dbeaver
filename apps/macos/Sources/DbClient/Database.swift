@@ -211,6 +211,15 @@ final class Database: @unchecked Sendable {
         ).value
     }
 
+    /// The sequences in one schema.
+    ///
+    /// Only ask where `capabilities().reportsSequences`, under the rule
+    /// `routines` is asked under. One call and no second one: a sequence has no
+    /// source, so everything about it is in the row.
+    func sequences(schema: String) throws -> [SequenceInfo] {
+        try decodeJSON(db_sequences_json(handle, schema, &errOut), as: [SequenceInfo].self)
+    }
+
     func columns(schema: String, relation: String) throws -> [ColumnInfo] {
         try decodeJSON(
             db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)

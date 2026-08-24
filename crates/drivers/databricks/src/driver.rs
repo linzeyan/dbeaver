@@ -190,6 +190,10 @@ impl Driver for DatabricksSource {
     /// Routines are not reported, and that is a gap: Unity Catalog serves
     /// `information_schema.routines`, and a schema on it can hold functions.
     /// Nothing here reads it yet.
+    ///
+    /// Sequences are not reported, and there is no such object. A Delta table
+    /// numbers rows with an identity column, which is a property of the column
+    /// and is already on it.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -197,6 +201,7 @@ impl Driver for DatabricksSource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

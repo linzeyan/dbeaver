@@ -194,6 +194,9 @@ impl Driver for BigQuerySource {
     /// BigQuery: a dataset can hold user-defined functions, table functions and
     /// procedures, and `INFORMATION_SCHEMA.ROUTINES` lists them. Nothing here
     /// reads it yet.
+    ///
+    /// Sequences are not reported, and BigQuery has none. A generated key is a
+    /// value an INSERT computes; nothing in a dataset holds a counter.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -201,6 +204,7 @@ impl Driver for BigQuerySource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

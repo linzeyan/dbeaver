@@ -249,6 +249,23 @@ final class Session: Identifiable {
     /// `AppModel.isLoadingRoutineSource`, the same way an empty `columns` is.
     var routineSource: String?
 
+    /// The sequence the detail panes are describing, under the same arrangement
+    /// as `selectedRoutine` and mutually exclusive with it.
+    ///
+    /// Two optionals rather than one enum of the two, because every pane that
+    /// draws one of them wants it unwrapped and nothing wants to switch over
+    /// both. `AppModel.navigatorSelection` is the only writer, which is what
+    /// keeps at most one of them set.
+    var selectedSequence: SequenceInfo?
+
+    /// Sequences, by schema. Empty where `capabilities.reportsSequences` is
+    /// false, which is what the navigator reads rather than this.
+    var sequences: [String: [SequenceInfo]] = [:]
+
+    /// Schemas whose Sequences group is open, kept apart from the routine
+    /// groups for the reason those are kept apart from `expanded`.
+    var expandedSequenceGroups: Set<String> = []
+
     /// Set while `refresh` swaps `selected` for the freshly read value naming
     /// the same relation. The two are the same object to a user but not to
     /// `==` — `estimatedRows` moves on its own — and that assignment must not

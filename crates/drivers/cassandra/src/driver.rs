@@ -189,6 +189,10 @@ impl Driver for CassandraSource {
     /// `system_schema.aggregates` are where they are. They would also arrive in
     /// two lists rather than one, which is the part that needs deciding before
     /// this can be true.
+    ///
+    /// Sequences are not reported, and there is no such object. A counter column
+    /// is the nearest thing and belongs to a table; nothing a keyspace holds
+    /// hands out increasing numbers.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -196,6 +200,7 @@ impl Driver for CassandraSource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

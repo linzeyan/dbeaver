@@ -114,6 +114,48 @@ pub struct RoutineInfo {
     pub language: Option<String>,
 }
 
+/// One sequence in a schema.
+///
+/// Everything a sequence is, in one struct, and no second call for a body: a
+/// sequence has no source. That is the whole of why it is not shaped like
+/// [`RoutineInfo`] — there is nothing here that is expensive enough to defer,
+/// so the navigator's one read answers every question the Structure pane asks.
+///
+/// The numbers are strings. A sequence on PostgreSQL is `bigint` and on another
+/// engine may be wider, `last_value` is unsigned on some and signed on others,
+/// and a client that parsed them into one Rust integer would be choosing which
+/// databases it can describe. Nothing here does arithmetic on them; they are
+/// read.
+#[derive(Debug, Clone, Serialize)]
+pub struct SequenceInfo {
+    pub schema: String,
+    pub name: String,
+
+    /// The last value written, or `None` where the server would not say.
+    ///
+    /// Two causes and the driver cannot tell them apart, so nothing above it
+    /// may claim to either: nothing has been taken from the sequence yet, or
+    /// this login may see that it exists without being allowed to read it —
+    /// `USAGE` on the schema and `SELECT` on the sequence are separate grants.
+    /// `None` rather than zero, because zero is a value a sequence can hold.
+    pub last_value: Option<String>,
+
+    /// The step, which may be negative: a descending sequence is an ordinary
+    /// thing and the pane has to be able to say so.
+    pub increment: String,
+
+    pub min_value: String,
+    pub max_value: String,
+
+    /// Whether it wraps at the end instead of failing.
+    pub cycles: bool,
+
+    /// How many values are handed out per trip to the catalog. Worth showing
+    /// because it explains the gaps somebody is looking at: a cache of 50 means
+    /// the numbers in a table jump by 50 whenever a session ends.
+    pub cache: Option<String>,
+}
+
 /// What kind of relation a navigator entry is.
 ///
 /// A closed set rather than the database's own word for it. A free string would

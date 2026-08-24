@@ -48,8 +48,8 @@ mod metadata;
 
 pub use metadata::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo,
-    UniqueKeyInfo,
+    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, SequenceInfo,
+    TriggerInfo, UniqueKeyInfo,
 };
 
 use arrow::array::RecordBatch;
@@ -327,6 +327,18 @@ pub struct Capabilities {
     /// The front end draws no group where this is false, and does not call
     /// `routines`.
     pub reports_routines: bool,
+
+    /// Whether `sequences` lists this schema's sequences.
+    ///
+    /// Its own flag rather than a second use of `reports_routines`, because the
+    /// two do not travel together: a database can have sequences and no stored
+    /// procedures, or the reverse, and MySQL is the reverse — it reports
+    /// routines here and has no sequence object at all, an `AUTO_INCREMENT`
+    /// column being a property of a table rather than a thing in a catalog.
+    ///
+    /// False carries the same two meanings `reports_routines` false does, and
+    /// each driver says which where it answers.
+    pub reports_sequences: bool,
 }
 
 /// One session against one database.
@@ -432,6 +444,20 @@ pub trait Driver: Send + Sync {
         Err(DbError::new(
             "this connection does not report functions and procedures",
         ))
+    }
+
+    /// The sequences in one schema.
+    ///
+    /// Only where `capabilities().reports_sequences`, under the rule `routines`
+    /// is written under, and everything it says about an empty list applies
+    /// here: a schema with no sequences is a real answer, and a driver that
+    /// cannot look refuses instead.
+    ///
+    /// One call and no second one. A sequence has no body to fetch, so
+    /// everything the Structure pane shows about one is in [`SequenceInfo`]
+    /// already — which is also why nothing here takes an opaque id.
+    async fn sequences(&self, _schema: &str) -> DbResult<Vec<SequenceInfo>> {
+        Err(DbError::new("this connection does not report sequences"))
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>>;

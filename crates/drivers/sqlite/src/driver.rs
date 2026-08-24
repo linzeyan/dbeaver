@@ -126,6 +126,11 @@ impl Driver for SqliteSource {
     /// call are the ones the host process registered, which belong to this
     /// application rather than to the file it opened. Listing them would describe
     /// the client.
+    ///
+    /// Sequences are not reported, and there is none to report. The
+    /// `sqlite_sequence` table exists but is bookkeeping for `AUTOINCREMENT`
+    /// columns rather than an object anybody creates, and listing it as one
+    /// would invent a level this file does not have.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -133,6 +138,7 @@ impl Driver for SqliteSource {
             switches_database: false,
             schema_is_the_database: true,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

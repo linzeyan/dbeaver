@@ -13,7 +13,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, RelationInfo, RelationshipInfo,
-    RoutineInfo, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    RoutineInfo, SchemaInfo, SequenceInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -489,6 +489,14 @@ impl PgSource {
     pub async fn routines(&self, schema: &str) -> Result<Vec<RoutineInfo>, PgError> {
         let conn = self.acquire_connection().await?;
         let result = metadata::routines(&conn, schema).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
+    }
+
+    /// Sequences within a schema, whole: there is no second call.
+    pub async fn sequences(&self, schema: &str) -> Result<Vec<SequenceInfo>, PgError> {
+        let conn = self.acquire_connection().await?;
+        let result = metadata::sequences(&conn, schema).await;
         // Connection is automatically returned to pool when conn goes out of scope
         result
     }

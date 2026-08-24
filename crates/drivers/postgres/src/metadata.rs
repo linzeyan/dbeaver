@@ -11,8 +11,8 @@
 
 use dbconn::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo,
-    UniqueKeyInfo,
+    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, SequenceInfo,
+    TriggerInfo, UniqueKeyInfo,
 };
 use tokio_postgres::Client;
 
@@ -244,6 +244,51 @@ pub(crate) async fn routines(client: &Client, schema: &str) -> Result<Vec<Routin
             arguments: r.get(3),
             returns: r.get(4),
             language: r.get(5),
+        })
+        .collect())
+}
+
+/// The sequences in one schema, from `pg_sequences`.
+///
+/// The view rather than `pg_sequence` joined to `pg_class`: it is the one the
+/// server documents, it already resolves the schema name, and it answers
+/// `last_value` as `NULL` for a sequence this login may see but not read —
+/// which is the answer `SequenceInfo::last_value` is `Option` for. Reaching
+/// into `pg_sequence` directly would need `SELECT` on every sequence to return
+/// any row at all, so a login with partial rights would see none of them
+/// instead of seeing them without their current values.
+///
+/// Everything numeric is cast to text on the server. These are `bigint` here
+/// and are not on every engine this file's shape will be copied to, and nothing
+/// above does arithmetic on them.
+pub(crate) async fn sequences(client: &Client, schema: &str) -> Result<Vec<SequenceInfo>, PgError> {
+    let rows = client
+        .query(
+            "SELECT sequencename, \
+                    last_value::text, \
+                    increment_by::text, \
+                    min_value::text, \
+                    max_value::text, \
+                    cycle, \
+                    cache_size::text \
+             FROM pg_catalog.pg_sequences \
+             WHERE schemaname = $1 \
+             ORDER BY sequencename",
+            &[&schema],
+        )
+        .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| SequenceInfo {
+            schema: schema.to_string(),
+            name: r.get(0),
+            last_value: r.get(1),
+            increment: r.get(2),
+            min_value: r.get(3),
+            max_value: r.get(4),
+            cycles: r.get(5),
+            cache: r.get(6),
         })
         .collect())
 }

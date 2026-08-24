@@ -304,6 +304,8 @@ impl Driver for Fixture {
             // A rendered statement is read off the metadata it was
             // handed; this double is never asked for routines.
             reports_routines: false,
+            // Nor sequences, for the same reason as the line above.
+            reports_sequences: false,
         }
     }
 

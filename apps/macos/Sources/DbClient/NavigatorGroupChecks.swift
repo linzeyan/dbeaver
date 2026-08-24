@@ -27,6 +27,9 @@ enum NavigatorGroupChecks {
         checkAFilterThatHidesTheSelectedRoutineDoesNotClearIt()
         checkARefreshedTreeDoesNotReopenGroupsUnderSchemasThatAreGone()
         checkTheChromeDescribesWhicheverObjectIsShowing()
+        checkASchemaOfNothingButSequencesIsDrawn()
+        checkOnlyOneNonRelationIsEverSelected()
+        checkASequenceCarriesItsNumbersAcross()
         if failures == 0 {
             fputs("navigator-groups: all checks passed\n", stderr)
         } else {
@@ -246,7 +249,96 @@ enum NavigatorGroupChecks {
         }
     }
 
+    /// The schema-row condition again, one kind further on. It was widened once
+    /// for the routines and would have been wrong a second time by the same
+    /// omission — a schema holding only sequences drawn by no branch at all.
+    private static func checkASchemaOfNothingButSequencesIsDrawn() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.sessions[0].schemas = [SchemaInfo(name: "counters")]
+            model.sessions[0].sequences = ["counters": [sequence("order_id_seq")]]
+            expect(model.hasVisibleObjects(in: "counters"), true, "a schema of sequences is drawn")
+            expect(model.totalObjectCount, 1, "and its one sequence is one object")
+
+            model.navigatorFilter = "order"
+            expect(
+                model.visibleSequences(in: "counters").count, 1,
+                "the filter reaches the sequences too")
+            expect(
+                model.isSequenceGroupExpanded("counters"), true,
+                "and opens the group holding what matched")
+        }
+    }
+
+    /// The invariant `navigatorSelection` exists to hold: `selectedRoutine` and
+    /// `selectedSequence` are two properties and at most one of them is set.
+    /// Both at once would put two panes' worth of claim on screen, and which one
+    /// won would be whichever branch the view happened to test first.
+    private static func checkOnlyOneNonRelationIsEverSelected() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.navigatorSelection = .routine(routine("settle"))
+            expect(model.selectedSequence == nil, true, "a routine alone")
+
+            model.navigatorSelection = .sequence(sequence("order_id_seq"))
+            expect(model.selectedRoutine == nil, true, "and picking a sequence lets it go")
+            expect(model.selectedSequence?.name, "order_id_seq", "leaving the sequence")
+            expect(model.showsNonRelation, true, "which is still not a relation")
+
+            model.navigatorSelection = .routine(routine("settle"))
+            expect(model.selectedSequence == nil, true, "and back the other way")
+
+            model.navigatorSelection = .relation(relation("orders"))
+            expect(model.showsNonRelation, false, "a relation clears both")
+        }
+    }
+
+    /// Every number a sequence shows is a string the server rendered, so a
+    /// field reading its neighbour typechecks. The fixture is deliberately one
+    /// where no two of them are equal.
+    private static func checkASequenceCarriesItsNumbersAcross() {
+        MainActor.assumeIsolated {
+            let decoded: SequenceInfo? = decode(
+                #"""
+                {"schema":"public","name":"bench_batch_seq","last_value":null,
+                 "increment":"10","min_value":"100","max_value":"900",
+                 "cycles":true,"cache":"5"}
+                """#)
+            expect(decoded?.increment, "10", "the step is the step")
+            expect(decoded?.minValue, "100", "the floor is the floor")
+            expect(decoded?.maxValue, "900", "and the ceiling is not the floor")
+            expect(decoded?.cycles, true, "cycling crosses as itself")
+            expect(decoded?.cache, "5", "and so does the cache")
+            expect(
+                decoded?.lastValue == nil, true,
+                "a null last value stays nil rather than becoming a zero somebody would read")
+            expect(decoded?.range, "100 … 900", "and the range is written from both ends")
+
+            // A key the core stopped writing is refused rather than defaulted,
+            // for the reason `MetadataChecks` refuses one: a default here is an
+            // answer nobody gave, and "increment 0" is a sequence that stands
+            // still.
+            let renamed: SequenceInfo? = decode(
+                #"""
+                {"schema":"public","name":"s","last_value":"1","increment_by":"1",
+                 "min_value":"1","max_value":"9","cycles":false,"cache":null}
+                """#)
+            expect(renamed == nil, true, "a renamed key is not guessed at")
+        }
+    }
+
     // MARK: - Helpers
+
+    private static func decode<T: Decodable>(_ json: String) -> T? {
+        guard let data = json.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(T.self, from: data)
+    }
+
+    private static func sequence(_ name: String) -> SequenceInfo {
+        SequenceInfo(
+            schema: "public", name: name, lastValue: "41", increment: "1", minValue: "1",
+            maxValue: "9223372036854775807", cycles: false, cache: "1")
+    }
 
     private static func relation(_ name: String) -> RelationInfo {
         RelationInfo(schema: "public", name: name, kind: .table, estimatedRows: nil)

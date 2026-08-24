@@ -157,6 +157,10 @@ impl Driver for MsSqlSource {
     /// this field records, because SQL Server is where a reader most expects the
     /// group. `sys.objects` marks the four kinds it has and `sys.sql_modules`
     /// holds the source of each. Nothing here reads either yet.
+    ///
+    /// Sequences are not reported, and that is a gap: `sys.sequences` has held
+    /// them since 2012, with every column the pane would show. Unwritten rather
+    /// than absent.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -164,6 +168,7 @@ impl Driver for MsSqlSource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

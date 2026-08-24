@@ -176,6 +176,10 @@ impl Driver for RedisSource {
     /// in `SELECT 4`, which contains keys and nothing else. Repeating one
     /// server-wide list under each of sixteen databases would be sixteen wrong
     /// answers.
+    ///
+    /// Sequences are not reported, and there are none. `INCR` on a key is how a
+    /// counter is kept here, which makes it a key like any other and already a
+    /// row in the tree.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -183,6 +187,7 @@ impl Driver for RedisSource {
             switches_database: false,
             schema_is_the_database: true,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

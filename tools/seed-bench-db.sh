@@ -30,6 +30,8 @@ DROP MATERIALIZED VIEW IF EXISTS bench_category_totals;
 DROP VIEW IF EXISTS bench_open_lines;
 DROP TABLE IF EXISTS bench_child;
 DROP TABLE IF EXISTS bench_wide;
+DROP SEQUENCE IF EXISTS bench_ticket_seq;
+DROP SEQUENCE IF EXISTS bench_batch_seq;
 
 CREATE TABLE bench_wide AS
 SELECT
@@ -141,6 +143,20 @@ GROUP BY w.category;
 CREATE UNIQUE INDEX bench_category_totals_category_idx
   ON bench_category_totals (category);
 ANALYZE bench_category_totals;
+
+-- Sequences. Two, because the pane's job is to say what a sequence is set to do
+-- and one of everything would let every field be the default. The first has been
+-- drawn from, so it has a last_value; the second climbs by 10 and cycles, so the
+-- three fields that are not the increment have something to show.
+CREATE SEQUENCE bench_ticket_seq;
+SELECT nextval('bench_ticket_seq');
+
+CREATE SEQUENCE bench_batch_seq
+  INCREMENT BY 10
+  MINVALUE 100
+  MAXVALUE 900
+  CACHE 5
+  CYCLE;
 
 -- A second schema. Every metadata query takes a schema argument and nothing
 -- hardcodes "public", but with one schema in the database that is a property of

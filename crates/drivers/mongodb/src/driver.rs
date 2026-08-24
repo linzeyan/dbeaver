@@ -155,6 +155,11 @@ impl Driver for MongoSource {
     /// JavaScript stored in `system.js` was how a Mongo database once held
     /// something like a function, and it went with `db.eval` in 4.4. An
     /// aggregation pipeline is written where it is used.
+    ///
+    /// Sequences are not reported, and there are none. A collection that hands
+    /// out numbers is a document somebody wrote and updates with
+    /// `findAndModify` — an application's convention, not a thing in the
+    /// catalog.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -162,6 +167,7 @@ impl Driver for MongoSource {
             switches_database: false,
             schema_is_the_database: true,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

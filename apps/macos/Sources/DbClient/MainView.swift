@@ -105,7 +105,10 @@ struct MainView: View {
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
-        .navigationTitle(model.selectedRoutine?.name ?? model.selected?.name ?? "DbClient")
+        .navigationTitle(
+            model.selectedRoutine?.name ?? model.selectedSequence?.name ?? model.selected?.name
+                ?? "DbClient"
+        )
         // Nothing rather than the connection's name when no object is selected.
         // The name was here because, with no selection, the titlebar was the
         // only place saying which database the window was pointed at; the tab
@@ -336,7 +339,8 @@ struct NavigatorView: View {
         ForEach(model.schemas) { schema in
             let relations = model.visibleRelations(in: schema.name)
             let routines = model.visibleRoutines(in: schema.name)
-            if !relations.isEmpty || !routines.isEmpty {
+            let sequences = model.visibleSequences(in: schema.name)
+            if !relations.isEmpty || !routines.isEmpty || !sequences.isEmpty {
                 DisclosureGroup(isExpanded: expansion(for: schema.name)) {
                     ForEach(relations) { relation in
                         NavigatorRow(relation: relation)
@@ -373,9 +377,25 @@ struct NavigatorView: View {
                                 title: "Routines", symbol: "function", count: routines.count)
                         }
                     }
+                    if !sequences.isEmpty {
+                        DisclosureGroup(isExpanded: sequenceExpansion(for: schema.name)) {
+                            ForEach(sequences) { sequence in
+                                SequenceRow(sequence: sequence)
+                                    .tag(NavigatorNode.sequence(sequence))
+                                    .listRowBackground(
+                                        model.navigatorSelection == .sequence(sequence)
+                                            ? Theme.accent.opacity(0.22).color
+                                            : Color.clear)
+                            }
+                        } label: {
+                            GroupLabel(
+                                title: "Sequences", symbol: "number", count: sequences.count)
+                        }
+                    }
                 } label: {
                     SchemaLabel(
-                        name: schema.name, count: relations.count + routines.count,
+                        name: schema.name,
+                        count: relations.count + routines.count + sequences.count,
                         noun: model.containerNoun
                     )
                     .background(highlightOff(ifFirst: schema.name == first))
@@ -634,6 +654,20 @@ struct NavigatorView: View {
                     model.expandedRoutineGroups.insert(schema)
                 } else {
                     model.expandedRoutineGroups.remove(schema)
+                }
+            })
+    }
+
+    /// The same arrangement one group over.
+    private func sequenceExpansion(for schema: String) -> Binding<Bool> {
+        Binding(
+            get: { model.isSequenceGroupExpanded(schema) },
+            set: { isOpen in
+                guard !model.isFiltering else { return }
+                if isOpen {
+                    model.expandedSequenceGroups.insert(schema)
+                } else {
+                    model.expandedSequenceGroups.remove(schema)
                 }
             })
     }
@@ -946,6 +980,116 @@ struct RoutineStructureView: View {
     }
 }
 
+/// One sequence. The number it is at, on the row, because that is the one thing
+/// anybody opens a sequence to see and it fits.
+struct SequenceRow: View {
+    let sequence: SequenceInfo
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "number")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecondary.color)
+                .frame(width: 14)
+
+            Text(sequence.name)
+                .font(Theme.Typography.body)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Spacer(minLength: Theme.Space.xs)
+
+            // Nothing where the server would not say, rather than a dash or a
+            // zero. Zero is a value a sequence can be at.
+            if let last = sequence.lastValue {
+                Text(last)
+                    .font(Theme.Typography.digits)
+                    .foregroundStyle(Theme.textTertiary.color)
+            }
+        }
+        .padding(.vertical, 1)
+        .help(help)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibility)
+    }
+
+    private var help: String {
+        var parts = ["Sequence", "by \(sequence.increment)", sequence.range]
+        if sequence.cycles { parts.append("cycles") }
+        return parts.joined(separator: " · ")
+    }
+
+    private var accessibility: String {
+        guard let last = sequence.lastValue else { return "\(sequence.name), sequence" }
+        return "\(sequence.name), sequence, at \(last)"
+    }
+}
+
+/// The Structure tab for a sequence: six facts and nothing else.
+///
+/// A table of label and value rather than the routine pane's header-and-body,
+/// because there is no body — a sequence is entirely its settings, and there is
+/// no second call that could add anything to this.
+struct SequenceStructureView: View {
+    let sequence: SequenceInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(sequence.name)
+                .font(Theme.Typography.mono)
+                .foregroundStyle(Theme.text.color)
+                .textSelection(.enabled)
+                .padding(.horizontal, Theme.Space.md)
+                .padding(.vertical, Theme.Space.sm)
+            Rectangle().fill(Theme.separator.color).frame(height: 1)
+
+            VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                // First, because it is the one that changes and the one anybody
+                // opened this to read.
+                // Both reasons or neither. The server answers null for a
+                // sequence nothing has drawn from and for one this login may
+                // not read, and naming one of them would be right about half
+                // the sequences anybody looks at.
+                row(
+                    "Current value",
+                    sequence.lastValue ?? "not taken from yet, or not readable by this login")
+                row("Increment", sequence.increment)
+                row("Minimum", sequence.minValue)
+                row("Maximum", sequence.maxValue)
+                // Spelled out rather than a checkmark: "Cycle ✓" needs the
+                // reader to know which way the tick points.
+                row("At the end", sequence.cycles ? "starts over" : "stops")
+                if let cache = sequence.cache {
+                    row("Cache", "\(cache) per session")
+                }
+            }
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, Theme.Space.sm)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Theme.background.color)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
+            Text(label)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.textTertiary.color)
+                // A fixed column so the values line up; a sequence's fields are
+                // read down the numbers, not across the labels.
+                .frame(width: 110, alignment: .leading)
+            Text(value)
+                .font(Theme.Typography.mono)
+                .foregroundStyle(Theme.text.color)
+                .textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(label), \(value)")
+    }
+}
+
 // MARK: - Detail
 
 struct DetailPane: View {
@@ -1059,6 +1203,8 @@ struct StructurePane: View {
             RoutineStructureView(
                 routine: routine, source: model.routineSource,
                 isLoading: model.isLoadingRoutineSource)
+        } else if let sequence = model.selectedSequence {
+            SequenceStructureView(sequence: sequence)
         } else if model.columns.isEmpty {
             // Three states rather than one. The sentence below was shown for
             // all three, including the wait between picking a relation and its
@@ -1513,6 +1659,12 @@ struct ContentPane: View {
                     title: "\(routine.kind.label)s have no rows",
                     hint: "\(routine.signature) is code, not a table. "
                         + "Its source is on the Structure tab.")
+            } else if let sequence = model.selectedSequence {
+                EmptyState(
+                    symbol: "number",
+                    title: "Sequences have no rows",
+                    hint: "\(sequence.name) is a counter, not a table. "
+                        + "What it is set to do is on the Structure tab.")
             } else if model.selected == nil {
                 EmptyState(
                     symbol: "tablecells",

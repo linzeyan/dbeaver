@@ -170,6 +170,10 @@ impl Driver for AthenaSource {
     /// a Lambda function named in the statement that uses it — `USING EXTERNAL
     /// FUNCTION` — so it belongs to the query rather than to the catalog, and the
     /// Glue database this driver lists tables out of holds no such object.
+    ///
+    /// Sequences are not reported, and there is nothing to report. Athena reads
+    /// files through a catalog of tables; a sequence would have to be held
+    /// somewhere that writes, and nothing here does.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -177,6 +181,7 @@ impl Driver for AthenaSource {
             switches_database: false,
             schema_is_the_database: true,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

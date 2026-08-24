@@ -50,10 +50,10 @@ use dbffi::{
     db_foreign_keys_json, db_free, db_import, db_indexes_json, db_names_forget, db_query,
     db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
-    db_schemas_json, db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free,
-    db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step, db_triggers_json,
-    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
-    db_tx_savepoint, db_tx_state_json,
+    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
+    db_string_free, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
+    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
+    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -231,6 +231,27 @@ fn test_routines_invalid_utf8_schema() {
     let result = unsafe { db_routines_json(ptr::null_mut(), invalid_cstring.as_ptr(), &mut err) };
     assert!(result.is_null());
     assert!(!err.is_null(), "db_routines_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_sequences_json with null handle
+#[test]
+fn test_sequences_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_sequences_json(ptr::null_mut(), ptr::null(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_sequences_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_sequences_json with invalid UTF-8 schema
+#[test]
+fn test_sequences_invalid_utf8_schema() {
+    let invalid_cstring = CString::new(vec![b'v', b'a', b'l', b'i', b'd', 0xff, 0xfe]).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_sequences_json(ptr::null_mut(), invalid_cstring.as_ptr(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_sequences_json must say why it failed");
     unsafe { db_string_free(err) };
 }
 
@@ -923,6 +944,64 @@ fn test_relations_json() {
 
     unsafe { db_string_free(result) };
     unsafe { db_free(handle) };
+}
+
+/// The numbers a sequence is set to hand out survive the crossing.
+///
+/// Not a null-argument test: `SequenceInfo` is the one metadata struct whose
+/// interesting fields are all strings the server rendered, so the failure this
+/// rules out is a column read from the wrong index — which typechecks, and
+/// which the two sequences the benchmark schema defines are shaped to catch,
+/// one being all defaults and the other nothing but non-defaults.
+#[ignore = "requires the benchmark database"]
+#[test]
+fn test_sequences_json_carries_the_numbers() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+    assert!(err.is_null(), "db_connect should not set err on success");
+
+    let schema_cstring = CString::new("public").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_sequences_json(handle, schema_cstring.as_ptr(), &mut err) };
+    assert!(!result.is_null());
+    assert!(
+        err.is_null(),
+        "db_sequences_json should not set err on success"
+    );
+
+    let listed = unsafe { CStr::from_ptr(result) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    unsafe { db_string_free(result) };
+    unsafe { db_free(handle) };
+
+    assert!(
+        listed.contains("bench_batch_seq"),
+        "the seeded sequences should be listed: {listed}"
+    );
+    // The one that is nothing but non-defaults, so no field can be reading its
+    // neighbour and still look right.
+    assert!(
+        listed.contains(r#""increment":"10""#),
+        "the step crosses as the server rendered it: {listed}"
+    );
+    assert!(
+        listed.contains(r#""min_value":"100""#) && listed.contains(r#""max_value":"900""#),
+        "and so does the range: {listed}"
+    );
+    assert!(
+        listed.contains(r#""cycles":true"#),
+        "cycling is a fact about the sequence, not about the row order: {listed}"
+    );
+    // Null rather than absent or zero: this one has never been drawn from, and
+    // zero is a value a sequence can legitimately hold.
+    assert!(
+        listed.contains(r#""last_value":null"#),
+        "a sequence nothing has taken from has no last value: {listed}"
+    );
 }
 
 /// The pair round-trips: an id this side got out of `db_routines_json` is one

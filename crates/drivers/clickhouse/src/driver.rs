@@ -132,6 +132,10 @@ impl Driver for ChSource {
     /// of them a database, so a per-database list needs a filter this driver does
     /// not have yet. A group listing every built-in under every database would be
     /// worse than no group.
+    ///
+    /// Sequences are not reported, and there is no such object. ClickHouse
+    /// numbers rows with functions evaluated at insert time; nothing in a
+    /// database holds a counter a client could list.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -139,6 +143,7 @@ impl Driver for ChSource {
             switches_database: false,
             schema_is_the_database: true,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

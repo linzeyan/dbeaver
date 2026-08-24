@@ -159,6 +159,12 @@ impl Driver for MySqlSource {
     /// every server down this wire implements, including the two that are not
     /// MySQL: StarRocks and Doris answer it, with no rows, which is the right
     /// answer for engines that have no `CREATE FUNCTION` of their own.
+    ///
+    /// Sequences are not reported, and there is no such object here. What a
+    /// MySQL table has instead is `AUTO_INCREMENT`, a property of a column that
+    /// is already on the column. MariaDB grew a real `CREATE SEQUENCE`; it is
+    /// not the server on this wire, and the two that are not MySQL at all —
+    /// StarRocks and Doris — have none either.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: MySqlSource::transactional(self),
@@ -166,6 +172,7 @@ impl Driver for MySqlSource {
             switches_database: false,
             schema_is_the_database: true,
             reports_routines: true,
+            reports_sequences: false,
         }
     }
 

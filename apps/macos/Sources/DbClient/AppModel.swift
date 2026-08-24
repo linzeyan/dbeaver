@@ -184,6 +184,10 @@ final class AppModel {
         get { session.routines }
         set { session.routines = newValue }
     }
+    private(set) var sequences: [String: [SequenceInfo]] {
+        get { session.sequences }
+        set { session.sequences = newValue }
+    }
     var expanded: Set<String> {
         get { session.expanded }
         set { session.expanded = newValue }
@@ -191,6 +195,10 @@ final class AppModel {
     var expandedRoutineGroups: Set<String> {
         get { session.expandedRoutineGroups }
         set { session.expandedRoutineGroups = newValue }
+    }
+    var expandedSequenceGroups: Set<String> {
+        get { session.expandedSequenceGroups }
+        set { session.expandedSequenceGroups = newValue }
     }
     /// The `didSet` this used to carry, written out. A computed property cannot
     /// have one, and the observer is not incidental: it is what clears the WHERE
@@ -218,6 +226,18 @@ final class AppModel {
         get { session.routineSource }
         set { session.routineSource = newValue }
     }
+    /// The sequence the detail panes are describing. See `Session`, and
+    /// `navigatorSelection`, which is what keeps this and `selectedRoutine`
+    /// from both being set.
+    private(set) var selectedSequence: SequenceInfo? {
+        get { session.selectedSequence }
+        set { session.selectedSequence = newValue }
+    }
+
+    /// Whether either of the two non-relation objects is what the panes are
+    /// describing. One question for the panes that behave the same for both —
+    /// Content has no rows for either.
+    var showsNonRelation: Bool { selectedRoutine != nil || selectedSequence != nil }
     /// Set while `refresh` swaps `selected` for the freshly read value naming
     /// the same relation. The two are the same object to a user but not to
     /// `==` — `estimatedRows` moves on its own — and that assignment must not
@@ -1945,6 +1965,7 @@ final class AppModel {
             filling.databases = tree.databases
             filling.relations = tree.relations
             filling.routines = tree.routines
+            filling.sequences = tree.sequences
             filling.isTreeStale = true
         }
         filling.connectionLabel = savedName ?? Self.label(for: connString)
@@ -1982,6 +2003,7 @@ final class AppModel {
         databases = inventory.databases
         relations = inventory.relations
         routines = inventory.routines
+        sequences = inventory.sequences
         isTreeStale = false
         remember(inventory)
         connectionLabel = session.savedName ?? Self.label(for: connString)
@@ -2150,12 +2172,19 @@ final class AppModel {
                 routines[schema.name] = (try? db.routines(schema: schema.name)) ?? []
             }
         }
+        var sequences: [String: [SequenceInfo]] = [:]
+        if capabilities.reportsSequences {
+            for schema in schemas {
+                sequences[schema.name] = (try? db.sequences(schema: schema.name)) ?? []
+            }
+        }
         // Asked here, where a failure costs the label and not the connection. A
         // database that will not say what it is is still a database somebody has
         // just opened, and refusing to show it over a version string would be
         // this application deciding the answer mattered more than the data.
         return Inventory(
             schemas: schemas, databases: databases, relations: relations, routines: routines,
+            sequences: sequences,
             server: (try? db.serverInfo())?.label ?? "",
             // Read here rather than on the main actor for the reason everything
             // else in this function is: it crosses the FFI boundary, and the
@@ -2179,7 +2208,8 @@ final class AppModel {
         NavigatorCache.shared.save(
             NavigatorCache.Tree(
                 schemas: inventory.schemas, databases: inventory.databases,
-                relations: inventory.relations, routines: inventory.routines),
+                relations: inventory.relations, routines: inventory.routines,
+                sequences: inventory.sequences),
             for: key)
     }
 
@@ -2191,6 +2221,8 @@ final class AppModel {
         /// Functions and procedures, empty where `capabilities.reportsRoutines`
         /// says nothing was asked.
         let routines: [String: [RoutineInfo]]
+        /// Sequences, under the same rule.
+        let sequences: [String: [SequenceInfo]]
         /// What answered, for the list row to keep. Empty where it would not say.
         let server: String
         /// What this connection can do, for the controls that would otherwise
@@ -2240,6 +2272,7 @@ final class AppModel {
             databases = inventory.databases
             relations = inventory.relations
             routines = inventory.routines
+            sequences = inventory.sequences
             // Refresh is the one thing somebody presses *because* the tree is
             // wrong, so what it read is the best answer anything has — and the
             // next launch should start from it rather than from whatever was
@@ -2251,6 +2284,7 @@ final class AppModel {
             let names = inventory.schemas.map(\.name)
             expanded.formIntersection(names)
             expandedRoutineGroups.formIntersection(names)
+            expandedSequenceGroups.formIntersection(names)
             reselect()
         }
     }
@@ -2375,6 +2409,16 @@ final class AppModel {
         return all.filter { $0.name.lowercased().contains(needle) }
     }
 
+    /// Sequences in `schema` matching the filter. The rules `visibleRoutines`
+    /// follows, for the reason it follows them: one field, one claim.
+    func visibleSequences(in schema: String) -> [SequenceInfo] {
+        let all = sequences[schema] ?? []
+        guard let needle = filterNeedle else { return all }
+        if schema.lowercased().contains(needle) { return all }
+        if currentDatabaseMatches(needle) { return all }
+        return all.filter { $0.name.lowercased().contains(needle) }
+    }
+
     /// Whether the database this connection is on is itself what was typed.
     private func currentDatabaseMatches(_ needle: String) -> Bool {
         (databases ?? []).contains { $0.isCurrent && $0.name.lowercased().contains(needle) }
@@ -2395,6 +2439,14 @@ final class AppModel {
     /// whether the schema appears in the tree at all.
     func hasVisibleObjects(in schema: String) -> Bool {
         !visibleRelations(in: schema).isEmpty || !visibleRoutines(in: schema).isEmpty
+            || !visibleSequences(in: schema).isEmpty
+    }
+
+    /// Whether a schema's Sequences group is open. `isRoutineGroupExpanded`'s
+    /// rule, one group over.
+    func isSequenceGroupExpanded(_ schema: String) -> Bool {
+        if isFiltering { return !visibleSequences(in: schema).isEmpty }
+        return expandedSequenceGroups.contains(schema)
     }
 
     /// Whether a schema's Routines group is open. The rule `isExpanded` follows:
@@ -2413,6 +2465,7 @@ final class AppModel {
     var matchedObjectCount: Int {
         schemas.reduce(0) {
             $0 + visibleRelations(in: $1.name).count + visibleRoutines(in: $1.name).count
+                + visibleSequences(in: $1.name).count
         }
     }
 
@@ -2448,6 +2501,7 @@ final class AppModel {
     var totalObjectCount: Int {
         relations.values.reduce(0) { $0 + $1.count }
             + routines.values.reduce(0) { $0 + $1.count }
+            + sequences.values.reduce(0) { $0 + $1.count }
     }
 
     /// Whether the filter is currently hiding the relation the detail panes are
@@ -2456,6 +2510,9 @@ final class AppModel {
         guard isFiltering else { return false }
         if let selectedRoutine {
             return !visibleRoutines(in: selectedRoutine.schema).contains(selectedRoutine)
+        }
+        if let selectedSequence {
+            return !visibleSequences(in: selectedSequence.schema).contains(selectedSequence)
         }
         guard let selected else { return false }
         return !visibleRelations(in: selected.schema).contains(selected)
@@ -2482,28 +2539,30 @@ final class AppModel {
     /// field brings the row and its highlight straight back.
     var navigatorSelection: NavigatorNode? {
         get {
-            // The routine first, because it is the one that took the panes over:
-            // `selected` is still set underneath, holding the table to come back
-            // to, and reading it here would highlight a row nobody is looking at.
+            // The non-relation first, because it is the one that took the panes
+            // over: `selected` is still set underneath, holding the table to
+            // come back to, and reading it here would highlight a row nobody is
+            // looking at.
             if let selectedRoutine { return .routine(selectedRoutine) }
+            if let selectedSequence { return .sequence(selectedSequence) }
             return selected.map(NavigatorNode.relation)
         }
         set {
             switch newValue {
             case .relation(let relation):
-                selectedRoutine = nil
-                routineSource = nil
+                clearNonRelationSelection()
                 selected = relation
             case .routine(let routine):
                 selectRoutine(routine)
+            case .sequence(let sequence):
+                selectSequence(sequence)
             case nil:
                 if filterHidesSelection { return }
-                // A routine being deselected puts the panes back on the table
-                // they were describing before it, which is still there. Only
-                // then is clearing the relation the thing that was asked for.
-                if selectedRoutine != nil {
-                    selectedRoutine = nil
-                    routineSource = nil
+                // A routine or sequence being deselected puts the panes back on
+                // the table they were describing before it, which is still
+                // there. Only then is clearing the relation what was asked for.
+                if showsNonRelation {
+                    clearNonRelationSelection()
                     return
                 }
                 selected = nil
@@ -2518,8 +2577,8 @@ final class AppModel {
     /// way past costs nothing to come back from.
     private func selectRoutine(_ routine: RoutineInfo) {
         guard routine != selectedRoutine else { return }
+        clearNonRelationSelection()
         selectedRoutine = routine
-        routineSource = nil
         // Off Content, and only off Content. That pane is rows of a relation and
         // a routine has none, so staying there would answer a click with an
         // empty grid. Query is left alone deliberately — it holds a statement
@@ -2547,8 +2606,28 @@ final class AppModel {
         if let selectedRoutine {
             return "\(selectedRoutine.kind.label) · \(selectedRoutine.schema)"
         }
+        if let selectedSequence { return "Sequence · \(selectedSequence.schema)" }
         guard let selected else { return "" }
         return "\(selected.kind.label) · \(selected.schema)"
+    }
+
+    /// Picks a sequence. Nothing is fetched: `SequenceInfo` is whole, which is
+    /// why this is four lines and `selectRoutine` is not.
+    private func selectSequence(_ sequence: SequenceInfo) {
+        guard sequence != selectedSequence else { return }
+        clearNonRelationSelection()
+        selectedSequence = sequence
+        // Off Content and only off Content, for the reason `selectRoutine`
+        // leaves the editor alone.
+        if activeTab == .content { activeTab = .structure }
+    }
+
+    /// Puts the panes back on the relation underneath. The one place either of
+    /// the two is let go of, which is what keeps them from both being set.
+    private func clearNonRelationSelection() {
+        selectedRoutine = nil
+        routineSource = nil
+        selectedSequence = nil
     }
 
     /// Whether the source of the selected routine has been asked for and not yet

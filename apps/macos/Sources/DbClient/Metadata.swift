@@ -84,6 +84,14 @@ struct Capabilities: Codable, Hashable {
     /// under a schema full of them is a claim, not a blank.
     let reportsRoutines: Bool
 
+    /// Whether this connection can list its sequences.
+    ///
+    /// Its own flag and not a second reading of `reportsRoutines`: the two do
+    /// not travel together, and MySQL is the case that proves it — routines yes,
+    /// sequences no, an `AUTO_INCREMENT` being a property of a column rather
+    /// than an object in a catalog.
+    let reportsSequences: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
@@ -93,7 +101,8 @@ struct Capabilities: Codable, Hashable {
     /// word, and lists no routines it has not been told are there.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
-        writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false)
+        writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
+        reportsSequences: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -102,6 +111,7 @@ struct Capabilities: Codable, Hashable {
         case writesStatements = "writes_statements"
         case schemaIsTheDatabase = "schema_is_the_database"
         case reportsRoutines = "reports_routines"
+        case reportsSequences = "reports_sequences"
     }
 }
 
@@ -149,7 +159,14 @@ enum RelationKind: String, Codable, Hashable {
     var symbol: String {
         switch self {
         case .table, .partitionedTable: return "tablecells"
-        case .view, .materializedView: return "eye"
+        case .view: return "eye"
+        // A view that keeps its rows, so the glyph is the view's inside the
+        // box a table's rows live in. It shared the plain eye until sequences
+        // arrived and the tree had four kinds of thing drawn with three
+        // glyphs — and the one difference the Structure tab can actually show
+        // between the two, that a materialized view can be indexed, was
+        // invisible in the sidebar.
+        case .materializedView: return "eye.square"
         case .foreignTable: return "link"
         case .unknown: return "questionmark.square"
         }
@@ -251,6 +268,48 @@ struct RoutineInfo: Codable, Hashable, Identifiable {
     var signature: String { "\(name)(\(arguments))" }
 }
 
+/// One sequence in a schema.
+///
+/// The numbers are strings, as they are in the core: `bigint` here and wider
+/// elsewhere, and nothing in this window does arithmetic on them. See
+/// `crates/conn/src/metadata.rs`, where the reason is written down once.
+struct SequenceInfo: Codable, Hashable, Identifiable {
+    let schema: String
+    let name: String
+
+    /// Absent for either of two reasons the server does not distinguish:
+    /// nothing has been taken from the sequence yet, or this login may see it
+    /// without being allowed to read it. Anything drawing this has to say both
+    /// or neither. See `crates/conn/src/metadata.rs`.
+    let lastValue: String?
+
+    /// May be negative: a descending sequence is ordinary.
+    let increment: String
+    let minValue: String
+    let maxValue: String
+
+    /// Whether it wraps at the end instead of failing.
+    let cycles: Bool
+
+    /// How many values are handed out per trip to the catalog. Worth showing
+    /// because it explains the gaps: a cache of 50 means the numbers in a table
+    /// jump by 50 whenever a session ends.
+    let cache: String?
+
+    var id: String { "\(schema).\(name)" }
+
+    /// The range as one line, which is how it is read. Both ends or neither —
+    /// half a range says nothing.
+    var range: String { "\(minValue) … \(maxValue)" }
+
+    private enum CodingKeys: String, CodingKey {
+        case schema, name, increment, cycles, cache
+        case lastValue = "last_value"
+        case minValue = "min_value"
+        case maxValue = "max_value"
+    }
+}
+
 /// One selectable row of the navigator.
 ///
 /// A `List` selection is one `Hashable` type and the tree now holds two kinds of
@@ -262,6 +321,7 @@ struct RoutineInfo: Codable, Hashable, Identifiable {
 enum NavigatorNode: Hashable {
     case relation(RelationInfo)
     case routine(RoutineInfo)
+    case sequence(SequenceInfo)
 }
 
 struct IndexInfo: Decodable, Hashable, Identifiable {

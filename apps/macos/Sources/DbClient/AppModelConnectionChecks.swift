@@ -794,7 +794,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: false, schemaIsTheDatabase: true,
-                reportsRoutines: false)
+                reportsRoutines: false, reportsSequences: false)
 
             expect(model.canEditCell, false, "no cell of a Redis key type is editable")
             expect(
@@ -809,7 +809,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: true, schemaIsTheDatabase: true,
-                reportsRoutines: false)
+                reportsRoutines: false, reportsSequences: false)
             expect(
                 model.editObstacle == nil, true,
                 "a database with a grammar has nothing to explain")
@@ -831,7 +831,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: true, schemaIsTheDatabase: false,
-                reportsRoutines: false)
+                reportsRoutines: false, reportsSequences: false)
             expect(
                 model.structureSections.contains(.ddl), true,
                 "a loading relation on a dialect the core writes offers DDL at once")
@@ -839,7 +839,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: false, schemaIsTheDatabase: false,
-                reportsRoutines: false)
+                reportsRoutines: false, reportsSequences: false)
             expect(
                 model.structureSections.contains(.ddl), false,
                 "and one the core writes nothing for never grows the section")
@@ -869,7 +869,7 @@ enum AppModelConnectionChecks {
                 Capabilities(
                     transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
                     writesStatements: false, schemaIsTheDatabase: schemaIsTheDatabase,
-                    reportsRoutines: false)
+                    reportsRoutines: false, reportsSequences: false)
             }
 
             model.sessions[0].connString = "redis://127.0.0.1:6379/0"
@@ -1235,7 +1235,7 @@ enum AppModelConnectionChecks {
                             schema: schema, name: relation, kind: .table, estimatedRows: nil)
                     ]
                 ],
-                routines: [:])
+                routines: [:], sequences: [:])
         }
 
         let home = URL(filePath: "/Users/nobody")
@@ -1315,6 +1315,14 @@ enum AppModelConnectionChecks {
                                 schema: "public", name: "settle", kind: .function, id: "1",
                                 arguments: "uuid", returns: "numeric", language: "plpgsql")
                         ]
+                    ],
+                    sequences: [
+                        "public": [
+                            SequenceInfo(
+                                schema: "public", name: "order_id_seq", lastValue: "41",
+                                increment: "1", minValue: "1", maxValue: "9223372036854775807",
+                                cycles: false, cache: "1")
+                        ]
                     ]),
                 for: NavigatorCacheKey(connection: connection.id, database: "sales"))
 
@@ -1333,6 +1341,9 @@ enum AppModelConnectionChecks {
             expect(
                 model.routines["public"]?.map(\.signature), ["settle(uuid)"],
                 "and the functions with them, since they were drawn last time too")
+            expect(
+                model.sequences["public"]?.map(\.name), ["order_id_seq"],
+                "and the sequences, which are drawn in the same tree")
             expect(model.isTreeStale, true, "and the window knows it is not the live one")
             expect(
                 model.connectionDescription.hasSuffix(

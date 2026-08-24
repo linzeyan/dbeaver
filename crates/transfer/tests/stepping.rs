@@ -258,6 +258,8 @@ impl Driver for Deaf {
             // A transfer reads rows and writes rows; a routine is never either
             // end of one.
             reports_routines: false,
+            // Nor sequences, for the same reason as the line above.
+            reports_sequences: false,
         }
     }
     async fn server_info(&self) -> DbResult<ServerInfo> {

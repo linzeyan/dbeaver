@@ -299,6 +299,9 @@ char* db_routines_json(DbHandle* handle, const char* schema, char** err);
 // routine reported, not its name — one name can stand for several overloads.
 char* db_routine_definition_json(DbHandle* handle, const char* schema, const char* id,
                                  char** err);
+// Sequences, whole: there is no second call, because a sequence has no body.
+// Fails where reports_sequences is false, like the two above.
+char* db_sequences_json(DbHandle* handle, const char* schema, char** err);
 
 // The statements that would recreate one relation, as plain text — released with
 // db_string_free like the JSON above, and unlike it in being the value itself.

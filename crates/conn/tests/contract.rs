@@ -1502,7 +1502,57 @@ async fn every_check(subject: &Subject) {
     moves_between_databases_only_where_it_says_it_can(subject).await;
     draws_its_databases_at_one_level_or_the_other(subject).await;
     reports_its_routines_only_where_it_says_it_does(subject).await;
+    reports_its_sequences_only_where_it_says_it_does(subject).await;
     controls_a_transaction(subject).await;
+}
+
+/// `sequences` and `capabilities().reports_sequences` say the same thing.
+///
+/// The same pairing the routines clause above checks, for the same reason: a
+/// field set with the trait's refusal left in place is a group the navigator
+/// draws and cannot fill, and a method implemented behind a false field is one
+/// nothing ever calls. No round trip here — a sequence has no second call to
+/// address it with, which is the whole of why `SequenceInfo` carries no id.
+///
+/// What is checked instead is that the numbers are there. `increment`, `min` and
+/// `max` are not optional in that struct, so a driver that filled them with
+/// empty strings would satisfy the type and hand the pane three blanks; and
+/// `last_value` is the one that may legitimately be `None`, because a login can
+/// be allowed to see a sequence without being allowed to read it.
+async fn reports_its_sequences_only_where_it_says_it_does(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    if !driver.capabilities().reports_sequences {
+        driver
+            .sequences(&subject.schema)
+            .await
+            .expect_err("this driver says it does not report sequences, so it should refuse to");
+        return;
+    }
+
+    let sequences = driver
+        .sequences(&subject.schema)
+        .await
+        .expect("a driver that says it reports sequences has to answer");
+    for sequence in &sequences {
+        assert_eq!(
+            sequence.schema, subject.schema,
+            "a sequence is reported under the schema it was asked for"
+        );
+        assert!(
+            !sequence.name.is_empty(),
+            "a sequence has a name to draw in the tree"
+        );
+        assert!(
+            !sequence.increment.is_empty(),
+            "the step of {} is a number the pane shows, not a blank",
+            sequence.name
+        );
+        assert!(
+            !sequence.min_value.is_empty() && !sequence.max_value.is_empty(),
+            "the range of {} is two numbers, not two blanks",
+            sequence.name
+        );
+    }
 }
 
 /// `routines` and `capabilities().reports_routines` say the same thing, and an

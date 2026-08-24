@@ -158,6 +158,10 @@ impl Driver for FlightSqlSource {
     /// `CommandGetDbSchemas`, `CommandGetPrimaryKeys` and the rest — and none of
     /// them is about a function or a procedure. A server behind this protocol may
     /// well have them; the protocol has no way to say so.
+    ///
+    /// Sequences are not reported, and here too there is nothing to ask: the
+    /// catalog commands the protocol defines include none about sequences, for
+    /// the same reason they include none about routines.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -165,6 +169,7 @@ impl Driver for FlightSqlSource {
             switches_database: false,
             schema_is_the_database: false,
             reports_routines: false,
+            reports_sequences: false,
         }
     }
 

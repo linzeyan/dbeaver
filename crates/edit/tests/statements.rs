@@ -153,6 +153,8 @@ impl Driver for Fake {
             schema_is_the_database: false,
             // an edit is written against a relation, never against a routine.
             reports_routines: false,
+            // Nor sequences, for the same reason as the line above.
+            reports_sequences: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {
