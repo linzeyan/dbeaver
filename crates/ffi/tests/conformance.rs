@@ -47,14 +47,14 @@ use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
     db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
     db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
-    db_foreign_keys_json, db_free, db_import_cancel, db_import_free, db_import_start,
-    db_import_step, db_indexes_json, db_names_forget, db_query, db_query_free, db_query_next,
-    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_routine_definition_json, db_routines_json, db_row_identity_json, db_schemas_json,
-    db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free,
-    db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
-    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
-    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
+    db_import_start, db_import_step, db_indexes_json, db_names_forget, db_query, db_query_free,
+    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
+    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
+    db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
+    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
+    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -2906,6 +2906,7 @@ fn a_csv_files_rows_arrive_in_the_table_it_was_imported_into() {
             format.as_ptr(),
             path_c.as_ptr(),
             table.as_ptr(),
+            ptr::null(),
             &mut err,
         )
     };
@@ -2980,6 +2981,7 @@ fn an_import_stopped_between_batches_keeps_what_had_already_arrived() {
             format.as_ptr(),
             path_c.as_ptr(),
             table.as_ptr(),
+            ptr::null(),
             &mut err,
         )
     };
@@ -3099,7 +3101,8 @@ fn an_import_that_cannot_start_says_so_instead_of_handing_back_a_handle() {
 
     for (what, target, format, path_arg, table_arg) in cases {
         let mut err: *mut c_char = ptr::null_mut();
-        let reading = unsafe { db_import_start(target, format, path_arg, table_arg, &mut err) };
+        let reading =
+            unsafe { db_import_start(target, format, path_arg, table_arg, ptr::null(), &mut err) };
         assert!(reading.is_null(), "{what} should not start an import");
         assert!(!err.is_null(), "{what} should say why it was refused");
         let message = unsafe { CStr::from_ptr(err) }
@@ -3120,6 +3123,99 @@ fn an_import_that_cannot_start_says_so_instead_of_handing_back_a_handle() {
             _ => {}
         }
     }
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+/// A mapping puts the file's columns where it says, and the same file with no
+/// mapping goes in by position.
+///
+/// Both halves in one test because the second is what the first has to be
+/// different from: the file's columns are in the wrong order for the table, so
+/// the positional read is the one that fails and the mapped read is the one that
+/// lands. A test of only the mapping would pass on a build that ignored it.
+#[test]
+fn a_mapping_decides_which_column_of_the_file_goes_where() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join(format!("dbffi-import-map-{}.csv", std::process::id()));
+    std::fs::write(&path, "remark,skipped,number\nhello,x,1\n").expect("write csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let format = CString::new("csv").unwrap();
+    let table = CString::new("people").unwrap();
+    ran(handle, "CREATE TABLE people (id INTEGER, name VARCHAR)");
+
+    // What the panel draws its rows from.
+    let mut err: *mut c_char = ptr::null_mut();
+    let listed = unsafe { db_file_columns_json(format.as_ptr(), path_c.as_ptr(), &mut err) };
+    assert!(!listed.is_null());
+    let columns = unsafe { CStr::from_ptr(listed) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    unsafe { db_string_free(listed) };
+    assert_eq!(columns, r#"["remark","skipped","number"]"#);
+
+    let mapping = CString::new(r#"["name",null,"id"]"#).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let reading = unsafe {
+        db_import_start(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            mapping.as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(!reading.is_null(), "the mapped import should start");
+    let mut rows: i64 = 0;
+    while unsafe { db_import_step(reading, &mut rows, &mut err) } == 1 {}
+    unsafe { db_import_free(reading) };
+    assert_eq!(rows, 1);
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT id FROM people WHERE id = 1 AND name = 'hello'"
+        ),
+        1,
+        "each value landed in the column the mapping named"
+    );
+
+    // The same file with no mapping: read by position, `remark` lands in `id`,
+    // and "hello" is not an integer.
+    ran(handle, "DELETE FROM people");
+    let mut err: *mut c_char = ptr::null_mut();
+    let reading = unsafe {
+        db_import_start(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            ptr::null(),
+            &mut err,
+        )
+    };
+    let refused = if reading.is_null() {
+        true
+    } else {
+        let mut rows: i64 = 0;
+        let mut err: *mut c_char = ptr::null_mut();
+        let step = unsafe { db_import_step(reading, &mut rows, &mut err) };
+        if !err.is_null() {
+            unsafe { db_string_free(err) };
+        }
+        unsafe { db_import_free(reading) };
+        step < 0
+    };
+    assert!(
+        refused,
+        "without a mapping this file is read by position, and 'hello' is not an id"
+    );
 
     let _ = std::fs::remove_file(&path);
     unsafe { db_free(handle) };

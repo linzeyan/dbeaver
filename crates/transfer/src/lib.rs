@@ -6,7 +6,7 @@
 //! being exportable at all. A batch at a time has no such ceiling, and leaves
 //! the cost where it belongs — in the socket and the disk, not in formatting.
 
-mod delimited;
+pub(crate) mod delimited;
 mod import;
 mod moving;
 mod parquet_file;
@@ -14,7 +14,7 @@ mod sql_script;
 mod target;
 
 pub use delimited::{DelimitedReader, DelimitedWriter};
-pub use import::{Import, ImportStopper, import};
+pub use import::{ColumnMapping, Import, ImportStopper, file_columns, import};
 pub use moving::{Step, Stopper, Transfer};
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;

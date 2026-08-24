@@ -21,6 +21,10 @@ enum ImportChecks {
         checkEveryImportableFormatIsReachableByItsOwnExtension()
         checkASqlScriptIsNotSomethingToImport()
         checkAnExtensionNothingReadsChoosesNothing()
+        checkColumnsAreMatchedByNameWhateverTheirOrder()
+        checkACaseDifferenceIsNotADifferentColumn()
+        checkNoTableColumnIsFedTwice()
+        checkAColumnWithNowhereToGoIsSkipped()
         if failures == 0 {
             fputs("import: all checks passed\n", stderr)
         } else {
@@ -69,6 +73,54 @@ enum ImportChecks {
         expect(ExportFormat(importPathExtension: "txt"), nil, "txt")
         expect(ExportFormat(importPathExtension: "xlsx"), nil, "xlsx")
         expect(ExportFormat(importPathExtension: ""), nil, "no extension at all")
+    }
+
+    /// The default mapping is by name, and a file whose columns are in another
+    /// order is an ordinary import rather than a corrupted one.
+    ///
+    /// This is the rule the core does *not* apply: with no mapping it reads by
+    /// position, which is right exactly when the file came out of this
+    /// application. Every other file — one column added upstream, two swapped by
+    /// a spreadsheet — is one where position puts values in the wrong columns
+    /// and the row count still looks right.
+    private static func checkColumnsAreMatchedByNameWhateverTheirOrder() {
+        expect(
+            AppModel.mappingByName(from: ["note", "id"], to: ["id", "note"]),
+            ["note", "id"],
+            "each file column is pointed at the table column of its own name")
+    }
+
+    /// A file written by one tool and a table made in another disagree about
+    /// case far more often than they disagree about names.
+    private static func checkACaseDifferenceIsNotADifferentColumn() {
+        expect(
+            AppModel.mappingByName(from: ["ID", "Note"], to: ["id", "note"]),
+            ["id", "note"],
+            "case is not a difference worth making somebody fix by hand")
+    }
+
+    /// Two file columns cannot both fill one table column.
+    ///
+    /// A file with `id` and `ID` in it is a file where one of them is a question.
+    /// Answering it by filling the column twice would send an INSERT naming one
+    /// column twice, which the server refuses in its own words at the first
+    /// batch — after the window has said it is importing.
+    private static func checkNoTableColumnIsFedTwice() {
+        expect(
+            AppModel.mappingByName(from: ["id", "ID"], to: ["id", "note"]),
+            ["id", nil],
+            "the second one is left for somebody to point somewhere")
+    }
+
+    /// A file column the table has no room for is skipped rather than refused.
+    ///
+    /// The whole point of the mapping: before it, a file with one column too many
+    /// was a file this application would not read at all.
+    private static func checkAColumnWithNowhereToGoIsSkipped() {
+        expect(
+            AppModel.mappingByName(from: ["id", "extra", "note"], to: ["id", "note"]),
+            ["id", nil, "note"],
+            "an unmatched column is skipped and the rest still land")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

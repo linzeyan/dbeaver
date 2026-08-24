@@ -1203,18 +1203,15 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         panel.allowedContentTypes = ExportFormat.allCases.filter(\.canImport).map(\.contentType)
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        // The two things the window cannot show. Rows landing in a table is not
-        // undoable, and a user who learns either of these afterwards learns it
-        // from a table that is already different.
-        panel.message = """
-            Rows are read into \(table), which must already exist — no table is created and no \
-            column is added. An import that fails part way leaves behind the rows it had already \
-            written.
-            """
+        // Where the rows are going, and nothing else. What used to be here — that
+        // the table must exist, and that a failure leaves what it had written —
+        // is now on the sheet that opens next, which is the last screen before
+        // anything is read rather than the first one after the menu.
+        panel.message = "Rows are read into \(table)."
 
         let read: (NSApplication.ModalResponse) -> Void = { [model] response in
             guard response == .OK, let url = panel.url else { return }
-            model.importFile(from: url)
+            model.prepareImport(from: url)
         }
         // A sheet, so the panel is attached to the table it is describing. The
         // free-standing fallback covers the window not being key.

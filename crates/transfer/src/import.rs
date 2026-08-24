@@ -13,9 +13,9 @@
 //! somebody should read before it runs.
 
 use crate::moving::Step;
-use crate::{DelimitedReader, Format, TargetWriter};
+use crate::{DelimitedReader, Format, TargetWriter, delimited};
 use arrow::array::RecordBatch;
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
 use dbconn::{Browse, DbError, DbResult, Driver};
 use dbsql::Dialect;
@@ -49,6 +49,58 @@ pub async fn import(
     Ok(rows)
 }
 
+/// Which column of the table each column of the file feeds.
+///
+/// One entry per column of the file, in the file's own order: the name of the
+/// table column it goes into, or `None` for a column nobody asked to read. The
+/// file's order rather than the table's because that is the order the file can
+/// be shown in — a mapping is drawn beside the header it describes, and a table
+/// column nothing feeds is simply absent from this list.
+pub type ColumnMapping = Vec<Option<String>>;
+
+/// What the file calls its own columns.
+///
+/// Read before an import is started, so that a mapping can be chosen against
+/// something real rather than typed from memory. Cheap by construction: the
+/// header of a delimited file is one record, JSON Lines is inferred from the
+/// first line, and Parquet keeps its schema in the footer.
+///
+/// An empty answer is possible and is not an error — an empty file has no
+/// columns to name. What the caller does with that is show a file with nothing
+/// in it, which is better than an error message about a file that is merely
+/// empty.
+pub fn file_columns(path: &Path, format: Format) -> DbResult<Vec<String>> {
+    let file = File::open(path).map_err(|e| DbError::new(e.to_string()))?;
+    let names = match format {
+        Format::Csv => delimited::header_names(file, b',').map_err(arrow_error)?,
+        Format::Tsv => delimited::header_names(file, b'\t').map_err(arrow_error)?,
+        // Inferred from one line rather than from the whole file: what is wanted
+        // here is the keys, and a second line that carries a key the first did
+        // not is a file this reader could not have imported anyway — the schema
+        // it reads with is fixed before the first batch.
+        Format::JsonLines => {
+            let (schema, _) =
+                arrow::json::reader::infer_json_schema(std::io::BufReader::new(file), Some(1))
+                    .map_err(arrow_error)?;
+            schema.fields().iter().map(|f| f.name().clone()).collect()
+        }
+        Format::Parquet => {
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                .map_err(|e| DbError::new(e.to_string()))?
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect()
+        }
+    };
+    Ok(names)
+}
+
+fn arrow_error(e: ArrowError) -> DbError {
+    DbError::new(e.to_string())
+}
+
 /// An import somebody can watch and stop.
 ///
 /// `import` above runs to completion and reports one number at the end, which
@@ -66,6 +118,11 @@ pub struct Import {
     /// to be reading it.
     batches: Batches,
     writer: TargetWriter,
+    /// Which of the batch's columns go to the server, in the order the INSERT
+    /// names them. `None` where every column goes, unchanged — an unmapped
+    /// import reads the file into the table's own columns by position, which is
+    /// what this did before there was anything to map.
+    projection: Option<Vec<usize>>,
     loaded: u64,
     asked: Arc<AtomicBool>,
 }
@@ -82,15 +139,28 @@ impl Import {
         target: Arc<dyn Driver>,
         dialect: &'static Dialect,
         table: String,
+        mapping: Option<ColumnMapping>,
     ) -> DbResult<Self> {
-        let schema = table_schema(target.as_ref(), dialect, &table).await?;
+        let columns = table_schema(target.as_ref(), dialect, &table).await?;
+        let plan = match mapping {
+            Some(mapping) => Some(Plan::of(path, format, &columns, &mapping)?),
+            None => None,
+        };
+        // The file is read against the schema on the left and written against
+        // the one on the right, and unmapped they are the same schema — which is
+        // the whole of what "read it into the table by position" means.
+        let (read, insert) = match &plan {
+            Some(plan) => (Arc::clone(&plan.read), Arc::clone(&plan.insert)),
+            None => (Arc::clone(&columns), Arc::clone(&columns)),
+        };
         let file = File::open(path).map_err(|e| DbError::new(e.to_string()))?;
-        let batches = reader(file, format, Arc::clone(&schema))?;
-        let writer = TargetWriter::new(dialect, table, &schema);
+        let batches = reader(file, format, read)?;
+        let writer = TargetWriter::new(dialect, table, &insert);
         Ok(Self {
             target,
             batches,
             writer,
+            projection: plan.map(|p| p.projection),
             loaded: 0,
             asked: Arc::new(AtomicBool::new(false)),
         })
@@ -123,11 +193,90 @@ impl Import {
             return Ok(Step::Done(self.loaded));
         };
         let batch = batch.map_err(|e| DbError::new(e.to_string()))?;
+        // Narrowed here rather than in the reader, because a skipped column
+        // still has to be parsed: a delimited record is found by counting
+        // delimiters, and a column nobody wants is still one the next one is
+        // measured from.
+        let batch = match &self.projection {
+            Some(projection) => batch.project(projection).map_err(arrow_error)?,
+            None => batch,
+        };
         if self.asked.load(Ordering::SeqCst) {
             return Ok(Step::Stopped(self.loaded));
         }
         self.loaded += self.writer.write(self.target.as_ref(), &batch).await?;
         Ok(Step::Moved(self.loaded))
+    }
+}
+
+/// What a mapping works out to: what to read the file as, what to send, and
+/// which columns of the first make up the second.
+///
+/// Three things rather than one because they answer at three different moments —
+/// the reader is built from the first, the INSERT's column list from the second,
+/// and every batch is narrowed by the third — and working them out together is
+/// what keeps them describing the same mapping.
+struct Plan {
+    read: SchemaRef,
+    insert: SchemaRef,
+    projection: Vec<usize>,
+}
+
+impl Plan {
+    fn of(
+        path: &Path,
+        format: Format,
+        columns: &Schema,
+        mapping: &ColumnMapping,
+    ) -> DbResult<Self> {
+        let names = file_columns(path, format)?;
+        if names.len() != mapping.len() {
+            return Err(DbError::new(format!(
+                "the mapping covers {} columns and the file has {}",
+                mapping.len(),
+                names.len()
+            )));
+        }
+
+        let mut read = Vec::with_capacity(names.len());
+        let mut insert = Vec::new();
+        let mut projection = Vec::new();
+        for (index, (name, target)) in names.iter().zip(mapping).enumerate() {
+            let Some(target) = target else {
+                // Named by the file and typed as text: nothing is done with it,
+                // and text is the one type every field parses as, so a column
+                // being skipped cannot fail the import on its way past.
+                read.push(Field::new(name, DataType::Utf8, true));
+                continue;
+            };
+            let column = columns.fields().iter().find(|f| f.name() == target);
+            let Some(column) = column else {
+                return Err(DbError::new(format!(
+                    "the table has no column called {target:?}"
+                )));
+            };
+            // Read under the file's name and the table's type. The name is what
+            // JSON Lines matches on and what a delimited file ignores; the type
+            // is what every format is parsed to.
+            read.push(Field::new(name, column.data_type().clone(), true));
+            // Nullable whatever the table says, because what this schema is used
+            // for is the INSERT's column list — see `Insert::new`. A NOT NULL the
+            // file has nothing for is the server's to refuse, with the column
+            // name in the message.
+            insert.push(column.as_ref().clone().with_nullable(true));
+            projection.push(index);
+        }
+
+        if projection.is_empty() {
+            return Err(DbError::new(
+                "every column of the file is skipped, so there is nothing to read",
+            ));
+        }
+        Ok(Self {
+            read: Arc::new(Schema::new(read)),
+            insert: Arc::new(Schema::new(insert)),
+            projection,
+        })
     }
 }
 

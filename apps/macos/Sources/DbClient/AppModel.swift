@@ -5252,6 +5252,74 @@ final class AppModel {
             && !isExporting && !isImporting
     }
 
+    /// A file that has been read far enough to say what is in it, and where each
+    /// of its columns is going.
+    ///
+    /// On the window rather than on the session, as `isTransferPickerOpen` is and
+    /// for the same reason: what holds it is a sheet, a sheet covers the window,
+    /// and one per tab would leave a plan behind a tab somebody switched away
+    /// from. Nil means no sheet — the presence of a plan is what puts it up.
+    var importPlan: ImportPlan?
+
+    /// The sheet's presence, as a binding. Derived from the plan rather than
+    /// stored beside it: two flags for one state is how a sheet ends up on
+    /// screen over a plan that is no longer there.
+    var isImportSheetOpen: Bool {
+        get { importPlan != nil }
+        set { if !newValue { importPlan = nil } }
+    }
+
+    /// A file about to be read, and where each of its columns goes.
+    struct ImportPlan {
+        let url: URL
+        let format: ExportFormat
+        let table: String
+        /// What the file calls its columns, in the file's order. Read from the
+        /// file itself: a header, the keys of the first JSON object, or a
+        /// Parquet footer.
+        let fileColumns: [String]
+        /// The columns of the table they can go into, as the connection reports
+        /// them — with their types, which is what makes an obviously wrong
+        /// mapping visible in the sheet rather than at the first batch.
+        let tableColumns: [ColumnInfo]
+        /// Parallel to `fileColumns`: the table column each one feeds, or nil for
+        /// one to skip.
+        var mapping: [String?]
+
+        var mapped: Int { mapping.compactMap { $0 }.count }
+    }
+
+    /// Points one of the file's columns at a table column, or at nothing.
+    ///
+    /// The target is taken off whichever other column had it, because a table
+    /// column can only be filled once and two rows pointing at it is a state the
+    /// sheet would have to explain rather than prevent. What that does is swap:
+    /// pointing `remark` at `note` when `comment` already had it leaves
+    /// `comment` skipped, which is visible in the row that changed.
+    func setImportTarget(_ target: String?, forFileColumn index: Int) {
+        guard var plan = importPlan, plan.mapping.indices.contains(index) else { return }
+        if let target {
+            for other in plan.mapping.indices where plan.mapping[other] == target {
+                plan.mapping[other] = nil
+            }
+        }
+        plan.mapping[index] = target
+        importPlan = plan
+    }
+
+    /// Why the sheet's Import button is not ready, or nil when it is.
+    ///
+    /// A sentence rather than a bool, shown beside the button: a disabled
+    /// control with no reason next to it is one somebody presses twice and then
+    /// closes the sheet.
+    var importPlanObstacle: String? {
+        guard let plan = importPlan else { return "Nothing to import." }
+        guard plan.mapped > 0 else {
+            return "Every column is skipped, so there is nothing to read."
+        }
+        return nil
+    }
+
     /// The table a file is read into.
     ///
     /// Nil rather than a placeholder, which is where this parts company with
@@ -5263,12 +5331,19 @@ final class AppModel {
         return "\(selected.schema).\(selected.name)"
     }
 
-    /// Reads `url` into the relation being browsed.
+    /// Reads `url`'s columns and opens the sheet that says where each goes.
     ///
     /// The format comes from the extension rather than from a menu, because the
     /// file already says what it is and a picker would only offer a way to
     /// disagree with it.
-    func importFile(from url: URL) {
+    ///
+    /// A sheet on every import, including the one whose columns already line up.
+    /// What it costs is a click; what it buys is that the last thing anybody sees
+    /// before rows land in a real table is a list of which column goes where.
+    /// Until this existed the columns were matched by position in silence, so a
+    /// file saved with two columns swapped was an import that worked, reported a
+    /// row count, and put the wrong data in.
+    func prepareImport(from url: URL) {
         // Before the table is worked out, because a dropped file arrives here
         // without passing a menu that could have been greyed out. Answering a
         // drop with silence looks like the drop was missed rather than refused,
@@ -5285,14 +5360,80 @@ final class AppModel {
                 "Nothing here reads \(named). Import reads CSV, TSV, JSON Lines and Parquet."
             return
         }
+        guard let relation = selected else { return }
+        // A new import supersedes the previous failure, as a new query does.
+        errorMessage = nil
+        run { db -> ImportSubject in
+            // The table's columns are asked for rather than read off the
+            // Structure pane, which may be showing another relation's or none at
+            // all: what the sheet offers has to be the columns of the table the
+            // rows are going into, and the connection is the one that knows.
+            ImportSubject(
+                file: try Database.fileColumns(format: format, url: url),
+                table: try db.columns(schema: relation.schema, relation: relation.name))
+        } then: { [self] subject in
+            guard !subject.file.isEmpty else {
+                errorMessage = "\(url.lastPathComponent) has no columns to read."
+                return
+            }
+            importPlan = ImportPlan(
+                url: url, format: format, table: table, fileColumns: subject.file,
+                tableColumns: subject.table,
+                mapping: Self.mappingByName(from: subject.file, to: subject.table.map(\.name)))
+        }
+    }
+
+    /// The two column lists a mapping is chosen between, read in one trip.
+    private struct ImportSubject: Sendable {
+        let file: [String]
+        let table: [ColumnInfo]
+    }
+
+    /// Which table column each column of the file feeds, matched by name.
+    ///
+    /// Case-insensitively, because a file exported from one tool and a table
+    /// created in another disagree about case more often than they disagree
+    /// about names. Each table column is taken at most once: a file with `id`
+    /// and `ID` in it is a file where the second one is a question, and a
+    /// question is what an unmapped row asks.
+    ///
+    /// Not by position, which is what the core does when nothing says otherwise.
+    /// Position is right exactly when the file came out of this application, and
+    /// wrong silently every other time.
+    /// `nonisolated` because it is a pure function of two lists and is checked
+    /// as one: `--verify-import` runs off the main actor.
+    nonisolated static func mappingByName(
+        from fileColumns: [String], to tableColumns: [String]
+    ) -> [String?] {
+        var unused = tableColumns
+        return fileColumns.map { column in
+            guard
+                let index = unused.firstIndex(where: {
+                    $0.compare(column, options: .caseInsensitive) == .orderedSame
+                })
+            else { return nil }
+            return unused.remove(at: index)
+        }
+    }
+
+    /// Starts the import the sheet has been describing.
+    ///
+    /// Takes the plan and clears it in the same breath, so the sheet closes on
+    /// the way in: an import that reported a failure behind its own sheet would
+    /// put the banner where nobody could read it.
+    func startPlannedImport() {
+        guard let plan = importPlan, importPlanObstacle == nil else { return }
+        importPlan = nil
+        let (url, format, table) = (plan.url, plan.format, plan.table)
+        let mapping = plan.mapping
         let named = url.lastPathComponent
         let source = session
         isImporting = true
         importStatus = "Reading \(named) into \(table)…"
-        // A new import supersedes the previous failure, as a new query does.
         errorMessage = nil
         run { [self] db -> ImportOutcome in
-            let reading = try db.startImport(from: url, format: format, table: table)
+            let reading = try db.startImport(
+                from: url, format: format, table: table, mapping: mapping)
             // Published before the first step, so Stop has something to press
             // for all of it — the same reason the transfer publishes its handle
             // early. Everything that could have refused this import has already

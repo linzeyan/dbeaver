@@ -597,12 +597,50 @@ final class Database: @unchecked Sendable {
     /// Blocks only for that asking. Everything that can be refused — a missing
     /// file, a format nothing reads, a table that is not there — is refused
     /// here, before the window says it is importing anything.
-    func startImport(from url: URL, format: ExportFormat, table: String) throws -> Import {
+    /// `mapping` has one entry per column of the file, in the file's order: the
+    /// table column it feeds, or nil to skip it. Nil for the whole thing reads
+    /// the file into the table's own columns by position.
+    func startImport(
+        from url: URL, format: ExportFormat, table: String, mapping: [String?]? = nil
+    ) throws -> Import {
         var err: UnsafeMutablePointer<CChar>?
-        guard let reading = db_import_start(handle, format.wireName, url.path, table, &err) else {
+        // Encoded here rather than assembled by hand, because a column name may
+        // contain a quote and a comma and this is the one place that would have
+        // to remember it.
+        let wire = try mapping.map { mapping -> String in
+            let data = try JSONEncoder().encode(mapping)
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw DbError(description: "the column mapping could not be encoded")
+            }
+            return text
+        }
+        let reading: OpaquePointer? =
+            if let wire {
+                wire.withCString {
+                    db_import_start(handle, format.wireName, url.path, table, $0, &err)
+                }
+            } else {
+                db_import_start(handle, format.wireName, url.path, table, nil, &err)
+            }
+        guard let reading else {
             throw DbError(description: Database.take(&err) ?? "import failed")
         }
         return Import(handle: reading)
+    }
+
+    /// What a file calls its own columns, in the file's order.
+    ///
+    /// Static because there is nothing to ask: a file has columns whether or not
+    /// anything is connected. Still off the main thread — it opens the file and
+    /// reads its head, and a Parquet footer is a seek.
+    static func fileColumns(format: ExportFormat, url: URL) throws -> [String] {
+        var err: UnsafeMutablePointer<CChar>?
+        guard let listed = db_file_columns_json(format.wireName, url.path, &err) else {
+            throw DbError(description: take(&err) ?? "could not read the file's columns")
+        }
+        defer { db_string_free(listed) }
+        return try JSONDecoder().decode(
+            [String].self, from: Data(bytes: listed, count: strlen(listed)))
     }
 
     /// Consumes an error out-parameter, releasing the Rust-owned string.
