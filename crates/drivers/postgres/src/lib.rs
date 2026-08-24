@@ -12,7 +12,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, RelationInfo, RelationshipInfo,
+    ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, InfoField, RelationInfo, RelationshipInfo,
     RoutineInfo, SchemaInfo, SequenceInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
@@ -489,6 +489,18 @@ impl PgSource {
     pub async fn routines(&self, schema: &str) -> Result<Vec<RoutineInfo>, PgError> {
         let conn = self.acquire_connection().await?;
         let result = metadata::routines(&conn, schema).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
+    }
+
+    /// What this engine has to say about one relation, beyond its shape.
+    pub async fn table_info(
+        &self,
+        schema: &str,
+        relation: &str,
+    ) -> Result<Vec<InfoField>, PgError> {
+        let conn = self.acquire_connection().await?;
+        let result = metadata::table_info(&conn, schema, relation).await;
         // Connection is automatically returned to pool when conn goes out of scope
         result
     }

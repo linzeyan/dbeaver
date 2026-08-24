@@ -129,6 +129,39 @@ pub struct RoutineInfo {
     pub language: Option<String>,
 }
 
+/// One line of the Structure tab's `Info` section: a label and what it says.
+///
+/// An open list rather than a struct of named fields, which is the opposite of
+/// the choice [`RelationKind`] documents — and for the reason that choice gives.
+/// A closed set is what a front end needs when it *switches* on the value: the
+/// sidebar picks an icon from the kind, so a free string there would mean
+/// teaching it every database's spelling. Nothing switches on anything here.
+/// These are read.
+///
+/// What a struct would cost is the union of fifteen engines' vocabularies:
+/// MySQL's storage engine and collation, PostgreSQL's owner and tablespace,
+/// ClickHouse's sorting key, each of them `None` on the fourteen drivers that
+/// have no such concept. A driver says what its engine has to say about a table
+/// and says nothing where there is nothing.
+///
+/// No capability flag, unlike `reports_routines`. That flag exists because a
+/// navigator would otherwise draw an empty `Routines` group and a reader could
+/// not tell "this schema has none" from "this driver never looked". An empty
+/// `Info` is a section that is not offered, and there is no claim in it for
+/// either answer to contradict.
+#[derive(Debug, Clone, Serialize)]
+pub struct InfoField {
+    /// As it goes on screen: "Owner", "Storage engine", "Size". The driver
+    /// writes it, because the driver is the only side that knows what its engine
+    /// calls the thing.
+    pub label: String,
+
+    /// Already rendered. A size is "45 MB" and not a byte count, because the
+    /// server has a function that formats one and this side would be
+    /// reimplementing it in every driver's units.
+    pub value: String,
+}
+
 /// One sequence in a schema.
 ///
 /// Everything a sequence is, in one struct, and no second call for a body: a

@@ -10,9 +10,9 @@
 //! side trivial.
 
 use dbconn::{
-    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, RelationInfo,
-    RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, SequenceInfo,
-    TriggerInfo, UniqueKeyInfo,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, InfoField,
+    RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo,
+    SequenceInfo, TriggerInfo, UniqueKeyInfo,
 };
 use tokio_postgres::Client;
 
@@ -266,6 +266,99 @@ pub(crate) async fn routines(client: &Client, schema: &str) -> Result<Vec<Routin
             language: r.get(5),
         })
         .collect())
+}
+
+/// What PostgreSQL has to say about one relation.
+///
+/// Five facts, each left out where the server answers nothing rather than
+/// printed as a dash — a row that says "Owner: —" is a row claiming the table
+/// has no owner.
+///
+/// The row estimate is here as well as on the navigator row, and it is here with
+/// the thing the navigator has no room for: when it was last taken. `reltuples`
+/// is whatever the last ANALYZE saw and every write since has drifted from it,
+/// so "≈5,000, analysed 3 days ago" is the answer to "why does the count in the
+/// grid not match the sidebar" — which is otherwise a bug report.
+///
+/// `pg_total_relation_size` rather than `pg_relation_size`: the number somebody
+/// wants when they ask how big a table is includes its indexes and its TOAST,
+/// which for a wide table is most of it.
+pub(crate) async fn table_info(
+    client: &Client,
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<InfoField>, PgError> {
+    let rows = client
+        .query(
+            "SELECT pg_catalog.pg_get_userbyid(c.relowner), \
+                    pg_catalog.pg_size_pretty(pg_catalog.pg_total_relation_size(c.oid)), \
+                    c.relpersistence::text, \
+                    pg_catalog.obj_description(c.oid, 'pg_class'), \
+                    GREATEST(s.last_analyze, s.last_autoanalyze)::text \
+             FROM pg_catalog.pg_class c \
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+             LEFT JOIN pg_catalog.pg_stat_all_tables s ON s.relid = c.oid \
+             WHERE n.nspname = $1 AND c.relname = $2",
+            &[&schema, &relation],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    let owner: Option<String> = row.get(0);
+    if let Some(owner) = owner {
+        out.push(InfoField {
+            label: "Owner".to_string(),
+            value: owner,
+        });
+    }
+    // Null for a view, which occupies nothing: the size of a view is the size of
+    // the query, and printing "0 bytes" would say it is an empty table.
+    let size: Option<String> = row.get(1);
+    if let Some(size) = size {
+        out.push(InfoField {
+            label: "Size".to_string(),
+            value: size,
+        });
+    }
+    // Only when it is not the ordinary kind. Every table is permanent, so a row
+    // saying so on every table is a row nobody reads; an unlogged table is not
+    // replicated and does not survive a crash, which is worth a line.
+    let persistence: Option<String> = row.get(2);
+    if let Some(word) = persistence.as_deref().and_then(persistence_word) {
+        out.push(InfoField {
+            label: "Persistence".to_string(),
+            value: word.to_string(),
+        });
+    }
+    let analyzed: Option<String> = row.get(4);
+    if let Some(analyzed) = analyzed {
+        out.push(InfoField {
+            label: "Row estimate taken".to_string(),
+            value: analyzed,
+        });
+    }
+    // Last, because it is the only one that can be a paragraph.
+    let comment: Option<String> = row.get(3);
+    if let Some(comment) = comment {
+        out.push(InfoField {
+            label: "Comment".to_string(),
+            value: comment,
+        });
+    }
+    Ok(out)
+}
+
+/// `relpersistence`, or `None` for the permanent tables that are nearly all of
+/// them.
+fn persistence_word(code: &str) -> Option<&'static str> {
+    match code {
+        "u" => Some("unlogged — not replicated, and emptied by a crash"),
+        "t" => Some("temporary — this session only"),
+        _ => None,
+    }
 }
 
 /// The sequences in one schema, from `pg_sequences`.

@@ -88,6 +88,11 @@ CREATE TABLE bench_child (
   CONSTRAINT bench_child_order_line_uniq UNIQUE (order_id, line_no, sku)
 );
 
+-- The only relation here carrying a comment, so the Info pane's one
+-- paragraph-shaped field is a real row rather than a hypothetical.
+COMMENT ON TABLE bench_child IS
+  'Order lines. One row per line of an order, keyed by (order_id, line_no).';
+
 CREATE OR REPLACE FUNCTION bench_child_touch() RETURNS trigger AS $fn$
 BEGIN
   RETURN NEW;

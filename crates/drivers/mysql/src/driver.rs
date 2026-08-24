@@ -9,7 +9,7 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo, InfoField,
     RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, ServerInfo, TriggerInfo,
     TxStep, UniqueKeyInfo, scalar_text,
 };
@@ -80,6 +80,10 @@ impl Driver for MySqlSource {
 
     async fn routine_definition(&self, schema: &str, id: &str) -> DbResult<Option<String>> {
         Ok(MySqlSource::routine_definition(self, schema, id).await?)
+    }
+
+    async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
+        Ok(MySqlSource::table_info(self, schema, relation).await?)
     }
 
     async fn columns(&self, schema: &str, relation: &str) -> DbResult<Vec<ColumnInfo>> {

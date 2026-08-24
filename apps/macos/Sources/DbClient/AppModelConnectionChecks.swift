@@ -56,6 +56,7 @@ enum AppModelConnectionChecks {
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
         checkTheDdlSectionIsThereFromTheFirstFrameOfTheLoad()
+        checkTheInfoSectionAppearsOnlyWhereTheEngineSaidSomething()
         checkTheLevelIsNamedByTheCapabilityAndNotTheScheme()
         checkTheTabSaysWhatItIsWithoutSayingTheSecret()
         checkOpeningAnotherDatabaseKeepsEverythingElseAboutTheConnection()
@@ -848,6 +849,52 @@ enum AppModelConnectionChecks {
             expect(
                 model.structureSections.contains(.ddl), false,
                 "settled with no statement, the section is not offered")
+        }
+    }
+
+    /// The Info section is offered exactly when the engine said something.
+    ///
+    /// The section has no capability behind it on purpose: every engine can
+    /// describe some relations and none of them can describe all of them, so
+    /// what decides is whether this relation came back with fields. An always-on
+    /// section would put "Nothing else to report" in the strip for every SQLite
+    /// table — a tab offering to answer a question and then declining — and one
+    /// keyed off the driver would hide PostgreSQL's owner and size on the view
+    /// next to the table that showed them.
+    ///
+    /// The count stays nil either way. Info is not a list of things the relation
+    /// has, and a number beside it would read as one.
+    private static func checkTheInfoSectionAppearsOnlyWhereTheEngineSaidSomething() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            model.sessions[0].selected = RelationInfo(
+                schema: "public", name: "orders", kind: .table, estimatedRows: nil)
+            expect(
+                model.structureSections.contains(.info), false,
+                "an engine that added nothing is not offered as a section")
+
+            model.sessions[0].tableInfo = [
+                InfoField(label: "Owner", value: "bench"),
+                InfoField(label: "Size", value: "142 MB")
+            ]
+            expect(
+                model.structureSections.contains(.info), true,
+                "two fields make the section worth offering")
+            expect(
+                model.structureSections.first, .info,
+                "and it is offered first, ahead of the lists")
+            expect(
+                model.structureDetailCount(.info) == nil, true,
+                "with no count: it is a description, not a list of two things")
+
+            // The state the load passes through, where every section is empty
+            // because nothing has come back yet. DDL is offered here on a
+            // dialect the core writes; Info has no such promise to make.
+            model.sessions[0].tableInfo = []
+            model.sessions[0].isBusy = true
+            expect(
+                model.structureSections.contains(.info), false,
+                "and nothing is claimed for a relation still being read")
         }
     }
 

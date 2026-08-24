@@ -471,6 +471,25 @@ struct TriggerInfo: Decodable, Hashable, Identifiable {
     }
 }
 
+/// One line of what the engine has to say about a relation beyond its columns.
+///
+/// Two strings, both already formatted by the driver: PostgreSQL's "142 MB"
+/// comes out of `pg_size_pretty` and MySQL's out of `information_schema`, and
+/// the labels are the driver's words for its own concepts — "Storage engine"
+/// means nothing on PostgreSQL and "Owner" is not a thing MySQL records here.
+/// Modelling this as a struct with a field per fact would be this side deciding
+/// which facts exist, and would leave every engine's own answer with nowhere to
+/// go.
+///
+/// The order is the driver's too, so a pane reads in the order somebody who
+/// knows the product would say it.
+struct InfoField: Decodable, Hashable, Identifiable {
+    let label: String
+    let value: String
+
+    var id: String { label }
+}
+
 struct ColumnInfo: Decodable, Hashable, Identifiable {
     let name: String
     let dataType: String
