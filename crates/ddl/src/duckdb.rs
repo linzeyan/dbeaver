@@ -21,8 +21,9 @@
 //!   a view. This crate has no generic builder and does not write comments in
 //!   place of answers, so both are refused with a message naming the object.
 
-use crate::Renderer;
+use crate::{ColumnKind, Renderer, create_table_text};
 use arrow::array::{Array, StringArray};
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo, RelationKind};
 
@@ -46,6 +47,11 @@ impl Renderer for DuckDb {
                 qualified(&relation.schema, &relation.name)
             ))),
         }
+    }
+
+    /// DuckDB's words for the kinds a file can ask for.
+    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
+        create_table_text(&dbsql::DUCKDB, table, columns, word, "")
     }
 }
 
@@ -145,4 +151,16 @@ fn qualified(schema: &str, name: &str) -> String {
         dbsql::DUCKDB.quote(schema),
         dbsql::DUCKDB.quote(name)
     )
+}
+
+fn word(kind: ColumnKind) -> String {
+    match kind {
+        ColumnKind::Bool => "BOOLEAN".to_string(),
+        ColumnKind::Int => "BIGINT".to_string(),
+        ColumnKind::Float => "DOUBLE".to_string(),
+        ColumnKind::Decimal(precision, scale) => format!("DECIMAL({precision}, {scale})"),
+        ColumnKind::Text => "VARCHAR".to_string(),
+        ColumnKind::Date => "DATE".to_string(),
+        ColumnKind::Timestamp => "TIMESTAMP".to_string(),
+    }
 }

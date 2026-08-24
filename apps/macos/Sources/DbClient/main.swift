@@ -888,6 +888,47 @@ func openImportSheet(model: AppModel, from path: String) {
     poll()
 }
 
+/// `--create-table <file>` opens the Create Table sheet on a file and leaves it
+/// there.
+///
+/// The companion to `--map-import`, and for the same reason: the sheet is behind
+/// a menu item and an open panel, and a capture can click neither. It presses
+/// nothing either — what is being photographed is the statement before it runs.
+let createTablePath = argument("--create-table")
+
+/// Drives `--create-table`. Waits for the statement as well as the sheet: an
+/// empty pane is what this looks like a fifth of a second before it is worth
+/// photographing.
+@MainActor
+func openCreateTableSheet(model: AppModel, from path: String) {
+    let url = URL(fileURLWithPath: path)
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("create table sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.createPlan?.statement {
+            fputs("create table\n\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("create table sheet timed out\n", stderr)
+            exit(1)
+        }
+        if !asked, model.canCreateTableFromFile {
+            asked = true
+            model.prepareCreateTable(from: url)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// `--refresh-after 4` reloads the navigator that many seconds in, printing its
 /// contents before and after, then exits.
 ///
@@ -1456,6 +1497,13 @@ func probeImport(model: AppModel) {
     let table = "import_probe"
     let path = FileManager.default.temporaryDirectory
         .appendingPathComponent("import-probe-\(ProcessInfo.processInfo.processIdentifier).csv")
+    /// The table the window makes for itself, and the small file it makes it
+    /// from. Separate from the pair above: what the first three phases are about
+    /// is a table nobody wrote a `CREATE TABLE` for, and the rest of the probe
+    /// needs a table whose columns are deliberately in the wrong order.
+    let made = "create_probe"
+    let madeFrom = FileManager.default.temporaryDirectory
+        .appendingPathComponent("create-probe-\(ProcessInfo.processInfo.processIdentifier).csv")
 
     /// Runs `sql` on a connection of its own, for the reason the transfer probe
     /// opens one: the window's connection is the one doing the importing, and a
@@ -1468,6 +1516,30 @@ func probeImport(model: AppModel) {
         return query.rowsAffected
     }
 
+    /// Drops a fixture table on a connection of its own, waiting a bounded time
+    /// for the lock.
+    ///
+    /// A browse is a server-side cursor inside an open transaction, so the window
+    /// holds a lock on every table it has shown until that cursor is closed.
+    /// `SET lock_timeout` — on the same connection, which is why this does not go
+    /// through `ran` — turns an indefinite wait into an error: a probe that hangs
+    /// on its own cleanup is a `make test-import` that never returns, which is
+    /// worse than a table left behind and a line saying so.
+    func dropped(_ relation: String) {
+        guard let db = try? Database(connString: conn) else {
+            fputs("import: nothing to drop \(relation) with\n", stderr)
+            return
+        }
+        do {
+            let limit = try db.query("SET lock_timeout = '20s'", batchRows: 1)
+            while try limit.nextBatch() != nil {}
+            let drop = try db.query("DROP TABLE IF EXISTS \(relation)", batchRows: 1)
+            while try drop.nextBatch() != nil {}
+        } catch {
+            fputs("import: \(relation) was left behind: \(error)\n", stderr)
+        }
+    }
+
     func fail(_ why: String) -> Never {
         fputs("import FAIL: \(why)\n", stderr)
         fputs("  status=\(model.statusLine) error=\(model.errorMessage ?? "(none)")\n", stderr)
@@ -1476,9 +1548,9 @@ func probeImport(model: AppModel) {
 
     /// Empties the table and reports what was in it — a DELETE rather than a
     /// count for the reason the transfer probe gives.
-    func emptied(_ what: String) -> Int {
-        guard let rows = ran("DELETE FROM \(table)") else {
-            fail("could not read \(table) back")
+    func emptied(_ what: String, from relation: String = table) -> Int {
+        guard let rows = ran("DELETE FROM \(relation)") else {
+            fail("could not read \(relation) back")
         }
         fputs("import \(what): \(rows) rows had arrived\n", stderr)
         return rows
@@ -1493,11 +1565,159 @@ func probeImport(model: AppModel) {
     /// only at the end would leave one.
     var progress: Set<String> = []
 
-    enum Phase { case building, planning, reading, restarting, replanning, stopping, stopped }
-    var phase = Phase.building
+    enum Phase {
+        case creating, naming, renaming, filling, filled
+        case building, planning, reading, restarting, replanning, stopping, stopped
+    }
+    var phase = Phase.creating
 
     func poll() {
         switch phase {
+        case .creating:
+            guard settled() else { return again() }
+            guard ran("DROP TABLE IF EXISTS \(made)") != nil else {
+                fail("could not clear \(made)")
+            }
+            // Four columns and four inferred types, with a blank row to say the
+            // columns came out nullable. The second row is empty in three of the
+            // four, which is what a table built with NOT NULL anywhere would
+            // refuse half way through the import that created it.
+            let body = """
+                id,note,seen_at,ratio
+                1,hello,2026-08-24 09:08:19,2.5
+                2,,,
+
+                """
+            do {
+                try body.write(to: madeFrom, atomically: true, encoding: .utf8)
+            } catch {
+                fail("could not write the file to make a table from: \(error)")
+            }
+            guard model.canCreateTableFromFile else {
+                fail("a live connection cannot make a table from a file")
+            }
+            model.prepareCreateTable(from: madeFrom)
+            phase = .naming
+            return again()
+
+        case .naming:
+            // The statement is waited for rather than assumed: it is written by
+            // the connection, and until it has answered there is nothing to run.
+            guard let plan = model.createPlan else {
+                guard model.errorMessage == nil else {
+                    fail("no table could be written for the file: \(model.errorMessage ?? "")")
+                }
+                return again()
+            }
+            guard let statement = plan.statement else { return again() }
+            // The name the file's own is turned into, before it is replaced with
+            // one this probe can drop afterwards. A temporary file's stem carries
+            // hyphens, and a hyphen in an unquoted name is a subtraction.
+            guard plan.name.hasPrefix("create_probe_") else {
+                fail("the file's name was not made into a name a table can have: \(plan.name)")
+            }
+            guard plan.name != made else { fail("the probe is not renaming anything") }
+            guard statement.contains("public.\(plan.name)") else {
+                fail("the statement does not name the table on the sheet: \(statement)")
+            }
+            // Renamed, which re-asks the connection. The name is typed on this
+            // side and the statement is written on the other, so for a moment
+            // there is no statement at all — which is the point of the phase
+            // below: `startPlannedCreate` before it arrives must run nothing.
+            model.setCreateTableTarget(name: made)
+            guard model.createPlan?.statement == nil else {
+                fail("a renamed table already had a statement, so nothing was re-asked")
+            }
+            model.startPlannedCreate()
+            guard model.createPlan != nil, !model.isBusy else {
+                fail("Create ran a statement written for the previous name")
+            }
+            phase = .renaming
+            return again()
+
+        case .renaming:
+            guard let renamed = model.createPlan?.statement else {
+                guard model.errorMessage == nil else {
+                    fail("the renamed table could not be written: \(model.errorMessage ?? "")")
+                }
+                return again()
+            }
+            guard renamed.contains("CREATE TABLE public.\(made) (") else {
+                fail("the statement is not about the table the sheet now names:\n\(renamed)")
+            }
+            // The four kinds a delimited file is read as, in PostgreSQL's words.
+            for word in ["id bigint", "note text", "seen_at timestamp", "ratio double precision"] {
+                guard renamed.contains(word) else {
+                    fail("the statement is missing `\(word)`:\n\(renamed)")
+                }
+            }
+            fputs("import made:\n\(renamed)\n", stderr)
+            model.startPlannedCreate()
+            phase = .filling
+            return again()
+
+        case .filling:
+            // The import sheet, opened by the create rather than by a menu. This
+            // is the whole of the chain: a table nobody typed, offered the file
+            // it was shaped from.
+            guard let plan = model.importPlan else {
+                guard model.errorMessage == nil else {
+                    fail("the table was not made: \(model.errorMessage ?? "")")
+                }
+                return again()
+            }
+            guard plan.table == "public.\(made)" else {
+                fail("the file was offered to \(plan.table) rather than to the table just made")
+            }
+            guard plan.mapping == ["id", "note", "seen_at", "ratio"] else {
+                fail(
+                    "a table made from this file does not match it column for column: \(plan.mapping)"
+                )
+            }
+            guard model.selected?.name == made else {
+                fail(
+                    "the window is not showing the table it just made: \(model.selected?.name ?? "nothing")"
+                )
+            }
+            guard
+                model.sessions[0].relations["public"]?.contains(where: { $0.name == made }) == true
+            else {
+                fail("the navigator has not heard of the table that was just made")
+            }
+            model.startPlannedImport()
+            phase = .filled
+            return again()
+
+        case .filled:
+            guard !model.isImporting, settled() else { return again() }
+            guard model.errorMessage == nil else {
+                fail(
+                    "the file would not go into the table made for it: \(model.errorMessage ?? "")")
+            }
+            // Deleted by a predicate the inferred types have to be right for: a
+            // `timestamp` compared against a timestamp and a `double precision`
+            // against a number. Had every column come out as text, this matches
+            // nothing and the count below is 2 rather than 1.
+            guard
+                let typed = ran(
+                    "DELETE FROM \(made) WHERE id = 1 AND ratio = 2.5 "
+                        + "AND seen_at = timestamp '2026-08-24 09:08:19'"), typed == 1
+            else {
+                fail("the values did not land in columns of the types that were inferred")
+            }
+            let rest = emptied("into the table it made", from: made)
+            guard rest == 1 else {
+                fail("the second row of the file did not arrive: \(rest) rows were left")
+            }
+            // Not dropped here. The window is browsing this table, and a browse
+            // is a server-side cursor inside an open transaction — a DROP from
+            // another connection waits on that lock until the cursor is closed,
+            // which is what selecting a different table does. It is dropped at
+            // the end, several tables later.
+            try? FileManager.default.removeItem(at: madeFrom)
+            phase = .building
+            return again()
+
         case .building:
             guard settled() else { return again() }
             guard ran("DROP TABLE IF EXISTS \(table)") != nil,
@@ -1615,7 +1835,12 @@ func probeImport(model: AppModel) {
                 fail("Stop stopped nothing: all \(partial) rows were read")
             }
             fputs("import stopped: \(model.importStatus)\n", stderr)
-            _ = ran("DROP TABLE IF EXISTS \(table)")
+            // The connection first. Both tables below have been browsed, and a
+            // browse holds its cursor — and the lock under it — until something
+            // closes it. This is what closes it.
+            model.closeSession(0)
+            dropped(table)
+            dropped(made)
             try? FileManager.default.removeItem(at: path)
             exit(0)
         }
@@ -3316,6 +3541,9 @@ if benchMode {
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let mapImportPath { openImportSheet(model: model, from: mapImportPath) }
+        if let createTablePath {
+            openCreateTableSheet(model: model, from: createTablePath)
+        }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
 }

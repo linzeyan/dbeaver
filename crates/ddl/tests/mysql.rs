@@ -493,3 +493,80 @@ async fn a_view_renders_without_the_definer_it_was_made_with() {
     assert!(!ddl.contains("DEFINER"), "{ddl}");
     assert!(ddl.contains("from `parts`"), "{ddl}");
 }
+
+// ---------------------------------------------------------------------------
+// A table made for a file
+// ---------------------------------------------------------------------------
+
+/// The seven kinds a file can ask for, and a name that has to be quoted.
+fn a_files_columns() -> arrow::datatypes::Schema {
+    use arrow::datatypes::{DataType, Field, TimeUnit};
+    arrow::datatypes::Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("Order Date", DataType::Date32, true),
+        Field::new("amount", DataType::Decimal128(12, 2), true),
+        Field::new("ratio", DataType::Float64, true),
+        Field::new("paid", DataType::Boolean, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new(
+            "seen_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+    ])
+}
+
+/// A statement run for its effect, drained so that it has finished before the
+/// next one starts.
+async fn run(source: &impl dbconn::Driver, statement: &str) {
+    let mut stream = source
+        .query(statement, 1)
+        .await
+        .unwrap_or_else(|e| panic!("the server refused this:\n{statement}\n{e}"));
+    while stream
+        .next_batch()
+        .await
+        .unwrap_or_else(|e| panic!("reading back from {statement}: {e}"))
+        .is_some()
+    {}
+}
+
+/// The statement written for a file's columns is one MySQL runs.
+///
+/// As with PostgreSQL, what is checked is the column list read back out of the
+/// table that was made. `DATETIME` is the word this cares about most: `TIMESTAMP`
+/// would also have been accepted here and would have held nothing before 1970.
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn a_table_made_for_a_files_columns_is_one_mysql_runs() {
+    let source = live().await;
+    let statement = dbddl::create_table(
+        &dbsql::MYSQL,
+        "dbclient_ddl.ddl_from_a_file",
+        &a_files_columns(),
+    )
+    .expect("MySQL would not write a table for a file's columns");
+    run(&source, "DROP TABLE IF EXISTS dbclient_ddl.ddl_from_a_file").await;
+    run(&source, &statement).await;
+
+    let columns: Vec<(String, String)> = source
+        .columns("dbclient_ddl", "ddl_from_a_file")
+        .await
+        .expect("listing the new table's columns failed")
+        .into_iter()
+        .map(|column| (column.name, column.data_type))
+        .collect();
+    run(&source, "DROP TABLE dbclient_ddl.ddl_from_a_file").await;
+    assert_eq!(
+        columns,
+        vec![
+            ("id".to_string(), "bigint".to_string()),
+            ("Order Date".to_string(), "date".to_string()),
+            ("amount".to_string(), "decimal(12,2)".to_string()),
+            ("ratio".to_string(), "double".to_string()),
+            ("paid".to_string(), "tinyint(1)".to_string()),
+            ("note".to_string(), "text".to_string()),
+            ("seen_at".to_string(), "datetime".to_string()),
+        ]
+    );
+}

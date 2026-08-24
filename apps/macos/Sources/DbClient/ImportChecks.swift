@@ -25,6 +25,7 @@ enum ImportChecks {
         checkACaseDifferenceIsNotADifferentColumn()
         checkNoTableColumnIsFedTwice()
         checkAColumnWithNowhereToGoIsSkipped()
+        checkAFileNameBecomesSomethingATableCanBeCalled()
         if failures == 0 {
             fputs("import: all checks passed\n", stderr)
         } else {
@@ -121,6 +122,30 @@ enum ImportChecks {
             AppModel.mappingByName(from: ["id", "extra", "note"], to: ["id", "note"]),
             ["id", nil, "note"],
             "an unmatched column is skipped and the rest still land")
+    }
+
+    /// The name a file suggests for the table made from it.
+    ///
+    /// The statement writes the name as given and unquoted, which is what makes
+    /// this a rule rather than a nicety: `sales report (2026).csv` proposed
+    /// verbatim is a `CREATE TABLE` of several tokens that the server refuses,
+    /// and the refusal arrives with the file's name in it and no hint that the
+    /// name is the problem. A file whose stem is already a name is left alone —
+    /// this must not "tidy" `bench_child` into something else.
+    private static func checkAFileNameBecomesSomethingATableCanBeCalled() {
+        let name = { (file: String) in
+            AppModel.tableName(for: URL(fileURLWithPath: "/tmp/\(file)"))
+        }
+        expect(name("orders.csv"), "orders", "a name that is already one is untouched")
+        expect(name("bench_child.parquet"), "bench_child", "underscores survive")
+        expect(
+            name("sales report (2026).csv"), "sales_report__2026_",
+            "spaces and brackets cannot be left in an unquoted name")
+        expect(name("2026-totals.csv"), "t_2026_totals", "a name cannot begin with a digit")
+        expect(
+            name("data.tar.gz"), "data_tar",
+            "a dot left in would name the table in a schema called data")
+        expect(name(".csv"), "_csv", "a file that is nothing but an extension still gets a name")
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

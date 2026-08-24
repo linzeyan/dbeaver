@@ -18,8 +18,9 @@
 //!   CREATE TABLE` for its own tables perfectly well, so they are read like any
 //!   others.
 
-use crate::Renderer;
+use crate::{ColumnKind, Renderer, create_table_text};
 use arrow::array::{Array, StringArray};
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo};
 
@@ -77,6 +78,25 @@ impl Renderer for Clickhouse {
         // same string as one showing it.
         Ok(statements.join("\n").trim_end().to_string())
     }
+
+    /// ClickHouse's words for the kinds a file can ask for.
+    ///
+    /// Every column `Nullable`, and an engine after the bracket. ClickHouse has
+    /// neither by default: a plain `Int64` column refuses a NULL rather than
+    /// storing one, and a table with no engine is not a table it will make. The
+    /// engine is `MergeTree` ordered by nothing, which is the shape that makes no
+    /// claim about the data — a sort key guessed from a file would be a
+    /// performance decision taken on somebody's behalf and written into the
+    /// table's definition.
+    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
+        create_table_text(
+            &dbsql::CLICKHOUSE,
+            table,
+            columns,
+            word,
+            "\nENGINE = MergeTree\nORDER BY tuple()",
+        )
+    }
 }
 
 /// A statement is one row, so this decides only how large a buffer holds it.
@@ -89,4 +109,19 @@ fn qualified(schema: &str, name: &str) -> String {
         dbsql::CLICKHOUSE.quote(schema),
         dbsql::CLICKHOUSE.quote(name)
     )
+}
+
+fn word(kind: ColumnKind) -> String {
+    let inner = match kind {
+        ColumnKind::Bool => "Bool".to_string(),
+        ColumnKind::Int => "Int64".to_string(),
+        ColumnKind::Float => "Float64".to_string(),
+        ColumnKind::Decimal(precision, scale) => format!("Decimal({precision}, {scale})"),
+        ColumnKind::Text => "String".to_string(),
+        ColumnKind::Date => "Date32".to_string(),
+        // Microseconds, which is the precision the inference asks for and the
+        // most a `DateTime64` can be given without losing years at either end.
+        ColumnKind::Timestamp => "DateTime64(6)".to_string(),
+    };
+    format!("Nullable({inner})")
 }

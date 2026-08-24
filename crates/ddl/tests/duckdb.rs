@@ -363,3 +363,58 @@ async fn a_view_is_the_statement_duckdb_stored() {
     assert!(ddl.starts_with("CREATE VIEW open_parts AS"), "{ddl}");
     assert!(ddl.contains("qty > 0"), "{ddl}");
 }
+
+// ---------------------------------------------------------------------------
+// A table made for a file
+// ---------------------------------------------------------------------------
+
+/// The seven kinds a file can ask for, and a name that has to be quoted.
+fn a_files_columns() -> arrow::datatypes::Schema {
+    use arrow::datatypes::{DataType, Field, TimeUnit};
+    arrow::datatypes::Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("Order Date", DataType::Date32, true),
+        Field::new("amount", DataType::Decimal128(12, 2), true),
+        Field::new("ratio", DataType::Float64, true),
+        Field::new("paid", DataType::Boolean, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new(
+            "seen_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+    ])
+}
+
+/// The statement written for a file's columns is one DuckDB runs.
+///
+/// The golden strings in the crate's own tests say what each database is *told*;
+/// only the database says whether it understood. DuckDB is a library in this
+/// process, so this one can be asked for real, and what it is asked for is the
+/// column list read back out of the table it made.
+#[tokio::test]
+async fn a_table_made_for_a_files_columns_is_one_duckdb_runs() {
+    let statement = dbddl::create_table(&dbsql::DUCKDB, "landed", &a_files_columns())
+        .expect("DuckDB would not write a table for a file's columns");
+    let file = File::holding(&statement);
+    let source = file.connect().await;
+    let columns: Vec<(String, String)> = source
+        .columns("main", "landed")
+        .await
+        .expect("listing the new table's columns failed")
+        .into_iter()
+        .map(|column| (column.name, column.data_type))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            ("id".to_string(), "BIGINT".to_string()),
+            ("Order Date".to_string(), "DATE".to_string()),
+            ("amount".to_string(), "DECIMAL(12,2)".to_string()),
+            ("ratio".to_string(), "DOUBLE".to_string()),
+            ("paid".to_string(), "BOOLEAN".to_string()),
+            ("note".to_string(), "VARCHAR".to_string()),
+            ("seen_at".to_string(), "TIMESTAMP".to_string()),
+        ]
+    );
+}

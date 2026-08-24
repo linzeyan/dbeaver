@@ -72,8 +72,8 @@ pub type ColumnMapping = Vec<Option<String>>;
 pub fn file_columns(path: &Path, format: Format) -> DbResult<Vec<String>> {
     let file = File::open(path).map_err(|e| DbError::new(e.to_string()))?;
     let names = match format {
-        Format::Csv => delimited::header_names(file, b',').map_err(arrow_error)?,
-        Format::Tsv => delimited::header_names(file, b'\t').map_err(arrow_error)?,
+        Format::Csv => delimited::head(file, b',', 0).map_err(arrow_error)?.0,
+        Format::Tsv => delimited::head(file, b'\t', 0).map_err(arrow_error)?.0,
         // Inferred from one line rather than from the whole file: what is wanted
         // here is the keys, and a second line that carries a key the first did
         // not is a file this reader could not have imported anyway — the schema
