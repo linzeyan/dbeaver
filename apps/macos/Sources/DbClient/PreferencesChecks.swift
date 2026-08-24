@@ -302,27 +302,29 @@ enum PreferencesChecks {
             "/Users/someone/.config", "and so is an empty one")
     }
 
-    /// The panel is tall enough for the sentence about iCloud being unavailable.
+    /// The sentence about iCloud being unavailable is laid out with the rows.
     ///
-    /// `SettingsWindow` measures this view once and sizes the panel to what it
-    /// measured, so anything that can appear in the view has to be in it while it
-    /// is being measured. The first version of the caveat arrived from a `.task`
-    /// and only under one of the two answers, which meant it was laid out below
-    /// the bottom edge of a window that had already been sized — a warning
+    /// Measured with `scrolls: false`, which is the view as tall as it wants to
+    /// be. The panel itself is one fixed height and scrolls what does not fit,
+    /// so its own height would report the same number whatever the rows did.
+    /// The first version of the caveat arrived from a `.task` and only under
+    /// one of the two answers, so it was not in the layout at all — a warning
     /// nobody could read. Asserted as a height rather than by eye because the
-    /// panel is 460pt wide and the capture tool only photographs the main window.
+    /// panel is 460pt wide and the capture tool photographs it only when it is
+    /// told the window's title.
     private static func checkTheSettingsPanelHasRoomForTheICloudCaveat() {
         let preferences = scratch()
         let quiet = NSHostingView(
-            rootView: SettingsView(preferences: preferences, syncCaveat: nil))
+            rootView: SettingsView(preferences: preferences, syncCaveat: nil, scrolls: false))
         let warned = NSHostingView(
             rootView: SettingsView(
                 preferences: preferences,
                 syncCaveat: ConnectionStore.syncCaveat() ?? "Two lines of explanation about "
-                    + "which half of syncing this build cannot do and what happens instead."))
+                    + "which half of syncing this build cannot do and what happens instead.",
+                scrolls: false))
         expect(
             warned.fittingSize.height > quiet.fittingSize.height, true,
-            "the caveat is inside the height the panel is sized to")
+            "the caveat is inside the height the column asks for")
     }
 
     /// The Editor pane is in the switcher, and switching to it shows the six
@@ -339,9 +341,11 @@ enum PreferencesChecks {
             "the Editor pane is one the switcher offers")
         let preferences = scratch()
         let editor = NSHostingView(
-            rootView: SettingsView(preferences: preferences, syncCaveat: nil, pane: .editor))
+            rootView: SettingsView(
+                preferences: preferences, syncCaveat: nil, scrolls: false, pane: .editor))
         let sidebar = NSHostingView(
-            rootView: SettingsView(preferences: preferences, syncCaveat: nil, pane: .sidebar))
+            rootView: SettingsView(
+                preferences: preferences, syncCaveat: nil, scrolls: false, pane: .sidebar))
         expect(
             editor.fittingSize.height > sidebar.fittingSize.height, true,
             "six settings stand taller than one — the pane's case is not empty")

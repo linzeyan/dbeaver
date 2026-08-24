@@ -23,8 +23,13 @@ final class SettingsWindow {
             window.makeKeyAndOrderFront(nil)
             return
         }
+        // One size for every pane, and the Editor pane is taller than it: the
+        // column scrolls inside the window rather than the window growing to
+        // meet it. A panel that resized as the switcher moved put the row under
+        // the pointer somewhere else on every click, and the tallest pane had
+        // grown past the bottom edge of a laptop screen.
         let panel = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 10),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false)
@@ -38,31 +43,13 @@ final class SettingsWindow {
         let view = NSHostingView(
             rootView: SettingsView(
                 preferences: preferences, syncCaveat: ConnectionStore.syncCaveat(),
-                onPaneChange: { [weak self] in self?.fitToPane() }, pane: pane))
-        // The window takes its height from the rows rather than a number written
-        // here, so an explanation that wraps to a third line is not clipped.
-        panel.setContentSize(view.fittingSize)
+                pane: pane))
         panel.contentView = view
+        // Centred once, when the window is made. Every later ⌘, raises the
+        // window that is already there, wherever the person left it.
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         window = panel
-    }
-
-    /// Re-takes the panel's height from the pane now showing.
-    ///
-    /// The panes are not the same height — Grid holds three settings and
-    /// Sidebar one — and a window sized once to the tallest of them would stand
-    /// two thirds empty on the others.
-    ///
-    /// Deferred by a turn of the run loop rather than measured on the spot: the
-    /// notice arrives from inside the SwiftUI update that is changing the pane,
-    /// and until that update has laid the new pane out the hosting view's
-    /// `fittingSize` still describes the pane being left.
-    private func fitToPane() {
-        DispatchQueue.main.async { [weak self] in
-            guard let window = self?.window, let view = window.contentView else { return }
-            window.setContentSize(view.fittingSize)
-        }
     }
 }
 
@@ -77,20 +64,21 @@ struct SettingsView: View {
     @Bindable var preferences: Preferences
     /// Which half of syncing is unavailable here, if either is.
     ///
-    /// Handed in rather than asked for here, and that is about the window's
-    /// height. `SettingsWindow` measures this view once and sizes the panel to
-    /// it, so a sentence that appeared later — from a `.task`, or on selecting
-    /// the option it is about — would be a sentence drawn past the bottom edge.
-    /// Standing under both answers rather than only under iCloud, for the same
-    /// reason: it is a fact about the choice, not about the current pick.
+    /// Handed in rather than asked for here, because the answer costs a look at
+    /// iCloud Drive and a throwaway Keychain item and neither changes while the
+    /// panel is open: it is asked once, on the way in, rather than from a
+    /// `.task` that would arrive after the rows around it had been laid out.
+    /// Standing under both answers rather than only under iCloud: it is a fact
+    /// about the choice, not about the current pick.
     let syncCaveat: String?
-    /// Told when the switcher moves to another pane, so that the window can
-    /// take that pane's height.
+    /// Whether the pane's rows are wrapped in a scroll view and held to the
+    /// window's height.
     ///
-    /// A closure out rather than a size read back in: the panel is the only
-    /// thing that knows how it is sized, and it already measures this view once
-    /// when it opens.
-    var onPaneChange: () -> Void = {}
+    /// True everywhere but the checks, which measure how tall a pane wants to
+    /// be: a scroll view reports the height it was handed rather than the
+    /// height of what it holds, so a caveat that adds a line would stop showing
+    /// up in the very measurement that exists to catch it.
+    let scrolls: Bool
 
     /// Which pane is showing. Not remembered between openings: the panel is
     /// opened to change one particular thing, and the pane it was last left on
@@ -100,12 +88,12 @@ struct SettingsView: View {
     /// The window always opens on General; the parameter exists for
     /// `--verify-preferences`, which measures a pane it cannot click to.
     init(
-        preferences: Preferences, syncCaveat: String?,
-        onPaneChange: @escaping () -> Void = {}, pane: SettingsPane = .general
+        preferences: Preferences, syncCaveat: String?, scrolls: Bool = true,
+        pane: SettingsPane = .general
     ) {
         self.preferences = preferences
         self.syncCaveat = syncCaveat
-        self.onPaneChange = onPaneChange
+        self.scrolls = scrolls
         _pane = State(initialValue: pane)
     }
 
@@ -113,22 +101,39 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             switcher
             Rectangle().fill(Theme.separator.color).frame(height: 1)
-            VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                switch pane {
-                case .general: general
-                case .connections: connections
-                case .grid: grid
-                case .editor: editor
-                case .sidebar: sidebar
-                case .mcp: mcp
+            if scrolls {
+                // The switcher stays above the scroll rather than inside it:
+                // the way to another pane is not something to scroll up for.
+                ScrollView {
+                    paneColumn
                 }
+                // No rubber band under a pane that already fits, which is most
+                // of them: a bounce is the window saying there is more below.
+                .scrollBounceBehavior(.basedOnSize)
+            } else {
+                paneColumn
             }
-            .padding(Theme.Space.xl)
-            .frame(width: 460, alignment: .leading)
         }
-        .frame(width: 460)
+        .frame(width: 460, height: scrolls ? 560 : nil)
         .background(Theme.background.color)
-        .onChange(of: pane) { onPaneChange() }
+    }
+
+    /// One pane's rows, as a column. Its own property because the body puts it
+    /// inside a scroll view or hands it over whole, and the two must not be two
+    /// spellings of the same column.
+    private var paneColumn: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.lg) {
+            switch pane {
+            case .general: general
+            case .connections: connections
+            case .grid: grid
+            case .editor: editor
+            case .sidebar: sidebar
+            case .mcp: mcp
+            }
+        }
+        .padding(Theme.Space.xl)
+        .frame(width: 460, alignment: .leading)
     }
 
     /// The pane switcher: a symbol over a name, one button per pane.
