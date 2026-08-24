@@ -805,6 +805,22 @@ let capturePane = argument("--settings").flatMap { name in
     SettingsPane.allCases.first { $0.rawValue.lowercased() == name.lowercased() }
 }
 
+/// `--mcp-probe 8791` serves MCP on that port and prints the endpoint and the
+/// token to stderr, so a script can talk to the socket.
+///
+/// Exists because `--verify-mcp` holds every rule this server has and none of
+/// them over a wire: parsing, routing, the walls and the dispatcher are pure
+/// functions checked as pure functions, which leaves the listener, the
+/// connection-per-request read loop and the live data source with no coverage
+/// at all. The one thing a check cannot do is open a socket; this is what
+/// lets something else do it.
+///
+/// The port is named rather than defaulted, because a probe must not answer
+/// on the port somebody's real client is paired to. The whole run is on a
+/// scratch defaults suite for the reason `--settings` is: a probe must not
+/// turn on a server in the person's own settings and leave it on.
+let mcpProbePort = argument("--mcp-probe").flatMap(Int.init)
+
 /// `--history-pick 2` recalls the nth-newest statement into the editor.
 ///
 /// Both exist for the reason `--cell` does: the panel is opened with a keystroke
@@ -2919,10 +2935,13 @@ if benchMode {
             history = QueryHistory()
         }
         let preferences: Preferences
-        if let capturePane {
+        if capturePane != nil || mcpProbePort != nil {
             let store = ScratchDefaults.store("capture-settings")
-            if capturePane == .mcp {
+            if capturePane == .mcp || mcpProbePort != nil {
                 store.set(true, forKey: "dev.dbclient.mcpServerEnabled")
+            }
+            if let mcpProbePort {
+                store.set(mcpProbePort, forKey: "dev.dbclient.mcpServerPort")
             }
             preferences = Preferences(store: store)
         } else {
@@ -2983,6 +3002,17 @@ if benchMode {
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if showFindBar { showFindBarWhenReady(model: model) }
+        if mcpProbePort != nil {
+            // After `follow`, which is where the server starts and the token is
+            // minted. No token means it did not start, and the coordinator has
+            // already said why on this same stream.
+            if let token = MCPCoordinator.shared.token {
+                fputs("mcp: http://127.0.0.1:\(preferences.mcpServerPort)/mcp\n", stderr)
+                fputs("mcp: token \(token)\n", stderr)
+            } else {
+                fputs("mcp: not running\n", stderr)
+            }
+        }
         if let capturePane {
             // A local is enough to keep: `present` hands the panel to AppKit,
             // whose window list retains it, and nothing here switches panes
