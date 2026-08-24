@@ -44,17 +44,18 @@ use std::time::Duration;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
-    db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json, db_cursor,
-    db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
-    db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_export, db_export_sql,
-    db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
-    db_import_start, db_import_step, db_indexes_json, db_names_forget, db_query, db_query_free,
-    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
-    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
-    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
-    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
-    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json,
+    db_create_table_sql, db_cursor, db_cursor_cancel, db_cursor_close, db_cursor_free,
+    db_cursor_next, db_cursor_schema, db_databases_json, db_ddl_text, db_definition_json,
+    db_edit_sql_json, db_export, db_export_sql, db_file_columns_json, db_foreign_keys_json,
+    db_free, db_import_cancel, db_import_free, db_import_start, db_import_step, db_indexes_json,
+    db_names_forget, db_query, db_query_free, db_query_next, db_query_rows_affected,
+    db_query_schema, db_referenced_by_json, db_relations_json, db_routine_definition_json,
+    db_routines_json, db_row_identity_json, db_schemas_json, db_sequences_json,
+    db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free, db_table_info_json,
+    db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step, db_triggers_json,
+    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
+    db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -3218,6 +3219,151 @@ fn a_mapping_decides_which_column_of_the_file_goes_where() {
     );
 
     let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+/// A file becomes a table, and then that file goes into it.
+///
+/// The three calls in the order the window makes them — read the file's shape,
+/// run the statement, read the file in — because each one is only worth anything
+/// if the next one works. A `CREATE TABLE` that renders beautifully and is
+/// refused by the server, or one the server takes and the importer then cannot
+/// fill, both pass a test of the text alone.
+///
+/// The file is deliberately mixed: a whole number, a word, a timestamp, a
+/// decimal number, and a second row that is empty in three of the four columns —
+/// which is what says the columns came out nullable and that a blank is read as
+/// a missing value rather than as text.
+#[test]
+fn a_table_made_from_a_file_is_a_table_that_file_reads_into() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+
+    let path = std::env::temp_dir().join(format!("dbffi-create-{}.csv", std::process::id()));
+    std::fs::write(
+        &path,
+        "id,note,seen_at,ratio
+1,hello,2026-08-24 09:08:19,2.5
+2,,,
+",
+    )
+    .expect("write csv");
+    let path_c = CString::new(path.to_str().unwrap()).unwrap();
+    let format = CString::new("csv").unwrap();
+    let table = CString::new("landed").unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let written = unsafe {
+        db_create_table_sql(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            &mut err,
+        )
+    };
+    assert!(!written.is_null(), "no statement came back for the file");
+    let statement = unsafe { CStr::from_ptr(written) }
+        .to_str()
+        .unwrap()
+        .to_owned();
+    unsafe { db_string_free(written) };
+    assert_eq!(
+        statement,
+        "CREATE TABLE landed (
+    id BIGINT,
+    note VARCHAR,
+    seen_at TIMESTAMP,
+    ratio DOUBLE
+);",
+        "the four kinds a delimited file can be read as, in DuckDB's words"
+    );
+
+    ran(handle, &statement);
+    let mut err: *mut c_char = ptr::null_mut();
+    let reading = unsafe {
+        db_import_start(
+            handle,
+            format.as_ptr(),
+            path_c.as_ptr(),
+            table.as_ptr(),
+            ptr::null(),
+            &mut err,
+        )
+    };
+    assert!(
+        !reading.is_null(),
+        "the file would not go into the table made for it"
+    );
+    let mut rows: i64 = 0;
+    while unsafe { db_import_step(reading, &mut rows, &mut err) } == 1 {}
+    unsafe { db_import_free(reading) };
+    assert_eq!(rows, 2);
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT id FROM landed              WHERE id = 1 AND note = 'hello' AND ratio = 2.5              AND seen_at = TIMESTAMP '2026-08-24 09:08:19'"
+        ),
+        1,
+        "every value landed in a column of the right type"
+    );
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT id FROM landed WHERE id = 2 AND note IS NULL AND seen_at IS NULL"
+        ),
+        1,
+        "a blank field is a missing value, and the column was made able to hold one"
+    );
+
+    let _ = std::fs::remove_file(&path);
+    unsafe { db_free(handle) };
+}
+
+/// Every argument of `db_create_table_sql` refuses to be null.
+///
+/// The handle among them, and with a live one in the other three cases: a
+/// function that checked only its first argument would pass a test whose handle
+/// was null every time.
+#[test]
+fn a_table_cannot_be_written_for_a_null_anything() {
+    let conn_str = CString::new("duckdb://:memory:").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null());
+
+    let format = CString::new("csv").unwrap();
+    let path = CString::new("/tmp/nothing.csv").unwrap();
+    let table = CString::new("t").unwrap();
+    let cases: [(
+        *mut dbffi::DbHandle,
+        *const c_char,
+        *const c_char,
+        *const c_char,
+    ); 4] = [
+        (
+            ptr::null_mut(),
+            format.as_ptr(),
+            path.as_ptr(),
+            table.as_ptr(),
+        ),
+        (handle, ptr::null(), path.as_ptr(), table.as_ptr()),
+        (handle, format.as_ptr(), ptr::null(), table.as_ptr()),
+        (handle, format.as_ptr(), path.as_ptr(), ptr::null()),
+    ];
+    for (handle, format, path, table) in cases {
+        let mut err: *mut c_char = ptr::null_mut();
+        let written = unsafe { db_create_table_sql(handle, format, path, table, &mut err) };
+        assert!(written.is_null());
+        assert!(
+            !err.is_null(),
+            "db_create_table_sql must say why it refused"
+        );
+        unsafe { db_string_free(err) };
+    }
+
     unsafe { db_free(handle) };
 }
 

@@ -8,6 +8,7 @@
 
 pub(crate) mod delimited;
 mod import;
+mod inferring;
 mod moving;
 mod parquet_file;
 mod sql_script;
@@ -15,6 +16,7 @@ mod target;
 
 pub use delimited::{DelimitedReader, DelimitedWriter};
 pub use import::{ColumnMapping, Import, ImportStopper, file_columns, import};
+pub use inferring::infer_schema;
 pub use moving::{Step, Stopper, Transfer};
 pub use parquet_file::ParquetWriter;
 pub use sql_script::SqlWriter;

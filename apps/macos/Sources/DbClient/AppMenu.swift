@@ -251,6 +251,15 @@ enum AppMenu {
             action: #selector(ExportCommands.importFile(_:)), keyEquivalent: "")
         importItem.target = export
 
+        // Directly under Import, because it is the same job started one step
+        // earlier: the item above needs a table to read into and this one makes
+        // it first. It is also the only item in this menu that adds an object to
+        // the database rather than rows to one.
+        let createItem = menu.addItem(
+            withTitle: "Create Table from File…",
+            action: #selector(ExportCommands.createTableFromFile(_:)), keyEquivalent: "")
+        createItem.target = export
+
         // Beside Import rather than in a group of its own: both write rows into
         // a table, and the only difference between them is where the rows come
         // from — a file for one, another open connection for the other. No
@@ -1222,6 +1231,29 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         }
     }
 
+    /// Asks for a file and offers to make a table shaped like it.
+    ///
+    /// The same panel as Import, and deliberately no message about a table:
+    /// there is not one yet, and what would be said about it is on the sheet
+    /// that opens next, alongside the statement that would make it.
+    @objc func createTableFromFile(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = ExportFormat.allCases.filter(\.canImport).map(\.contentType)
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.message = "A table is made for this file's columns; nothing runs until you say so."
+
+        let read: (NSApplication.ModalResponse) -> Void = { [model] response in
+            guard response == .OK, let url = panel.url else { return }
+            model.prepareCreateTable(from: url)
+        }
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            panel.beginSheetModal(for: window, completionHandler: read)
+        } else {
+            panel.begin(completionHandler: read)
+        }
+    }
+
     /// Opens the picker that names the other connection and the table on it.
     ///
     /// A sheet of the window's own rather than an `NSOpenPanel` like the two
@@ -1240,6 +1272,9 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(importFile(_:)): return model.canImport
+        // A live connection that may be written to, and no more: the table this
+        // makes does not exist yet, so nothing has to be selected for it.
+        case #selector(createTableFromFile(_:)): return model.canCreateTableFromFile
         // A result to read out of *and* somewhere live to put it. The second
         // half is why this is not `canExport`: with one connection open there
         // is nothing to transfer to, and the item stays grey.

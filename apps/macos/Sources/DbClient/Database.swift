@@ -643,6 +643,27 @@ final class Database: @unchecked Sendable {
             [String].self, from: Data(bytes: listed, count: strlen(listed)))
     }
 
+    /// The `CREATE TABLE` that would hold what is in `url`, for this database.
+    ///
+    /// Written and not run. What comes back goes to the server through `query`
+    /// like any other statement, which is what puts it inside whatever
+    /// transaction the connection is in and under the same Cancel button — and
+    /// what lets it be read first. The types are inferred from the head of the
+    /// file, so it is a guess, and a guess belongs on screen.
+    ///
+    /// On the connection, unlike `fileColumns`, because the type words differ per
+    /// database and only the connection knows which set to use.
+    func createTableSQL(format: ExportFormat, url: URL, table: String) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        guard let written = db_create_table_sql(handle, format.wireName, url.path, table, &err)
+        else {
+            throw DbError(
+                description: Database.take(&err) ?? "could not write a CREATE TABLE for this file")
+        }
+        defer { db_string_free(written) }
+        return String(cString: written)
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }

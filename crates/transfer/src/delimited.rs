@@ -422,17 +422,29 @@ fn text(bytes: Vec<u8>, start_line: u64) -> Result<String, ArrowError> {
         .map_err(|_| ArrowError::CsvError(format!("line {start_line}: not valid UTF-8")))
 }
 
-/// The names in a delimited file's first record.
+/// A file's column names, and the records under them exactly as they were
+/// written.
+///
+/// A record is as wide as it happens to be, and a field is `None` where the file
+/// left it empty. This is the file before anything has decided what any of it
+/// means, which is what both callers want: one offers the names, the other works
+/// out what the values could be.
+pub type Head = (Vec<String>, Vec<Vec<Option<String>>>);
+
+/// The names in a delimited file's first record, and up to `rows` records after
+/// it.
 ///
 /// Built by hand rather than through `DelimitedReader::new`, because there is no
 /// schema yet — this is what runs before there is one, so that somebody can be
-/// shown which of the file's columns is going where. Nothing below the record
-/// splitter is touched: no width is checked and no value is cast.
+/// shown which of the file's columns is going where, or be offered a table to
+/// put them in. Nothing below the record splitter is touched: no width is
+/// checked and no value is cast, which is what lets this run on a file whose
+/// records disagree about how many fields they have.
 ///
 /// An empty field in a header comes back as an empty name, which is what the
 /// file says. Inventing "column 3" here would put a name in the picker that is
 /// not in the file.
-pub fn header_names<R: Read>(input: R, delimiter: u8) -> Result<Vec<String>, ArrowError> {
+pub fn head<R: Read>(input: R, delimiter: u8, rows: usize) -> Result<Head, ArrowError> {
     let mut reader = DelimitedReader {
         input: BufReader::new(input).bytes(),
         peeked: None,
@@ -443,9 +455,18 @@ pub fn header_names<R: Read>(input: R, delimiter: u8) -> Result<Vec<String>, Arr
         finished: false,
     };
     let Some((_, fields)) = reader.record()? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
-    Ok(fields.into_iter().map(|f| f.unwrap_or_default()).collect())
+    let names: Vec<String> = fields.into_iter().map(|f| f.unwrap_or_default()).collect();
+
+    let mut sample = Vec::new();
+    while sample.len() < rows {
+        match reader.record()? {
+            Some((_, fields)) => sample.push(fields),
+            None => break,
+        }
+    }
+    Ok((names, sample))
 }
 
 impl<R: Read> Iterator for DelimitedReader<R> {

@@ -2622,6 +2622,83 @@ pub unsafe extern "C" fn db_file_columns_json(
     }
 }
 
+/// The `CREATE TABLE` that would hold what is in `path`, as text. Release with
+/// `db_string_free`.
+///
+/// Written and not run, the way `db_ddl` and `db_edit_statements_json` are
+/// written and not run. What comes back goes to the server through `db_query`
+/// like any other statement, which is what puts it inside whatever transaction
+/// the connection is in, under the same Cancel button and behind the same
+/// confirmation as everything else that changes a database. It is also what the
+/// caller can show somebody before any of that happens, which is the point: a
+/// type inferred from the first thousand rows of a file is a guess, and a guess
+/// belongs on screen rather than in a table nobody saw being made.
+///
+/// A handle, unlike `db_file_columns_json`, because the words differ per
+/// database — `bigint` on one, `Nullable(Int64)` and an engine clause on
+/// another — and the connection is what says which.
+///
+/// `table` is written into the statement as it is given. A qualified name is the
+/// caller's to spell: quoting it here would make `public.orders` one identifier
+/// with a dot in it.
+///
+/// Null on failure with `err` set: a file nothing reads, a file with no columns,
+/// a column of a kind no table can be made for, or a database this build writes
+/// no DDL for.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `format`,
+/// `path`, and `table` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_create_table_sql(
+    handle: *mut DbHandle,
+    format: *const c_char,
+    path: *const c_char,
+    table: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || format.is_null() || path.is_null() || table.is_null() {
+        unsafe { set_err(err, "null handle, format, path, or table") };
+        return ptr::null_mut();
+    }
+    let (format_str, path_str, table_str) = unsafe {
+        match (
+            CStr::from_ptr(format).to_str(),
+            CStr::from_ptr(path).to_str(),
+            CStr::from_ptr(table).to_str(),
+        ) {
+            (Ok(f), Ok(p), Ok(t)) => (f, p, t),
+            _ => {
+                set_err(err, "format, path, or table is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let Some(format) = dbtransfer::Format::from_extension(format_str) else {
+        unsafe { set_err(err, format!("no importer reads {format_str:?} files")) };
+        return ptr::null_mut();
+    };
+    let h = unsafe { &*handle };
+    let Some(dialect) = h.dialect else {
+        unsafe { set_err(err, "this build does not write DDL for this database") };
+        return ptr::null_mut();
+    };
+    let written = dbtransfer::infer_schema(std::path::Path::new(path_str), format)
+        .and_then(|columns| dbddl::create_table(dialect, table_str, &columns))
+        .and_then(|text| {
+            CString::new(text)
+                .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
+        });
+    match written {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Starts reading a file into an existing table on `target`, one batch per call.
 ///
 /// The table must already exist: nothing here guesses a schema, because a file's

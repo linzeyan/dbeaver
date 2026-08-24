@@ -29,8 +29,9 @@
 //! `getTableDDL` and `getViewDDL` take the map and never read it, so there is no
 //! preference whose default had to be established before this could be written.
 
-use crate::Renderer;
+use crate::{ColumnKind, Renderer, create_table_text};
 use arrow::array::{Array, StringArray};
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo, RelationKind};
 
@@ -58,6 +59,16 @@ impl Renderer for Sqlite {
                 qualified(&relation.schema, &relation.name)
             ))),
         }
+    }
+
+    /// SQLite's declared type names for the kinds a file can ask for.
+    ///
+    /// Declared names and not storage classes: SQLite decides what a value is by
+    /// looking at the value, and a column's type only sets which conversion it
+    /// tries first. What is written here is therefore for whoever reads the
+    /// table back, and is chosen to match what will actually be in it.
+    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
+        create_table_text(&dbsql::SQLITE, table, columns, word, "")
     }
 }
 
@@ -225,4 +236,19 @@ fn qualified(schema: &str, name: &str) -> String {
         dbsql::SQLITE.quote(schema),
         dbsql::SQLITE.quote(name)
     )
+}
+
+fn word(kind: ColumnKind) -> String {
+    match kind {
+        ColumnKind::Bool => "BOOLEAN".to_string(),
+        ColumnKind::Int => "INTEGER".to_string(),
+        ColumnKind::Float => "REAL".to_string(),
+        ColumnKind::Decimal(precision, scale) => format!("NUMERIC({precision}, {scale})"),
+        ColumnKind::Text => "TEXT".to_string(),
+        // SQLite has no date and no timestamp. Rows arrive as quoted strings, so
+        // text is what the column will hold whatever it is called; `DATE` would
+        // give it numeric affinity, fail to make a number of the string, and
+        // store the same text under a name that says otherwise.
+        ColumnKind::Date | ColumnKind::Timestamp => "TEXT".to_string(),
+    }
 }

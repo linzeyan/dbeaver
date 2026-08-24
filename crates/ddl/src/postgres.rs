@@ -18,7 +18,8 @@
 //! no comments and no grants to print under the first two, and the other two
 //! produce a shape nobody reads.
 
-use crate::{Renderer, Script};
+use crate::{ColumnKind, Renderer, Script, create_table_text};
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, Computed, ConstraintKind, DbError, DbResult, Driver, IndexInfo, RelationInfo,
@@ -50,6 +51,11 @@ impl Renderer for Postgres {
                 qualified(&relation.schema, &relation.name)
             ))),
         }
+    }
+
+    /// PostgreSQL's words for the kinds a file can ask for.
+    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
+        create_table_text(&dbsql::POSTGRES, table, columns, word, "")
     }
 }
 
@@ -429,4 +435,19 @@ fn quoted_list(names: &[String]) -> String {
 
 fn quote(name: &str) -> String {
     dbsql::POSTGRES.quote(name)
+}
+
+fn word(kind: ColumnKind) -> String {
+    match kind {
+        ColumnKind::Bool => "boolean".to_string(),
+        ColumnKind::Int => "bigint".to_string(),
+        ColumnKind::Float => "double precision".to_string(),
+        ColumnKind::Decimal(precision, scale) => format!("numeric({precision}, {scale})"),
+        ColumnKind::Text => "text".to_string(),
+        ColumnKind::Date => "date".to_string(),
+        // Without a zone, matching the kind: a file states an instant or it does
+        // not, and `timestamptz` would have the server read one into the other
+        // using whatever `TimeZone` the connection happens to be set to.
+        ColumnKind::Timestamp => "timestamp".to_string(),
+    }
 }

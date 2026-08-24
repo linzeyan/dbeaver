@@ -5361,6 +5361,22 @@ final class AppModel {
             return
         }
         guard let relation = selected else { return }
+        prepareImport(
+            from: url, format: format, into: table, schema: relation.schema,
+            relation: relation.name)
+    }
+
+    /// The half of `prepareImport` that has already been told where the rows go.
+    ///
+    /// Split out for the one caller that knows its table without the navigator
+    /// having heard of it yet: a table this window has just made. Everything the
+    /// menu path has to establish — that the connection may be written to, that
+    /// something reads this file, that a relation is selected — is established
+    /// before this is called, and the create path establishes the same things in
+    /// its own way.
+    private func prepareImport(
+        from url: URL, format: ExportFormat, into table: String, schema: String, relation: String
+    ) {
         // A new import supersedes the previous failure, as a new query does.
         errorMessage = nil
         run { db -> ImportSubject in
@@ -5370,7 +5386,7 @@ final class AppModel {
             // rows are going into, and the connection is the one that knows.
             ImportSubject(
                 file: try Database.fileColumns(format: format, url: url),
-                table: try db.columns(schema: relation.schema, relation: relation.name))
+                table: try db.columns(schema: schema, relation: relation))
         } then: { [self] subject in
             guard !subject.file.isEmpty else {
                 errorMessage = "\(url.lastPathComponent) has no columns to read."
@@ -5501,6 +5517,229 @@ final class AppModel {
     private func endImport() {
         isImporting = false
         importHandle = nil
+    }
+
+    // MARK: - Create table from file
+
+    /// Whether a file could be made into a table on this connection.
+    ///
+    /// No relation has to be selected, which is where this parts company with
+    /// `canImport`: the table this makes does not exist yet, and which schema it
+    /// goes in is asked on the sheet rather than read off the tree.
+    var canCreateTableFromFile: Bool {
+        safety.writeRefusal == nil && db != nil && !isBusy && !isExporting && !isImporting
+    }
+
+    /// A file, a name for the table it would become, and the statement that
+    /// would make it. Nil means no sheet, as `importPlan` does.
+    var createPlan: CreateTablePlan?
+
+    var isCreateTableSheetOpen: Bool {
+        get { createPlan != nil }
+        set { if !newValue { createPlan = nil } }
+    }
+
+    /// A table about to be made, and the statement that would make it.
+    struct CreateTablePlan {
+        let url: URL
+        let format: ExportFormat
+        /// Where the table goes and what it is called, kept apart rather than as
+        /// one string. The statement writes the name unquoted and takes it
+        /// whole, so a qualified name would have to be split back into two to
+        /// ask the connection for the new table's columns — and splitting on a
+        /// dot is exactly the guess this avoids having to make.
+        var schema: String
+        var name: String
+        /// The last answer the connection gave, and the table it was about.
+        ///
+        /// Stamped with the table rather than stored bare, because the name is
+        /// typed on this side and the statement is written on the other: for as
+        /// long as a round trip takes, the two are about different tables. The
+        /// preview goes on showing the older one — a pane that blanked on every
+        /// keystroke would be unreadable — and `statement` is nil until they
+        /// agree again, which is what keeps the button from running a statement
+        /// that names the table somebody has just stopped calling it.
+        var written: Written?
+
+        struct Written {
+            let table: String
+            /// The statement, or nil for a file no table can be made from.
+            let text: String?
+            /// Why there is none, in a sentence. On the plan rather than in
+            /// `errorMessage`, because the banner is behind the sheet.
+            let refusal: String?
+        }
+
+        var table: String { schema.isEmpty ? name : "\(schema).\(name)" }
+
+        /// The statement that would run, which is one written for this table.
+        var statement: String? { written?.table == table ? written?.text : nil }
+
+        /// Why nothing would run, once that is settled for the table now named.
+        var refusal: String? { written?.table == table ? written?.refusal : nil }
+
+        /// What the pane shows: the last statement written, current or not.
+        var preview: String { written?.text ?? "" }
+    }
+
+    /// Reads `url`'s shape and opens the sheet showing what it would be made into.
+    ///
+    /// Nothing is run here. What this produces is a statement to read, which is
+    /// the whole point of the feature: the types come from the head of the file
+    /// and are a guess — `2026-08-24` is a date and `08/24/2026` is text, and
+    /// which one a column of dates lands on is worth seeing before a table is
+    /// made rather than after.
+    func prepareCreateTable(from url: URL) {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) Nothing was made from \(url.lastPathComponent)."
+            return
+        }
+        guard let format = ExportFormat(importPathExtension: url.pathExtension) else {
+            let named =
+                url.pathExtension.isEmpty ? "a file with no extension" : ".\(url.pathExtension)"
+            errorMessage =
+                "Nothing here reads \(named). Import reads CSV, TSV, JSON Lines and Parquet."
+            return
+        }
+        errorMessage = nil
+        createPlan = CreateTablePlan(
+            url: url, format: format,
+            // The selected relation's schema first: somebody who was looking at a
+            // table is nearly always putting the new one beside it.
+            schema: selected?.schema ?? schemas.first?.name ?? "",
+            name: Self.tableName(for: url), written: nil)
+        renderCreateTable()
+    }
+
+    /// Puts the table somewhere else, or calls it something else, and rewrites
+    /// the statement to match.
+    ///
+    /// The statement is asked for again rather than patched, because the name is
+    /// not the only thing in it that a name decides — and a preview edited by
+    /// this side would be a preview that no longer says what will run. It is one
+    /// call per keystroke, the way the filter bar's clause is, and it reads the
+    /// head of a file rather than the network.
+    func setCreateTableTarget(schema: String? = nil, name: String? = nil) {
+        guard var plan = createPlan else { return }
+        if let schema { plan.schema = schema }
+        if let name { plan.name = name }
+        createPlan = plan
+        renderCreateTable()
+    }
+
+    /// Asks the connection for the statement the current plan would run.
+    private func renderCreateTable() {
+        guard let plan = createPlan else { return }
+        let (url, format, table) = (plan.url, plan.format, plan.table)
+        guard !plan.name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            createPlan?.written = CreateTablePlan.Written(
+                table: table, text: nil, refusal: "A table needs a name.")
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(try db.createTableSQL(format: format, url: url, table: table))
+            } catch {
+                // Caught rather than thrown: a file with a column nothing can
+                // hold is a thing to say on the sheet, and a thrown error would
+                // put it in the banner behind it and close nothing.
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            // The sheet may have been dismissed while this was in the air and
+            // reopened onto another file. Only the plan that asked takes the
+            // answer; the table it was about travels with it.
+            guard createPlan?.url == url else { return }
+            createPlan?.written =
+                switch answer {
+                case .success(let statement):
+                    CreateTablePlan.Written(table: table, text: statement, refusal: nil)
+                case .failure(let error):
+                    CreateTablePlan.Written(
+                        table: table, text: nil, refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// A table name made out of a file's name.
+    ///
+    /// Everything that is not a letter, a digit or an underscore becomes an
+    /// underscore, and a leading digit gets one in front: the statement writes
+    /// the name as given and unquoted, so `sales report (2026).csv` would
+    /// otherwise be a `CREATE TABLE` of three tokens that the server refuses.
+    /// A starting point rather than a rule — the field is editable and the
+    /// statement under it says exactly what will run.
+    nonisolated static func tableName(for url: URL) -> String {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let cleaned = String(
+            stem.map { $0.isLetter || $0.isNumber || $0 == "_" ? $0 : "_" })
+        // A dot is among the things replaced, and deliberately: `data.tar.gz`
+        // left alone would name the table `tar` in a schema called `data`.
+        // Nothing is invented for a file that leaves nothing behind — the sheet
+        // says a table needs a name, which is truer than a name nobody chose.
+        return cleaned.first?.isNumber == true ? "t_" + cleaned : cleaned
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var createPlanObstacle: String? {
+        guard let plan = createPlan else { return "Nothing to make." }
+        if let refusal = plan.refusal { return refusal }
+        guard plan.statement != nil else { return "Reading the file…" }
+        return nil
+    }
+
+    /// Runs the statement the sheet has been showing, then offers the file to the
+    /// table it made.
+    ///
+    /// One trip: the statement, the schema's relations again so the navigator has
+    /// the new table, and then the import sheet over the top of it. Making a table
+    /// from a file and not putting the file in it is not a thing anybody came here
+    /// to do, and the second sheet is where the columns can still be changed.
+    func startPlannedCreate() {
+        guard let plan = createPlan, let statement = plan.statement, plan.refusal == nil else {
+            return
+        }
+        createPlan = nil
+        let (url, format, table) = (plan.url, plan.format, plan.table)
+        let (schema, name) = (plan.schema, plan.name)
+        isBusy = true
+        status = "Making \(table)…"
+        errorMessage = nil
+        run { db -> MadeTable in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained, because a name that is already taken is refused when the
+            // server executes the statement rather than when it accepts it.
+            while try query.nextBatch() != nil {}
+            // The editor completes from names it learned when the tree was read,
+            // and a table it has never heard of is one it will not offer.
+            db.forgetNames()
+            return MadeTable(
+                affected: query.rowsAffected ?? 0, listed: try db.relations(schema: schema))
+        } then: { [self] made in
+            isBusy = false
+            relations[schema] = made.listed
+            history.record(
+                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0)
+            status = "Made \(table)"
+            // Selected, so the window is showing the table the rows are about to
+            // go into. Empty until the import lands, which is the honest picture
+            // of what has happened so far.
+            if let made = made.listed.first(where: { $0.name == name }) {
+                activeTab = .content
+                selected = made
+            }
+            // Whatever the transaction is doing now, a statement moved it.
+            refreshTransaction()
+            prepareImport(from: url, format: format, into: table, schema: schema, relation: name)
+        }
+    }
+
+    /// A table that has just been made, and the relations of the schema it
+    /// landed in.
+    private struct MadeTable: Sendable {
+        let affected: Int
+        let listed: [RelationInfo]
     }
 
     // MARK: - Query execution

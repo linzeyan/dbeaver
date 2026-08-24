@@ -770,3 +770,70 @@ async fn the_materialized_view_in_the_database_is_refused() {
         .await
         .expect_err("a materialized view was rendered without knowing whether it holds data");
 }
+
+// ---------------------------------------------------------------------------
+// A table made for a file
+// ---------------------------------------------------------------------------
+
+/// The seven kinds a file can ask for, and a name that has to be quoted.
+fn a_files_columns() -> arrow::datatypes::Schema {
+    use arrow::datatypes::{DataType, Field, TimeUnit};
+    arrow::datatypes::Schema::new(vec![
+        Field::new("id", DataType::Int64, true),
+        Field::new("Order Date", DataType::Date32, true),
+        Field::new("amount", DataType::Decimal128(12, 2), true),
+        Field::new("ratio", DataType::Float64, true),
+        Field::new("paid", DataType::Boolean, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new(
+            "seen_at",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
+    ])
+}
+
+/// The statement written for a file's columns is one PostgreSQL runs.
+///
+/// The golden strings in the crate's own tests say what each database is *told*;
+/// only the server says whether it understood. What is checked is the column
+/// list read back out of the table that was made, in the catalog's own words, so
+/// a type word the server merely tolerated would show up here as something other
+/// than what was asked for.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_table_made_for_a_files_columns_is_one_postgresql_runs() {
+    let source = bench().await;
+    let statement = dbddl::create_table(
+        &dbsql::POSTGRES,
+        "public.ddl_from_a_file",
+        &a_files_columns(),
+    )
+    .expect("PostgreSQL would not write a table for a file's columns");
+    run(&source, "DROP TABLE IF EXISTS public.ddl_from_a_file").await;
+    run(&source, &statement).await;
+
+    let columns: Vec<(String, String)> = source
+        .columns("public", "ddl_from_a_file")
+        .await
+        .expect("listing the new table's columns failed")
+        .into_iter()
+        .map(|column| (column.name, column.data_type))
+        .collect();
+    run(&source, "DROP TABLE public.ddl_from_a_file").await;
+    assert_eq!(
+        columns,
+        vec![
+            ("id".to_string(), "bigint".to_string()),
+            ("Order Date".to_string(), "date".to_string()),
+            ("amount".to_string(), "numeric(12,2)".to_string()),
+            ("ratio".to_string(), "double precision".to_string()),
+            ("paid".to_string(), "boolean".to_string()),
+            ("note".to_string(), "text".to_string()),
+            (
+                "seen_at".to_string(),
+                "timestamp without time zone".to_string()
+            ),
+        ]
+    );
+}

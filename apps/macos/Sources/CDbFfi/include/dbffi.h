@@ -648,6 +648,20 @@ void db_transfer_free(DbTransfer* transfer);
 // an empty file has no columns.
 char* db_file_columns_json(const char* format, const char* path, char** err);
 
+// The CREATE TABLE that would hold what is in `path`, as text. Released with
+// db_string_free.
+//
+// Written and not run, like db_ddl: what comes back goes to the server through
+// db_query like any other statement, and can be put in front of somebody first.
+// The types are inferred from the head of the file, which is a guess, and a
+// guess belongs on screen.
+//
+// A handle, unlike db_file_columns_json, because the words differ per database.
+// `table` is written into the statement as given — a qualified name is the
+// caller's to spell.
+char* db_create_table_sql(
+    DbHandle* handle, const char* format, const char* path, const char* table, char** err);
+
 // Starts reading a file into an existing table on `target`, one batch per call.
 //
 // A batch at a time, so a multi-gigabyte CSV is no heavier than a small one.

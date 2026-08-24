@@ -17,7 +17,8 @@
 //! `CREATE TABLE`, before the indexes, which is the order `getTableDDL`
 //! aggregates them in.
 
-use crate::{Renderer, Script};
+use crate::{ColumnKind, Renderer, Script, create_table_text};
+use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DbError, DbResult, Driver, IndexInfo,
@@ -44,6 +45,11 @@ impl Renderer for MsSql {
                 qualified(&relation.schema, &relation.name)
             ))),
         }
+    }
+
+    /// SQL Server's words for the kinds a file can ask for.
+    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
+        create_table_text(&dbsql::MSSQL, table, columns, word, "")
     }
 }
 
@@ -322,4 +328,21 @@ fn quoted_list(names: &[String]) -> String {
 
 fn quote(name: &str) -> String {
     dbsql::MSSQL.quote(name)
+}
+
+fn word(kind: ColumnKind) -> String {
+    match kind {
+        ColumnKind::Bool => "bit".to_string(),
+        ColumnKind::Int => "bigint".to_string(),
+        ColumnKind::Float => "float".to_string(),
+        ColumnKind::Decimal(precision, scale) => format!("decimal({precision}, {scale})"),
+        // `nvarchar(max)` rather than a length: a file's longest value is not
+        // known until the file has been read, and a length guessed from the
+        // sample is an import that stops on the row that exceeds it.
+        ColumnKind::Text => "nvarchar(max)".to_string(),
+        ColumnKind::Date => "date".to_string(),
+        // `datetime2` and not `datetime`, which rounds to 1/300 of a second and
+        // begins in 1753.
+        ColumnKind::Timestamp => "datetime2".to_string(),
+    }
 }
