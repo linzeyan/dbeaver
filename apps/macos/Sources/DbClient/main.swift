@@ -76,6 +76,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-filter-rows`,
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
+// `--verify-grid-find`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -125,6 +126,9 @@ if CommandLine.arguments.contains("--verify-schema-metadata") {
 }
 if CommandLine.arguments.contains("--verify-fk-nav") {
     exit(FKNavigationChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-grid-find") {
+    exit(MainActor.assumeIsolated { GridFindChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -964,6 +968,20 @@ func openCreateTableSheet(model: AppModel, from path: String) {
 /// list saying so.
 let fkJumpColumn = argument("--fk-jump")
 
+/// `--find-in-grid "carol"` opens the find bar over the result and searches for
+/// that text, the way ⌘F and then Return do.
+///
+/// Exists for the reason `--cell` does: the bar opens on a menu command sent to
+/// whichever view holds the keyboard, and a capture can neither press ⌘F nor
+/// click into a grid — synthetic events need accessibility permission this
+/// environment does not grant. Without it the only picture of the bar is of the
+/// pane it is not in.
+let findText = argument("--find-in-grid")
+
+/// `--find-column name` narrows that search to one column, as the bar's popup
+/// does. Only useful with `--find-in-grid`.
+let findColumn = argument("--find-column")
+
 /// Drives `--fk-jump`. Polls for the reason `openValueViewer` polls: the rows
 /// and the relation's keys arrive through the model's own background pipeline,
 /// and a jump needs both.
@@ -1131,6 +1149,99 @@ func importWhenReady(model: AppModel, from path: String) {
             started = true
             fputs("import table    \(table)\n", stderr)
             model.prepareImport(from: url)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// Drives `--find-in-grid`. Polls for the reason `openValueViewer` does: the
+/// rows arrive through the model's own background pipeline.
+///
+/// Every command goes through the Edit menu rather than through the model,
+/// because the half of this that can be wrong without a compiler noticing is the
+/// responder chain. The four find items share one selector, name no target, and
+/// mean four different things through their tags; the grid joins that chain only
+/// by implementing the selector, and only reaches it while it holds the
+/// keyboard. `sendAction` returning false is exactly that failure, and it is
+/// loud — a capture of a window with no find bar in it would otherwise be filed
+/// as a picture of the bar.
+///
+/// The scan is timed because the claim this feature makes is about a search that
+/// runs in this process over the rows already here, and "fast enough to press
+/// Return on" is a number rather than an opinion.
+@MainActor
+func findInGrid(model: AppModel, text: String, column: String?) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    let selector = #selector(NSTextView.performFindPanelAction(_:))
+
+    func send(_ action: NSFindPanelAction, _ what: String) {
+        guard
+            let item = (AppMenu.editMenu().submenu?.items ?? []).first(where: {
+                $0.action == selector && $0.tag == Int(action.rawValue)
+            })
+        else {
+            fputs("the Edit menu has no \(what)\n", stderr)
+            exit(1)
+        }
+        guard NSApp.sendAction(selector, to: nil, from: item) else {
+            fputs("\(what) reached nothing — the grid does not hold the keyboard\n", stderr)
+            exit(1)
+        }
+    }
+
+    func open() {
+        send(.showFindPanel, "Find…")
+        guard model.isFindingInGrid else {
+            fputs("Find… did not open the bar\n", stderr)
+            exit(1)
+        }
+        fputs("find bar        open\n", stderr)
+        // A turn later than the bar, deliberately, and for the reason
+        // `--edit-value` waits a turn after its selection. The bar takes thirty
+        // points off the grid, and the scroll that brings a match into view is
+        // computed from the grid's height: searching in the same turn scrolls
+        // against a height that is about to be two rows smaller, and lands the
+        // match just under the bottom edge. A person typing into the field pays
+        // this delay without noticing it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            MainActor.assumeIsolated { search() }
+        }
+    }
+
+    func search() {
+        model.gridFindText = text
+        model.gridFindColumn = column
+        let grid = model.current.table
+        let cells = model.current.rowCount * (column == nil ? grid.columns.count : 1)
+        let began = CFAbsoluteTimeGetCurrent()
+        // Through the model rather than the menu, and only here: ⌘F has just put
+        // the keyboard in the find field, so the menu's Find Next now belongs to
+        // that field's editor. Which responder owns it is the thing the bar's own
+        // Return exists to sidestep, and this is that Return.
+        model.findInGrid()
+        let took = CFAbsoluteTimeGetCurrent() - began
+        let scope = column.map { " in \($0)" } ?? ""
+        fputs(
+            "find scan       “\(text)”\(scope) · up to \(AppModel.formatted(cells)) cells · "
+                + String(format: "%.2f s\n", took), stderr)
+        fputs("find report     \(model.gridFindReport)\n", stderr)
+        if let at = model.current.selection {
+            fputs("find cursor     row \(at.row + 1) · \(grid.columns[at.column].name)\n", stderr)
+        }
+    }
+
+    func poll() {
+        let result = model.current
+        if result.hasRun, !result.isLoading, result.rowCount > 0 {
+            open()
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("no rows to search: --find-in-grid needs a result\n", stderr)
+            exit(1)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -3680,6 +3791,9 @@ if benchMode {
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let mapImportPath { openImportSheet(model: model, from: mapImportPath) }
         if let fkJumpColumn { followForeignKey(model: model, from: fkJumpColumn) }
+        if let findText {
+            findInGrid(model: model, text: findText, column: findColumn)
+        }
         if let createTablePath {
             openCreateTableSheet(model: model, from: createTablePath)
         }

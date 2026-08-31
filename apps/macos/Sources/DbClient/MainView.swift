@@ -18,6 +18,11 @@ enum FocusArea: Hashable {
     /// the ring is most of the point of putting the cell editor in one: it is
     /// the field that writes to the database.
     case cellValue
+    /// The find bar's field. Its own case for the reason `cellValue` has one,
+    /// and for one more: ⌘F opens the bar from a grid that holds the keyboard,
+    /// so something has to move focus into the field, and that something needs a
+    /// name to move it to.
+    case gridFind
     // The connection form's fields. In the same enum as the panes' because the
     // form is the same window: it replaces the shell rather than floating over
     // it, so focus is only ever in one of these places at a time.
@@ -1118,6 +1123,11 @@ struct DetailPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
+            if model.isFindingInGrid {
+                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                GridFindBar(model: model, focus: $focus)
+            }
+
             Rectangle().fill(Theme.separator.color).frame(height: 1)
             StatusBar(model: model)
         }
@@ -1739,7 +1749,10 @@ struct ContentPane: View {
                     // is the same sentence `CellEditorRow` shows under the grid.
                     onEditValue: model.editObstacle == nil ? { model.editSelectedValue() } : nil,
                     onStageEdit: { model.stageEdit($0) },
-                    editSeed: { model.inlineEditSeed }
+                    editSeed: { model.inlineEditSeed },
+                    onFindAction: { model.takeFindAction($0) },
+                    hasFindText: !model.gridFindText.isEmpty,
+                    revealCount: model.browseResult.revealCount
                 )
                 .overlay { LoadingVeil(isVisible: model.browseResult.isVeiled) }
 
@@ -2405,7 +2418,10 @@ struct QueryPane: View {
                                 generation: model.queryResult.generation,
                                 rowCount: model.queryResult.rowCount,
                                 selection: $result.selection,
-                                name: "Query result grid"
+                                name: "Query result grid",
+                                onFindAction: { model.takeFindAction($0) },
+                                hasFindText: !model.gridFindText.isEmpty,
+                                revealCount: model.queryResult.revealCount
                             )
                             .overlay { LoadingVeil(isVisible: model.queryResult.isLoading) }
 
@@ -3306,6 +3322,126 @@ struct LoadingVeil: View {
         .animation(Theme.Motion.ease(reduceMotion), value: isVisible)
         .accessibilityHidden(!isVisible)
         .accessibilityLabel("Running query")
+    }
+}
+
+// MARK: - Find in the grid
+
+/// The bar ⌘F opens under the grid.
+///
+/// A bar of its own rather than a field squeezed into the status line, which is
+/// where this was first drawn. The status line is what a search most needs
+/// beside it — "first 100,000 of ~1,000,000 rows" is the sentence that makes
+/// this bar's own sentence mean something — and taking its place to say "no
+/// match" would have hidden the count that explains the answer.
+///
+/// It appears and disappears, which does move the grid. That is the one place
+/// the argument in `ValueViewer` about not moving the grid does not apply: this
+/// is a mode somebody entered on purpose and leaves with ⎋, not something that
+/// happens as a side effect of moving the cursor.
+struct GridFindBar: View {
+    @Bindable var model: AppModel
+    @FocusState.Binding var focus: FocusArea?
+
+    var body: some View {
+        HStack(spacing: Theme.Space.sm) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.textTertiary.color)
+
+            CompactField(
+                placeholder: "Find in fetched rows", text: $model.gridFindText,
+                area: .gridFind, focus: $focus,
+                // Return finds the next one, which is what Return means in every
+                // find bar. The search does not run on every keystroke: it walks
+                // whatever is loaded, and a hundred thousand rows per character
+                // typed is not something a field can afford.
+                onSubmit: { model.findInGrid() }
+            )
+            .frame(width: 220)
+
+            // Every column, or one. A restricted search is the difference
+            // between finding an id in the id column and finding it inside a
+            // JSON document three columns over.
+            Picker("", selection: columnBinding) {
+                Text("All columns").tag("")
+                ForEach(model.gridFindColumns, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 160)
+            .help("Look in one column instead of all of them")
+
+            Button("Previous") { model.findInGrid(backwards: true) }
+                .buttonStyle(.link)
+                .font(Theme.Typography.micro)
+                .disabled(model.gridFindText.isEmpty)
+                .help("The match before this one (⇧⌘G)")
+            Button("Next") { model.findInGrid() }
+                .buttonStyle(.link)
+                .font(Theme.Typography.micro)
+                .disabled(model.gridFindText.isEmpty)
+                .help("The next match (⌘G)")
+
+            if !model.gridFindReport.isEmpty {
+                Text(model.gridFindReport)
+                    .font(Theme.Typography.digits)
+                    .foregroundStyle(Theme.textSecondary.color)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: Theme.Space.sm)
+
+            // The sentence the plan asks for, and the reason this feature is
+            // honest. What is searched is what has been fetched; the whole table
+            // is what the filter rows are for, and they run on the server.
+            Text("searches fetched rows only")
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+                .help("Use the filter rows above to search the whole table on the server")
+
+            Button {
+                model.closeGridFind()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .semibold))
+                    .frame(width: 20, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Theme.textSecondary.color)
+            .help("Close the find bar (⎋)")
+            .accessibilityLabel("Close find bar")
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .frame(height: 30)
+        .background(Theme.surfaceRaised.color)
+        // Opened by a menu command from a grid that has the keyboard, so the
+        // field has to take focus itself — otherwise ⌘F draws a bar and the next
+        // thing typed goes to the grid underneath it.
+        .task { focus = .gridFind }
+        .onKeyPress(.escape) {
+            model.closeGridFind()
+            return .handled
+        }
+        // ⇧Return steps backwards, because ⇧⌘G cannot reach here: the field has
+        // the keyboard while the bar is being typed in, and the Edit menu's
+        // find commands go to whichever responder holds it. From the grid, where
+        // the cursor is the rest of the time, both shortcuts work.
+        .onKeyPress(.return, phases: .down) { press in
+            guard press.modifiers.contains(.shift) else { return .ignored }
+            model.findInGrid(backwards: true)
+            return .handled
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Find in fetched rows")
+    }
+
+    /// The picker speaks in strings because `nil` is not a `Hashable` tag worth
+    /// inventing a case for; the empty one is "all columns".
+    private var columnBinding: Binding<String> {
+        Binding(
+            get: { model.gridFindColumn ?? "" },
+            set: { model.gridFindColumn = $0.isEmpty ? nil : $0 })
     }
 }
 

@@ -211,7 +211,7 @@ struct CellFilterRequest: Sendable {
     let extend: Bool
 }
 
-final class GridView: MTKView {
+final class GridView: MTKView, NSMenuItemValidation {
     weak var renderer: GridRenderer?
 
     /// Called when the selected cell changes, so the chrome can show the full
@@ -273,6 +273,20 @@ final class GridView: MTKView {
     /// answer to "is this cell dirty".
     var onStageEdit: ((String) -> Void)?
 
+    /// Called with the find command the Edit menu dispatched.
+    ///
+    /// The menu's four items share one selector and say which command they are
+    /// through their tag, and they name no target — which is what lets the
+    /// responder chain hand them to the editor when the caret is in it and to
+    /// this grid when the cursor is here. Implementing the selector is the whole
+    /// of joining that chain; without it ⌘F over a grid is a disabled menu item.
+    var onFindAction: ((NSFindPanelAction) -> Void)?
+    /// Whether there is a result under this grid to search at all.
+    var offersFind = false
+    /// Whether something has been typed to search for, so Find Next is not
+    /// offered over an empty field.
+    var hasFindText = false
+
     /// What the editor starts with for the cell the cursor is on.
     ///
     /// Asked for rather than read off the table: a NULL seeds an empty field
@@ -318,6 +332,38 @@ final class GridView: MTKView {
     private var trackingArea: NSTrackingArea?
 
     override var acceptsFirstResponder: Bool { true }
+
+    /// The Edit menu's find commands, while the cursor is in this grid.
+    ///
+    /// One selector for four commands, told apart by the sender's tag, which is
+    /// AppKit's own arrangement and the reason the editor and the grid can share
+    /// the keys: whichever of the two holds first responder is the one the chain
+    /// reaches. An unknown tag is ignored rather than guessed at — a fifth
+    /// command would be a fifth thing to mean, not a variation on one of these.
+    @objc func performFindPanelAction(_ sender: Any?) {
+        guard let tag = (sender as? NSMenuItem)?.tag,
+            let action = NSFindPanelAction(rawValue: UInt(tag))
+        else { return }
+        onFindAction?(action)
+    }
+
+    /// Only ever asked about the find commands: AppKit puts the question to
+    /// whichever responder implements the item's action, and this view
+    /// implements exactly one. Anything else that reaches here is something a
+    /// later edit added, and enabling it is what it would have got without this
+    /// method at all.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard item.action == #selector(performFindPanelAction(_:)) else { return true }
+        guard offersFind, let action = NSFindPanelAction(rawValue: UInt(item.tag)) else {
+            return false
+        }
+        switch action {
+        // Nothing to step through until something has been typed, and a live
+        // ⌘G that does nothing is indistinguishable from one that found nothing.
+        case .next, .previous: return hasFindText
+        default: return true
+        }
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

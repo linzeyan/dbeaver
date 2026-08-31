@@ -104,6 +104,15 @@ struct MetalGridView: NSViewRepresentable {
     var onStageEdit: ((String) -> Void)?
     /// What an inline editor starts with. Nil for the Query pane, likewise.
     var editSeed: (() -> String)?
+    /// Called with the find command the Edit menu dispatched while this grid had
+    /// the keyboard. Nil means ⌘F belongs to whatever else the responder chain
+    /// finds — see `GridView.onFindAction`.
+    var onFindAction: ((NSFindPanelAction) -> Void)?
+    /// Whether anything has been typed to search for, for Find Next's validation.
+    var hasFindText = false
+    /// Bumped when the selection was set by something other than this grid and
+    /// the cell has to be brought into view. See `ResultSet.revealCount`.
+    var revealCount = 0
 
     final class Coordinator {
         var renderer: GridRenderer?
@@ -118,6 +127,8 @@ struct MetalGridView: NSViewRepresentable {
         var onEditValue: (() -> Void)?
         var onStageEdit: ((String) -> Void)?
         var editSeed: (() -> String)?
+        var onFindAction: ((NSFindPanelAction) -> Void)?
+        var lastReveal = 0
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -163,6 +174,9 @@ struct MetalGridView: NSViewRepresentable {
         view.editSeed = { [weak coordinator = context.coordinator] in
             coordinator?.editSeed?() ?? ""
         }
+        view.onFindAction = { [weak coordinator = context.coordinator] action in
+            coordinator?.onFindAction?(action)
+        }
 
         if let renderer = GridRenderer(device: device, scale: scale) {
             renderer.table = table
@@ -196,6 +210,9 @@ struct MetalGridView: NSViewRepresentable {
         context.coordinator.onStageEdit = onStageEdit
         context.coordinator.editSeed = editSeed
         view.offersValueEditing = onEditValue != nil
+        context.coordinator.onFindAction = onFindAction
+        view.offersFind = onFindAction != nil
+        view.hasFindText = hasFindText
         renderer.sort = sort
         renderer.pending = pending
         renderer.deleted = deleted
@@ -224,6 +241,12 @@ struct MetalGridView: NSViewRepresentable {
         // arrives, so the renderer follows the binding rather than being reset
         // here — resetting would discard that initial selection every time.
         if renderer.selection != selection { renderer.selection = selection }
+        // After the assignment above, so the cell being scrolled to is the one
+        // the renderer now believes is selected.
+        if context.coordinator.lastReveal != revealCount {
+            context.coordinator.lastReveal = revealCount
+            if let selection { renderer.scrollToVisible(selection, viewSize: view.bounds.size) }
+        }
         view.needsDisplay = true
     }
 }

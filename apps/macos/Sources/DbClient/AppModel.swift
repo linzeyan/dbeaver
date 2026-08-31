@@ -55,6 +55,16 @@ final class ResultSet {
     private(set) var isExtending = false
     var selection: GridSelection?
 
+    /// Bumped when the selection was moved by something the grid could not see,
+    /// and the cell it landed on has to be scrolled into view.
+    ///
+    /// A counter rather than a flag, because the same cell can be asked for
+    /// twice — ⌘G on a search with one match lands where it already was — and a
+    /// flag would have to be cleared by the view that read it. Not done for
+    /// every selection change: most of them come from the grid, which has
+    /// already scrolled itself, and scrolling on a click would fight the pointer.
+    var revealCount = 0
+
     var hasRun: Bool { generation > 0 }
 
     /// Whether to dim what is on screen while this fetch runs.
@@ -4240,6 +4250,186 @@ final class AppModel {
                 selected = target
             }
         }
+    }
+
+    // MARK: - Finding a value in the fetched rows
+
+    /// Everything this searches is already in this window.
+    ///
+    /// A grid find is not a WHERE clause and does not pretend to be one. It
+    /// walks the rows the result is holding — the first page, plus whatever
+    /// *Load more* has added — and moves the cursor to the first cell whose text
+    /// contains what was typed. The bar says so beside the field, because the
+    /// alternative reading is the expensive one: somebody searching a million
+    /// rows through a hundred thousand of them and concluding the value is not
+    /// in the table.
+    ///
+    /// Server-side search over the whole relation is what the filter rows are,
+    /// and they are one control away. Two things that look like search and
+    /// answer differently is worse than one that says which it is.
+
+    var isFindingInGrid: Bool {
+        get { session.isFindingInGrid }
+        set { session.isFindingInGrid = newValue }
+    }
+
+    var gridFindText: String {
+        get { session.gridFindText }
+        set { session.gridFindText = newValue }
+    }
+
+    var gridFindColumn: String? {
+        get { session.gridFindColumn }
+        set { session.gridFindColumn = newValue }
+    }
+
+    var gridFindReport: String { session.gridFindReport }
+
+    /// The columns the bar's popup offers, which are the ones in front.
+    ///
+    /// Hidden columns included: `hidesEmptyColumns` takes a column off the grid
+    /// for having nothing in it, and a search restricted to it would find
+    /// nothing anyway — but a column hidden today is one whose next page may
+    /// have values, and dropping it from the list would make the popup change
+    /// shape as rows arrive.
+    var gridFindColumns: [String] { current.table.columnNames }
+
+    /// Opens the bar over whichever result is in front.
+    ///
+    /// The structure pane has no grid to search, so ⌘F there stays the editor's
+    /// — which is to say nobody's, since that pane has no text view either.
+    func openGridFind() {
+        guard activeTab != .structure else { return }
+        // A column that was named against the last result and is not in this one
+        // would search nothing and say "no match", which is a true sentence
+        // about the wrong question.
+        if let column = gridFindColumn, !gridFindColumns.contains(column) {
+            session.gridFindColumn = nil
+        }
+        session.isFindingInGrid = true
+    }
+
+    /// Routes one of the Edit menu's four find commands to the grid in front.
+    ///
+    /// The commands arrive here because a grid held first responder when the key
+    /// was pressed; the editor gets the same four when the caret is in it. One
+    /// entry point for all of them, so the menu and the bar's own buttons cannot
+    /// come to mean different things.
+    func takeFindAction(_ action: NSFindPanelAction) {
+        switch action {
+        case .showFindPanel: openGridFind()
+        case .next: findInGrid()
+        case .previous: findInGrid(backwards: true)
+        case .setFindString:
+            // Read through the same accessor the search compares against, so
+            // ⌘E and then ⌘G land back on the cell the text was taken from. A
+            // NULL has no text to look for and leaves the field as it was.
+            guard let at = current.selection,
+                let text = current.table.value(row: at.row, column: at.column)
+            else { return }
+            session.gridFindText = text
+            openGridFind()
+        @unknown default: break
+        }
+    }
+
+    /// Shuts it, leaving the cursor where the last match put it.
+    ///
+    /// The text stays. Somebody who closed the bar to read the row they landed
+    /// on and then presses ⌘F again is continuing one search, not starting a
+    /// second.
+    func closeGridFind() {
+        session.isFindingInGrid = false
+        session.gridFindReport = ""
+    }
+
+    /// Moves the cursor to the next cell holding what was typed, and says where.
+    ///
+    /// Wraps, so ⌘G off the end of the fetched rows comes back to the top rather
+    /// than stopping at a boundary that means nothing — the last fetched row is
+    /// wherever paging happened to stop, not the end of anything.
+    func findInGrid(backwards: Bool = false) {
+        let result = current
+        let grid = result.table
+        guard !gridFindText.isEmpty else {
+            session.gridFindReport = ""
+            return
+        }
+        guard
+            let hit = Self.nextMatch(
+                for: gridFindText, from: result.selection, backwards: backwards,
+                rows: result.rowCount, columns: grid.columnNames, onlyColumn: gridFindColumn,
+                value: { grid.value(row: $0, column: $1) })
+        else {
+            session.gridFindReport =
+                "not in the \(Self.pluralized(result.rowCount, "row"))"
+                + " fetched"
+            return
+        }
+        result.selection = hit
+        // The grid scrolls where the cursor went, which it does not do for a
+        // selection it did not make itself. Without this a match twenty thousand
+        // rows down moves a highlight nobody can see.
+        result.revealCount += 1
+        session.gridFindReport =
+            "row \(Self.formatted(hit.row + 1)) · \(grid.columns[hit.column].name)"
+    }
+
+    /// The next cell holding `needle`, searching from `from` and wrapping once.
+    ///
+    /// `nonisolated static` for the reason `jumps` is: it is a pure function of
+    /// what it is handed, and `--verify-grid-find` runs it against rows written
+    /// by hand. `value` is a closure rather than an `ArrowTable` for the same
+    /// reason — a check has no Arrow buffers, and the rule being checked is
+    /// about order and wrapping, not about how a cell is read.
+    ///
+    /// Case-insensitive contains, which is what a reader means by "find" and
+    /// what every grid in this category does. NULL never matches: `value`
+    /// answers nil for it, and a NULL is the absence of text rather than text
+    /// that happens to be empty — searching for "" is already refused by the
+    /// caller.
+    nonisolated static func nextMatch(
+        for needle: String, from: GridSelection?, backwards: Bool, rows: Int,
+        columns: [String], onlyColumn: String?, value: (Int, Int) -> String?
+    ) -> GridSelection? {
+        let wanted = needle.lowercased()
+        guard !wanted.isEmpty, rows > 0, !columns.isEmpty else { return nil }
+        let lanes: [Int]
+        if let onlyColumn {
+            // A named column this result does not have finds nothing rather than
+            // quietly widening back to all of them: the answer to a question
+            // about `email` must not come from `name`.
+            guard let only = columns.firstIndex(of: onlyColumn) else { return nil }
+            lanes = [only]
+        } else {
+            lanes = Array(columns.indices)
+        }
+
+        // One flat position per cell, row-major — across a row and then down,
+        // which is the order the rows are read in. The cursor is a position in
+        // that space so that wrapping is one modulo rather than two boundaries.
+        let total = rows * lanes.count
+        let cursor: Int
+        if let from, let lane = lanes.firstIndex(of: from.column), from.row < rows {
+            cursor = from.row * lanes.count + lane
+        } else {
+            // Nothing selected, or the cursor is in a column this search is not
+            // looking at. Starting one before the first cell going forward — and
+            // one past the last going back — makes the first press find the
+            // first match rather than skipping it.
+            cursor = backwards ? 0 : total - 1
+        }
+        for step in 1...total {
+            // `+ total` before the modulo because Swift's is a remainder, and a
+            // negative one would index backwards off the front.
+            let at = backwards ? (cursor - step + total) % total : (cursor + step) % total
+            let row = at / lanes.count
+            let column = lanes[at % lanes.count]
+            if let text = value(row, column), text.lowercased().contains(wanted) {
+                return GridSelection(row: row, column: column, anchor: nil)
+            }
+        }
+        return nil
     }
 
     /// Puts the selected rows on the pasteboard as INSERT statements.

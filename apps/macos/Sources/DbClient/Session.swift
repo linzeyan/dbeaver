@@ -471,6 +471,28 @@ final class Session: Identifiable {
     /// Whether the viewer is in its editing mode.
     var isEditingValue = false
 
+    // MARK: - Finding a value in the grid
+
+    /// Whether the find bar under the grid is open.
+    ///
+    /// One per connection rather than one per pane, because there is one bar:
+    /// it searches whichever result is in front, and two bars disagreeing about
+    /// what was last typed would be two answers to one question.
+    var isFindingInGrid = false
+
+    /// What was last typed into it. Kept while the bar is shut, so ⌘F reopens on
+    /// the last search rather than on an empty field.
+    var gridFindText = ""
+
+    /// The column to look in, by name; nil is every column. Kept for the reason
+    /// the text is — a search narrowed to one column stays narrowed until it is
+    /// widened — and dropped when it names no column of the result in front.
+    var gridFindColumn: String?
+
+    /// What the bar says about the last search: nothing while none has run,
+    /// otherwise where it landed or that it found nothing.
+    var gridFindReport = ""
+
     // MARK: - Transfers
 
     /// Set while a result is being written to a file. The write happens off the
