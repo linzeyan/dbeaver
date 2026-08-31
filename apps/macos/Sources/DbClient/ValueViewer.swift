@@ -1,3 +1,5 @@
+import AppKit
+import ImageIO
 import SwiftUI
 
 /// Reading one cell's value in full.
@@ -70,6 +72,53 @@ enum ValueRendering {
     static func hex(_ bytes: some Sequence<UInt8>) -> String {
         bytes.map { String(format: "%02x", $0) }.joined()
     }
+
+    /// The picture format a blob's first bytes name, or nil for anything else.
+    ///
+    /// A prefix comparison rather than a decode, and it is the first of two
+    /// gates. What it is mostly for is the blob that is *not* a picture: a
+    /// `bytea` holding twenty megabytes of protobuf is answered by comparing
+    /// eight bytes rather than by handing all of it to ImageIO to fail on.
+    ///
+    /// BMP is the weak one, and knowingly so. Its entire signature is the two
+    /// letters `BM`, so a text blob beginning "BM" sniffs as a bitmap — which is
+    /// why nothing is drawn on this answer alone. The second gate is the header
+    /// read in `RenderedValue.picture`: a `BM` that is not a bitmap yields no
+    /// size, and falls back to the hex dump it would have had anyway.
+    static func imageFormat(of bytes: [UInt8]) -> ImageFormat? {
+        func begins(_ magic: [UInt8], at offset: Int = 0) -> Bool {
+            bytes.count >= offset + magic.count
+                && !zip(magic, bytes[offset...]).contains { $0 != $1 }
+        }
+        if begins([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return .png }
+        // Three bytes rather than the whole SOI-and-marker pair: what follows
+        // `FF D8 FF` says which flavour of JPEG this is, and JFIF and Exif are
+        // not the only two a camera or an encoder writes.
+        if begins([0xFF, 0xD8, 0xFF]) { return .jpeg }
+        if begins(Array("GIF87a".utf8)) || begins(Array("GIF89a".utf8)) { return .gif }
+        // A RIFF container names what it holds four bytes past its length
+        // field, so the first word alone would also match a WAV and an AVI.
+        if begins(Array("RIFF".utf8)), begins(Array("WEBP".utf8), at: 8) { return .webp }
+        if begins(Array("BM".utf8)) { return .bmp }
+        return nil
+    }
+}
+
+/// A picture format this program will draw out of a binary column.
+///
+/// Five, and the list is closed on purpose. ImageIO would also accept TIFF,
+/// PDF, ICNS and a dozen camera raws, and drawing whichever of those a `bytea`
+/// happened to contain would claim more about the column than a prefix test can
+/// support. These five are what a blob holds when it holds a picture: what a
+/// browser renders and what an upload form produces.
+///
+/// The raw value is the name the strip prints.
+enum ImageFormat: String {
+    case png = "PNG"
+    case jpeg = "JPEG"
+    case gif = "GIF"
+    case webp = "WebP"
+    case bmp = "BMP"
 }
 
 /// A value as the viewer will draw it, plus one line saying what was done to it.
@@ -91,6 +140,22 @@ struct RenderedValue {
     /// indented JSON and a hex dump are laid out in columns that a soft wrap
     /// destroys, and a wrapped line there reads as part of the next one.
     let wraps: Bool
+    /// The picture a binary value turned out to be, drawn in place of the hex
+    /// dump. Nil for every other value, and for a picture this pane will not
+    /// draw — see `picture`, which says why in the descriptor and hands back
+    /// the bytes.
+    let image: Picture?
+
+    /// A picture at the size it will be drawn, and at the size it really is.
+    ///
+    /// Both, because they are different numbers and each answers something. The
+    /// thumbnail is what the pane draws; the pixel count is what the strip
+    /// prints, and what stops a 16-pixel icon being blown up to fill the pane.
+    struct Picture {
+        let thumbnail: NSImage
+        let width: Int
+        let height: Int
+    }
 
     /// How much of a value the pane will lay out.
     ///
@@ -125,6 +190,17 @@ struct RenderedValue {
     /// arrow key.
     private static let reindentCap = 4 * 1024 * 1024
 
+    /// The largest blob that gets decoded into a picture.
+    ///
+    /// A rendering is made whenever the selected cell changes — the strip
+    /// follows the cursor — so this is the bound on what one arrow key may
+    /// cost. Eight megabytes is far above the thumbnails, logos and scanned
+    /// pages a blob column actually holds, and below the photograph somebody
+    /// stored whole. Past it the value is its hex dump with its size named,
+    /// which is the answer `reindentCap` already gives a document too large to
+    /// lay out.
+    private static let imageCap = 8 * 1024 * 1024
+
     /// Main-actor because the number formatting it borrows from `AppModel` is,
     /// and because the only caller is a view body.
     @MainActor
@@ -135,16 +211,19 @@ struct RenderedValue {
         if cell.isNull {
             return RenderedValue(
                 text: "NULL", descriptor: "SQL NULL — not an empty string",
-                isPlaceholder: true, wraps: false)
+                isPlaceholder: true, wraps: false, image: nil)
         }
         if cell.value.isEmpty {
             return RenderedValue(
                 text: "(empty)", descriptor: "zero-length text — not NULL",
-                isPlaceholder: true, wraps: false)
+                isPlaceholder: true, wraps: false, image: nil)
         }
 
         switch cell.rendering {
         case .binary(let bytes):
+            // A picture where the bytes are one; the dump below is what a blob
+            // looks like when they are not, which is most of the time.
+            if let picture = picture(bytes) { return picture }
             let shown = bytes.prefix(byteCap)
             let clipped = bytes.count > shown.count
             return RenderedValue(
@@ -153,7 +232,7 @@ struct RenderedValue {
                     ? "hex dump of the first \(AppModel.formatted(shown.count)) "
                         + "of \(AppModel.pluralized(bytes.count, "byte"))"
                     : "hex dump · \(AppModel.pluralized(bytes.count, "byte"))",
-                isPlaceholder: false, wraps: false)
+                isPlaceholder: false, wraps: false, image: nil)
 
         case .json:
             // Every branch measures the stored value rather than the rendering
@@ -197,7 +276,68 @@ struct RenderedValue {
         }
         return RenderedValue(
             text: cut ? String(text.prefix(characterCap)) : text,
-            descriptor: descriptor, isPlaceholder: false, wraps: wraps)
+            descriptor: descriptor, isPlaceholder: false, wraps: wraps, image: nil)
+    }
+
+    /// A binary value read as a picture, or nil where it is not one.
+    ///
+    /// The second of the two gates the sniff opens: the format has to be one of
+    /// the five *and* the header has to yield a size. Both refusals land in the
+    /// same place — the caller's hex dump — because a blob this cannot draw is
+    /// a blob, and that is what every blob looked like before this existed.
+    ///
+    /// Only the header is read to answer. `CGImageSourceCopyPropertiesAtIndex`
+    /// parses as far as the dimensions and stops, so a value that turns out to
+    /// be too large to draw costs the same as one that is not a picture at all.
+    @MainActor
+    private static func picture(_ bytes: [UInt8]) -> RenderedValue? {
+        guard let format = ValueRendering.imageFormat(of: bytes),
+            let source = CGImageSourceCreateWithData(Data(bytes) as CFData, nil),
+            let header = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+            let width = header[kCGImagePropertyPixelWidth] as? Int,
+            let height = header[kCGImagePropertyPixelHeight] as? Int,
+            width > 0, height > 0
+        else { return nil }
+
+        // Every number here is the stored value's: the pixels the column holds
+        // and the bytes it takes, never the thumbnail's. A reader checking this
+        // against what their uploader reported is checking against those.
+        let said =
+            "\(format.rawValue) · \(AppModel.formatted(width)) × \(AppModel.formatted(height)) "
+            + "· \(AppModel.pluralized(bytes.count, "byte"))"
+
+        guard bytes.count <= imageCap else {
+            return RenderedValue(
+                text: hexDump(bytes.prefix(byteCap)),
+                descriptor: said + " — too large to draw here",
+                isPlaceholder: false, wraps: false, image: nil)
+        }
+        guard let thumbnail = thumbnail(from: source) else { return nil }
+        return RenderedValue(
+            text: "", descriptor: said, isPlaceholder: false, wraps: false,
+            image: Picture(thumbnail: thumbnail, width: width, height: height))
+    }
+
+    /// The picture decoded to the size the pane needs rather than to its own.
+    ///
+    /// `CGImageSourceCreateThumbnailAtIndex` scales during the decode instead of
+    /// after it, which for a photograph out of a blob column is the difference
+    /// between a megabyte of bitmap and forty. The bound covers a pane-height
+    /// picture on a Retina screen with room to spare for a wide one; past that
+    /// the picture is wider than half the window, and softening it there is the
+    /// better trade than decoding a whole camera frame to draw it 220 points
+    /// tall.
+    private static func thumbnail(from source: CGImageSource) -> NSImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            // Without this a photograph taken sideways is drawn sideways: the
+            // orientation is in the Exif rather than in the pixels.
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1024
+        ]
+        guard let drawn = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
+        else { return nil }
+        return NSImage(cgImage: drawn, size: NSSize(width: drawn.width, height: drawn.height))
     }
 }
 
@@ -429,15 +569,26 @@ struct CellValueViewer: View {
 
     let rendered: RenderedValue
 
+    /// Read for the bound below, which is in pixels while the layout is in
+    /// points.
+    @Environment(\.displayScale) private var displayScale
+
     var body: some View {
-        ScrollView(rendered.wraps ? .vertical : [.vertical, .horizontal]) {
-            content
-                .padding(.horizontal, Theme.Space.md)
-                .padding(.vertical, Theme.Space.sm)
+        Group {
+            if let image = rendered.image {
+                picture(image)
+            } else {
+                ScrollView(rendered.wraps ? .vertical : [.vertical, .horizontal]) {
+                    content
+                        .padding(.horizontal, Theme.Space.md)
+                        .padding(.vertical, Theme.Space.sm)
+                }
+                // A two-axis scroll view centres content smaller than its
+                // viewport, so a short value would land in the middle of the
+                // pane like a caption.
+                .defaultScrollAnchor(.topLeading)
+            }
         }
-        // A two-axis scroll view centres content smaller than its viewport, so a
-        // short value would land in the middle of the pane like a caption.
-        .defaultScrollAnchor(.topLeading)
         // Fixed rather than proportional, and not draggable. The grid above is
         // what shrinks, and it has to shrink by a predictable amount: a viewer
         // that opens to a different height depending on the window makes the
@@ -447,6 +598,31 @@ struct CellValueViewer: View {
         .frame(height: Self.height)
         .background(Theme.background.color)
         .accessibilityLabel("Cell value")
+    }
+
+    /// The picture, at most as large as the pane and never larger than itself.
+    ///
+    /// The second bound is the one easily left out. `scaledToFit` alone blows a
+    /// 16-pixel icon up to fill 220 points, which is a picture of the scaler
+    /// rather than of the value; dividing the stored size by the display scale
+    /// is what makes "as large as itself" mean one image pixel per screen pixel.
+    private func picture(_ image: RenderedValue.Picture) -> some View {
+        Image(nsImage: image.thumbnail)
+            .resizable()
+            .scaledToFit()
+            .frame(
+                maxWidth: CGFloat(image.width) / displayScale,
+                maxHeight: CGFloat(image.height) / displayScale
+            )
+            // A hairline, because a white logo and a transparent PNG both end
+            // where this theme's background begins, and neither shows an edge.
+            .overlay(Rectangle().strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+            .padding(Theme.Space.sm)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The strip's sentence, because "image" alone says nothing a reader
+            // could not already tell, and the format and size are the whole of
+            // what is known about a picture nobody can see.
+            .accessibilityLabel(rendered.descriptor)
     }
 
     @ViewBuilder

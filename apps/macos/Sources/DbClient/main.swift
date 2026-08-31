@@ -187,12 +187,33 @@ if CommandLine.arguments.contains("--verify-quitting") {
     exit(MainActor.assumeIsolated { QuittingChecks.run() } ? 0 : 1)
 }
 
+/// `--view-image` opens the Query tab on a result holding a picture, so that
+/// the value viewer has one to draw.
+///
+/// A capture flag for the reason `--cell` is one, a step further back: no
+/// fixture database has a picture in it, and putting one in would mean a table
+/// to create, fill and drop around every screenshot. The picture is drawn here
+/// and sent through `decode()`, so what gets photographed is a blob that came
+/// back from the server as Arrow binary — the path a real `bytea` takes —
+/// rather than bytes handed to the viewer by the process that made them.
+///
+/// It sets the tab, the statement and the column together, because a picture in
+/// a result nobody selected a cell of is a picture of a grid. `--cell` still
+/// wins where it is given, which is how a capture reaches the column beside it.
+/// PostgreSQL's spelling of a hex literal, that being the connection every
+/// capture uses.
+let imageStatement: String? =
+    CommandLine.arguments.contains("--view-image") ? pictureStatement() : nil
+
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
 /// how rendering defects get caught here, and a screenshot cannot click.
-let initialTab = argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized) } ?? .content
+let initialTab =
+    imageStatement != nil
+    ? DetailTab.query
+    : (argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized) } ?? .content)
 
 /// `--sql "SELECT …"` opens on the Query tab with that statement already run.
-let initialSQL = argument("--sql")
+let initialSQL = imageStatement ?? argument("--sql")
 
 /// `--caret 42` puts the editor's caret at that offset, counted in Unicode
 /// scalars from the start of `--sql`.
@@ -658,7 +679,7 @@ let initialSection = argument("--section").flatMap { requested in
 /// neither — synthetic events need accessibility permission this environment
 /// does not grant. Without it the one thing that catches a rendering defect in
 /// the viewer, a screenshot of the viewer, cannot be taken.
-let initialCell = argument("--cell")
+let initialCell = argument("--cell") ?? (imageStatement != nil ? "image_data" : nil)
 
 /// `--edit-value` opens the box on the cell `--cell` chose, instead of the
 /// reading pane.
@@ -1116,6 +1137,45 @@ func importWhenReady(model: AppModel, from path: String) {
         }
     }
     poll()
+}
+
+/// The statement `--view-image` runs: a picture, hex-encoded into a SELECT.
+///
+/// Shapes rather than a photograph, and shapes chosen so that the two defects a
+/// screenshot is taken to catch announce themselves. A circle distorts visibly
+/// when the aspect ratio is wrong, where a photograph only looks slightly odd; a
+/// frame drawn one pixel inside the edge disappears when the picture is drawn
+/// past its bounds, where a photograph would just be cropped.
+func pictureStatement() -> String {
+    let width = 320
+    let height = 240
+    guard
+        let canvas = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+        let context = NSGraphicsContext(bitmapImageRep: canvas)
+    else {
+        fputs("could not draw the picture --view-image sends\n", stderr)
+        exit(1)
+    }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = context
+    NSColor(calibratedRed: 0.12, green: 0.15, blue: 0.22, alpha: 1).setFill()
+    NSRect(x: 0, y: 0, width: width, height: height).fill()
+    NSColor(calibratedRed: 0.35, green: 0.72, blue: 0.95, alpha: 1).setFill()
+    NSBezierPath(ovalIn: NSRect(x: 90, y: 50, width: 140, height: 140)).fill()
+    NSColor.white.setStroke()
+    NSBezierPath(
+        rect: NSRect(x: 0.5, y: 0.5, width: Double(width) - 1, height: Double(height) - 1)
+    ).stroke()
+    NSGraphicsContext.restoreGraphicsState()
+
+    guard let png = canvas.representation(using: .png, properties: [:]) else {
+        fputs("could not encode the picture --view-image sends\n", stderr)
+        exit(1)
+    }
+    return "SELECT decode('\(ValueRendering.hex(png))', 'hex') AS image_data"
 }
 
 /// Drives `--cell`. Polls for the same reason `exportWhenReady` does: the result
