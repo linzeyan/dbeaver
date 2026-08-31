@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Executable checks for what the value viewer will let you edit, run by
@@ -32,6 +33,12 @@ enum ValueViewerChecks {
             checkTheRowsObstacleAnswersBeforeTheValueIsLookedAt()
             checkAValueTooLongToLayOutIsRefusedWithItsLength()
             checkTheControlReadsTheSameAnswerAsThePane()
+            checkEachPictureFormatIsKnownByItsFirstBytes()
+            checkABlobThatIsNotAPictureIsNotTakenForOne()
+            checkAPictureIsDrawnAndTheStripSaysWhatItIs()
+            checkASignatureWithNoPictureBehindItFallsBackToTheBytes()
+            checkAPictureTooLargeToDrawSaysSoAndKeepsItsBytes()
+            checkAPictureIsStillNotSomethingThisCanEdit()
         }
         if failures == 0 {
             fputs("value: all checks passed\n", stderr)
@@ -195,7 +202,189 @@ enum ValueViewerChecks {
             "and carries its sentence, for the tooltip on the control it disabled")
     }
 
+    // MARK: - Pictures
+
+    /// Each of the five signatures is recognised, and the near misses are not.
+    ///
+    /// Written out as literal bytes rather than taken from an encoder, because
+    /// what this checks is the table itself: a magic number copied down wrong
+    /// would agree with an encoder's output only if the encoder were the one
+    /// that wrote the table. The negatives beside each are the point of the
+    /// case — `GIF88a` is not a GIF, a RIFF holding audio is not a WebP, and a
+    /// PNG signature one byte short is not a PNG.
+    private static func checkEachPictureFormatIsKnownByItsFirstBytes() {
+        let png: [UInt8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+        expect(ValueRendering.imageFormat(of: png + [0, 0]), .png, "the PNG signature")
+        expect(
+            ValueRendering.imageFormat(of: Array(png.dropLast())), nil,
+            "and seven eighths of it is not a PNG")
+
+        expect(ValueRendering.imageFormat(of: [0xFF, 0xD8, 0xFF, 0xE0]), .jpeg, "JFIF")
+        expect(ValueRendering.imageFormat(of: [0xFF, 0xD8, 0xFF, 0xE1]), .jpeg, "and Exif")
+        expect(
+            ValueRendering.imageFormat(of: [0xFF, 0xD8, 0x00]), nil,
+            "and a start-of-image with no marker after it is neither")
+
+        expect(ValueRendering.imageFormat(of: bytes("GIF87a")), .gif, "the older GIF")
+        expect(ValueRendering.imageFormat(of: bytes("GIF89a")), .gif, "and the one in use")
+        expect(
+            ValueRendering.imageFormat(of: bytes("GIF88a")), nil,
+            "and a version between them that was never written")
+
+        expect(
+            ValueRendering.imageFormat(of: bytes("RIFF") + [0, 0, 0, 0] + bytes("WEBP")),
+            .webp, "a RIFF container holding WebP")
+        expect(
+            ValueRendering.imageFormat(of: bytes("RIFF") + [0, 0, 0, 0] + bytes("WAVE")), nil,
+            "and the same container holding audio, which the first word alone would have taken")
+
+        expect(ValueRendering.imageFormat(of: bytes("BM")), .bmp, "the two letters BMP has")
+    }
+
+    /// The blob that is not a picture, which is nearly every blob.
+    ///
+    /// The sniff exists as much for this as for the pictures: it is what keeps
+    /// a twenty-megabyte `bytea` of protobuf away from a decoder that would
+    /// read all of it to conclude the same thing.
+    @MainActor private static func checkABlobThatIsNotAPictureIsNotTakenForOne() {
+        let blob: [UInt8] = [0x08, 0x96, 0x01, 0x12, 0x07, 0x74, 0x65, 0x73, 0x74]
+        expect(ValueRendering.imageFormat(of: blob), nil, "a protobuf is not a picture")
+        expect(ValueRendering.imageFormat(of: []), nil, "and neither is nothing at all")
+
+        let rendered = RenderedValue.make(
+            from: cell(value: "\\x0896", type: "bytea", rendering: .binary(blob)))
+        expect(rendered.image == nil, true, "so the pane draws no picture")
+        expect(
+            rendered.descriptor, "hex dump · 9 bytes",
+            "and the strip says what it did, exactly as it did before pictures existed")
+    }
+
+    /// A real picture is drawn, and the strip names its format and its size.
+    ///
+    /// Encoded here rather than embedded, so what is fed in is a file with the
+    /// header a real one has. Both formats on purpose: PNG carries its size in
+    /// a fixed position and JPEG carries it in a segment that has to be walked
+    /// to, and a header read that only ever met the easy one would be a header
+    /// read nobody had checked.
+    @MainActor private static func checkAPictureIsDrawnAndTheStripSaysWhatItIs() {
+        for (format, name) in [(NSBitmapImageRep.FileType.png, "PNG"), (.jpeg, "JPEG")] {
+            guard let picture = encoded(format, width: 24, height: 16) else {
+                failures += 1
+                fputs("value FAIL: could not encode a \(name) to check against\n", stderr)
+                continue
+            }
+            let rendered = RenderedValue.make(
+                from: cell(
+                    value: ValueRendering.preview(bytes: picture), type: "bytea",
+                    rendering: .binary(picture)))
+            expect(rendered.image != nil, true, "a \(name) blob is drawn as a picture")
+            expect(rendered.image?.width, 24, "at the width its header declares")
+            expect(rendered.image?.height, 16, "and the height")
+            expect(
+                rendered.descriptor,
+                "\(name) · 24 × 16 · \(AppModel.pluralized(picture.count, "byte"))",
+                "and the strip names the format, the pixels and the stored size")
+            expect(
+                rendered.text, "",
+                "with no hex dump behind it, which nothing would have drawn")
+        }
+    }
+
+    /// A blob whose first bytes look like a signature and whose rest is not a
+    /// picture goes back to being a blob.
+    ///
+    /// This is the whole reason the sniff is only the first of two gates. BMP's
+    /// signature is the two letters `BM`, so a text column's worth of notes
+    /// beginning "BMP export failed" sniffs as a bitmap; nothing is drawn on
+    /// that answer alone, and what the reader gets is the hex dump they would
+    /// have got anyway.
+    @MainActor private static func checkASignatureWithNoPictureBehindItFallsBackToTheBytes() {
+        let text = bytes("BMP export failed")
+        expect(
+            ValueRendering.imageFormat(of: text), .bmp,
+            "the two-letter signature is matched, which is as much as it can say")
+        let rendered = RenderedValue.make(
+            from: cell(value: "\\x424d", type: "bytea", rendering: .binary(text)))
+        expect(rendered.image == nil, true, "and nothing is drawn, because there is no header")
+        expect(
+            rendered.descriptor, "hex dump · \(text.count) bytes",
+            "so the strip says hex dump rather than claiming a bitmap")
+    }
+
+    /// A picture past the decode cap is named and not drawn.
+    ///
+    /// The size still comes from the header — that read is bounded whatever the
+    /// blob weighs — so the sentence can be specific about what is being
+    /// refused. Saying "too large" without the numbers would leave a reader
+    /// unable to tell a photograph from a corrupt column.
+    @MainActor private static func checkAPictureTooLargeToDrawSaysSoAndKeepsItsBytes() {
+        guard let small = encoded(.png, width: 24, height: 16) else {
+            failures += 1
+            fputs("value FAIL: could not encode a PNG to pad\n", stderr)
+            return
+        }
+        // Padded past the cap rather than encoded at a size that would reach
+        // it: a PNG stays readable with trailing bytes after its end chunk, and
+        // encoding eight megabytes of real pixels would spend a second of every
+        // run to check a comparison.
+        let padded = small + [UInt8](repeating: 0, count: 9 * 1024 * 1024)
+        let rendered = RenderedValue.make(
+            from: cell(value: "\\x89504e47", type: "bytea", rendering: .binary(padded)))
+        expect(rendered.image == nil, true, "past the cap nothing is decoded")
+        expect(
+            rendered.descriptor,
+            "PNG · 24 × 16 · \(AppModel.pluralized(padded.count, "byte")) — too large to draw here",
+            "and the strip names what it refused, from a header it could still afford to read")
+        expect(
+            rendered.text.hasPrefix("00000000  89 50 4e 47"), true,
+            "with the bytes shown, which is what the reader is left able to look at")
+    }
+
+    /// A picture is still a binary value, and the editor still refuses it.
+    ///
+    /// Drawing a blob is a reading change and nothing more. The hazard it could
+    /// have introduced is a pencil that lights up over a picture and seeds a box
+    /// from `cell.value`, which for a binary cell is the first 64 bytes of the
+    /// blob written out as hex — staging that would replace a photograph with a
+    /// transcription of its own header.
+    @MainActor private static func checkAPictureIsStillNotSomethingThisCanEdit() {
+        guard let picture = encoded(.png, width: 24, height: 16) else {
+            failures += 1
+            fputs("value FAIL: could not encode a PNG to offer\n", stderr)
+            return
+        }
+        expect(
+            ValueEdit.offered(
+                for: cell(
+                    value: ValueRendering.preview(bytes: picture), type: "bytea",
+                    rendering: .binary(picture)),
+                obstacle: nil),
+            .refused("A binary value cannot be edited here."),
+            "the same refusal a blob got before it could be looked at")
+    }
+
     // MARK: - Harness
+
+    /// A real picture of a known size, written by the system encoder.
+    ///
+    /// By an encoder rather than as a literal, because these cases are about
+    /// the header a real file has: a hand-typed one would check the size read
+    /// against whatever was typed. The pixels are left as allocated — every
+    /// case here reads the header and none of them looks at the picture.
+    @MainActor private static func encoded(
+        _ format: NSBitmapImageRep.FileType, width: Int, height: Int
+    ) -> [UInt8]? {
+        guard
+            let canvas = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+            let data = canvas.representation(using: format, properties: [:])
+        else { return nil }
+        return [UInt8](data)
+    }
+
+    private static func bytes(_ text: String) -> [UInt8] { Array(text.utf8) }
 
     /// A cell as `AppModel` would describe it, with the fields this decision
     /// does not read left at whatever is cheapest to write.
