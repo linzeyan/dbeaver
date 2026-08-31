@@ -91,6 +91,11 @@ struct MetalGridView: NSViewRepresentable {
     /// Called with the selected rows when *Copy as INSERT* is chosen. Nil means
     /// the item is not offered, for the reason `onFilter` is not.
     var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
+    /// Asked what a cell leads to when the menu opens. Nil means this grid
+    /// offers no jumps — see `GridView.jumpsAtCell`.
+    var jumpsAtCell: ((String, [String: String]) -> AppModel.CellJumps)?
+    /// Called with the jump chosen from that menu.
+    var onJump: ((AppModel.RowJump) -> Void)?
     /// Called when *Edit Value…* is chosen. Nil means the item is not offered —
     /// the Query pane, and any relation this build cannot write to.
     var onEditValue: (() -> Void)?
@@ -108,6 +113,8 @@ struct MetalGridView: NSViewRepresentable {
         var onSortColumn: ((Int) -> Void)?
         var onFilter: ((CellFilterRequest) -> Void)?
         var onCopyAsInsert: ((ClosedRange<Int>) -> Void)?
+        var jumpsAtCell: ((String, [String: String]) -> AppModel.CellJumps)?
+        var onJump: ((AppModel.RowJump) -> Void)?
         var onEditValue: (() -> Void)?
         var onStageEdit: ((String) -> Void)?
         var editSeed: (() -> String)?
@@ -140,6 +147,12 @@ struct MetalGridView: NSViewRepresentable {
         }
         view.onCopyAsInsert = { [weak coordinator = context.coordinator] rows in
             coordinator?.onCopyAsInsert?(rows)
+        }
+        view.jumpsAtCell = { [weak coordinator = context.coordinator] column, row in
+            coordinator?.jumpsAtCell?(column, row) ?? AppModel.CellJumps()
+        }
+        view.onJump = { [weak coordinator = context.coordinator] jump in
+            coordinator?.onJump?(jump)
         }
         view.onEditValue = { [weak coordinator = context.coordinator] in
             coordinator?.onEditValue?()
@@ -176,6 +189,9 @@ struct MetalGridView: NSViewRepresentable {
         view.offersFilters = onFilter != nil
         context.coordinator.onCopyAsInsert = onCopyAsInsert
         view.offersInsertCopy = onCopyAsInsert != nil
+        context.coordinator.jumpsAtCell = jumpsAtCell
+        context.coordinator.onJump = onJump
+        view.offersJumps = jumpsAtCell != nil
         context.coordinator.onEditValue = onEditValue
         context.coordinator.onStageEdit = onStageEdit
         context.coordinator.editSeed = editSeed

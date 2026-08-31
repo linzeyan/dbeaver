@@ -4096,6 +4096,152 @@ final class AppModel {
         applyFilters()
     }
 
+    // MARK: - Foreign key navigation
+
+    /// One place a cell leads to, and the filter it lands under there.
+    ///
+    /// Answered by the model rather than asked of it, which is the other way
+    /// round from `CellFilterRequest`: what a cell can lead to is a question
+    /// about this relation's keys, and the grid draws values and knows nothing
+    /// about keys. It carries the whole answer for the same reason the filter
+    /// request carries the whole cell — a menu stays open across events, and the
+    /// row it was built for is the row it must act on.
+    struct RowJump: Sendable {
+        /// The relation as the menu names it: qualified only when it is in
+        /// another schema, which is how `RelationshipInfo.otherLabel` names one.
+        let label: String
+        /// The columns holding the reference, which are the foreign key's own
+        /// wherever it lives: this relation's going out, and the other one's
+        /// coming in. What tells two entries of one submenu apart — an order
+        /// with a billing address and a shipping one is two keys into `addresses`
+        /// and two keys back out of it, and only the side holding them differs.
+        let via: String
+        let schema: String
+        let name: String
+        /// The filter the target opens under: one row per column of the key, so
+        /// a composite key lands on the row rather than on every row that
+        /// shares half of it.
+        let match: [FilterRule]
+    }
+
+    /// Where one cell can lead, in both directions.
+    struct CellJumps: Sendable {
+        /// The row this cell points at, through a foreign key on this relation.
+        var referenced: [RowJump] = []
+        /// The rows that point at this one, in each relation that does.
+        var referencing: [RowJump] = []
+        var isEmpty: Bool { referenced.isEmpty && referencing.isEmpty }
+    }
+
+    /// What a cell in `column` leads to, given the row it sits in.
+    ///
+    /// `row` is the whole row by column name with its NULL columns left out. It
+    /// is passed in rather than read off `browseResult`, because a composite key
+    /// needs the other columns of the same row and the caller is the one holding
+    /// the cell that was clicked — the same reason the menu carries its request.
+    ///
+    /// A column missing from `row` is a jump that is not offered, and that is
+    /// the right answer to both ways it can be missing: a key with a NULL in it
+    /// references nothing, and a column the result does not carry is one whose
+    /// value this window does not know.
+    func jumps(atColumn column: String, in row: [String: String]) -> CellJumps {
+        guard let selected else { return CellJumps() }
+        return Self.jumps(
+            atColumn: column, in: row, through: foreignKeys, and: referencedBy,
+            reading: selected.schema)
+    }
+
+    /// The rule itself, with the two key lists and the schema handed to it.
+    ///
+    /// `nonisolated static` for the reason `mappingByName` is: it is a pure
+    /// function of what it is given, and `--verify-fk-nav` runs it off the main
+    /// actor against key lists written by hand — a model with no connection has
+    /// no keys, and the shapes worth checking are the ones this fixture cannot
+    /// have.
+    nonisolated static func jumps(
+        atColumn column: String, in row: [String: String], through foreignKeys: [RelationshipInfo],
+        and referencedBy: [RelationshipInfo], reading schema: String
+    ) -> CellJumps {
+        /// The filter for one key, or nil where this cell is not part of it.
+        func match(from mine: [String], to theirs: [String]) -> [FilterRule]? {
+            guard mine.contains(column), mine.count == theirs.count else { return nil }
+            var rules: [FilterRule] = []
+            for (here, there) in zip(mine, theirs) {
+                guard let value = row[here] else { return nil }
+                rules.append(FilterRule(column: there, op: .equals, value: value))
+            }
+            return rules
+        }
+        func made(_ key: RelationshipInfo, _ rules: [FilterRule], via: [String]) -> RowJump {
+            RowJump(
+                label: key.otherSchema == schema
+                    ? key.otherTable : "\(key.otherSchema).\(key.otherTable)",
+                via: via.joined(separator: ", "),
+                schema: key.otherSchema, name: key.otherTable, match: rules)
+        }
+        var jumps = CellJumps()
+        // Outbound: this row's value is the other table's key. Inbound is the
+        // same read with the sides swapped, which is how the driver reports it —
+        // `localColumns` is always this relation's, whichever way the key points.
+        // What differs is which side holds the key, and that is what `via` says.
+        for key in foreignKeys {
+            if let rules = match(from: key.localColumns, to: key.otherColumns) {
+                jumps.referenced.append(made(key, rules, via: key.localColumns))
+            }
+        }
+        for key in referencedBy {
+            if let rules = match(from: key.localColumns, to: key.otherColumns) {
+                jumps.referencing.append(made(key, rules, via: key.otherColumns))
+            }
+        }
+        return jumps
+    }
+
+    /// Opens where a cell led, filtered to the rows it named.
+    ///
+    /// The clause is compiled first and stored under the target relation, so the
+    /// one browse that selecting it starts is the filtered one. Selecting and
+    /// then filtering would be two browses, and the first of them is the whole
+    /// table somebody clicked in order not to read.
+    ///
+    /// The filter list is opened with it. A jump that quietly filtered would be
+    /// a table showing four of its million rows with nothing on screen saying
+    /// why, and the way back is Back — which works because a jump moves the
+    /// selection like any other, and each relation keeps its own filter.
+    func jump(_ jump: RowJump) {
+        guard let target = relations[jump.schema]?.first(where: { $0.name == jump.name }) else {
+            // A key can name a table in a schema this login cannot list. Saying
+            // so beats a menu item that does nothing.
+            errorMessage = "\(jump.schema).\(jump.name) is not in this connection's tree."
+            return
+        }
+        let rules = jump.match
+        errorMessage = nil
+        run { db in
+            try db.filterClause(schema: jump.schema, relation: jump.name, rules: rules)
+        } then: { [self] clause in
+            browseStore.save(
+                BrowseState(
+                    whereClause: "", orderClause: "", rules: rules, compiledClause: clause,
+                    selection: nil),
+                for: target.id)
+            isFilterRowsOpen = true
+            activeTab = .content
+            // A relation that is already selected is not selected again — the
+            // observer returns early on an unchanged selection — so a key
+            // pointing into its own table takes the other path. Self-referencing
+            // keys are the ordinary case for a tree, not a curiosity.
+            if selected?.id == target.id {
+                whereClause = ""
+                filterRules = rules
+                compiledClause = clause
+                runBrowse()
+            } else {
+                selected = target
+            }
+        }
+    }
+
     /// Puts the selected rows on the pasteboard as INSERT statements.
     ///
     /// Written by the core rather than assembled here, which is the same rule

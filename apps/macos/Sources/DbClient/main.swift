@@ -75,7 +75,8 @@ let reconnectTo = argument("--reconnect")
 // `--verify-browse-state`, `--verify-history`, `--verify-progressive`,
 // `--verify-filter-rows`,
 // `--verify-metadata`,
-// `--verify-schema-metadata`, `--verify-import`, `--verify-preferences`,
+// `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
+// `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
@@ -121,6 +122,9 @@ if CommandLine.arguments.contains("--verify-metadata") {
 }
 if CommandLine.arguments.contains("--verify-schema-metadata") {
     exit(SchemaMetadataChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-fk-nav") {
+    exit(FKNavigationChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -921,6 +925,80 @@ func openCreateTableSheet(model: AppModel, from path: String) {
         if !asked, model.canCreateTableFromFile {
             asked = true
             model.prepareCreateTable(from: url)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--fk-jump parent_id` follows the key on that column of the first row and
+/// leaves the window on whatever it landed on.
+///
+/// Exists for the reason `--cell` does: the jump is behind a right-click menu,
+/// and a capture cannot open one — a menu is a window of its own and not part of
+/// the window being photographed. What is worth a picture is the other end
+/// anyway: the table it went to, filtered to the row it named, with the filter
+/// list saying so.
+let fkJumpColumn = argument("--fk-jump")
+
+/// Drives `--fk-jump`. Polls for the reason `openValueViewer` polls: the rows
+/// and the relation's keys arrive through the model's own background pipeline,
+/// and a jump needs both.
+@MainActor
+func followForeignKey(model: AppModel, from column: String) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var jumped = false
+
+    func poll() {
+        let result = model.browseResult
+        if jumped {
+            // The far end, once it has settled. Printed rather than only shown,
+            // so a script driving this can say whether the jump landed on rows
+            // without reading the picture.
+            if result.hasRun, !result.isLoading {
+                fputs("fk landed       \(model.statusLine)\n", stderr)
+                return
+            }
+            return again()
+        }
+        guard result.hasRun, !result.isLoading, result.rowCount > 0,
+            let index = result.table.columns.firstIndex(where: { $0.name == column })
+        else { return again() }
+
+        // The whole row, the way the menu builds it: NULL columns left out,
+        // because a key with a NULL in it references nothing.
+        var values: [String: String] = [:]
+        for at in result.table.columnNames.indices {
+            if let value = result.table.value(row: 0, column: at) {
+                values[result.table.columnNames[at]] = value
+            }
+        }
+        // The keys may still be on their way — `loadRelationDetail` is a second
+        // round trip after the browse — so an empty answer is waited on rather
+        // than reported, until the deadline says otherwise.
+        let jumps = model.jumps(atColumn: column, in: values)
+        guard let jump = jumps.referenced.first ?? jumps.referencing.first else { return again() }
+
+        // Selected as well as jumped from. The cell the jump came from is what a
+        // reader of the picture would look for first, and the grid it was on is
+        // about to be replaced.
+        result.selection = GridSelection(row: 0, column: index)
+        let filter = jump.match
+            .map { "\($0.column) = \($0.value ?? "NULL")" }
+            .joined(separator: " AND ")
+        fputs("fk jump         \(column) → \(jump.label) via \(jump.via)\n", stderr)
+        fputs("fk filter       \(filter)\n", stderr)
+        model.jump(jump)
+        jumped = true
+        return again()
+    }
+
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("nothing on \(column) to follow within the deadline\n", stderr)
+            exit(1)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -3541,6 +3619,7 @@ if benchMode {
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let mapImportPath { openImportSheet(model: model, from: mapImportPath) }
+        if let fkJumpColumn { followForeignKey(model: model, from: fkJumpColumn) }
         if let createTablePath {
             openCreateTableSheet(model: model, from: createTablePath)
         }

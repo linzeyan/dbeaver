@@ -1732,6 +1732,8 @@ struct ContentPane: View {
                     onSortColumn: { model.toggleSort(column: $0) },
                     onFilter: { model.filterByCell($0) },
                     onCopyAsInsert: { model.copyRowsAsInsert($0) },
+                    jumpsAtCell: { model.jumps(atColumn: $0, in: $1) },
+                    onJump: { model.jump($0) },
                     // Nil where nothing can be written, which is what keeps the
                     // item off a view and off a table with no key: `editObstacle`
                     // is the same sentence `CellEditorRow` shows under the grid.

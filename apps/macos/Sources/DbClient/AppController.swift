@@ -239,6 +239,23 @@ final class GridView: MTKView {
     /// none.
     var offersInsertCopy = false
 
+    /// What the cell in a column leads to, given its row by column name.
+    ///
+    /// Asked at the click rather than handed over as data: a jump depends on the
+    /// relation's keys, which this view knows nothing about, and on the row under
+    /// the pointer, which only this view can find. Nil means the menu offers no
+    /// jumps — the Query pane, where a result joining five tables belongs to no
+    /// relation whose keys could be read.
+    var jumpsAtCell: ((String, [String: String]) -> AppModel.CellJumps)?
+
+    /// Called with the jump that was chosen.
+    var onJump: ((AppModel.RowJump) -> Void)?
+    /// Whether the menu offers jumps at all. False for the Query pane, for the
+    /// reason `offersFilters` is false there: a jump is read off the browsed
+    /// relation's keys, and a result joining five tables belongs to none of them
+    /// — a column of it named `parent_id` is not that relation's `parent_id`.
+    var offersJumps = false
+
     /// Called when *Edit Value…* is chosen.
     var onEditValue: (() -> Void)?
     /// Whether that item is offered. False for the Query pane, and false for any
@@ -525,6 +542,40 @@ final class GridView: MTKView {
                 filters(titled: "Add to Filter", column: column, value: cell, extend: true))
         }
 
+        // Where this cell leads. After the filters, because both are about the
+        // value under the pointer and this is the one that leaves the table —
+        // and before Edit Value, because it changes nothing.
+        if offersJumps, let jumpsAtCell, hit.column < table.columnNames.count,
+            hit.row < table.rowCount
+        {
+            // The whole row, not the clicked cell: a composite key is answered
+            // by all of its columns, and one of them may be hidden or scrolled
+            // out of sight. NULL columns are left out, which the model reads as
+            // "no jump" — a key with a NULL in it references nothing.
+            var values: [String: String] = [:]
+            for index in table.columnNames.indices {
+                if let value = table.value(row: hit.row, column: index) {
+                    values[table.columnNames[index]] = value
+                }
+            }
+            let jumps = jumpsAtCell(table.columnNames[hit.column], values)
+            if !jumps.isEmpty {
+                menu.addItem(.separator())
+                for item in jumpItems(
+                    jumps.referenced, alone: { "Go to Row in \($0.label)" },
+                    grouped: "Go to Referenced Row")
+                {
+                    menu.addItem(item)
+                }
+                for item in jumpItems(
+                    jumps.referencing, alone: { "Rows in \($0.label) Referencing This" },
+                    grouped: "Rows Referencing This")
+                {
+                    menu.addItem(item)
+                }
+            }
+        }
+
         // Last, and behind a separator, because it is the one item here that
         // changes something. Everything above it reads the cell.
         //
@@ -572,6 +623,40 @@ final class GridView: MTKView {
         }
         parent.submenu = submenu
         return parent
+    }
+
+    /// One item for a single jump, and a submenu for several.
+    ///
+    /// A submenu with one entry in it is a click somebody has to make to read a
+    /// name they could have read anyway, so a lone jump says where it goes in
+    /// its own title. Several are grouped, because "Go to Row in orders" three
+    /// times over is three items that read the same until the schema is noticed.
+    private func jumpItems(
+        _ jumps: [AppModel.RowJump], alone: (AppModel.RowJump) -> String, grouped: String
+    ) -> [NSMenuItem] {
+        guard !jumps.isEmpty else { return [] }
+        if jumps.count == 1 {
+            return [jumpItem(jumps[0], titled: alone(jumps[0]))]
+        }
+        let parent = NSMenuItem(title: grouped, action: nil, keyEquivalent: "")
+        let submenu = NSMenu(title: grouped)
+        for jump in jumps {
+            submenu.addItem(jumpItem(jump, titled: "\(jump.label) · \(jump.via)"))
+        }
+        parent.submenu = submenu
+        return [parent]
+    }
+
+    private func jumpItem(_ jump: AppModel.RowJump, titled title: String) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(goToRow), keyEquivalent: "")
+        item.target = self
+        item.representedObject = jump
+        return item
+    }
+
+    @objc private func goToRow(_ sender: NSMenuItem) {
+        guard let jump = sender.representedObject as? AppModel.RowJump else { return }
+        onJump?(jump)
     }
 
     @objc private func applyCellFilter(_ sender: NSMenuItem) {
