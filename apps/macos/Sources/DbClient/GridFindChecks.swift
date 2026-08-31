@@ -15,6 +15,13 @@ import AppKit
 /// rather than an `ArrowTable` precisely so the rule can be checked without
 /// buffers, and restating the Arrow read in Swift would be checking a copy of
 /// it. That half is `--find-in-grid`, against a table with a million rows in it.
+///
+/// There is also no case saying an empty field finds nothing. It does, and the
+/// guard in `nextMatch` says so, but the case would pass with the guard removed:
+/// Foundation's `contains` is `range(of:) != nil`, and the range of an empty
+/// string is nil, so a search for nothing already matches nothing. A check that
+/// passes whether the rule is there or not is not a check — the same reason
+/// `ValueViewerChecks` gives for not asserting that NULL and "" seed one box.
 @MainActor
 enum GridFindChecks {
     private static var failures = 0
@@ -30,7 +37,6 @@ enum GridFindChecks {
         checkARestrictedSearchLooksInThatColumnAndNoOther()
         checkAColumnTheResultDoesNotHaveFindsNothing()
         checkANullCellIsNeverAMatch()
-        checkAnEmptyNeedleFindsNothingRatherThanEverything()
         checkTheGridAnswersTheFourFindCommands()
         if failures == 0 {
             fputs("grid-find: all checks passed\n", stderr)
@@ -114,6 +120,12 @@ enum GridFindChecks {
             find("dave", from: nil, backwards: true), GridSelection(row: 4, column: 1),
             "and with nothing selected, the last one — so the first press finds a match "
                 + "either way rather than skipping the one at the end")
+        // The last cell of all, which is the one an off-by-one starting position
+        // skips: a backwards walk that begins at the last cell instead of one
+        // past it finds the second-to-last match and calls it the last.
+        expect(
+            find("seen", from: nil, backwards: true), GridSelection(row: 4, column: 2),
+            "including the very last cell, which is the first one a backwards walk looks at")
     }
 
     /// A search restricted to a column ignores every other one.
@@ -152,16 +164,6 @@ enum GridFindChecks {
     /// this program's own word.
     private static func checkANullCellIsNeverAMatch() {
         expect(find("null", from: nil), nil, "the word the grid draws is not in the data")
-    }
-
-    /// An empty field finds nothing, rather than matching every cell.
-    ///
-    /// `contains("")` is true of every string, so without the guard the first
-    /// press of Return over an empty field would move the cursor to the top-left
-    /// cell and report a match.
-    private static func checkAnEmptyNeedleFindsNothingRatherThanEverything() {
-        expect(
-            find("", from: GridSelection(row: 2, column: 1)), nil, "nothing typed, nothing found")
     }
 
     // MARK: - The menu wiring
@@ -221,7 +223,7 @@ enum GridFindChecks {
     private static let rows: [[String?]] = [
         ["1", "alice", nil],
         ["2", "bob", "note 4x"],
-        ["3", "carol x", "seen"],
+        ["3", "Carol X", "seen"],
         ["4", "dave", "seen"],
         ["5", "dave", "seen"]
     ]
