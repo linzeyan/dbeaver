@@ -468,6 +468,7 @@ pub unsafe extern "C" fn db_capabilities_json(
         &Surface {
             driver: h.driver.capabilities(),
             writes_statements: h.dialect.is_some(),
+            changes_relations: h.dialect.is_some_and(dbddl::changes_relations),
         },
         err,
     )
@@ -497,6 +498,22 @@ struct Surface {
     /// would be reading a table on the other side of the crate graph and
     /// guessing whether it still says the same thing.
     writes_statements: bool,
+
+    /// Whether `db_table_change_sql` writes anything at all for this database.
+    ///
+    /// Narrower than `writes_statements` and not implied by it: every dialect
+    /// this build carries can have a `SELECT` composed for it, and only three of
+    /// the six have had a drop, a truncate and a rename written. A navigator
+    /// keyed on the wider flag would put three items on a ClickHouse table's
+    /// menu that refuse whichever is clicked.
+    ///
+    /// Here rather than in `Capabilities` for the same reason `writes_statements`
+    /// is: it is a fact about what `dbddl` has been taught, and no driver can
+    /// read it. Whether a *particular* relation takes a *particular* change is a
+    /// different question — a view has no rows of its own to truncate — and that
+    /// one is answered by `db_table_change_sql` in place of the statement, so
+    /// the reason is read where the statement would have been shown.
+    changes_relations: bool,
 }
 
 /// Asks the database whether this connection is still good. 0 if it is, -1 if
@@ -1488,6 +1505,115 @@ pub unsafe extern "C" fn db_ddl_text(
     });
     match written.and_then(|text| {
         CString::new(text).map_err(|e| dbconn::DbError::new(format!("DDL is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// The statement that would `change` an existing relation, as text. Release with
+/// `db_string_free`.
+///
+/// `change` is `"drop"`, `"truncate"` or `"rename"`, spelled rather than
+/// numbered for the reason `db_end_process` spells its two: these are one
+/// argument apart and two of them are irreversible, so a caller that got the
+/// order wrong should fail to compose a statement rather than compose the wrong
+/// one. `rename_to` is the new name for `"rename"` and null for the other two.
+///
+/// Written and not run, like `db_ddl_text` and `db_create_table_sql`. What comes
+/// back goes to the server through `db_query` like any other statement, which is
+/// what puts it inside the connection's transaction and under the same Cancel
+/// button — and what lets a caller show somebody a `DROP TABLE` before it goes,
+/// which is the point of composing it here rather than executing it here.
+///
+/// The relation's kind is read rather than taken as an argument, for the reason
+/// `db_ddl_text` reads it: a caller passing it would be handing back something
+/// this side said, and the day the two disagree the answer is `DROP TABLE` for a
+/// view — a statement PostgreSQL refuses and MySQL, having one `DROP` per kind,
+/// refuses too.
+///
+/// Null on failure with `err` set: a relation that is no longer there, a
+/// database whose statements have not been written, a change this relation
+/// cannot take, or a rename with no new name.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `schema`,
+/// `relation` and `change` must be valid NUL-terminated C strings; `rename_to`
+/// must be null or one. `err` must be null or point to writable storage for one
+/// `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_table_change_sql(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    change: *const c_char,
+    rename_to: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() || change.is_null() {
+        unsafe { set_err(err, "null handle, schema, relation, or change") };
+        return ptr::null_mut();
+    }
+    let (s, r, verb) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+            CStr::from_ptr(change).to_str(),
+        ) {
+            (Ok(s), Ok(r), Ok(c)) => (s, r, c),
+            _ => {
+                set_err(err, "schema, relation, or change is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let new_name = if rename_to.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(rename_to) }.to_str() {
+            Ok(name) => Some(name),
+            Err(_) => {
+                unsafe { set_err(err, "the new name is not valid UTF-8") };
+                return ptr::null_mut();
+            }
+        }
+    };
+    // A rename with no name is caught here rather than reaching a renderer,
+    // because every renderer would have to catch it and each would word it
+    // differently. The empty string is the same mistake as the missing pointer:
+    // `ALTER TABLE t RENAME TO ""` is a statement some of these servers accept.
+    let change = match (verb, new_name) {
+        ("drop", _) => dbddl::TableChange::Drop,
+        ("truncate", _) => dbddl::TableChange::Truncate,
+        ("rename", Some(to)) if !to.is_empty() => dbddl::TableChange::Rename { to },
+        ("rename", _) => {
+            unsafe { set_err(err, "a rename needs a new name") };
+            return ptr::null_mut();
+        }
+        _ => {
+            unsafe { set_err(err, format!("{verb:?} is not a change to a relation")) };
+            return ptr::null_mut();
+        }
+    };
+    let h = unsafe { &*handle };
+    let written = runtime().block_on(async {
+        let Some(dialect) = h.dialect else {
+            return Err(dbconn::DbError::new(
+                "this build does not write DDL for this database",
+            ));
+        };
+        let listed = h.driver.relations(s).await?;
+        match listed.into_iter().find(|info| info.name == r) {
+            Some(info) => dbddl::table_change(dialect, &info, change),
+            None => Err(dbconn::DbError::new(format!("{s}.{r} is not there"))),
+        }
+    });
+    match written.and_then(|text| {
+        CString::new(text)
+            .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
     }) {
         Ok(text) => text.into_raw(),
         Err(e) => {

@@ -361,6 +361,29 @@ char* db_variables_json(DbHandle* handle, char** err);
 // because a statement that looks complete and is not is worse than a refusal.
 char* db_ddl_text(DbHandle* handle, const char* schema, const char* relation, char** err);
 
+// The statement that would change a relation that is already there, as plain
+// text — released with db_string_free, and written rather than run like the DDL
+// above. Showing it is the point: two of the three are irreversible, and a
+// window that can print DROP TABLE orders before sending it is offering the only
+// review anybody gets.
+//
+// `change` is "drop", "truncate" or "rename", spelled rather than numbered for
+// the reason db_end_process spells its two — they are one argument apart and the
+// wrong one destroys something. `rename_to` carries the new name for "rename"
+// and is null otherwise; a rename without one is refused rather than sent, an
+// empty name being a statement some of these servers accept.
+//
+// The relation's kind is read here, like db_ddl_text reads it and for the same
+// reason: DROP TABLE aimed at a view is a statement PostgreSQL and MySQL both
+// refuse, and a caller passing the kind back would be the one to get it wrong.
+//
+// Whether this connection writes any of the three at all is
+// db_capabilities_json's changes_relations, which is what a menu is built from.
+// Whether *this* relation takes *this* change is answered here, in place of the
+// statement, so the reason appears where the statement would have been.
+char* db_table_change_sql(DbHandle* handle, const char* schema, const char* relation,
+                          const char* change, const char* rename_to, char** err);
+
 // The statement that reads one relation's rows, as plain text — released with
 // db_string_free, and written rather than run, like db_edit_sql_json.
 //
