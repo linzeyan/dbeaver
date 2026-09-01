@@ -64,6 +64,11 @@ impl Renderer for MsSql {
             "changing a table has not been written for SQL Server yet",
         ))
     }
+
+    /// None are written, so the items are not drawn at all.
+    fn changes_relations(&self) -> bool {
+        false
+    }
 }
 
 /// A table, as `SQLTableManager.getTableDDL` orders it.

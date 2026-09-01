@@ -116,6 +116,11 @@ impl Renderer for Mysql {
             }
         })
     }
+
+    /// All three are written above.
+    fn changes_relations(&self) -> bool {
+        true
+    }
 }
 
 /// The statement `SHOW CREATE {object}` answers with, taken from `column`.

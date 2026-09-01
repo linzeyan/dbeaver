@@ -125,6 +125,12 @@ impl Renderer for Sqlite {
             }
         }
     }
+
+    /// Two of the three are written above, which is enough for the items to be
+    /// worth drawing; the third refuses where its statement would have been.
+    fn changes_relations(&self) -> bool {
+        true
+    }
 }
 
 /// A table, as `SQLiteMetaModel.getTableDDL` assembles one.

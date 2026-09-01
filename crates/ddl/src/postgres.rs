@@ -109,6 +109,11 @@ impl Renderer for Postgres {
             }
         })
     }
+
+    /// All three are written above.
+    fn changes_relations(&self) -> bool {
+        true
+    }
 }
 
 /// PostgreSQL's own word for a relation of this kind.

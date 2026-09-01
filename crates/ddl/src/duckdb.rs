@@ -61,6 +61,11 @@ impl Renderer for DuckDb {
             "changing a table has not been written for DuckDB yet",
         ))
     }
+
+    /// None are written, so the items are not drawn at all.
+    fn changes_relations(&self) -> bool {
+        false
+    }
 }
 
 /// A table, from `duckdb_tables()`.

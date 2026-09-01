@@ -112,6 +112,11 @@ impl Renderer for Clickhouse {
             "changing a table has not been written for ClickHouse yet",
         ))
     }
+
+    /// None are written, so the items are not drawn at all.
+    fn changes_relations(&self) -> bool {
+        false
+    }
 }
 
 /// A statement is one row, so this decides only how large a buffer holds it.

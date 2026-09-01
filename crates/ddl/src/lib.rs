@@ -272,6 +272,31 @@ pub trait Renderer: Send + Sync {
     /// where it would have shown the statement, which is the same place and the
     /// same gesture — see the sheet this feeds.
     fn table_change(&self, relation: &RelationInfo, change: TableChange<'_>) -> DbResult<String>;
+
+    /// Whether this renderer writes any [`TableChange`] at all.
+    ///
+    /// Asked separately from `table_change` because a menu is built for a
+    /// connection and not for a row: the front end needs to know whether to draw
+    /// the items before anybody has chosen a relation for them to act on. A
+    /// renderer that has not been written must answer `false` so that the items
+    /// are absent rather than present and always refusing.
+    ///
+    /// It can disagree with `table_change`, which is what
+    /// `a_renderer_that_claims_changes_writes_one` exists to stop: every
+    /// renderer answering `true` there has to return a statement for an ordinary
+    /// table's drop, and every one answering `false` has to refuse it.
+    fn changes_relations(&self) -> bool;
+}
+
+/// Whether this build writes any change to a relation on `dialect`.
+///
+/// What the front end reads to decide whether the Drop, Truncate and Rename
+/// items exist. Which of the three a *particular* relation can take is a
+/// narrower question with its own answer — a view cannot be truncated anywhere —
+/// and that one is answered by [`table_change`] where the statement would have
+/// been, so that the refusal is read in the place the statement is shown.
+pub fn changes_relations(dialect: &'static Dialect) -> bool {
+    for_dialect(dialect).is_some_and(|renderer| renderer.changes_relations())
 }
 
 /// The renderer written for `dialect`, and `None` where none is yet.
@@ -683,6 +708,46 @@ ORDER BY tuple();",
             .expect("rendered"),
             "ALTER TABLE staging.orders RENAME TO \"Orders 2026\";"
         );
+    }
+
+    /// `changes_relations` and `table_change` say the same thing.
+    ///
+    /// The two can disagree, and each direction is its own silent failure. A
+    /// renderer claiming changes it cannot write gives the navigator three menu
+    /// items that open a sheet only to refuse; one that writes them and says
+    /// otherwise is never asked, and the items are simply missing with nothing
+    /// anywhere to say why.
+    ///
+    /// Asked with a drop of an ordinary table, which is the change every
+    /// renderer that writes any of the three writes — the narrower refusals are
+    /// about a particular relation, and `changes_relations` is not.
+    #[test]
+    fn a_renderer_that_claims_changes_writes_one() {
+        let table = relation("s", "t", RelationKind::Table);
+        for dialect in dbsql::ALL {
+            let Some(renderer) = super::for_dialect(dialect) else {
+                continue;
+            };
+            let written = renderer.table_change(&table, TableChange::Drop).is_ok();
+            assert_eq!(
+                renderer.changes_relations(),
+                written,
+                "{} says it {} change a relation and {} write the statement",
+                dialect.name,
+                if renderer.changes_relations() {
+                    "can"
+                } else {
+                    "cannot"
+                },
+                if written { "does" } else { "does not" }
+            );
+            assert_eq!(
+                super::changes_relations(dialect),
+                written,
+                "{} answers differently through the crate's own entry point",
+                dialect.name
+            );
+        }
     }
 
     /// What each database refuses, and why the refusal says so.
