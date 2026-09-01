@@ -384,6 +384,28 @@ char* db_ddl_text(DbHandle* handle, const char* schema, const char* relation, ch
 char* db_table_change_sql(DbHandle* handle, const char* schema, const char* relation,
                           const char* change, const char* rename_to, char** err);
 
+// The statement that would make or drop a whole database — released with
+// db_string_free, written rather than run like the one above it, and the one
+// statement in this library whose blast radius is an entire catalog.
+//
+// `change` is "create" or "drop". `name` is the database, written as the server
+// reads it: quoted where it has to be, bare where it does not. An empty name is
+// refused here, CREATE DATABASE "" being a statement some of these servers take.
+//
+// Nothing is read from the server first. There is no kind to look up and
+// "create" names something that is not there yet, so the cost is that dropping a
+// database that has already gone composes fine and is refused by the server —
+// which is the right end for that to happen at.
+//
+// Neither runs inside a transaction on PostgreSQL, which refuses both with
+// "cannot run inside a transaction block". That is a fact about the caller's
+// session rather than about the text, so the caller is what has to be out of one.
+//
+// Whether this connection writes either at all is db_capabilities_json's
+// changes_databases, which is not implied by changes_relations: SQLite drops and
+// renames a table, and a SQLite database is a file.
+char* db_database_change_sql(DbHandle* handle, const char* change, const char* name, char** err);
+
 // The statement that reads one relation's rows, as plain text — released with
 // db_string_free, and written rather than run, like db_edit_sql_json.
 //
