@@ -256,6 +256,16 @@ final class Database: @unchecked Sendable {
         return answer == 1
     }
 
+    /// The settings the server is running with, in name order.
+    ///
+    /// Only ask where `capabilities().reportsVariables`, under the rule
+    /// `routines` is asked under. Not cached here either, but for the opposite
+    /// reason to `processes`: this answer keeps, so the sheet holds the one it
+    /// was given and asks again only when told to.
+    func variables() throws -> [ServerVariable] {
+        try decodeJSON(db_variables_json(handle, &errOut), as: [ServerVariable].self)
+    }
+
     func columns(schema: String, relation: String) throws -> [ColumnInfo] {
         try decodeJSON(
             db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)

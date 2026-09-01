@@ -261,6 +261,7 @@ impl Driver for Deaf {
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
     async fn server_info(&self) -> DbResult<ServerInfo> {

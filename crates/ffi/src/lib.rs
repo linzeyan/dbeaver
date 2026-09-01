@@ -1211,6 +1211,38 @@ pub unsafe extern "C" fn db_end_process(
     }
 }
 
+/// The settings the server is running with, as a JSON array. Release with
+/// `db_string_free`.
+///
+/// Fails on a connection whose `reports_variables` is false, rather than
+/// answering with an empty array, for the reason `db_processes_json` fails.
+///
+/// Asked once when the sheet opens and again only when somebody asks. Unlike
+/// `db_processes_json` this answer keeps: a setting changes when an
+/// administrator changes it, and the six hundred rows that came back are still
+/// the six hundred rows a minute later.
+///
+/// # Safety
+/// `handle` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_variables_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.driver.variables()) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Defines one `(handle, schema, name, err) -> JSON` entry point.
 ///
 /// The schema-and-one-name metadata calls differ only in which method they

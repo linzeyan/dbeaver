@@ -49,7 +49,7 @@ mod metadata;
 pub use metadata::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, InfoField,
     ProcessInfo, RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind,
-    SchemaInfo, SequenceInfo, TriggerInfo, UniqueKeyInfo,
+    SchemaInfo, SequenceInfo, TriggerInfo, UniqueKeyInfo, VariableInfo, VariableScope,
 };
 
 use arrow::array::RecordBatch;
@@ -348,6 +348,22 @@ pub struct Capabilities {
     /// contract clause would have to rule out. A driver that could close a
     /// connection but not list one has nothing to name in the call.
     pub server_processes: ServerProcesses,
+
+    /// Whether `variables` lists the settings the server is running with.
+    ///
+    /// A bool where `server_processes` is a ladder, because there is only one
+    /// verb here: the list is read and nothing is done to a row. Writing a
+    /// setting is deliberately not something this client offers — see
+    /// [`VariableInfo`] — so there is no second state for a driver to be in.
+    ///
+    /// False carries the same two meanings `reports_routines` false does, and
+    /// each driver says which where it answers. Both are common here: a managed
+    /// service may have no settings a client can read at all, while most of the
+    /// engines that do have simply not been taught the call yet.
+    ///
+    /// The front end draws no menu item where this is false, and does not call
+    /// `variables`.
+    pub reports_variables: bool,
 }
 
 /// What a driver can report and do about the server's own activity.
@@ -584,6 +600,32 @@ pub trait Driver: Send + Sync {
     async fn end_process(&self, _id: &str, _how: EndProcess) -> DbResult<bool> {
         Err(DbError::new(
             "this connection cannot end what the server is running",
+        ))
+    }
+
+    /// The settings the server is running with.
+    ///
+    /// Only where `capabilities().reports_variables`, under the rule `routines`
+    /// is written under and for the same reason.
+    ///
+    /// Every setting, and not a chosen few. A driver that reported the twenty it
+    /// thought interesting would be answering the question its author had rather
+    /// than the one being asked — somebody opens this because a specific setting
+    /// is not what they expected, and the specific one is never on anybody
+    /// else's list. Six hundred rows and a filter field is the shape that works.
+    ///
+    /// Ordered by name, which is the only order a list this long can be read in.
+    /// `processes` leaves the order to the driver because its rows mean
+    /// something in the order the server keeps them; these do not.
+    ///
+    /// One row per name. A setting with both a server value and a value this
+    /// connection changed is reported once, at [`VariableScope::Session`], with
+    /// the value this connection is actually running under — the server's own is
+    /// a `RESET` away and is not what somebody debugging their own connection is
+    /// looking for.
+    async fn variables(&self) -> DbResult<Vec<VariableInfo>> {
+        Err(DbError::new(
+            "this connection does not report the server's settings",
         ))
     }
 

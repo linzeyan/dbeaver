@@ -642,21 +642,31 @@ enum AppMenu {
 
     /// The server itself, as opposed to the data on it.
     ///
+    /// The server itself, as opposed to the data on it.
+    ///
     /// Its own menu rather than more items under Query, because nothing in it is
     /// about the statement in front of you: Query acts on the buffer and the
-    /// result, and this asks the server what it is doing for everybody. One item
-    /// today and the read-only variables sheet beside it next, which is the
-    /// other half of the same question.
+    /// result, and this asks the server what it is doing and what it is running
+    /// with. Two halves of one question, which is why they sit together.
+    ///
+    /// Processes first, because it is the one somebody opens while something is
+    /// wrong; the settings are what they read next, once they know which
+    /// setting to go looking for.
     private static func databaseMenu(server: ServerCommands) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Database")
-        // No key equivalent. It is a sheet somebody opens deliberately when a
-        // server is misbehaving, not something reached mid-typing, and the
-        // shortcuts near it are all things that act on the query in front.
+        // No key equivalents. These are sheets somebody opens deliberately when
+        // a server is misbehaving, not things reached mid-typing, and the
+        // shortcuts near them all act on the query in front.
         let processes = menu.addItem(
             withTitle: "Server Processes…",
             action: #selector(ServerCommands.showServerProcesses(_:)), keyEquivalent: "")
         processes.target = server
+
+        let variables = menu.addItem(
+            withTitle: "Server Variables…",
+            action: #selector(ServerCommands.showServerVariables(_:)), keyEquivalent: "")
+        variables.target = server
 
         item.submenu = menu
         return item
@@ -1084,7 +1094,19 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
 
     @objc func showServerProcesses(_ sender: Any?) { model.openProcesses() }
 
-    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.watchesServerProcesses }
+    @objc func showServerVariables(_ sender: Any?) { model.openVariables() }
+
+    /// One answer per item, because the two capabilities are separate questions
+    /// and a driver may well answer one and not the other — reading
+    /// `SHOW VARIABLES` is a query, and listing somebody else's sessions is a
+    /// privilege.
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(showServerProcesses(_:)): model.watchesServerProcesses
+        case #selector(showServerVariables(_:)): model.readsServerVariables
+        default: false
+        }
+    }
 }
 
 /// The Query menu's transaction items, as something a menu can send to.

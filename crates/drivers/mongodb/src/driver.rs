@@ -165,6 +165,10 @@ impl Driver for MongoSource {
     /// absence: `$currentOp` and `killOp` are the pair `cancel` above already
     /// uses for this session's own operations. What is missing is the general
     /// read, not the mechanism.
+    ///
+    /// The server's settings are not listed, and that is a gap. `getParameter:
+    /// '*'` returns the ones readable at runtime and `getCmdLineOpts` what the
+    /// process was started with; this driver asks for neither yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -174,6 +178,7 @@ impl Driver for MongoSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

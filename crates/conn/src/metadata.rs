@@ -456,3 +456,63 @@ pub struct ProcessInfo {
     /// connection that is not running one, which is most of them.
     pub statement: String,
 }
+
+/// One setting the server is running with.
+///
+/// The second of the two snapshots in this file, and steadier than
+/// [`ProcessInfo`]: a setting changes when somebody changes it, so this list is
+/// worth reading top to bottom and does not refresh on a timer.
+///
+/// Read-only, and the read is the whole feature. Writing one is `SET GLOBAL` or
+/// an edit to a config file, which is a statement the Query tab already runs and
+/// a decision nobody should be one mis-click away from — the two most common
+/// settings to change by accident here would be `max_connections` and
+/// `innodb_buffer_pool_size`, and both take the server with them.
+#[derive(Debug, Clone, Serialize)]
+pub struct VariableInfo {
+    /// The server's own spelling, which is what somebody searching the manual
+    /// for it will type.
+    pub name: String,
+    /// What it is set to now, formatted by the server, for the reason
+    /// [`ProcessInfo::duration`] is: a byte count is `134217728` on MySQL and
+    /// `16384` eight-kilobyte blocks on PostgreSQL, and a client that rendered
+    /// either as "128 MB" would be inventing a unit the server never used and
+    /// that no `SET` will accept back.
+    ///
+    /// Empty where the setting has no value, which is ordinary — an unset
+    /// `archive_command` is a blank rather than a missing row.
+    pub value: String,
+    /// Whose value this is.
+    pub scope: VariableScope,
+}
+
+/// How far one setting's value reaches.
+///
+/// Normalised into two words, which is the opposite of what
+/// [`ProcessInfo::state`] does, and the difference is worth saying. A process
+/// state is a word about an engine — "idle in transaction" has no equivalent
+/// anywhere else — so translating one would lose the thing that made it worth
+/// showing. This is a question with the same two answers on every server that
+/// has settings at all: either everybody connected sees this value, or only this
+/// connection does. A front end sorts and filters on it, and it cannot do that
+/// against fifteen vocabularies.
+///
+/// What each driver translates *from* is its own business and is written where
+/// it answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VariableScope {
+    /// The server's, and every connection's. What somebody reading this list to
+    /// find out how the server is configured came for.
+    Server,
+    /// This connection's alone, either because it was set on this connection or
+    /// because the setting has no server-wide value to have — MySQL's
+    /// `timestamp` and `rand_seed1` are per-connection and nothing else.
+    ///
+    /// Worth a word of its own rather than being folded into the rest, because a
+    /// reader who takes a session value for the server's draws the wrong
+    /// conclusion twice over: they think they have found why the server behaves
+    /// as it does, and they think a value they can change alone is one everybody
+    /// is stuck with.
+    Session,
+}

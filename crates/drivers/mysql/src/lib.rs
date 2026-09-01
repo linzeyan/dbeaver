@@ -47,7 +47,7 @@ use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
     ColumnInfo, ConstraintInfo, EndProcess, IndexInfo, InfoField, ProcessInfo, RelationInfo,
-    RelationshipInfo, RoutineInfo, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    RelationshipInfo, RoutineInfo, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo, VariableInfo,
 };
 use futures_util::StreamExt;
 use metadata::Capabilities;
@@ -515,6 +515,20 @@ impl MySqlSource {
     pub async fn end_process(&self, id: &str, how: EndProcess) -> Result<bool, MySqlError> {
         let mut spare = self.acquire().await?;
         let out = metadata::end_process(&mut spare.conn, id, how).await;
+        self.release(spare, &out);
+        out
+    }
+
+    /// The settings this server is running with.
+    ///
+    /// Asked on a pooled connection like everything else here, which is what the
+    /// session-scoped rows are relative to. See `limitations.md`: they describe
+    /// whichever connection answered rather than a session anybody here can
+    /// address, and what they are good for is the distinction they draw — this
+    /// value is not the server's — rather than the connection they belong to.
+    pub async fn variables(&self) -> Result<Vec<VariableInfo>, MySqlError> {
+        let mut spare = self.acquire().await?;
+        let out = metadata::variables(&mut spare.conn).await;
         self.release(spare, &out);
         out
     }

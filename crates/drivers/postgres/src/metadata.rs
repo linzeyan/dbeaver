@@ -12,7 +12,7 @@
 use dbconn::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, EndProcess, IndexInfo,
     InfoField, ProcessInfo, RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind,
-    SchemaInfo, SequenceInfo, TriggerInfo, UniqueKeyInfo,
+    SchemaInfo, SequenceInfo, TriggerInfo, UniqueKeyInfo, VariableInfo, VariableScope,
 };
 use tokio_postgres::Client;
 
@@ -892,4 +892,70 @@ pub(crate) async fn end_process(
     };
     let row = client.query_one(statement, &[&pid]).await?;
     Ok(row.get::<_, Option<bool>>(0).unwrap_or(false))
+}
+
+/// Every setting in `pg_settings`, with the scope read off `source`.
+///
+/// `pg_settings` rather than `SHOW ALL`, which returns the same names and values
+/// and one column of prose instead of the one that says where each value came
+/// from. The description is not shown — six hundred paragraphs is a manual, and
+/// PostgreSQL's is better and already written.
+///
+/// A setting no role may read comes back with `setting` null rather than as an
+/// error, and is listed with a blank value: the name is still a true fact about
+/// the server, and dropping the row would make a filter for it come back empty
+/// as though the setting did not exist.
+///
+/// Sorted here and not by the server, which is the one thing this does not ask
+/// PostgreSQL for. `ORDER BY name` sorts in the database's collation, and
+/// `en_US.UTF-8` ignores the underscores — which puts `logging_collector` in the
+/// middle of the `log_` settings and `DateStyle` between `data_sync_retry` and
+/// `deadlock_timeout`. Byte order keeps every `log_` prefix together, and it is
+/// the order MySQL's answer already arrives in, so one rule in `contract.rs`
+/// covers both.
+pub(crate) async fn variables(client: &Client) -> Result<Vec<VariableInfo>, PgError> {
+    let rows = client
+        .query(
+            "SELECT name, coalesce(setting, ''), source FROM pg_catalog.pg_settings",
+            &[],
+        )
+        .await?;
+    let mut variables: Vec<VariableInfo> = rows
+        .iter()
+        .map(|row| VariableInfo {
+            name: row.get(0),
+            value: row.get(1),
+            scope: scope_of(row.get(2)),
+        })
+        .collect();
+    variables.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(variables)
+}
+
+/// Which of the two scopes a `pg_settings.source` describes.
+///
+/// PostgreSQL names thirteen sources, and they answer a finer question than
+/// `VariableScope` asks: not only whether this value is the server's but which
+/// file or statement put it there. The four folded into `Session` are the ones
+/// that arrived with this particular connection — `SET` in the session,
+/// `PGOPTIONS` in its startup packet, and the per-role and per-database defaults
+/// `ALTER ROLE ... SET` and `ALTER DATABASE ... SET` leave behind.
+///
+/// The last two are the arguable ones, and they are here rather than under
+/// `Server` because of what the answer is for: somebody reading this list wants
+/// to know whether the value in front of them is the one everybody gets. A
+/// setting that follows a role around is not, and calling it the server's would
+/// send them to `postgresql.conf` to look for something that was never in it.
+///
+/// Anything unrecognised is the server's. A source this does not know is far
+/// more likely to be a new way of writing configuration than a new way for one
+/// connection to differ from the rest, and the wrong guess in that direction is
+/// the quieter one — it says "everybody has this" about a value that is in fact
+/// only yours, rather than sending somebody looking for a per-session override
+/// that does not exist.
+fn scope_of(source: &str) -> VariableScope {
+    match source {
+        "session" | "client" | "user" | "database" | "database user" => VariableScope::Session,
+        _ => VariableScope::Server,
+    }
 }

@@ -265,6 +265,7 @@ impl Driver for Fixture {
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

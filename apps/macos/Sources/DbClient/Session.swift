@@ -530,6 +530,29 @@ final class Session: Identifiable {
     /// last read failed. Empty when there is nothing to report.
     var processReport = ""
 
+    // MARK: - What the server is configured with
+
+    /// Whether the Server Variables sheet is up. Per connection, for the reason
+    /// `isProcessesOpen` is.
+    var isVariablesOpen = false
+
+    /// The last list read, in the name order the core promises. Not re-sorted
+    /// here, and there is no column to sort by: six hundred settings are found
+    /// by typing a prefix, not by scrolling to one.
+    var variables: [ServerVariable] = []
+
+    /// What is typed into the sheet's filter, matched against name and value.
+    var variableFilter = ""
+
+    /// Set while the read is in flight. There is no refresh timer to go with it
+    /// — a setting changes when somebody changes it, so the list is asked for
+    /// once when the sheet opens and again only when Refresh is pressed.
+    var isReadingVariables = false
+
+    /// Why the last read failed, or what the last copy took. Empty when there is
+    /// nothing to report.
+    var variableReport = ""
+
     // MARK: - Transfers
 
     /// Set while a result is being written to a file. The write happens off the

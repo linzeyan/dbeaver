@@ -14,7 +14,7 @@ use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
     ColumnInfo, ConstraintInfo, DatabaseInfo, EndProcess, IndexInfo, InfoField, ProcessInfo,
     RelationInfo, RelationshipInfo, RoutineInfo, SchemaInfo, SequenceInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    UniqueKeyInfo, VariableInfo,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -518,6 +518,18 @@ impl PgSource {
     pub async fn end_process(&self, id: &str, how: EndProcess) -> Result<bool, PgError> {
         let conn = self.acquire_connection().await?;
         metadata::end_process(&conn, id, how).await
+    }
+
+    /// The settings this server is running with.
+    ///
+    /// Asked on a pooled connection like everything else here, which is what the
+    /// session-scoped rows are relative to. See `limitations.md`: they describe
+    /// whichever connection answered rather than a session anybody here can
+    /// address, and what they are good for is the distinction they draw — this
+    /// value is not the server's — rather than the connection they belong to.
+    pub async fn variables(&self) -> Result<Vec<VariableInfo>, PgError> {
+        let conn = self.acquire_connection().await?;
+        metadata::variables(&conn).await
     }
 
     /// Sequences within a schema, whole: there is no second call.

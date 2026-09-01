@@ -155,6 +155,12 @@ impl Driver for DuckSource {
     /// The server's activity is not reported, and there is no server. DuckDB
     /// runs in this process, so the only work there is to list is the work this
     /// application started.
+    ///
+    /// The server's settings are not listed, and that is a gap rather than an
+    /// absence. `duckdb_settings()` returns every one of them, and they matter
+    /// — `threads` and `memory_limit` decide how a query runs. What they are
+    /// not is a server's: the engine is in this process, so every row would be
+    /// `Session`.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -164,6 +170,7 @@ impl Driver for DuckSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

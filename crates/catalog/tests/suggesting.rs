@@ -135,6 +135,7 @@ impl Driver for Fake {
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

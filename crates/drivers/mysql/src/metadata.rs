@@ -37,7 +37,7 @@
 use dbconn::{
     ColumnInfo, ConstraintInfo, ConstraintKind, EndProcess, IndexInfo, InfoField, ProcessInfo,
     RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo,
-    TriggerInfo, UniqueKeyInfo,
+    TriggerInfo, UniqueKeyInfo, VariableInfo, VariableScope,
 };
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Row};
@@ -1035,6 +1035,56 @@ pub async fn end_process(conn: &mut Conn, id: &str, how: EndProcess) -> Result<b
         Err(e) => Err(e.into()),
     }
 }
+
+/// Every setting, from the two `SHOW VARIABLES` this server answers.
+///
+/// Two statements because MySQL will not say in one which scope a value belongs
+/// to. `SHOW SESSION VARIABLES` is the wider list and the one to walk: it names
+/// every setting this connection has, which is the server's own plus the two
+/// dozen that exist only per-connection — `timestamp`, `rand_seed1`,
+/// `pseudo_thread_id`. `SHOW GLOBAL VARIABLES` names only the server's.
+///
+/// A name in both is `Server` when the two values agree and `Session` when they
+/// do not, because a session value that differs from the global one differs for
+/// exactly one reason: something set it on this connection. That is the same
+/// fact PostgreSQL reports in `pg_settings.source`, arrived at the only way this
+/// server offers.
+///
+/// Not `performance_schema.variables_info`, which has a `VARIABLE_SOURCE` column
+/// saying where each value came from and would have answered this in one query.
+/// It is empty on a server started with `performance_schema=OFF`, and empty
+/// there is indistinguishable from a server with no settings — the sheet would
+/// say "no variables" about a server with six hundred. `SHOW VARIABLES` is
+/// answered by every MySQL there has ever been.
+pub async fn variables(conn: &mut Conn) -> Result<Vec<VariableInfo>, MySqlError> {
+    let read = |rows: Vec<Row>| -> BTreeMap<String, String> {
+        rows.iter()
+            .filter_map(|row| {
+                let text = |index: usize| row.get::<Option<String>, usize>(index).flatten();
+                // A row with no name is not a setting. MySQL does not send one;
+                // dropping it here is what keeps a malformed answer out of a
+                // list the front end keys by name.
+                Some((text(0)?, text(1).unwrap_or_default()))
+            })
+            .collect()
+    };
+    let server = read(conn.query("SHOW GLOBAL VARIABLES").await?);
+    let session = read(conn.query("SHOW SESSION VARIABLES").await?);
+
+    // `BTreeMap` and not the order the server sent, which is the ordering by
+    // name the trait asks for and is also what makes the two lists comparable.
+    Ok(session
+        .into_iter()
+        .map(|(name, value)| {
+            let scope = match server.get(&name) {
+                Some(global) if *global == value => VariableScope::Server,
+                _ => VariableScope::Session,
+            };
+            VariableInfo { name, value, scope }
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
