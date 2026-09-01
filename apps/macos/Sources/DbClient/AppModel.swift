@@ -4504,7 +4504,11 @@ final class AppModel {
             else { return }
             session.gridFindText = text
             openGridFind()
-        @unknown default: break
+        // The other six are the text system's: replace, replace-and-find and
+        // their variants, and the two select-alls. The bar over a grid offers no
+        // replacement and no multiple selection, so the grid declines them and
+        // the key keeps whatever meaning it had elsewhere.
+        default: break
         }
     }
 
