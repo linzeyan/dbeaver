@@ -53,9 +53,10 @@ use dbffi::{
     db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
     db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
-    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
-    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json, db_variables_json,
+    db_string_free, db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
+    db_transfer_start, db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit,
+    db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_variables_json,
 };
 
 // Test db_connect with null connection string
@@ -1920,7 +1921,15 @@ fn connected() -> *mut dbffi::DbHandle {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
     let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
-    assert!(!handle.is_null(), "benchmark database unreachable");
+    // The server's own words rather than "unreachable". Every ignored test in
+    // this file goes through here, so this message is the first thing anybody
+    // debugging them reads, and a refused password and an exhausted connection
+    // limit are not the same problem.
+    assert!(
+        !handle.is_null(),
+        "benchmark database unreachable: {}",
+        complaint(&mut err)
+    );
     handle
 }
 
@@ -2200,6 +2209,208 @@ fn the_ddl_of_a_table_is_the_statement_that_would_make_it() {
     unsafe { db_string_free(err) };
     assert!(why.contains("no_such_relation_anywhere"), "got {why}");
 
+    unsafe { db_free(handle) };
+}
+
+/// Which of the three words was passed decides what gets destroyed.
+///
+/// Asked on SQLite, which needs no server and writes all three, so the rules
+/// under test are the ones this call applies rather than the ones a null handle
+/// would short-circuit. Every case here would still be caught if the verbs were
+/// read in the wrong order or defaulted — a word nobody wrote has to refuse, and
+/// a rename with nothing to rename to has to refuse before a renderer is asked
+/// to spell `RENAME TO ""`, which two of these servers accept.
+#[test]
+fn a_change_this_call_cannot_read_is_refused_rather_than_guessed_at() {
+    let path = std::env::temp_dir().join("dbffi-table-change.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+    ran(handle, "CREATE TABLE changed (n int)");
+
+    let main = CString::new("main").unwrap();
+    let table = CString::new("changed").unwrap();
+    let named = CString::new("renamed").unwrap();
+    let empty = CString::new("").unwrap();
+    let change = |verb: &str, to: *const c_char| {
+        let verb = CString::new(verb).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_table_change_sql(
+                handle,
+                main.as_ptr(),
+                table.as_ptr(),
+                verb.as_ptr(),
+                to,
+                &mut err,
+            )
+        };
+        if raw.is_null() {
+            return Err(complaint(&mut err));
+        }
+        assert!(err.is_null(), "a written statement must not also set err");
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        Ok(text)
+    };
+
+    // The two that are written, each recognisable as itself. Composed and not
+    // run: this call writes statements, and running one here would be testing
+    // SQLite rather than the words that reached it.
+    let dropped = change("drop", ptr::null()).expect("SQLite drops a table");
+    assert!(dropped.contains("DROP TABLE"), "got {dropped}");
+    let renamed = change("rename", named.as_ptr()).expect("SQLite renames a table");
+    assert!(renamed.contains("RENAME TO"), "got {renamed}");
+    assert!(renamed.contains("renamed"), "got {renamed}");
+
+    // A word no renderer has. `delete` is the tempting one, reading like a
+    // change and being a statement about rows.
+    let why = change("delete", ptr::null()).expect_err("there is no such change");
+    assert!(why.contains("delete"), "the refusal must name it: {why}");
+
+    // Both ways of not supplying a new name, and the empty string is the one
+    // that has to be caught here: it is a valid C string all the way down.
+    for to in [ptr::null(), empty.as_ptr()] {
+        let why = change("rename", to).expect_err("a rename needs somewhere to go");
+        assert!(why.contains("name"), "got {why}");
+    }
+
+    // What this database will not do, said in place of the statement rather
+    // than by leaving the item off a menu.
+    let why = change("truncate", ptr::null()).expect_err("SQLite has no TRUNCATE");
+    assert!(why.contains("DELETE FROM"), "got {why}");
+
+    // A relation that is not there is not a change with an empty statement.
+    let gone = CString::new("no_such_relation_anywhere").unwrap();
+    let verb = CString::new("drop").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe {
+        db_table_change_sql(
+            handle,
+            main.as_ptr(),
+            gone.as_ptr(),
+            verb.as_ptr(),
+            ptr::null(),
+            &mut err,
+        )
+    };
+    assert!(raw.is_null());
+    let why = complaint(&mut err);
+    assert!(why.contains("no_such_relation_anywhere"), "got {why}");
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The arguments this call refuses to read at all.
+///
+/// Separate from the test above because a null handle answers every one of these
+/// before a verb is looked at, which is exactly what makes it the wrong place to
+/// test the verbs.
+#[test]
+fn the_table_change_call_says_why_it_could_not_read_its_arguments() {
+    let public = CString::new("public").unwrap();
+    let drop = CString::new("drop").unwrap();
+    let invalid = CString::new(vec![b'p', b'u', b'b', 0xff, 0xfe]).unwrap();
+    for (handle, schema, relation, change) in [
+        (
+            ptr::null_mut(),
+            public.as_ptr(),
+            public.as_ptr(),
+            drop.as_ptr(),
+        ),
+        (ptr::null_mut(), ptr::null(), public.as_ptr(), drop.as_ptr()),
+        (ptr::null_mut(), public.as_ptr(), ptr::null(), drop.as_ptr()),
+        (
+            ptr::null_mut(),
+            public.as_ptr(),
+            public.as_ptr(),
+            ptr::null(),
+        ),
+        (
+            ptr::null_mut(),
+            invalid.as_ptr(),
+            public.as_ptr(),
+            drop.as_ptr(),
+        ),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw =
+            unsafe { db_table_change_sql(handle, schema, relation, change, ptr::null(), &mut err) };
+        assert!(raw.is_null());
+        assert!(
+            !err.is_null(),
+            "db_table_change_sql must say why it refused"
+        );
+        unsafe { db_string_free(err) };
+    }
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn the_three_changes_are_statements_the_server_runs() {
+    let handle = connected();
+    ran(
+        handle,
+        "DROP TABLE IF EXISTS ffi_change_old, ffi_change_new",
+    );
+    ran(handle, "CREATE TABLE ffi_change_old (n int)");
+    ran(handle, "INSERT INTO ffi_change_old VALUES (1), (2)");
+
+    let schema = CString::new("public").unwrap();
+    let old = CString::new("ffi_change_old").unwrap();
+    let new = CString::new("ffi_change_new").unwrap();
+    let composed = |relation: &CString, verb: &str, to: *const c_char| {
+        let verb = CString::new(verb).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_table_change_sql(
+                handle,
+                schema.as_ptr(),
+                relation.as_ptr(),
+                verb.as_ptr(),
+                to,
+                &mut err,
+            )
+        };
+        assert!(!raw.is_null(), "{}", complaint(&mut err));
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        text
+    };
+
+    // Each statement is run, which is the only thing that proves it was written
+    // for this server rather than merely written. The destructive one is last,
+    // so a failure leaves the table behind to look at.
+    let truncate = composed(&old, "truncate", ptr::null());
+    ran(handle, &truncate);
+    assert_eq!(ran(handle, "SELECT n FROM ffi_change_old"), 0);
+
+    let rename = composed(&old, "rename", new.as_ptr());
+    ran(handle, &rename);
+    // Renamed and not copied: the old name has to be gone, which a rename that
+    // left a second table behind would not manage.
+    let verb = CString::new("drop").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe {
+        db_table_change_sql(
+            handle,
+            schema.as_ptr(),
+            old.as_ptr(),
+            verb.as_ptr(),
+            ptr::null(),
+            &mut err,
+        )
+    };
+    assert!(raw.is_null(), "the old name is still listed after a rename");
+    let why = complaint(&mut err);
+    assert!(why.contains("ffi_change_old"), "got {why}");
+
+    let dropped = composed(&new, "drop", ptr::null());
+    assert!(dropped.contains("DROP TABLE"), "got {dropped}");
+    ran(handle, &dropped);
     unsafe { db_free(handle) };
 }
 

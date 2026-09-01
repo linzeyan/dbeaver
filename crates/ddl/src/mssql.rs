@@ -17,7 +17,7 @@
 //! `CREATE TABLE`, before the indexes, which is the order `getTableDDL`
 //! aggregates them in.
 
-use crate::{ColumnKind, Renderer, Script, create_table_text};
+use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{
@@ -50,6 +50,24 @@ impl Renderer for MsSql {
     /// SQL Server's words for the kinds a file can ask for.
     fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
         create_table_text(&dbsql::MSSQL, table, columns, word, "")
+    }
+
+    /// None of the three yet.
+    ///
+    /// The rename is the reason to wait rather than the drop. SQL Server has no
+    /// `RENAME` statement at all — `SQLServerBaseTableManager` calls
+    /// `sp_rename`, a stored procedure taking the object as a *string literal*,
+    /// which is a different escaping problem from every other renderer here and
+    /// one worth writing against upstream rather than from memory.
+    fn table_change(&self, _relation: &RelationInfo, _change: TableChange<'_>) -> DbResult<String> {
+        Err(DbError::new(
+            "changing a table has not been written for SQL Server yet",
+        ))
+    }
+
+    /// None are written, so the items are not drawn at all.
+    fn changes_relations(&self) -> bool {
+        false
     }
 }
 

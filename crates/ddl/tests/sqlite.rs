@@ -636,3 +636,83 @@ async fn a_table_made_for_a_files_columns_is_one_sqlite_runs() {
         ]
     );
 }
+
+/// The rename and the drop are statements SQLite runs, and they do what they say.
+///
+/// The half the golden strings cannot reach. `ALTER TABLE … RENAME TO` and
+/// `DROP TABLE` are short enough to look obviously right and are exactly the two
+/// where "looks right" is not worth much: a rename that quietly moved the table
+/// somewhere, or a drop that named the wrong object, reads the same on the page.
+/// So both are run and the result is read back out of the catalog.
+///
+/// Read back through `SqliteSource::relations` rather than through the
+/// connection that ran them, so what is checked is the state the navigator would
+/// draw afterwards.
+#[tokio::test]
+async fn a_rename_and_a_drop_are_statements_sqlite_runs() {
+    let dir = tempfile::tempdir().expect("no temporary directory");
+    let path = dir.path().join("changed.db");
+    let conn = rusqlite::Connection::open(&path).expect("could not create the fixture");
+    conn.execute_batch("CREATE TABLE orders (id INTEGER PRIMARY KEY, note TEXT);\nINSERT INTO orders VALUES (1, 'one');")
+        .expect("could not seed the fixture");
+
+    let orders = RelationInfo {
+        schema: "main".to_string(),
+        name: "orders".to_string(),
+        kind: RelationKind::Table,
+        estimated_rows: None,
+    };
+
+    let rename = dbddl::table_change(
+        &dbsql::SQLITE,
+        &orders,
+        dbddl::TableChange::Rename { to: "orders_old" },
+    )
+    .expect("SQLite would not write a rename");
+    conn.execute_batch(&rename)
+        .unwrap_or_else(|e| panic!("SQLite refused the rename: {e}\n{rename}"));
+
+    let renamed = RelationInfo {
+        name: "orders_old".to_string(),
+        ..orders.clone()
+    };
+    let listed = names(&path).await;
+    assert_eq!(
+        listed,
+        vec!["orders_old".to_string()],
+        "after the rename the table is listed under the new name and nothing is listed under \
+         the old one"
+    );
+
+    // The rows are still there, which is the whole difference between a rename
+    // and the drop-and-recreate SQLite needs for a view.
+    let kept: i64 = conn
+        .query_row("SELECT count(*) FROM orders_old", [], |row| row.get(0))
+        .expect("the renamed table could not be read");
+    assert_eq!(kept, 1, "a rename keeps the rows");
+
+    let removal = dbddl::table_change(&dbsql::SQLITE, &renamed, dbddl::TableChange::Drop)
+        .expect("SQLite would not write a drop");
+    conn.execute_batch(&removal)
+        .unwrap_or_else(|e| panic!("SQLite refused the drop: {e}\n{removal}"));
+    drop(conn);
+
+    assert!(
+        names(&path).await.is_empty(),
+        "after the drop there is nothing left to list"
+    );
+}
+
+/// The relations `main` holds, as the navigator would list them.
+async fn names(path: &std::path::Path) -> Vec<String> {
+    let source = SqliteSource::connect(path.to_str().expect("a temporary path is UTF-8"))
+        .await
+        .expect("the fixture is unreachable");
+    source
+        .relations("main")
+        .await
+        .expect("listing failed")
+        .into_iter()
+        .map(|relation| relation.name)
+        .collect()
+}

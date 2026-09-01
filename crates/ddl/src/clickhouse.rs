@@ -18,7 +18,7 @@
 //!   CREATE TABLE` for its own tables perfectly well, so they are read like any
 //!   others.
 
-use crate::{ColumnKind, Renderer, create_table_text};
+use crate::{ColumnKind, Renderer, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -96,6 +96,26 @@ impl Renderer for Clickhouse {
             word,
             "\nENGINE = MergeTree\nORDER BY tuple()",
         )
+    }
+
+    /// None of the three yet.
+    ///
+    /// ClickHouse has all of them — `DROP TABLE`, `TRUNCATE TABLE`,
+    /// `RENAME TABLE … TO …` — and upstream writes none of them: `ext.clickhouse`
+    /// has no `addObjectRenameActions` and no truncate tool, so its tables are
+    /// dropped through the generic manager and renamed not at all. A statement
+    /// written here would be this build's guess rather than a reading of the
+    /// specification the rest of this file is written against, and the families
+    /// are lit one at a time.
+    fn table_change(&self, _relation: &RelationInfo, _change: TableChange<'_>) -> DbResult<String> {
+        Err(DbError::new(
+            "changing a table has not been written for ClickHouse yet",
+        ))
+    }
+
+    /// None are written, so the items are not drawn at all.
+    fn changes_relations(&self) -> bool {
+        false
     }
 }
 

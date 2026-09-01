@@ -105,6 +105,17 @@ struct Capabilities: Codable, Hashable {
     /// read and nothing is done to a row. See `ServerVariable`.
     let reportsVariables: Bool
 
+    /// Whether the core writes a drop, an empty or a rename for this database.
+    ///
+    /// Narrower than `writesStatements` and not implied by it: every dialect the
+    /// core carries can have a `SELECT` composed for it, and only three of the
+    /// six have had these three written. The navigator's row menu is built from
+    /// this, before any relation has been chosen — three items that refuse
+    /// whichever is clicked would be a menu that lies about what it does. What a
+    /// *particular* relation will take is answered later, in the sheet, where
+    /// the reason appears in place of the statement.
+    let changesRelations: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
@@ -113,11 +124,13 @@ struct Capabilities: Codable, Hashable {
     /// control that writes, calls the level it has not read yet by the neutral
     /// word, lists no routines it has not been told are there, and does not
     /// offer to show a server's activity before the server has said it keeps
-    /// any, nor its settings before it has said it will hand them over.
+    /// any, nor its settings before it has said it will hand them over, and
+    /// offers to change no relation before it knows it can write the statement.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
-        reportsSequences: false, serverProcesses: .unreported, reportsVariables: false)
+        reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
+        changesRelations: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -129,7 +142,70 @@ struct Capabilities: Codable, Hashable {
         case reportsSequences = "reports_sequences"
         case serverProcesses = "server_processes"
         case reportsVariables = "reports_variables"
+        case changesRelations = "changes_relations"
     }
+}
+
+/// What is being done to a relation that already exists.
+///
+/// The raw values are the words the C boundary takes, spelled rather than
+/// numbered for the reason `EndProcess` spells its two: these are one argument
+/// apart and two of them are irreversible. See `db_table_change_sql`.
+enum TableChange: String, Codable, Hashable, CaseIterable {
+    /// Remove the relation and everything in it.
+    case drop
+    /// Remove every row and leave the relation standing.
+    case truncate
+    /// Give it another name, in the schema it is already in.
+    case rename
+
+    /// What the menu item says.
+    ///
+    /// "Empty" rather than "Truncate" because the menu is read before the
+    /// statement is: `TRUNCATE` is the word the server takes and "empty" is what
+    /// it does, and the sheet shows the statement anyway.
+    var menuTitle: String {
+        switch self {
+        case .drop: return "Drop…"
+        case .truncate: return "Empty…"
+        case .rename: return "Rename…"
+        }
+    }
+
+    /// What the button that runs it says. No ellipsis: this one is the doing.
+    var actionTitle: String {
+        switch self {
+        case .drop: return "Drop"
+        case .truncate: return "Empty"
+        case .rename: return "Rename"
+        }
+    }
+
+    /// What the status line says while it is happening.
+    var progressive: String {
+        switch self {
+        case .drop: return "Dropping"
+        case .truncate: return "Emptying"
+        case .rename: return "Renaming"
+        }
+    }
+
+    /// What the status line says once it has happened. Both tenses are spelled
+    /// out rather than derived from `actionTitle`, English being what it is.
+    var pastTense: String {
+        switch self {
+        case .drop: return "Dropped"
+        case .truncate: return "Emptied"
+        case .rename: return "Renamed"
+        }
+    }
+
+    /// Whether pressing the button loses something that cannot be got back.
+    ///
+    /// Both destructive ones say so the same way and the rename does not, which
+    /// is the distinction worth drawing on a sheet whose three shapes are
+    /// otherwise identical.
+    var isDestructive: Bool { self != .rename }
 }
 
 /// How much of the server's own activity a connection can see and interrupt.

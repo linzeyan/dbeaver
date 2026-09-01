@@ -26,7 +26,7 @@
 //!   MySQL takes. Written as that constant rather than as the test, because the
 //!   parameter belongs to a driver descriptor this rewrite has no equivalent of.
 
-use crate::{ColumnKind, Renderer, create_table_text};
+use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -64,6 +64,62 @@ impl Renderer for Mysql {
     /// MySQL's words for the kinds a file can ask for.
     fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
         create_table_text(&dbsql::MYSQL, table, columns, word, "")
+    }
+
+    /// All three. MySQL has two nouns and a rename that names both ends.
+    fn table_change(&self, relation: &RelationInfo, change: TableChange<'_>) -> DbResult<String> {
+        let name = qualified(&relation.schema, &relation.name);
+        let noun = match relation.kind {
+            RelationKind::Table | RelationKind::PartitionedTable => "TABLE",
+            RelationKind::View => "VIEW",
+            kind => {
+                return Err(DbError::new(format!(
+                    "MySQL has no {kind:?}, so there is no statement to write for one"
+                )));
+            }
+        };
+        Ok(match change {
+            TableChange::Drop => crate::drop_text(noun, &name),
+            TableChange::Truncate => {
+                // `MySQLToolTableTruncate`, which writes the statement and
+                // nothing else. A table only: MySQL refuses `TRUNCATE` on a view
+                // with error 1347, the view not being a base table.
+                if noun != "TABLE" {
+                    return Err(DbError::new(format!(
+                        "{name} is a view, and a view has no rows of its own to remove"
+                    )));
+                }
+                let mut script = Script::new();
+                script.statement(&format!("TRUNCATE TABLE {name}"));
+                script.finish()
+            }
+            // `RENAME TABLE old TO new` and not `ALTER TABLE … RENAME TO`.
+            // `MySQLTableManager.addObjectRenameActions` chooses between the two
+            // on `supportsAlterTableRenameSyntax()`, which is `false` on
+            // MySQL itself and overridden only by the forks that need the other
+            // spelling — so this is the branch MySQL takes.
+            //
+            // Both ends qualified, as upstream writes them. `RENAME TABLE` can
+            // move a table between databases when they differ, and naming the
+            // same schema on both sides is what says this one does not.
+            //
+            // The word stays `TABLE` for a view, which is not a mistake:
+            // `RENAME TABLE` is how MySQL renames a view, there being no
+            // `RENAME VIEW`.
+            TableChange::Rename { to } => {
+                let mut script = Script::new();
+                script.statement(&format!(
+                    "RENAME TABLE {name} TO {}",
+                    qualified(&relation.schema, to)
+                ));
+                script.finish()
+            }
+        })
+    }
+
+    /// All three are written above.
+    fn changes_relations(&self) -> bool {
+        true
     }
 }
 

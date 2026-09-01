@@ -21,7 +21,7 @@
 //!   a view. This crate has no generic builder and does not write comments in
 //!   place of answers, so both are refused with a message naming the object.
 
-use crate::{ColumnKind, Renderer, create_table_text};
+use crate::{ColumnKind, Renderer, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -52,6 +52,19 @@ impl Renderer for DuckDb {
     /// DuckDB's words for the kinds a file can ask for.
     fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
         create_table_text(&dbsql::DUCKDB, table, columns, word, "")
+    }
+
+    /// None of the three yet, for the reason ClickHouse's says: `ext.duckdb`
+    /// overrides no rename action, so upstream has nothing to be read here.
+    fn table_change(&self, _relation: &RelationInfo, _change: TableChange<'_>) -> DbResult<String> {
+        Err(DbError::new(
+            "changing a table has not been written for DuckDB yet",
+        ))
+    }
+
+    /// None are written, so the items are not drawn at all.
+    fn changes_relations(&self) -> bool {
+        false
     }
 }
 

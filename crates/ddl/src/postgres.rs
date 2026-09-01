@@ -18,7 +18,7 @@
 //! no comments and no grants to print under the first two, and the other two
 //! produce a shape nobody reads.
 
-use crate::{ColumnKind, Renderer, Script, create_table_text};
+use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{
@@ -57,6 +57,86 @@ impl Renderer for Postgres {
     fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
         create_table_text(&dbsql::POSTGRES, table, columns, word, "")
     }
+
+    /// All three, each with PostgreSQL's own noun for the relation.
+    ///
+    /// The noun is `PostgreTableBase.getTableTypeName` and its overrides, which
+    /// is what `PostgreTableManager.addObjectRenameActions` writes after `ALTER`.
+    /// The same word goes after `DROP`, and that is a deliberate departure:
+    /// upstream's `DROP` comes from `SQLTableManager.getDropTableType`, which
+    /// reduces to `isView(table) ? "VIEW" : "TABLE"`, so DBeaver emits
+    /// `DROP VIEW` for a materialized view — which PostgreSQL refuses with
+    /// "…is not a view. Use DROP MATERIALIZED VIEW". Writing the same noun in
+    /// both places is the smaller rule and the one that runs.
+    fn table_change(&self, relation: &RelationInfo, change: TableChange<'_>) -> DbResult<String> {
+        let name = qualified(&relation.schema, &relation.name);
+        let noun = noun_for(relation.kind)?;
+        Ok(match change {
+            TableChange::Drop => crate::drop_text(noun, &name),
+            TableChange::Truncate => {
+                // `PostgreToolTableTruncate` writes `TRUNCATE TABLE <name>` plus
+                // whatever its dialog was set to — `ONLY`, `RESTART IDENTITY`,
+                // `CASCADE`. None of those are offered here and none of them are
+                // the default, so what is left is the statement itself.
+                //
+                // A table only. `TRUNCATE` on a view is refused by the server,
+                // and on a materialized view it is refused as well — the rows
+                // there belong to the query, and the statement that empties one
+                // is `REFRESH MATERIALIZED VIEW … WITH NO DATA`, which is a
+                // different thing to offer under the same word.
+                if relation.kind != RelationKind::Table
+                    && relation.kind != RelationKind::PartitionedTable
+                {
+                    return Err(DbError::new(format!(
+                        "{name} is a {:?}, and only a table has rows of its own to remove",
+                        relation.kind
+                    )));
+                }
+                let mut script = Script::new();
+                script.statement(&format!("TRUNCATE TABLE {name}"));
+                script.finish()
+            }
+            // The new name unqualified, as `addObjectRenameActions` writes it:
+            // `RENAME TO` names an object inside the schema it is already in,
+            // and a qualified name there is a syntax error rather than a move.
+            TableChange::Rename { to } => {
+                let mut script = Script::new();
+                script.statement(&format!(
+                    "ALTER {noun} {name} RENAME TO {}",
+                    dbsql::POSTGRES.quote(to)
+                ));
+                script.finish()
+            }
+        })
+    }
+
+    /// All three are written above.
+    fn changes_relations(&self) -> bool {
+        true
+    }
+}
+
+/// PostgreSQL's own word for a relation of this kind.
+///
+/// `PostgreTableBase.getTableTypeName` and the three overrides beside it. The
+/// kinds with no override are ones this driver does not report for PostgreSQL,
+/// and a statement built on a guess at the noun is one the server rejects with a
+/// message about the wrong object type.
+fn noun_for(kind: RelationKind) -> DbResult<&'static str> {
+    Ok(match kind {
+        // A partition is still a table to every statement here: `DROP TABLE` and
+        // `ALTER TABLE … RENAME` are what upstream writes for one, the partition
+        // clause mattering only to `CREATE`.
+        RelationKind::Table | RelationKind::PartitionedTable => "TABLE",
+        RelationKind::View => "VIEW",
+        RelationKind::MaterializedView => "MATERIALIZED VIEW",
+        RelationKind::ForeignTable => "FOREIGN TABLE",
+        kind => {
+            return Err(DbError::new(format!(
+                "PostgreSQL has no {kind:?}, so there is no statement to write for one"
+            )));
+        }
+    })
 }
 
 /// A table, as `SQLTableManager.getTableDDL` orders it.
