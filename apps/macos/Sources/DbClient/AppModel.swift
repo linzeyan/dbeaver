@@ -6714,6 +6714,211 @@ final class AppModel {
         let schemas: [SchemaInfo]
     }
 
+    // MARK: - Making a table
+
+    /// Whether this connection can be asked to make a table.
+    ///
+    /// `writesStatements` and not a narrower flag, because there is no narrower
+    /// question to ask: every dialect this build renders DDL for writes a
+    /// `CREATE TABLE`, which is the one statement all six have in common. What
+    /// one of them will not do — ClickHouse stores a table in the order of its
+    /// primary key — comes back in place of the statement, where it is read
+    /// beside the checkbox that caused it.
+    var makesTables: Bool {
+        capabilities.writesStatements && safety.writeRefusal == nil && !isBusy
+    }
+
+    /// Whether the sidebar's minus has anything to act on.
+    ///
+    /// The selection and not the right-clicked row, which is what makes it a
+    /// separate question from `changesRelations`: the footer's button is aimed
+    /// at whatever is highlighted, and nothing is highlighted until something has
+    /// been opened.
+    var canDropSelected: Bool { changesRelations && selected != nil }
+
+    /// A table being described, and the statement the connection wrote for it.
+    var newTablePlan: NewTablePlan?
+
+    var isNewTableSheetOpen: Bool {
+        get { newTablePlan != nil }
+        set { if !newValue { newTablePlan = nil } }
+    }
+
+    /// Where the table goes, what is in it, and the statement for all of that.
+    ///
+    /// Every field changes the statement, which is why `written` records the
+    /// whole plan it was written for rather than one field of it: the
+    /// arrangement `RelationChangePlan.Written` has, widened because there is
+    /// more than a name to be out of date about.
+    struct NewTablePlan {
+        var schema: String
+        var name: String = ""
+        var columns: [NewTableColumn] = [NewTableColumn()]
+        var written: Written?
+
+        struct Written {
+            /// Everything the statement was written for. Compared as a whole, so
+            /// that a statement arriving after any field moved on is not the one
+            /// the button runs — a `NOT NULL` unticked while the round trip was
+            /// in the air is exactly the change that would otherwise be lost.
+            let schema: String
+            let name: String
+            let columns: [NewTableColumn]
+            let text: String?
+            let refusal: String?
+        }
+
+        /// Whether `written` describes the table as it is now.
+        private func isCurrent(_ written: Written) -> Bool {
+            written.schema == schema && written.name == name && written.columns == columns
+        }
+
+        var statement: String? { written.flatMap { isCurrent($0) ? $0.text : nil } }
+        var refusal: String? { written.flatMap { isCurrent($0) ? $0.refusal : nil } }
+
+        /// What the pane shows: the last statement written, current or not.
+        ///
+        /// A pane that blanked on every keystroke would be unreadable, which is
+        /// the reason this is separate from `statement` — that one is what the
+        /// button would run, and it is nil until the answer catches up.
+        var preview: String { written?.text ?? "" }
+    }
+
+    /// Opens the form, pointed at `schema`.
+    ///
+    /// One empty column to start with rather than none: a table with no columns
+    /// is not a table, so the first row is the shape of the thing rather than
+    /// something to be added.
+    func prepareNewTable(in schema: String? = nil) {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) No table was made."
+            return
+        }
+        errorMessage = nil
+        // The schema of whatever is selected, then the first the tree has. A
+        // form that opened on nothing would make the picker the first thing to
+        // deal with, and on most connections there is only one sensible answer.
+        let target = schema ?? selected?.schema ?? schemas.first?.name ?? ""
+        newTablePlan = NewTablePlan(schema: target)
+        renderNewTable()
+    }
+
+    /// Applies `change` to the plan and rewrites the statement.
+    ///
+    /// One entry point for every field, because every field changes the
+    /// statement the same way — there is nothing for a per-field setter to do
+    /// that this does not, and eight of them would be eight places to forget the
+    /// re-render.
+    func editNewTable(_ change: (inout NewTablePlan) -> Void) {
+        guard var plan = newTablePlan else { return }
+        change(&plan)
+        // A key column cannot hold a null on any of these servers, and two of
+        // them apply that silently: PostgreSQL and MySQL make a `PRIMARY KEY`
+        // column `NOT NULL` whatever the statement said. Applied here rather
+        // than in the checkbox that causes it, so that the statement on screen
+        // says what the server will do — a form showing `id bigint` under a
+        // ticked Key would be showing something that is not what gets made.
+        // Only in this direction: unticking Key says nothing about whether a
+        // null is wanted, so the answer stays and the checkbox merely opens.
+        for index in plan.columns.indices where plan.columns[index].isPrimaryKey {
+            plan.columns[index].nullable = false
+        }
+        newTablePlan = plan
+        renderNewTable()
+    }
+
+    private func renderNewTable() {
+        guard let plan = newTablePlan else { return }
+        let (schema, name, columns) = (plan.schema, plan.name, plan.columns)
+        // The two the form can answer for itself, so that an empty field is
+        // answered as fast as it is typed in rather than after a round trip.
+        let missing =
+            if name.trimmingCharacters(in: .whitespaces).isEmpty {
+                "A table needs a name."
+            } else if columns.contains(where: {
+                $0.name.trimmingCharacters(in: .whitespaces).isEmpty
+            }) {
+                "Every column needs a name."
+            } else {
+                String?.none
+            }
+        if let missing {
+            newTablePlan?.written = NewTablePlan.Written(
+                schema: schema, name: name, columns: columns, text: nil, refusal: missing)
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(
+                    try db.newTableSQL(schema: schema, name: name, columns: columns))
+            } catch {
+                // Caught rather than thrown, as the two change sheets catch: a
+                // table this database will not make is a thing to say on the
+                // form, not in the banner behind it.
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            guard newTablePlan != nil else { return }
+            newTablePlan?.written =
+                switch answer {
+                case .success(let statement):
+                    NewTablePlan.Written(
+                        schema: schema, name: name, columns: columns, text: statement,
+                        refusal: nil)
+                case .failure(let error):
+                    NewTablePlan.Written(
+                        schema: schema, name: name, columns: columns, text: nil,
+                        refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var newTableObstacle: String? {
+        guard let plan = newTablePlan else { return "Nothing to make." }
+        if let refusal = plan.refusal { return refusal }
+        guard let statement = plan.statement, !statement.isEmpty else { return "Writing it…" }
+        return nil
+    }
+
+    /// Runs the statement the form has been showing, then reads the schema back.
+    func applyNewTable() {
+        guard let plan = newTablePlan, let statement = plan.statement, newTableObstacle == nil
+        else {
+            return
+        }
+        newTablePlan = nil
+        let (schema, name) = (plan.schema, plan.name)
+        isBusy = true
+        status = "Making \(schema).\(name)…"
+        errorMessage = nil
+        run { db -> MadeTable in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained: a name already taken is refused while the statement
+            // executes rather than while it is accepted.
+            while try query.nextBatch() != nil {}
+            db.forgetNames()
+            return MadeTable(
+                affected: query.rowsAffected ?? 0, listed: try db.relations(schema: schema))
+        } then: { [self] made in
+            isBusy = false
+            relations[schema] = made.listed
+            history.record(
+                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0)
+            status = "Made \(schema).\(name)"
+            // Opened onto, which is what a table nobody has put anything in is
+            // for: the grid shows no rows and the Structure tab shows the
+            // columns that were just described, so the form's answers can be
+            // read back from the server that took them.
+            expanded.insert(schema)
+            if let made = made.listed.first(where: { $0.name == name }) {
+                selected = made
+            }
+            refreshTransaction()
+        }
+    }
+
     // MARK: - Query execution
 
     private func browseSummary(

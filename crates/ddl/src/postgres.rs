@@ -18,8 +18,9 @@
 //! no comments and no grants to print under the first two, and the other two
 //! produce a shape nobody reads.
 
-use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
-use arrow::datatypes::Schema;
+use crate::{
+    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+};
 use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, Computed, ConstraintKind, DbError, DbResult, Driver, IndexInfo, RelationInfo,
@@ -53,9 +54,16 @@ impl Renderer for Postgres {
         }
     }
 
-    /// PostgreSQL's words for the kinds a file can ask for.
-    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
-        create_table_text(&dbsql::POSTGRES, table, columns, word, "")
+    /// PostgreSQL's words for the kinds a new table can ask for.
+    fn new_table(&self, table: &str, columns: &[NewColumn]) -> DbResult<String> {
+        new_table_text(
+            &dbsql::POSTGRES,
+            table,
+            columns,
+            word,
+            NullStyle::Suffix,
+            "",
+        )
     }
 
     /// All three, each with PostgreSQL's own noun for the relation.

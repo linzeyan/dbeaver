@@ -1719,6 +1719,121 @@ pub unsafe extern "C" fn db_database_change_sql(
     }
 }
 
+/// One column of a table that does not exist yet, as it crosses the boundary.
+///
+/// Owned, because the JSON it comes from is a C string this side does not keep.
+/// `kind` is [`dbddl::ColumnKind`]'s own word rather than a database's type name,
+/// which is what keeps the front end out of the business of spelling SQL for a
+/// server it does not know.
+#[derive(serde::Deserialize)]
+struct NewColumnRequest {
+    name: String,
+    kind: String,
+    nullable: bool,
+    /// Absent means no default, which is not the same as an empty one: `DEFAULT`
+    /// with nothing after it is a syntax error, and a column with no default is
+    /// the ordinary case.
+    default: Option<String>,
+    primary_key: bool,
+}
+
+/// The `CREATE TABLE` for a table described column by column, as text. Release
+/// with `db_string_free`.
+///
+/// Written and not run, like `db_create_table_sql` beside it and everything else
+/// in `dbddl`. What comes back goes to the server through `db_query`, which is
+/// what puts it inside whatever transaction the connection is in and under the
+/// same Cancel button — and what lets the caller show the statement first, which
+/// is the point of a form whose every field changes it.
+///
+/// `columns` is the whole table at once:
+///
+/// ```json
+/// [{"name": …, "kind": "int", "nullable": false, "default": null,
+///   "primary_key": true}]
+/// ```
+///
+/// One call and not one per column, because a primary key over two columns is a
+/// clause about the table rather than about either of them, and so is the
+/// refusal for a name used twice.
+///
+/// `schema` and `name` are quoted here, unlike `db_create_table_sql`'s single
+/// pre-spelled `table`: this name was typed into a form, so a schema called
+/// `Sales Data` has to survive reaching the server. An empty `schema` is a table
+/// with no container named, not a container called nothing.
+///
+/// Null on failure with `err` set: a kind this build does not know, a form that
+/// contradicts itself — a nullable key column, a name used twice — or a database
+/// this build writes no DDL for.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `schema`,
+/// `name` and `columns` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_new_table_sql(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    name: *const c_char,
+    columns: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || name.is_null() || columns.is_null() {
+        unsafe { set_err(err, "null handle, schema, name, or columns") };
+        return ptr::null_mut();
+    }
+    let (schema, name, columns) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(name).to_str(),
+            CStr::from_ptr(columns).to_str(),
+        ) {
+            (Ok(s), Ok(n), Ok(c)) => (s, n, c),
+            _ => {
+                set_err(err, "schema, name, or columns is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let requested: Vec<NewColumnRequest> = match serde_json::from_str(columns) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, format!("the columns are not the shape expected: {e}")) };
+            return ptr::null_mut();
+        }
+    };
+
+    let h = unsafe { &*handle };
+    let written = requested
+        .into_iter()
+        .map(|column| {
+            Ok(dbddl::NewColumn {
+                kind: dbddl::ColumnKind::parse(&column.kind)?,
+                name: column.name,
+                nullable: column.nullable,
+                default: column.default,
+                primary_key: column.primary_key,
+            })
+        })
+        .collect::<dbconn::DbResult<Vec<_>>>()
+        .and_then(|columns| match h.dialect {
+            Some(dialect) => dbddl::new_table(dialect, schema, name, &columns),
+            None => Err(dbconn::DbError::new(
+                "this build does not write DDL for this database",
+            )),
+        });
+    match written.and_then(|text| {
+        CString::new(text)
+            .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// The statements a grid's pending changes would take, as a JSON array of
 /// strings. Release with `db_string_free`.
 ///

@@ -113,6 +113,7 @@ struct MainView: View {
         .sheet(isPresented: $model.isVariablesOpen) { VariablesSheet(model: model) }
         .sheet(isPresented: $model.isRelationChangeSheetOpen) { RelationChangeSheet(model: model) }
         .sheet(isPresented: $model.isDatabaseChangeSheetOpen) { DatabaseChangeSheet(model: model) }
+        .sheet(isPresented: $model.isNewTableSheetOpen) { NewTableSheet(model: model) }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
@@ -632,6 +633,49 @@ struct NavigatorView: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary.color)
                 Spacer()
+                // The pair every navigator has at the bottom left, and until
+                // there was a `CREATE TABLE` to put behind the first of them
+                // there was nothing here but the count. Minus is the drop sheet
+                // the row's own menu opens — the same statement, reached from
+                // the selection rather than from a right-click — so nothing here
+                // acts on a click: both open something that shows the statement.
+                Button {
+                    model.prepareNewTable()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(
+                    model.makesTables ? Theme.textSecondary.color : Theme.textTertiary.color
+                )
+                .disabled(!model.makesTables)
+                .help("Make a table in this \(model.containerNoun)")
+                .accessibilityLabel("New table")
+
+                Button {
+                    if let relation = model.selected {
+                        model.prepareRelationChange(.drop, of: relation)
+                    }
+                } label: {
+                    Image(systemName: "minus")
+                        .font(.system(size: 10, weight: .medium))
+                        .frame(width: 18, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(
+                    model.canDropSelected ? Theme.textSecondary.color : Theme.textTertiary.color
+                )
+                .disabled(!model.canDropSelected)
+                .help(
+                    model.selected.map { "Drop \($0.schema).\($0.name)" }
+                        ?? "Select an object to drop it"
+                )
+                .accessibilityLabel("Drop the selected object")
+
                 // Beside the count, because the two are about the same thing:
                 // what this tree currently holds, and how to make "currently"
                 // true again. ⇧⌘R reaches it too, but a shortcut is invisible,

@@ -18,9 +18,10 @@
 //!   CREATE TABLE` for its own tables perfectly well, so they are read like any
 //!   others.
 
-use crate::{ColumnKind, DatabaseChange, Renderer, TableChange, create_table_text};
+use crate::{
+    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, TableChange, new_table_text,
+};
 use arrow::array::{Array, StringArray};
-use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo};
 
@@ -79,21 +80,34 @@ impl Renderer for Clickhouse {
         Ok(statements.join("\n").trim_end().to_string())
     }
 
-    /// ClickHouse's words for the kinds a file can ask for.
+    /// ClickHouse's words for the kinds a new table can ask for, plus an engine
+    /// after the bracket.
     ///
-    /// Every column `Nullable`, and an engine after the bracket. ClickHouse has
-    /// neither by default: a plain `Int64` column refuses a NULL rather than
-    /// storing one, and a table with no engine is not a table it will make. The
-    /// engine is `MergeTree` ordered by nothing, which is the shape that makes no
-    /// claim about the data — a sort key guessed from a file would be a
-    /// performance decision taken on somebody's behalf and written into the
-    /// table's definition.
-    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
-        create_table_text(
+    /// A table with no engine is not a table ClickHouse will make. The engine is
+    /// `MergeTree` ordered by nothing, which is the shape that makes no claim
+    /// about the data — a sort key guessed from a file would be a performance
+    /// decision taken on somebody's behalf and written into the table's
+    /// definition.
+    ///
+    /// Which is also why a primary key is refused rather than written. On a
+    /// `MergeTree` the primary key is the sort order, and ClickHouse insists it
+    /// be a prefix of `ORDER BY`; a `PRIMARY KEY (id)` under `ORDER BY tuple()`
+    /// is rejected outright. Honouring the checkbox would mean choosing the
+    /// table's physical order from a form that never mentions ordering, so the
+    /// answer is the refusal and the caller keeps the choice.
+    fn new_table(&self, table: &str, columns: &[NewColumn]) -> DbResult<String> {
+        if columns.iter().any(|column| column.primary_key) {
+            return Err(DbError::new(
+                "a ClickHouse table is stored in the order of its primary key, which is a \
+                 choice this form does not offer",
+            ));
+        }
+        new_table_text(
             &dbsql::CLICKHOUSE,
             table,
             columns,
             word,
+            NullStyle::Wrapped,
             "\nENGINE = MergeTree\nORDER BY tuple()",
         )
     }
@@ -144,8 +158,14 @@ fn qualified(schema: &str, name: &str) -> String {
     )
 }
 
+/// The type alone, with nullability left to [`NullStyle::Wrapped`].
+///
+/// ClickHouse spells it inside the type rather than after it — `Nullable(Int64)`
+/// against a bare `Int64` that refuses a NULL — and the wrapping lives with the
+/// rest of the column layout so that one place decides whether a column takes
+/// one.
 fn word(kind: ColumnKind) -> String {
-    let inner = match kind {
+    match kind {
         ColumnKind::Bool => "Bool".to_string(),
         ColumnKind::Int => "Int64".to_string(),
         ColumnKind::Float => "Float64".to_string(),
@@ -155,6 +175,5 @@ fn word(kind: ColumnKind) -> String {
         // Microseconds, which is the precision the inference asks for and the
         // most a `DateTime64` can be given without losing years at either end.
         ColumnKind::Timestamp => "DateTime64(6)".to_string(),
-    };
-    format!("Nullable({inner})")
+    }
 }

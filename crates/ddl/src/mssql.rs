@@ -17,8 +17,9 @@
 //! `CREATE TABLE`, before the indexes, which is the order `getTableDDL`
 //! aggregates them in.
 
-use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
-use arrow::datatypes::Schema;
+use crate::{
+    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+};
 use async_trait::async_trait;
 use dbconn::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DbError, DbResult, Driver, IndexInfo,
@@ -48,8 +49,8 @@ impl Renderer for MsSql {
     }
 
     /// SQL Server's words for the kinds a file can ask for.
-    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
-        create_table_text(&dbsql::MSSQL, table, columns, word, "")
+    fn new_table(&self, table: &str, columns: &[NewColumn]) -> DbResult<String> {
+        new_table_text(&dbsql::MSSQL, table, columns, word, NullStyle::Suffix, "")
     }
 
     /// None of the three yet.

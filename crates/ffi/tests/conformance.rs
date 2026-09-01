@@ -49,14 +49,14 @@ use dbffi::{
     db_cursor_next, db_cursor_schema, db_database_change_sql, db_databases_json, db_ddl_text,
     db_definition_json, db_edit_sql_json, db_end_process, db_export, db_export_sql,
     db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
-    db_import_start, db_import_step, db_indexes_json, db_names_forget, db_processes_json, db_query,
-    db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
-    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
-    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
-    db_transfer_start, db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit,
-    db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
-    db_variables_json,
+    db_import_start, db_import_step, db_indexes_json, db_names_forget, db_new_table_sql,
+    db_processes_json, db_query, db_query_free, db_query_next, db_query_rows_affected,
+    db_query_schema, db_referenced_by_json, db_relations_json, db_routine_definition_json,
+    db_routines_json, db_row_identity_json, db_schemas_json, db_sequences_json,
+    db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free, db_table_change_sql,
+    db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
+    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
+    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json, db_variables_json,
 };
 
 // Test db_connect with null connection string
@@ -2395,6 +2395,145 @@ fn a_database_change_this_call_cannot_read_is_refused_rather_than_guessed_at() {
 
     unsafe { db_free(handle) };
     let _ = std::fs::remove_file(&path);
+}
+
+/// A form's answers reach the server, and a form that contradicts itself does
+/// not.
+///
+/// Asked on SQLite, which needs no server and can therefore *run* what this
+/// composes — the only thing that proves the statement is a statement rather
+/// than a plausible string. The table it makes is then read back through the
+/// same handle, so a `NOT NULL` that never crossed is a row this inserts.
+///
+/// The refusals are the other half, and they are what this call adds over
+/// `dbddl`: a kind spelled a way this build stopped writing must not become a
+/// text column, and the JSON must be read as a whole table rather than one
+/// column at a time.
+#[test]
+fn a_table_described_column_by_column_is_composed_or_refused_by_name() {
+    let path = std::env::temp_dir().join("dbffi-new-table.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let compose = |schema: &str, name: &str, columns: &str| {
+        let schema = CString::new(schema).unwrap();
+        let name = CString::new(name).unwrap();
+        let columns = CString::new(columns).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_new_table_sql(
+                handle,
+                schema.as_ptr(),
+                name.as_ptr(),
+                columns.as_ptr(),
+                &mut err,
+            )
+        };
+        if raw.is_null() {
+            return Err(complaint(&mut err));
+        }
+        assert!(err.is_null(), "a written statement must not also set err");
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        Ok(text)
+    };
+
+    let statement = compose(
+        "main",
+        "invoice",
+        r#"[{"name":"id","kind":"int","nullable":false,"default":null,"primary_key":true},
+            {"name":"amount","kind":"decimal(12,2)","nullable":false,"default":"7","primary_key":false},
+            {"name":"note","kind":"text","nullable":false,"default":null,"primary_key":false},
+            {"name":"memo","kind":"text","nullable":true,"default":null,"primary_key":false}]"#,
+    )
+    .expect("SQLite makes a table");
+    ran(handle, &statement);
+
+    // What the server made, asked of the server, one field of the form at a
+    // time: the default fills the column it was given, the nullable column takes
+    // the null, and the column marked NOT NULL with nothing to fall back on
+    // refuses. A `NOT NULL` written into the string and lost on the way would
+    // let the second insert succeed.
+    ran(
+        handle,
+        "INSERT INTO main.invoice (id, note) VALUES (1, 'x')",
+    );
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT 1 FROM main.invoice WHERE amount = 7 AND memo IS NULL"
+        ),
+        1,
+        "the default this composed is what the server put in the row"
+    );
+    let mut err: *mut c_char = ptr::null_mut();
+    let refused = CString::new("INSERT INTO main.invoice (id) VALUES (2)").unwrap();
+    let mut position: c_int = 0;
+    let query = unsafe { db_query(handle, refused.as_ptr(), 100, &mut err, &mut position) };
+    assert!(
+        query.is_null(),
+        "the column the form marked NOT NULL took a null"
+    );
+    unsafe { db_string_free(err) };
+
+    // A kind this build does not write, which is the seam with no compiler on
+    // it: the front end sends a word and a wrong one must not become `text`.
+    let why = compose(
+        "main",
+        "invoice2",
+        r#"[{"name":"id","kind":"varchar(64)","nullable":true,"default":null,"primary_key":false}]"#,
+    )
+    .expect_err("there is no such kind");
+    assert!(
+        why.contains("varchar(64)"),
+        "the refusal must name it: {why}"
+    );
+
+    // A form that contradicts itself, refused with the column named — the two
+    // rules that need every column at once, which is why this call takes the
+    // whole table rather than one column per crossing.
+    let why = compose(
+        "main",
+        "invoice2",
+        r#"[{"name":"id","kind":"int","nullable":true,"default":null,"primary_key":true}]"#,
+    )
+    .expect_err("a key column cannot hold a null");
+    assert!(why.contains("id"), "got {why}");
+
+    // Not JSON at all, and JSON of the wrong shape. Both are a front end this
+    // build no longer agrees with, and neither may compose anything.
+    for columns in ["", "[]]", r#"[{"name":"id"}]"#, r#"{"name":"id"}"#] {
+        let why = compose("main", "invoice2", columns)
+            .expect_err("a statement was composed from columns nobody sent");
+        assert!(!why.is_empty(), "the refusal must say something");
+    }
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The arguments this call refuses to read at all.
+#[test]
+fn the_new_table_call_says_why_it_could_not_read_its_arguments() {
+    let public = CString::new("public").unwrap();
+    let columns = CString::new("[]").unwrap();
+    let invalid = CString::new(vec![b'p', b'u', b'b', 0xff, 0xfe]).unwrap();
+    for (schema, name, requested) in [
+        (public.as_ptr(), public.as_ptr(), columns.as_ptr()),
+        (ptr::null(), public.as_ptr(), columns.as_ptr()),
+        (public.as_ptr(), ptr::null(), columns.as_ptr()),
+        (public.as_ptr(), public.as_ptr(), ptr::null()),
+        (invalid.as_ptr(), public.as_ptr(), columns.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_new_table_sql(ptr::null_mut(), schema, name, requested, &mut err) };
+        assert!(raw.is_null());
+        assert!(!err.is_null(), "db_new_table_sql must say why it refused");
+        unsafe { db_string_free(err) };
+    }
 }
 
 #[ignore = "requires the benchmark database"]
