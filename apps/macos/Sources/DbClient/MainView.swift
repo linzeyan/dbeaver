@@ -112,6 +112,7 @@ struct MainView: View {
         .sheet(isPresented: $model.isProcessesOpen) { ProcessesSheet(model: model) }
         .sheet(isPresented: $model.isVariablesOpen) { VariablesSheet(model: model) }
         .sheet(isPresented: $model.isRelationChangeSheetOpen) { RelationChangeSheet(model: model) }
+        .sheet(isPresented: $model.isDatabaseChangeSheetOpen) { DatabaseChangeSheet(model: model) }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
@@ -422,6 +423,18 @@ struct NavigatorView: View {
                         noun: model.containerNoun
                     )
                     .background(highlightOff(ifFirst: schema.name == first))
+                    // Only where this level *is* the database level. On
+                    // PostgreSQL a schema is a namespace inside the database and
+                    // `DROP DATABASE` aimed at one would name something that is
+                    // not there; on MySQL these rows are the databases, and the
+                    // tree already calls them that.
+                    .contextMenu {
+                        if model.changesDatabases, model.capabilities.schemaIsTheDatabase {
+                            Button(DatabaseChange.drop.menuTitle) {
+                                model.prepareDatabaseChange(.drop, named: schema.name)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -549,6 +562,20 @@ struct NavigatorView: View {
                                         // switch refuses.
                                         Button("Open in New Tab") {
                                             model.openDatabase(database.name)
+                                        }
+                                        // Last, and only on the rows this tab
+                                        // is not connected to — which is every
+                                        // row that draws this menu. The server
+                                        // refuses to drop a database a session
+                                        // is on, and the current row is drawn
+                                        // by the branch above with no menu at
+                                        // all.
+                                        if model.changesDatabases {
+                                            Divider()
+                                            Button(DatabaseChange.drop.menuTitle) {
+                                                model.prepareDatabaseChange(
+                                                    .drop, named: database.name)
+                                            }
                                         }
                                     }
                                     .help("Double-click to open \(database.name) in this tab")

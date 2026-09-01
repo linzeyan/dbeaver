@@ -46,11 +46,11 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json,
     db_create_table_sql, db_cursor, db_cursor_cancel, db_cursor_close, db_cursor_free,
-    db_cursor_next, db_cursor_schema, db_databases_json, db_ddl_text, db_definition_json,
-    db_edit_sql_json, db_end_process, db_export, db_export_sql, db_file_columns_json,
-    db_foreign_keys_json, db_free, db_import_cancel, db_import_free, db_import_start,
-    db_import_step, db_indexes_json, db_names_forget, db_processes_json, db_query, db_query_free,
-    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_cursor_next, db_cursor_schema, db_database_change_sql, db_databases_json, db_ddl_text,
+    db_definition_json, db_edit_sql_json, db_end_process, db_export, db_export_sql,
+    db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
+    db_import_start, db_import_step, db_indexes_json, db_names_forget, db_processes_json, db_query,
+    db_query_free, db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
     db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
     db_string_free, db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
@@ -2346,6 +2346,103 @@ fn the_table_change_call_says_why_it_could_not_read_its_arguments() {
         );
         unsafe { db_string_free(err) };
     }
+}
+
+/// Which word crosses decides whether a catalog survives.
+///
+/// Asked on SQLite, which refuses both — so what this pins is everything before
+/// the renderer: the two words, the empty name, and that the refusal for SQLite
+/// says a database is a file rather than promising a later release. A word this
+/// side does not know must never fall through to `drop`.
+#[test]
+fn a_database_change_this_call_cannot_read_is_refused_rather_than_guessed_at() {
+    let path = std::env::temp_dir().join("dbffi-database-change.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let change = |verb: &str, name: &str| {
+        let verb = CString::new(verb).unwrap();
+        let name = CString::new(name).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_database_change_sql(handle, verb.as_ptr(), name.as_ptr(), &mut err) };
+        if raw.is_null() {
+            return Err(complaint(&mut err));
+        }
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        Ok(text)
+    };
+
+    // The name is checked before the verb is looked at, so both verbs reach the
+    // same refusal for it — which is what says the check is not inside one arm.
+    for verb in ["create", "drop"] {
+        let why = change(verb, "").expect_err("a database needs a name");
+        assert!(why.contains("name"), "{verb}: {why}");
+    }
+
+    // A word no renderer has, and the one that reads like a change and is not.
+    for verb in ["remove", "rename", "CREATE"] {
+        let why = change(verb, "reporting").expect_err("there is no such change");
+        assert!(why.contains(verb), "the refusal must name it: {why}");
+    }
+
+    // SQLite's own answer, which is not "not yet".
+    let why = change("create", "reporting").expect_err("SQLite has no CREATE DATABASE");
+    assert!(why.contains("file"), "got {why}");
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+#[ignore = "requires the benchmark database"]
+#[test]
+fn a_database_is_made_and_dropped_by_the_statements_this_writes() {
+    let handle = connected();
+    let name = "ffi_scratch_db";
+    // A leftover from a run that failed part way is dropped rather than making
+    // this one fail on the create.
+    ran(handle, &format!("DROP DATABASE IF EXISTS {name}"));
+
+    let composed = |verb: &str| {
+        let verb = CString::new(verb).unwrap();
+        let database = CString::new(name).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw =
+            unsafe { db_database_change_sql(handle, verb.as_ptr(), database.as_ptr(), &mut err) };
+        assert!(!raw.is_null(), "{}", complaint(&mut err));
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        text
+    };
+
+    // Run, which is the only thing that proves the statement was written for
+    // this server. Both of them, in the order that leaves nothing behind.
+    let create = composed("create");
+    assert!(create.contains("CREATE DATABASE"), "got {create}");
+    ran(handle, &create);
+    assert_eq!(
+        ran(
+            handle,
+            &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'")
+        ),
+        1,
+        "the database this made is one the catalog lists"
+    );
+
+    let drop = composed("drop");
+    ran(handle, &drop);
+    assert_eq!(
+        ran(
+            handle,
+            &format!("SELECT 1 FROM pg_database WHERE datname = '{name}'")
+        ),
+        0,
+        "and the drop took it away"
+    );
+    unsafe { db_free(handle) };
 }
 
 #[ignore = "requires the benchmark database"]

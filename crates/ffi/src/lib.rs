@@ -469,6 +469,7 @@ pub unsafe extern "C" fn db_capabilities_json(
             driver: h.driver.capabilities(),
             writes_statements: h.dialect.is_some(),
             changes_relations: h.dialect.is_some_and(dbddl::changes_relations),
+            changes_databases: h.dialect.is_some_and(dbddl::changes_databases),
         },
         err,
     )
@@ -514,6 +515,15 @@ struct Surface {
     /// one is answered by `db_table_change_sql` in place of the statement, so
     /// the reason is read where the statement would have been shown.
     changes_relations: bool,
+
+    /// Whether `db_database_change_sql` writes anything at all for this
+    /// database.
+    ///
+    /// Not implied by `changes_relations` and deliberately not folded into it.
+    /// SQLite is the case: it drops and renames a table, and a database there is
+    /// a file rather than something a statement makes. One flag for both would
+    /// have to be wrong about one of them.
+    changes_databases: bool,
 }
 
 /// Asks the database whether this connection is still good. 0 if it is, -1 if
@@ -1611,6 +1621,92 @@ pub unsafe extern "C" fn db_table_change_sql(
             None => Err(dbconn::DbError::new(format!("{s}.{r} is not there"))),
         }
     });
+    match written.and_then(|text| {
+        CString::new(text)
+            .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// The statement that would make or drop a whole database, as text. Release
+/// with `db_string_free`.
+///
+/// `change` is `"create"` or `"drop"`, spelled for the reason
+/// `db_table_change_sql` spells its three. `name` is the database, written the
+/// way the server reads it — quoted where it has to be, bare where it does not.
+///
+/// Written and not run, and here that matters most: a dropped database takes
+/// every relation in it, and this is the only statement in this library whose
+/// blast radius is a whole catalog.
+///
+/// Nothing is read from the server first, unlike `db_table_change_sql`. There is
+/// no kind to look up — a database is a database — and `create` names something
+/// that does not exist yet, so a lookup would have nothing to find. What that
+/// costs is that a drop of a database that is already gone composes fine and is
+/// refused by the server, which is the right end for that to happen at.
+///
+/// Neither statement runs inside a transaction on PostgreSQL, which refuses both
+/// with `cannot run inside a transaction block`. Nothing here can enforce that —
+/// it is a fact about the caller's session rather than about the text — so the
+/// front end is where it is checked.
+///
+/// Null on failure with `err` set: a database this build writes no statements
+/// for, a word that is not one of the two, or an empty name.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `change` and
+/// `name` must be valid NUL-terminated C strings. `err` must be null or point to
+/// writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_database_change_sql(
+    handle: *mut DbHandle,
+    change: *const c_char,
+    name: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || change.is_null() || name.is_null() {
+        unsafe { set_err(err, "null handle, change, or name") };
+        return ptr::null_mut();
+    }
+    let (verb, name) = unsafe {
+        match (
+            CStr::from_ptr(change).to_str(),
+            CStr::from_ptr(name).to_str(),
+        ) {
+            (Ok(c), Ok(n)) => (c, n),
+            _ => {
+                set_err(err, "change or name is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    // The empty name is caught here rather than by a renderer, for the reason
+    // the empty rename is: every renderer would have to catch it, and
+    // `CREATE DATABASE ""` is a statement some of these servers accept.
+    if name.is_empty() {
+        unsafe { set_err(err, "a database needs a name") };
+        return ptr::null_mut();
+    }
+    let change = match verb {
+        "create" => dbddl::DatabaseChange::Create { name },
+        "drop" => dbddl::DatabaseChange::Drop { name },
+        _ => {
+            unsafe { set_err(err, format!("{verb:?} is not a change to a database")) };
+            return ptr::null_mut();
+        }
+    };
+    let h = unsafe { &*handle };
+    let written = match h.dialect {
+        Some(dialect) => dbddl::database_change(dialect, change),
+        None => Err(dbconn::DbError::new(
+            "this build does not write DDL for this database",
+        )),
+    };
     match written.and_then(|text| {
         CString::new(text)
             .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))

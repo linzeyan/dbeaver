@@ -6538,6 +6538,182 @@ final class AppModel {
         }
     }
 
+    // MARK: - Making and dropping a database
+
+    /// Whether this connection makes or drops a database at all.
+    ///
+    /// Its own capability and not a second reading of `changesRelations`: SQLite
+    /// drops a table and has no `CREATE DATABASE`, a database there being a
+    /// file. A menu keyed on the other flag would offer it one.
+    var changesDatabases: Bool {
+        capabilities.changesDatabases && safety.writeRefusal == nil && !isBusy
+    }
+
+    /// A database about to be made or dropped, and the statement for it.
+    var databasePlan: DatabaseChangePlan?
+
+    var isDatabaseChangeSheetOpen: Bool {
+        get { databasePlan != nil }
+        set { if !newValue { databasePlan = nil } }
+    }
+
+    /// One verb, one name, and the statement the connection wrote for them.
+    struct DatabaseChangePlan {
+        let change: DatabaseChange
+        /// The database being made or dropped. Editable for a create and fixed
+        /// for a drop — the row that was clicked is what is going.
+        var name: String
+        var written: Written?
+
+        struct Written {
+            /// The name this was written for, so that a statement arriving after
+            /// the field has moved on is not the one the button runs. The
+            /// arrangement `RelationChangePlan.Written` has, for the same reason.
+            let name: String
+            let text: String?
+            let refusal: String?
+        }
+
+        var statement: String? { written?.name == name ? written?.text : nil }
+        var refusal: String? { written?.name == name ? written?.refusal : nil }
+        var preview: String { written?.text ?? "" }
+    }
+
+    /// Opens the sheet showing what would be made or dropped.
+    ///
+    /// `named` is the database for a drop and the starting point for a create,
+    /// which is empty: there is no name to suggest for something that does not
+    /// exist, and one invented here would be a name somebody had to notice
+    /// before changing.
+    func prepareDatabaseChange(_ change: DatabaseChange, named: String = "") {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) No database was made or dropped."
+            return
+        }
+        errorMessage = nil
+        databasePlan = DatabaseChangePlan(change: change, name: named, written: nil)
+        renderDatabaseChange()
+    }
+
+    /// Calls the database being made something else and rewrites the statement.
+    func setNewDatabaseName(_ name: String) {
+        guard var plan = databasePlan, plan.change == .create else { return }
+        plan.name = name
+        databasePlan = plan
+        renderDatabaseChange()
+    }
+
+    private func renderDatabaseChange() {
+        guard let plan = databasePlan else { return }
+        let (change, name) = (plan.change, plan.name)
+        guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+            databasePlan?.written = DatabaseChangePlan.Written(
+                name: name, text: nil, refusal: "A database needs a name.")
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(try db.databaseChangeSQL(change: change, name: name))
+            } catch {
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            guard databasePlan?.change == change else { return }
+            databasePlan?.written =
+                switch answer {
+                case .success(let statement):
+                    DatabaseChangePlan.Written(name: name, text: statement, refusal: nil)
+                case .failure(let error):
+                    DatabaseChangePlan.Written(
+                        name: name, text: nil, refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var databaseChangeObstacle: String? {
+        guard let plan = databasePlan else { return "Nothing to change." }
+        if let refusal = plan.refusal { return refusal }
+        guard let statement = plan.statement, !statement.isEmpty else { return "Writing it…" }
+        // Neither statement belongs inside a transaction, and the rule is stated
+        // once rather than per database because the two engines that write these
+        // fail differently and both failures are bad: PostgreSQL refuses with
+        // `cannot run inside a transaction block`, and MySQL commits whatever
+        // was open before running it — which ends somebody's transaction without
+        // being asked. Refusing here is the only answer that is true on both.
+        if transaction.open {
+            return "A database is made or dropped outside a transaction. "
+                + "Commit or roll back first."
+        }
+        // The database this window is connected to cannot be dropped from this
+        // connection: the server refuses while a session is on it, and the
+        // session is this one. Upstream says the same thing in its own words.
+        if plan.change == .drop, isOpenDatabase(plan.name) {
+            return "This is the database this tab is connected to. "
+                + "Open another one first."
+        }
+        return nil
+    }
+
+    /// Whether `name` is the database this connection is open on.
+    ///
+    /// Read off the database level, which is the only place this is marked:
+    /// `SchemaInfo` carries no `isCurrent`, so an engine whose schemas are its
+    /// databases answers false here for all of them. That is the right answer
+    /// rather than a gap — MySQL lets a session drop the schema it is on and
+    /// simply leaves it without a default, where PostgreSQL refuses outright
+    /// while any session is connected. The rule stated here is the one that
+    /// would otherwise be a server error somebody could do nothing about.
+    private func isOpenDatabase(_ name: String) -> Bool {
+        (databases ?? []).contains { $0.isCurrent && $0.name == name }
+    }
+
+    /// Runs the statement the sheet has been showing, then reads the tree back.
+    func applyDatabaseChange() {
+        guard let plan = databasePlan, let statement = plan.statement,
+            databaseChangeObstacle == nil
+        else {
+            return
+        }
+        databasePlan = nil
+        let (change, name) = (plan.change, plan.name)
+        isBusy = true
+        status = "\(change.progressive) \(name)…"
+        errorMessage = nil
+        run { db -> ChangedDatabases in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained: a name already taken and a database somebody else is
+            // connected to are both refused while the statement executes rather
+            // than while it is accepted.
+            while try query.nextBatch() != nil {}
+            db.forgetNames()
+            // Both levels, because which one changed depends on the engine: a
+            // PostgreSQL database is a row above the schemas and a MySQL one is
+            // the schema level itself.
+            return ChangedDatabases(
+                affected: query.rowsAffected ?? 0,
+                databases: try db.databases(),
+                schemas: try db.schemas())
+        } then: { [self] changed in
+            isBusy = false
+            databases = changed.databases
+            schemas = changed.schemas
+            history.record(
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+            status = "\(change.pastTense) \(name)"
+            refreshTransaction()
+        }
+    }
+
+    /// A database that has just been made or dropped, and both tree levels read
+    /// back afterwards.
+    private struct ChangedDatabases: Sendable {
+        let affected: Int
+        let databases: [DatabaseInfo]?
+        let schemas: [SchemaInfo]
+    }
+
     // MARK: - Query execution
 
     private func browseSummary(

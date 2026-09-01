@@ -18,7 +18,7 @@
 //!   CREATE TABLE` for its own tables perfectly well, so they are read like any
 //!   others.
 
-use crate::{ColumnKind, Renderer, TableChange, create_table_text};
+use crate::{ColumnKind, DatabaseChange, Renderer, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -115,6 +115,19 @@ impl Renderer for Clickhouse {
 
     /// None are written, so the items are not drawn at all.
     fn changes_relations(&self) -> bool {
+        false
+    }
+
+    /// Neither is written yet, for the reason the relation changes are not:
+    /// upstream is the specification and the families are lit one at a time.
+    fn database_change(&self, _change: DatabaseChange<'_>) -> DbResult<String> {
+        Err(DbError::new(
+            "making or removing a database has not been written for ClickHouse yet",
+        ))
+    }
+
+    /// Neither is written, so the items are not drawn at all.
+    fn changes_databases(&self) -> bool {
         false
     }
 }

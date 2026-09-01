@@ -116,6 +116,14 @@ struct Capabilities: Codable, Hashable {
     /// the reason appears in place of the statement.
     let changesRelations: Bool
 
+    /// Whether the core writes a statement that makes or drops a whole database.
+    ///
+    /// Not a second reading of `changesRelations`, and SQLite is what keeps them
+    /// apart: it drops and renames a table, and a SQLite database is a file —
+    /// made by opening a path and removed by deleting one. One flag for both
+    /// would have to be wrong about one of them.
+    let changesDatabases: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
@@ -130,7 +138,7 @@ struct Capabilities: Codable, Hashable {
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
         reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
-        changesRelations: false)
+        changesRelations: false, changesDatabases: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -143,7 +151,51 @@ struct Capabilities: Codable, Hashable {
         case serverProcesses = "server_processes"
         case reportsVariables = "reports_variables"
         case changesRelations = "changes_relations"
+        case changesDatabases = "changes_databases"
     }
+}
+
+/// What is being done to a whole database.
+///
+/// Two and not three, as the core's own enum is: a rename is refused outright by
+/// upstream's MySQL manager, and PostgreSQL's needs a connection to some *other*
+/// database — which is exactly the connection a window pointed at this one does
+/// not have. The raw values are the words the C boundary takes.
+enum DatabaseChange: String, Codable, Hashable, CaseIterable {
+    /// Make one, empty.
+    case create
+    /// Remove one and everything in it.
+    case drop
+
+    /// What the menu item says.
+    ///
+    /// Always "database", and deliberately not `AppModel.containerNoun`: that
+    /// property names the *schema* level, which PostgreSQL calls a schema and
+    /// MySQL calls a database. What these two act on is the database level on
+    /// both — the row above the schemas on PostgreSQL and the schema rows
+    /// themselves on MySQL, which the tree already labels databases. Borrowing
+    /// the other noun put "A schema needs a name." on a `CREATE DATABASE`.
+    var menuTitle: String {
+        switch self {
+        case .create: return "New Database…"
+        case .drop: return "Drop Database…"
+        }
+    }
+
+    /// What the button that runs it says. No ellipsis: this one is the doing.
+    var actionTitle: String {
+        switch self {
+        case .create: return "Create"
+        case .drop: return "Drop"
+        }
+    }
+
+    /// What the status line says while it is happening, and afterwards.
+    var progressive: String { self == .create ? "Creating" : "Dropping" }
+    var pastTense: String { self == .create ? "Created" : "Dropped" }
+
+    /// Whether pressing the button loses something that cannot be got back.
+    var isDestructive: Bool { self == .drop }
 }
 
 /// What is being done to a relation that already exists.

@@ -268,7 +268,7 @@ enum ProcessesChecks {
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: reach, reportsVariables: false,
-            changesRelations: false)
+            changesRelations: false, changesDatabases: false)
     }
 
     /// A model with a real connection under it, opened on a scratch SQLite file

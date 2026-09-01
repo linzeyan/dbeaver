@@ -18,7 +18,7 @@
 //! no comments and no grants to print under the first two, and the other two
 //! produce a shape nobody reads.
 
-use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
+use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{
@@ -112,6 +112,36 @@ impl Renderer for Postgres {
 
     /// All three are written above.
     fn changes_relations(&self) -> bool {
+        true
+    }
+
+    /// `CREATE DATABASE` and `DROP DATABASE`, as `PostgreDatabaseManager`
+    /// writes them.
+    ///
+    /// Bare, with none of the four clauses upstream can append. Owner, template,
+    /// encoding and tablespace are all optional there and all default to null,
+    /// so a database made without touching upstream's form gets exactly this —
+    /// and each of the four names an object this build does not read.
+    ///
+    /// Neither runs inside a transaction: PostgreSQL refuses both with
+    /// `cannot run inside a transaction block`, which is why upstream wraps them
+    /// in `SQLDatabasePersistActionAtomic`. Nothing in the text says so, because
+    /// nothing in the text can — it is the caller that has to be out of one, and
+    /// the front end is where that is known.
+    fn database_change(&self, change: DatabaseChange<'_>) -> DbResult<String> {
+        let mut script = Script::new();
+        script.statement(&match change {
+            DatabaseChange::Create { name } => {
+                format!("CREATE DATABASE {}", dbsql::POSTGRES.quote(name))
+            }
+            DatabaseChange::Drop { name } => {
+                format!("DROP DATABASE {}", dbsql::POSTGRES.quote(name))
+            }
+        });
+        Ok(script.finish())
+    }
+
+    fn changes_databases(&self) -> bool {
         true
     }
 }

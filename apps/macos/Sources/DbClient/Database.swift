@@ -733,6 +733,21 @@ final class Database: @unchecked Sendable {
         return String(cString: written)
     }
 
+    /// The statement that would make or drop a whole database.
+    ///
+    /// Written and not run, like the two above it, and here that matters most: a
+    /// dropped database takes every relation in it.
+    func databaseChangeSQL(change: DatabaseChange, name: String) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        guard let written = db_database_change_sql(handle, change.rawValue, name, &err) else {
+            throw DbError(
+                description: Database.take(&err)
+                    ?? "could not write that statement for this database")
+        }
+        defer { db_string_free(written) }
+        return String(cString: written)
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }

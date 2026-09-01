@@ -286,6 +286,70 @@ pub trait Renderer: Send + Sync {
     /// renderer answering `true` there has to return a statement for an ordinary
     /// table's drop, and every one answering `false` has to refuse it.
     fn changes_relations(&self) -> bool;
+
+    /// The statement that makes or removes a whole database.
+    ///
+    /// No default, and here the reason is the noun rather than the verb: the
+    /// object these two act on is called a database on one server and a schema
+    /// on the next, and MySQL's `CREATE SCHEMA` and PostgreSQL's `CREATE SCHEMA`
+    /// make different things. A renderer that inherited either word would be
+    /// making the wrong object on half of these servers.
+    fn database_change(&self, change: DatabaseChange<'_>) -> DbResult<String>;
+
+    /// Whether this renderer writes either [`DatabaseChange`].
+    ///
+    /// Separate from `changes_relations` and not implied by it. SQLite is the
+    /// case that proves it: it drops and renames a table, and it has no
+    /// statement for making a database at all — a database there is a file, and
+    /// a file is made by opening a path rather than by sending SQL.
+    fn changes_databases(&self) -> bool;
+}
+
+/// Making or removing a whole database.
+///
+/// Two, not three. A rename is missing because it is missing upstream too:
+/// `MySQLDatabaseManager.renameObject` throws outright, and PostgreSQL's
+/// `ALTER DATABASE … RENAME TO` only works from a connection to some *other*
+/// database — which is exactly the connection a window pointed at this one does
+/// not have. A verb that worked on one engine and threw on the other is not a
+/// verb this enum should carry.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DatabaseChange<'a> {
+    /// Make one, empty, with the server's own defaults for everything else.
+    ///
+    /// No owner, template, encoding or tablespace, although
+    /// `PostgreDatabaseManager` appends all four. Each is optional there and
+    /// defaults to null, so the statement below is the one upstream writes for a
+    /// database created without touching its form — and every one of the four
+    /// names an object this build does not read.
+    Create { name: &'a str },
+    /// Remove one and everything in it.
+    Drop { name: &'a str },
+}
+
+/// The statement that would make or remove a database, in the SQL `dialect`
+/// writes.
+///
+/// Rendered and handed back rather than run, like [`table_change`]. The drop is
+/// the most destructive statement this crate composes — it takes every relation
+/// in the database with it — so showing it first matters more here than
+/// anywhere else.
+pub fn database_change(dialect: &'static Dialect, change: DatabaseChange<'_>) -> DbResult<String> {
+    match for_dialect(dialect) {
+        Some(renderer) => renderer.database_change(change),
+        None => Err(DbError::new(format!(
+            "DDL for {} has not been written yet",
+            dialect.name
+        ))),
+    }
+}
+
+/// Whether this build makes or removes a database on `dialect`.
+///
+/// What the front end reads to decide whether the New Database item and the
+/// database row's Drop item exist at all.
+pub fn changes_databases(dialect: &'static Dialect) -> bool {
+    for_dialect(dialect).is_some_and(|renderer| renderer.changes_databases())
 }
 
 /// Whether this build writes any change to a relation on `dialect`.
@@ -371,7 +435,7 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
-    use super::TableChange;
+    use super::{DatabaseChange, TableChange};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use dbconn::{RelationInfo, RelationKind};
     use dbsql::Dialect;
@@ -747,6 +811,125 @@ ORDER BY tuple();",
                 "{} answers differently through the crate's own entry point",
                 dialect.name
             );
+        }
+    }
+
+    /// A database is made and removed in each server's own noun.
+    ///
+    /// The noun is the whole of the risk here. PostgreSQL's `CREATE SCHEMA`
+    /// makes a namespace inside the database this connection is already on, and
+    /// MySQL's makes a database — so a renderer that borrowed the other's word
+    /// would run, succeed, and make the wrong object.
+    #[test]
+    fn a_database_is_made_and_removed_in_each_servers_own_noun() {
+        let cases: &[(&Dialect, DatabaseChange, &str)] = &[
+            (
+                &dbsql::POSTGRES,
+                DatabaseChange::Create { name: "reporting" },
+                "CREATE DATABASE reporting;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                DatabaseChange::Drop { name: "reporting" },
+                "DROP DATABASE reporting;",
+            ),
+            // `SCHEMA`, which is the word upstream's MySQL manager writes and
+            // which MySQL reads as `DATABASE`.
+            (
+                &dbsql::MYSQL,
+                DatabaseChange::Create { name: "reporting" },
+                "CREATE SCHEMA reporting;",
+            ),
+            (
+                &dbsql::MYSQL,
+                DatabaseChange::Drop { name: "reporting" },
+                "DROP SCHEMA reporting;",
+            ),
+        ];
+        for (dialect, change, want) in cases {
+            let written = super::database_change(dialect, *change)
+                .unwrap_or_else(|e| panic!("{} refused {change:?}: {e}", dialect.name));
+            assert_eq!(written.trim_end(), *want, "{} wrote it wrong", dialect.name);
+        }
+
+        // A name the server could not read bare is quoted, as everywhere else
+        // in this crate — and a name holding the closing delimiter is the case
+        // upstream's hand-written backticks get wrong.
+        let awkward = super::database_change(
+            &dbsql::MYSQL,
+            DatabaseChange::Create {
+                name: "wei`rd order",
+            },
+        )
+        .expect("MySQL makes a database");
+        assert_eq!(awkward.trim_end(), "CREATE SCHEMA `wei``rd order`;");
+    }
+
+    /// `changes_databases` and `database_change` say the same thing.
+    ///
+    /// The companion to `a_renderer_that_claims_changes_writes_one`, and its own
+    /// test rather than a second loop inside that one: the two capabilities are
+    /// deliberately independent, and a check that asserted them together would
+    /// be the drift it exists to catch.
+    #[test]
+    fn a_renderer_that_claims_database_changes_writes_one() {
+        for dialect in dbsql::ALL {
+            let Some(renderer) = super::for_dialect(dialect) else {
+                continue;
+            };
+            let written = renderer
+                .database_change(DatabaseChange::Create { name: "d" })
+                .is_ok();
+            assert_eq!(
+                renderer.changes_databases(),
+                written,
+                "{} says it {} make a database and {} write the statement",
+                dialect.name,
+                if renderer.changes_databases() {
+                    "can"
+                } else {
+                    "cannot"
+                },
+                if written { "does" } else { "does not" }
+            );
+            assert_eq!(
+                super::changes_databases(dialect),
+                written,
+                "{} answers differently through the crate's own entry point",
+                dialect.name
+            );
+        }
+
+        // SQLite is the case that keeps the two capabilities apart: it changes
+        // relations and cannot make a database. A build where both came from one
+        // flag would have to be wrong about one of them.
+        assert!(super::changes_relations(&dbsql::SQLITE));
+        assert!(!super::changes_databases(&dbsql::SQLITE));
+    }
+
+    /// SQLite says a database is a file rather than promising one later.
+    ///
+    /// The distinction every refusal in this crate draws, and the one that is
+    /// easiest to lose: "not written yet" invites somebody to wait for a release
+    /// that will never contain it, because there is no `CREATE DATABASE` in
+    /// SQLite to write.
+    #[test]
+    fn sqlite_says_a_database_is_a_file_rather_than_promising_one_later() {
+        let refusal = super::database_change(&dbsql::SQLITE, DatabaseChange::Create { name: "d" })
+            .expect_err("SQLite has no CREATE DATABASE");
+        let said = refusal.to_string();
+        assert!(said.contains("file"), "got {said}");
+        assert!(
+            !said.contains("yet"),
+            "a refusal that will never change: {said}"
+        );
+
+        // And the three that are waiting for somebody to write them say so.
+        for dialect in [&dbsql::CLICKHOUSE, &dbsql::MSSQL, &dbsql::DUCKDB] {
+            let said = super::database_change(dialect, DatabaseChange::Create { name: "d" })
+                .expect_err("not written yet")
+                .to_string();
+            assert!(said.contains("yet"), "{}: {said}", dialect.name);
         }
     }
 
