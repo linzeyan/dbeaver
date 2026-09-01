@@ -224,7 +224,7 @@ enum VariablesChecks {
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: serverProcesses,
-            reportsVariables: reportsVariables, changesRelations: false)
+            reportsVariables: reportsVariables, changesRelations: false, changesDatabases: false)
     }
 
     /// A model with no connection, built the way `ProcessesChecks` builds its

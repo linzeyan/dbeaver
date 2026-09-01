@@ -668,6 +668,19 @@ enum AppMenu {
             action: #selector(ServerCommands.showServerVariables(_:)), keyEquivalent: "")
         variables.target = server
 
+        // Behind a separator, because it is the one item here that changes
+        // something. The two above read. This is also the only place a database
+        // can be *made* from: dropping one is a right-click on the row that is
+        // going, and a database that does not exist yet has no row to click.
+        menu.addItem(.separator())
+        let newDatabase = menu.addItem(
+            // From the enum, so that this item and the tree's Drop are one
+            // source: two spellings of the same feature is how a menu and a
+            // right-click drift into naming different things.
+            withTitle: DatabaseChange.create.menuTitle,
+            action: #selector(ServerCommands.newDatabase(_:)), keyEquivalent: "")
+        newDatabase.target = server
+
         item.submenu = menu
         return item
     }
@@ -1096,14 +1109,21 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
 
     @objc func showServerVariables(_ sender: Any?) { model.openVariables() }
 
-    /// One answer per item, because the two capabilities are separate questions
-    /// and a driver may well answer one and not the other — reading
-    /// `SHOW VARIABLES` is a query, and listing somebody else's sessions is a
-    /// privilege.
+    /// The empty name is the starting point, and deliberately: there is nothing
+    /// to suggest for a database that does not exist, and a name invented here
+    /// would be one somebody had to notice before changing it.
+    @objc func newDatabase(_ sender: Any?) { model.prepareDatabaseChange(.create) }
+
+    /// One answer per item, because the capabilities are separate questions and
+    /// a driver may well answer one and not the others — reading
+    /// `SHOW VARIABLES` is a query, listing somebody else's sessions is a
+    /// privilege, and writing a `CREATE DATABASE` is a grammar this build either
+    /// carries or does not.
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(showServerProcesses(_:)): model.watchesServerProcesses
         case #selector(showServerVariables(_:)): model.readsServerVariables
+        case #selector(newDatabase(_:)): model.changesDatabases
         default: false
         }
     }

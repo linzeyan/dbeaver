@@ -77,7 +77,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
-// `--verify-relation-change`,
+// `--verify-relation-change`, `--verify-database-change`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -139,6 +139,9 @@ if CommandLine.arguments.contains("--verify-variables") {
 }
 if CommandLine.arguments.contains("--verify-relation-change") {
     exit(MainActor.assumeIsolated { RelationChangeChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-database-change") {
+    exit(MainActor.assumeIsolated { DatabaseChangeChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)

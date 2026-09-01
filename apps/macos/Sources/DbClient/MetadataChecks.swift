@@ -133,7 +133,7 @@ enum MetadataChecks {
             {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
              "reports_sequences":true,"server_processes":"interruptible",
-             "reports_variables":true,"changes_relations":true}
+             "reports_variables":true,"changes_relations":true,"changes_databases":true}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -156,6 +156,9 @@ enum MetadataChecks {
         expect(
             both?.changesRelations, true,
             "and that the core writes a drop, an empty and a rename for it")
+        expect(
+            both?.changesDatabases, true,
+            "and a create and a drop for a whole database, which is a separate question")
 
         // Cassandra's answer, which is the one `cancel_stops_the_statement`
         // exists to carry — and Redis's for the field beside it.
@@ -164,7 +167,7 @@ enum MetadataChecks {
             {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
              "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,
              "reports_sequences":false,"server_processes":"unreported",
-             "reports_variables":false,"changes_relations":false}
+             "reports_variables":false,"changes_relations":false,"changes_databases":false}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -188,6 +191,9 @@ enum MetadataChecks {
         expect(
             neither?.changesRelations, false,
             "and no statement for changing a relation, so the row menu is not drawn")
+        expect(
+            neither?.changesDatabases, false,
+            "nor for making one, so New Database is greyed")
 
         // A field the core stopped writing is refused rather than read as false,
         // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
@@ -197,7 +203,7 @@ enum MetadataChecks {
             {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
              "reports_sequences":true,"server_processes":"unreported",
-             "reports_variables":false,"changes_relations":false}
+             "reports_variables":false,"changes_relations":false,"changes_databases":false}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 
