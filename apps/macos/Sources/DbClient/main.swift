@@ -77,6 +77,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
+// `--verify-relation-change`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -135,6 +136,9 @@ if CommandLine.arguments.contains("--verify-processes") {
 }
 if CommandLine.arguments.contains("--verify-variables") {
     exit(MainActor.assumeIsolated { VariablesChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-relation-change") {
+    exit(MainActor.assumeIsolated { RelationChangeChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -1036,6 +1040,57 @@ func openCreateTableSheet(model: AppModel, from path: String) {
         if !asked, model.canCreateTableFromFile {
             asked = true
             model.prepareCreateTable(from: url)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--change-relation drop` opens the Drop, Empty or Rename sheet on the
+/// selected relation and leaves it there.
+///
+/// Exists for the reason `--create-table` does, and more so: this sheet is
+/// behind a right-click on a tree row, and a capture cannot open a context menu —
+/// a menu is a window of its own and not part of the window being photographed.
+/// It presses nothing. What is worth a picture is a `DROP TABLE` that has not
+/// run, which is the entire argument for the sheet existing.
+let changeRelationVerb = argument("--change-relation")
+
+/// Drives `--change-relation`. Waits for the statement as well as the sheet: an
+/// empty pane is what this looks like a fifth of a second before it is worth
+/// photographing.
+@MainActor
+func openRelationChangeSheet(model: AppModel, verb: String) {
+    guard let change = TableChange(rawValue: verb) else {
+        fputs("--change-relation takes drop, truncate or rename\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("relation change sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.changePlan?.statement {
+            fputs("\(change.rawValue)\n\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("relation change sheet timed out\n", stderr)
+            exit(1)
+        }
+        if !asked, model.changesRelations, let relation = model.selected {
+            asked = true
+            model.prepareRelationChange(change, of: relation)
+            // A rename that kept the name it has would show the sheet with its
+            // own button greyed, which is a true picture of a state nobody is
+            // in for more than a keystroke. The suffix is what somebody typing
+            // would have arrived at.
+            if change == .rename { model.setRelationNewName(relation.name + "_2026") }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -3958,6 +4013,9 @@ if benchMode {
         }
         if let createTablePath {
             openCreateTableSheet(model: model, from: createTablePath)
+        }
+        if let changeRelationVerb {
+            openRelationChangeSheet(model: model, verb: changeRelationVerb)
         }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }

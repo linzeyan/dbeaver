@@ -111,6 +111,7 @@ struct MainView: View {
         .sheet(isPresented: $model.isCreateTableSheetOpen) { CreateTableSheet(model: model) }
         .sheet(isPresented: $model.isProcessesOpen) { ProcessesSheet(model: model) }
         .sheet(isPresented: $model.isVariablesOpen) { VariablesSheet(model: model) }
+        .sheet(isPresented: $model.isRelationChangeSheetOpen) { RelationChangeSheet(model: model) }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
@@ -354,6 +355,19 @@ struct NavigatorView: View {
                     ForEach(relations) { relation in
                         NavigatorRow(relation: relation)
                             .tag(NavigatorNode.relation(relation))
+                            // Only where the core writes the statements. The
+                            // items are absent rather than present and refusing,
+                            // which is the whole reason `changesRelations` is
+                            // asked of the connection instead of the row.
+                            .contextMenu {
+                                if model.changesRelations {
+                                    ForEach(TableChange.allCases, id: \.self) { change in
+                                        Button(change.menuTitle) {
+                                            model.prepareRelationChange(change, of: relation)
+                                        }
+                                    }
+                                }
+                            }
                             // The window's own selected tone, now that the
                             // system's is switched off below. A shade stronger
                             // than the grid's 0.18, which is read with a

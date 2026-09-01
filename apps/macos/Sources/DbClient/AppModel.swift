@@ -6344,6 +6344,200 @@ final class AppModel {
         let listed: [RelationInfo]
     }
 
+    // MARK: - Changing a relation
+
+    /// Whether this connection writes any of the three changes at all.
+    ///
+    /// Read before a row is picked, because the menu is built for the
+    /// connection: three items that refuse whichever is clicked would be a menu
+    /// that lies. Not folded together with the per-row question — a view cannot
+    /// be emptied anywhere — which is answered in the sheet, where the reason
+    /// stands in the place the statement would have been.
+    ///
+    /// No `db != nil`, unlike `canCreateTableFromFile`. The capability is
+    /// `.unknown` until a connection answers and a session only loses its handle
+    /// as its tab is discarded, so the test would be true wherever the first
+    /// clause already is — and it would make this unanswerable without a server.
+    var changesRelations: Bool {
+        capabilities.changesRelations && safety.writeRefusal == nil && !isBusy
+    }
+
+    /// A relation about to be changed, and the statement that would change it.
+    /// Nil means no sheet, as `createPlan` does.
+    var changePlan: RelationChangePlan?
+
+    var isRelationChangeSheetOpen: Bool {
+        get { changePlan != nil }
+        set { if !newValue { changePlan = nil } }
+    }
+
+    /// One relation, one verb, and the statement the connection wrote for them.
+    struct RelationChangePlan {
+        let relation: RelationInfo
+        let change: TableChange
+        /// What a rename would call it. Unused by the other two, and kept on the
+        /// plan rather than in the sheet so that the statement and the field it
+        /// came from cannot disagree.
+        var newName: String
+        var written: Written?
+
+        struct Written {
+            /// The name this was written for, so that a statement arriving after
+            /// the field has moved on is not the one the button runs. The same
+            /// arrangement `CreateTablePlan.Written` has, and for the same
+            /// reason: the name is typed here and the statement is written on
+            /// the other side of a round trip.
+            let newName: String
+            let text: String?
+            let refusal: String?
+        }
+
+        /// The statement that would run, which is one written for this name.
+        ///
+        /// A drop and an empty do not read the name at all, so theirs is always
+        /// current — but the comparison is the same in all three cases, because
+        /// `newName` does not move for them either.
+        var statement: String? { written?.newName == newName ? written?.text : nil }
+
+        /// Why nothing would run, once that is settled for the name now typed.
+        var refusal: String? { written?.newName == newName ? written?.refusal : nil }
+
+        /// What the pane shows: the last statement written, current or not.
+        var preview: String { written?.text ?? "" }
+
+        /// The relation, spelled the way the tree spells it.
+        var qualified: String { "\(relation.schema).\(relation.name)" }
+    }
+
+    /// Opens the sheet showing what `change` would do to `relation`.
+    ///
+    /// Nothing is run here and nothing is asked before the sheet is up. Two of
+    /// the three cannot be undone, and the statement is the only thing that says
+    /// exactly what is about to be lost — a menu item that acted on the click
+    /// would be offering a `DROP TABLE` with no reading of it at all.
+    func prepareRelationChange(_ change: TableChange, of relation: RelationInfo) {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) \(relation.schema).\(relation.name) is unchanged."
+            return
+        }
+        errorMessage = nil
+        changePlan = RelationChangePlan(
+            relation: relation, change: change,
+            // A rename opens with the name it already has, so the field says what
+            // is being changed from and a blank one is somebody's own doing.
+            newName: change == .rename ? relation.name : "", written: nil)
+        renderRelationChange()
+    }
+
+    /// Calls the renamed relation something else and rewrites the statement.
+    func setRelationNewName(_ name: String) {
+        guard var plan = changePlan, plan.change == .rename else { return }
+        plan.newName = name
+        changePlan = plan
+        renderRelationChange()
+    }
+
+    /// Asks the connection for the statement the current plan would run.
+    private func renderRelationChange() {
+        guard let plan = changePlan else { return }
+        let (relation, change, newName) = (plan.relation, plan.change, plan.newName)
+        if change == .rename, newName.trimmingCharacters(in: .whitespaces).isEmpty {
+            changePlan?.written = RelationChangePlan.Written(
+                newName: newName, text: nil, refusal: "A rename needs a new name.")
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(
+                    try db.tableChangeSQL(
+                        schema: relation.schema, relation: relation.name, change: change,
+                        newName: change == .rename ? newName : nil))
+            } catch {
+                // Caught rather than thrown, as the create sheet catches: a
+                // change this relation cannot take is a thing to say on the
+                // sheet, and a thrown error would put it in the banner behind it.
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            // The sheet may have been dismissed while this was in the air and
+            // reopened onto another relation. Only the plan that asked takes it.
+            guard changePlan?.relation == relation, changePlan?.change == change else { return }
+            changePlan?.written =
+                switch answer {
+                case .success(let statement):
+                    RelationChangePlan.Written(newName: newName, text: statement, refusal: nil)
+                case .failure(let error):
+                    RelationChangePlan.Written(
+                        newName: newName, text: nil, refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var relationChangeObstacle: String? {
+        guard let plan = changePlan else { return "Nothing to change." }
+        if let refusal = plan.refusal { return refusal }
+        guard let statement = plan.statement, !statement.isEmpty else { return "Writing it…" }
+        // A rename to the name it already has is not a statement worth sending:
+        // several of these servers refuse it, and the ones that do not do
+        // nothing. Caught here rather than by the server so the sheet says it
+        // while the field is still on screen.
+        if plan.change == .rename, plan.newName == plan.relation.name {
+            return "That is the name it already has."
+        }
+        return nil
+    }
+
+    /// Runs the statement the sheet has been showing, then reads the schema back.
+    ///
+    /// The tree is refreshed from the server rather than patched here. A drop
+    /// takes dependent views with it on some of these databases and a rename
+    /// moves one row, and the difference between the two is exactly the sort of
+    /// thing a client that edited its own list would get wrong.
+    func applyRelationChange() {
+        guard let plan = changePlan, let statement = plan.statement, relationChangeObstacle == nil
+        else {
+            return
+        }
+        changePlan = nil
+        let (relation, change, newName) = (plan.relation, plan.change, plan.newName)
+        let schema = relation.schema
+        isBusy = true
+        status = "\(change.progressive) \(plan.qualified)…"
+        errorMessage = nil
+        run { db -> MadeTable in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained, because a drop the server refuses for having dependents is
+            // refused while it executes rather than while it is accepted.
+            while try query.nextBatch() != nil {}
+            db.forgetNames()
+            return MadeTable(
+                affected: query.rowsAffected ?? 0, listed: try db.relations(schema: schema))
+        } then: { [self] changed in
+            isBusy = false
+            relations[schema] = changed.listed
+            history.record(
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+            status =
+                "\(change.pastTense) \(schema).\(change == .rename ? newName : relation.name)"
+            // Where the selection lands is the one thing this cannot read off the
+            // server. A renamed relation is the same object under another name
+            // and the window should stay on it; a dropped one is gone and
+            // staying would leave a grid over a table that is not there.
+            if selected == relation {
+                selected =
+                    change == .drop
+                    ? nil
+                    : changed.listed.first {
+                        $0.name == (change == .rename ? newName : relation.name)
+                    }
+            }
+            // Whatever the transaction is doing now, a statement moved it.
+            refreshTransaction()
+        }
+    }
+
     // MARK: - Query execution
 
     private func browseSummary(

@@ -701,6 +701,38 @@ final class Database: @unchecked Sendable {
         return String(cString: written)
     }
 
+    /// The statement that would make `change` to a relation that is already there.
+    ///
+    /// Written and not run, like `createTableSQL` above. Two of the three cannot
+    /// be undone, so the statement exists to be read before anything is sent —
+    /// and a refusal comes back here, in place of the statement, rather than
+    /// after a button was pressed.
+    ///
+    /// `newName` is used only by `.rename`; the core refuses a rename without
+    /// one rather than writing `RENAME TO ""`.
+    func tableChangeSQL(
+        schema: String, relation: String, change: TableChange, newName: String? = nil
+    ) throws -> String {
+        var err: UnsafeMutablePointer<CChar>?
+        // Spelled out rather than passed straight through: Swift bridges a
+        // `String` to a C string for us and an `Optional<String>` not at all,
+        // and null is the argument the other two changes take.
+        let written =
+            if let newName {
+                newName.withCString {
+                    db_table_change_sql(handle, schema, relation, change.rawValue, $0, &err)
+                }
+            } else {
+                db_table_change_sql(handle, schema, relation, change.rawValue, nil, &err)
+            }
+        guard let written else {
+            throw DbError(
+                description: Database.take(&err) ?? "could not write that change for this database")
+        }
+        defer { db_string_free(written) }
+        return String(cString: written)
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }
