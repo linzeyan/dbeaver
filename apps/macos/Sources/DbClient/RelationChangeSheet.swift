@@ -26,7 +26,11 @@ struct RelationChangeSheet: View {
             Rectangle().fill(Theme.separator.color).frame(height: 1)
             footer
         }
-        .frame(width: 540, height: change == .rename ? 380 : 340)
+        // Width fixed, height from the content. Unlike the create sheet, whose
+        // pane holds one line per column of a file, everything `table_change`
+        // writes is a single statement — so a fixed height was three hundred
+        // points of black under four words.
+        .frame(width: 540)
         .background(Theme.surface.color)
         // Escape closes it. Nothing has run yet, so closing needs no question.
         .onExitCommand { model.changePlan = nil }
@@ -111,6 +115,10 @@ struct RelationChangeSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.Space.md)
         }
+        // Room for three lines of it. One is what these statements are; the
+        // other two are for a schema and a name long enough to wrap, which is
+        // the case that would otherwise scroll a four-word statement.
+        .frame(height: 92)
         .accessibilityLabel("The statement that will be run")
     }
 
