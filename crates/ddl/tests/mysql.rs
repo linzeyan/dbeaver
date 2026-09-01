@@ -20,7 +20,7 @@ use dbconn::{
 };
 use driver_mysql::MySqlSource;
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Opts};
+use mysql_async::Opts;
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
 
@@ -418,7 +418,9 @@ async fn live() -> MySqlSource {
 
 async fn seed() {
     let opts = Opts::from_url(ROOT_URL).expect("the fixture URL should parse");
-    let mut conn = Conn::new(opts)
+    // Through the driver's opener, so the seed survives a connection the port
+    // forwarder opened early and MySQL has since closed. See `open_conn`.
+    let mut conn = driver_mysql::open_conn(&opts)
         .await
         .expect("MySQL unreachable; run 'make db-up-mysql'");
     for statement in [
@@ -460,7 +462,7 @@ async fn a_table_renders_as_the_server_spells_it() {
     let relation = listed(&source, "parts").await;
     let ddl = rendered(&source, &relation).await;
 
-    let mut conn = Conn::new(Opts::from_url(URL).unwrap())
+    let mut conn = driver_mysql::open_conn(&Opts::from_url(URL).unwrap())
         .await
         .expect("a connection of the test's own");
     let (_, expected): (String, String) = conn

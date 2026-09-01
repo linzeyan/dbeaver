@@ -724,7 +724,11 @@ async fn mysql() -> Subject {
     use mysql_async::prelude::Queryable;
 
     let opts = mysql_async::Opts::from_url(MYSQL_ROOT).expect("the fixture URL should parse");
-    let mut conn = mysql_async::Conn::new(opts)
+    // Opened the way the driver opens one, which is what makes the retry inside
+    // it cover the seed as well: the first connection a process makes can be one
+    // the port forwarder opened early and MySQL has since closed, and the
+    // fixture would be the one to meet it.
+    let mut conn = driver_mysql::open_conn(&opts)
         .await
         .expect("MySQL unreachable; run `make db-up-mysql`");
     let rows: Vec<String> = (1..=500).map(|i| format!("({i}, 'row-{i}')")).collect();
@@ -1007,7 +1011,7 @@ async fn mysql_compatible(
     // report. Turning it off here keeps the seed connection honest about what
     // it is testing — a fixture that reached the server by a route the driver
     // does not use would be proving something else.
-    let mut conn = mysql_async::Conn::new(mysql_async::Opts::from(
+    let mut conn = driver_mysql::open_conn(&mysql_async::Opts::from(
         mysql_async::OptsBuilder::from_opts(opts).prefer_socket(false),
     ))
     .await

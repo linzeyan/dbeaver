@@ -24,8 +24,8 @@ use arrow::array::{
 use arrow::datatypes::{DataType, TimeUnit};
 use dbconn::{ConstraintKind, RelationKind};
 use driver_mysql::MySqlSource;
+use mysql_async::Opts;
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Opts};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -70,7 +70,9 @@ async fn source() -> MySqlSource {
 /// surface to save a loop.
 async fn seed() {
     let opts = Opts::from_url(ROOT_URL).expect("the fixture URL should parse");
-    let mut conn = Conn::new(opts)
+    // Through the driver's opener rather than `Conn::new`, so the seed survives
+    // a connection the port forwarder opened early and MySQL has since closed.
+    let mut conn = driver_mysql::open_conn(&opts)
         .await
         .expect("MySQL unreachable; see the header of this file for the container");
 
@@ -734,13 +736,35 @@ async fn schemas_are_the_server_s_databases_and_not_the_connection_s_own() {
     // listing all of them is right — a cross-database query is ordinary here.
     assert!(names.contains(&"bench".to_string()));
     assert!(names.contains(&"bench2".to_string()));
-    // The server's own four belong in a sidebar no more than a catalog does.
-    for kept_back in ["information_schema", "performance_schema", "mysql", "sys"] {
-        assert!(
-            !names.contains(&kept_back.to_string()),
-            "{kept_back} should not be listed"
-        );
+
+    // The server's own four are reported and marked rather than left out: a
+    // name missing from the answer is one no setting can put back. `sys` is on
+    // this list on our own account rather than upstream's, being helper views
+    // over `performance_schema`.
+    let schemas = source.schemas().await.expect("schemas");
+    let system = |name: &str| {
+        schemas
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} should be listed, got {names:?}"))
+            .is_system
+    };
+    for own in ["information_schema", "performance_schema", "mysql", "sys"] {
+        assert!(system(own), "{own} should be marked as the server's own");
     }
+    assert!(!system("bench"));
+
+    // And they sort last, so a tree that opens on a fresh server does not open
+    // on `information_schema`. The ordering is the half of this that a marking
+    // driver can still get wrong.
+    let first_system = schemas
+        .iter()
+        .position(|s| s.is_system)
+        .expect("the server's own are in the list");
+    assert!(
+        schemas[first_system..].iter().all(|s| s.is_system),
+        "the server's own belong after everybody else's, got {names:?}"
+    );
 }
 
 #[tokio::test]

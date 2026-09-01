@@ -702,12 +702,36 @@ async fn read(conn: Held, sql: &str, batch_rows: usize) -> Result<Reader, MySqlE
 /// one names a different session — killing somebody else's statement, or
 /// nothing.
 async fn open(opts: &Opts) -> Result<(Conn, u64), MySqlError> {
-    let mut conn = Conn::new(opts.clone()).await?;
+    let mut conn = open_conn(opts).await?;
     let id: u64 = conn
         .query_first("SELECT CONNECTION_ID()")
         .await?
         .unwrap_or_else(|| u64::from(conn.id()));
     Ok((conn, id))
+}
+
+/// Opens one connection, past a connection that was already dead when it
+/// arrived.
+///
+/// Anything that keeps connections ready in front of the server — a container's
+/// port forwarder, a proxy, a tunnel — may open one to the server before anybody
+/// asks for it and hand that one over. MySQL closes a connection that has not
+/// authenticated within `connect_timeout`, ten seconds by default, and it closes
+/// it by writing error 1159 rather than by going quiet. A client that arrives
+/// after that reads the handshake and then this second packet, numbered for a
+/// conversation it was not part of, and reports "packets out of sync" — which
+/// names the symptom and blames the client for it. There is nothing to recover
+/// on a socket the server has already given up on, so this asks for another one,
+/// which is opened for this request and answered immediately.
+///
+/// Once, and only when the failure was the socket. A refused password is an
+/// answer rather than a broken connection, and retrying it would spend two of
+/// the server's failed-login attempts on one wrong password.
+pub async fn open_conn(opts: &Opts) -> Result<Conn, MySqlError> {
+    match Conn::new(opts.clone()).await {
+        Err(mysql_async::Error::Io(_)) => Ok(Conn::new(opts.clone()).await?),
+        other => Ok(other?),
+    }
 }
 
 fn register(live: &Arc<Mutex<Vec<u64>>>, id: u64) -> Registration {
