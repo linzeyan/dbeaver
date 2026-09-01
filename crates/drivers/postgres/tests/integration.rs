@@ -607,22 +607,35 @@ async fn cursor_works_without_primary_key() {
 
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
-async fn schemas_exclude_catalog_namespaces() {
+async fn schemas_report_the_catalog_and_mark_it_as_the_server_s() {
     let src = connect().await;
     let schemas = src.schemas().await.expect("schemas failed");
     let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+    let system = |name: &str| {
+        schemas
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} should be listed, got {names:?}"))
+            .is_system
+    };
 
     assert!(names.contains(&"public"), "public schema should be listed");
-    // Catalog schemas would bury the user's own objects in the navigator.
-    assert!(
-        !names.iter().any(|n| n.starts_with("pg_")),
-        "pg_* schemas should be filtered out, got {names:?}"
-    );
-    assert!(!names.contains(&"information_schema"));
     assert!(
         names.contains(&"reporting"),
         "a non-public user schema should be listed too, got {names:?}"
     );
+    assert!(!system("public"));
+    assert!(!system("reporting"));
+
+    // Reported and marked rather than left out. A name missing from the answer
+    // is one no setting can put back, so "show me pg_catalog" would be a thing
+    // this client could not do at all; the driver says which is which and the
+    // tree decides. Both spellings of the server's own, because they are two
+    // rules and not one: `information_schema` is named by the standard and the
+    // `pg_` families are named by this product.
+    assert!(system("pg_catalog"));
+    assert!(system("pg_toast"));
+    assert!(system("information_schema"));
 }
 
 #[tokio::test]
