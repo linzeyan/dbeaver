@@ -26,7 +26,7 @@
 //!   MySQL takes. Written as that constant rather than as the test, because the
 //!   parameter belongs to a driver descriptor this rewrite has no equivalent of.
 
-use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
+use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -119,6 +119,33 @@ impl Renderer for Mysql {
 
     /// All three are written above.
     fn changes_relations(&self) -> bool {
+        true
+    }
+
+    /// `CREATE SCHEMA` and `DROP SCHEMA`, as `MySQLDatabaseManager` writes them.
+    ///
+    /// `SCHEMA` and not `DATABASE`, which upstream chose and MySQL treats as the
+    /// same keyword — kept because the manager writing it is the one this is
+    /// read from, and because a reader comparing the two files should find the
+    /// same word in both.
+    ///
+    /// The name goes through the dialect's quoter rather than being wrapped in
+    /// backticks by hand, which is a deliberate divergence: upstream writes
+    /// `"CREATE SCHEMA \`" + name + "\`"`, and a name holding a backtick ends
+    /// that identifier early and leaves the rest of it as syntax. `quote` doubles
+    /// the closer, which is what MySQL reads as one.
+    fn database_change(&self, change: DatabaseChange<'_>) -> DbResult<String> {
+        let mut script = Script::new();
+        script.statement(&match change {
+            DatabaseChange::Create { name } => {
+                format!("CREATE SCHEMA {}", dbsql::MYSQL.quote(name))
+            }
+            DatabaseChange::Drop { name } => format!("DROP SCHEMA {}", dbsql::MYSQL.quote(name)),
+        });
+        Ok(script.finish())
+    }
+
+    fn changes_databases(&self) -> bool {
         true
     }
 }

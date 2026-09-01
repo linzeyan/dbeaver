@@ -35,7 +35,7 @@
 //! `getTableDDL` and `getViewDDL` take the map and never read it, so there is no
 //! preference whose default had to be established before this could be written.
 
-use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
+use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -130,6 +130,23 @@ impl Renderer for Sqlite {
     /// worth drawing; the third refuses where its statement would have been.
     fn changes_relations(&self) -> bool {
         true
+    }
+
+    /// Neither, and not because nobody has written them.
+    ///
+    /// A SQLite database is a file. It is made by opening a path that has none
+    /// and removed by deleting one, and the nearest statement — `ATTACH` — puts
+    /// a second file on this connection rather than making anything. There is no
+    /// `CREATE DATABASE` here to teach, which is why this refusal names the
+    /// filesystem instead of promising a later version.
+    fn database_change(&self, _: DatabaseChange<'_>) -> DbResult<String> {
+        Err(DbError::new(
+            "a SQLite database is a file, made and removed on the filesystem rather than by SQL",
+        ))
+    }
+
+    fn changes_databases(&self) -> bool {
+        false
     }
 }
 
