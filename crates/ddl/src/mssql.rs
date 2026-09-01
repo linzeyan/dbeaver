@@ -92,6 +92,13 @@ impl Renderer for MsSql {
         false
     }
 
+    /// Not written either, and the two are asked separately because they are
+    /// separate questions everywhere else: SQLite changes the set of columns and
+    /// alters none of them.
+    fn alters_columns(&self) -> bool {
+        false
+    }
+
     /// Neither is written yet, for the reason the relation changes are not:
     /// upstream is the specification and the families are lit one at a time.
     fn database_change(&self, _change: DatabaseChange<'_>) -> DbResult<String> {

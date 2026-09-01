@@ -470,6 +470,7 @@ pub unsafe extern "C" fn db_capabilities_json(
             writes_statements: h.dialect.is_some(),
             changes_relations: h.dialect.is_some_and(dbddl::changes_relations),
             changes_columns: h.dialect.is_some_and(dbddl::changes_columns),
+            alters_columns: h.dialect.is_some_and(dbddl::alters_columns),
             changes_databases: h.dialect.is_some_and(dbddl::changes_databases),
         },
         err,
@@ -531,6 +532,14 @@ struct Surface {
     /// query's — and `db_column_change_sql` answers that in place of the
     /// statement.
     changes_columns: bool,
+
+    /// Whether `db_column_change_sql` writes an `alter` for this database.
+    ///
+    /// Narrower than `changes_columns` and deliberately separate from it: adding,
+    /// dropping and renaming change which columns a table has, while this changes
+    /// what one of them is, and SQLite's `ALTER TABLE` does the first three and
+    /// none of the fourth. The Edit Column item is drawn from this one.
+    alters_columns: bool,
 
     /// Whether `db_database_change_sql` writes anything at all for this
     /// database.
@@ -1738,17 +1747,50 @@ pub unsafe extern "C" fn db_database_change_sql(
 /// One change to one column, as it crosses the boundary.
 ///
 /// Tagged rather than positional, unlike `db_table_change_sql`'s verb-and-name
-/// pair, because one of the three verbs carries a whole column: an argument list
-/// with five strings on it, four of them null for two of the verbs, is a call
+/// pair, because two of the four verbs carry more than a name: an argument list
+/// with eight strings on it, most of them null for most of the verbs, is a call
 /// nobody can read at the site. A tag serde does not know is refused rather than
-/// falling through to a verb, which is the property that matters here — the
-/// three destroy, keep and rename respectively.
+/// falling through to a verb, which is the property that matters here — the four
+/// destroy, keep, rename and rewrite respectively.
 #[derive(serde::Deserialize)]
 #[serde(tag = "change", rename_all = "snake_case")]
 enum ColumnChangeRequest {
-    Add { column: NewColumnRequest },
-    Drop { name: String },
-    Rename { name: String, to: String },
+    Add {
+        column: NewColumnRequest,
+    },
+    Drop {
+        name: String,
+    },
+    Rename {
+        name: String,
+        to: String,
+    },
+    /// An absent `kind` or `nullable` leaves that property alone, which is what
+    /// makes this safe to send for a column whose type this build cannot spell:
+    /// only what was asked for is written.
+    Alter {
+        name: String,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        nullable: Option<bool>,
+        #[serde(default)]
+        default: DefaultRequest,
+    },
+}
+
+/// What an alteration does to a column's default.
+///
+/// Three tagged answers rather than a nullable string, because a JSON null would
+/// have to mean both "leave it" and "take it away" — and taking a default away
+/// is the one of the two that runs a statement.
+#[derive(Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DefaultRequest {
+    #[default]
+    Keep,
+    Drop,
+    Set(String),
 }
 
 /// The statement for one change to a column of a relation that is there, as
@@ -1763,20 +1805,30 @@ enum ColumnChangeRequest {
 ///                              "default": …, "primary_key": false}}
 /// {"change": "drop", "name": …}
 /// {"change": "rename", "name": …, "to": …}
+/// {"change": "alter", "name": …, "kind": …, "nullable": …,
+///                     "default": "keep" | "drop" | {"set": …}}
 /// ```
 ///
 /// The column being added is the same shape `db_new_table_sql` reads, because it
 /// is the same five answers — and `primary_key` is refused here, a key being a
 /// rule about the whole table rather than about one column.
 ///
+/// An alteration's `kind` and `nullable` are optional and absent means "leave it
+/// alone". That is not brevity: a column the server describes as
+/// `character varying(64)` has no kind in this build's seven, and a caller that
+/// had to send one on every alteration would retype the column each time it
+/// changed the default.
+///
 /// The relation's kind is read from the server, like `db_table_change_sql` reads
 /// it and for the same reason: no server alters a view's columns, those being
 /// the columns its query selects, and a caller passing the kind back would be
 /// the one to get it wrong.
 ///
-/// Whether this connection writes any of the three at all is
-/// `db_capabilities_json`'s `changes_columns`. Whether *this* relation takes
-/// *this* change is answered here, in place of the statement.
+/// Whether this connection writes any of the first three at all is
+/// `db_capabilities_json`'s `changes_columns`, and whether it writes an
+/// alteration is the separate `alters_columns` — SQLite answers the first yes
+/// and the second no. Whether *this* relation takes *this* change is answered
+/// here, in place of the statement.
 ///
 /// # Safety
 /// `handle` must come from `db_connect` and not have been freed. `schema`,
@@ -1827,10 +1879,44 @@ pub unsafe extern "C" fn db_column_change_sql(
         },
         _ => None,
     };
+    // Same again for an alteration's kind: parsed here so that a word this build
+    // does not know is refused by name rather than becoming text, which is the
+    // rule `NewColumnRequest::into_column` follows.
+    let altered = match &requested {
+        ColumnChangeRequest::Alter { kind, .. } => {
+            match kind.as_deref().map(dbddl::ColumnKind::parse) {
+                Some(Err(e)) => {
+                    unsafe { set_err(err, e) };
+                    return ptr::null_mut();
+                }
+                Some(Ok(kind)) => Some(kind),
+                None => None,
+            }
+        }
+        _ => None,
+    };
     let change = match (&requested, &added) {
         (ColumnChangeRequest::Add { .. }, Some(column)) => dbddl::ColumnChange::Add(column),
         (ColumnChangeRequest::Drop { name }, _) => dbddl::ColumnChange::Drop { name },
         (ColumnChangeRequest::Rename { name, to }, _) => dbddl::ColumnChange::Rename { name, to },
+        (
+            ColumnChangeRequest::Alter {
+                name,
+                nullable,
+                default,
+                ..
+            },
+            _,
+        ) => dbddl::ColumnChange::Alter {
+            name,
+            kind: altered,
+            nullable: *nullable,
+            default: match default {
+                DefaultRequest::Keep => dbddl::DefaultChange::Keep,
+                DefaultRequest::Drop => dbddl::DefaultChange::Drop,
+                DefaultRequest::Set(value) => dbddl::DefaultChange::Set(value),
+            },
+        },
         (ColumnChangeRequest::Add { .. }, None) => unreachable!("an add always builds a column"),
     };
 

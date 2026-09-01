@@ -473,15 +473,24 @@ pub(crate) fn column_declaration(
     Ok(declaration)
 }
 
+/// What an alteration does to a column's default.
+///
+/// Three answers rather than an `Option<Option<String>>`: leaving a default
+/// alone and taking one away are different statements, and which is which
+/// should not be a matter of counting wrappers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DefaultChange<'a> {
+    Keep,
+    Drop,
+    Set(&'a str),
+}
+
 /// What to do to a column of a table that already exists.
 ///
-/// Three verbs and not six. Changing a column's *type*, its nullability or its
-/// default is the same family of statement on paper and a different one on every
-/// server — PostgreSQL writes one `ALTER COLUMN` per property changed, MySQL
-/// writes a single `MODIFY COLUMN` carrying the whole declaration back, SQL
-/// Server splits it again — and those three are left out of this enum
-/// deliberately rather than folded in. What is here is what the servers agree
-/// about: a column is added, dropped, or given another name.
+/// The first three change *which* columns the table has; [`ColumnChange::Alter`]
+/// changes what one of them is. That is the line the two capabilities are drawn
+/// along — SQLite adds, drops and renames a column and cannot alter one — and it
+/// is why altering is a fourth variant here rather than a second enum.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ColumnChange<'a> {
     /// Put a new column into the table.
@@ -495,9 +504,42 @@ pub enum ColumnChange<'a> {
     Drop { name: &'a str },
     /// Give it another name, leaving everything else about it alone.
     Rename { name: &'a str, to: &'a str },
+    /// Change what the column *is*: its type, whether it takes a null, its
+    /// default, or any two of the three together.
+    ///
+    /// Each property carries its own "leave it alone", and only what changed is
+    /// written. This is not politeness about statement length: a column read
+    /// back from the server as `character varying(64)` has no [`ColumnKind`],
+    /// and a form that restated the type it guessed on every alteration would
+    /// silently retype half the columns it touched.
+    Alter {
+        name: &'a str,
+        kind: Option<ColumnKind>,
+        nullable: Option<bool>,
+        default: DefaultChange<'a>,
+    },
 }
 
-/// `ALTER <noun> <table> …` for one column change, which is the shape all three
+/// How much of a column's definition this server's `ALTER TABLE` reaches.
+///
+/// The per-dialect half of altering a column, in the shape [`NullStyle`] has:
+/// the three spellings differ enough that a shared function needs telling which,
+/// and a renderer that picks the wrong one writes something that looks right.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum AlterStyle {
+    /// One `ALTER COLUMN` clause per property, all in the one statement.
+    ///
+    /// The type clause carries PostgreSQL's `USING <column>::<type>` cast. The
+    /// next renderer to choose this style has to check that its server spells a
+    /// cast the same way — nothing here can check that for it.
+    EveryProperty,
+    /// The default alone. The sentence says what the rest would cost.
+    DefaultOnly(&'static str),
+    /// Nothing at all, and why.
+    Refused(&'static str),
+}
+
+/// `ALTER <noun> <table> …` for one column change, which is the shape all four
 /// verbs share.
 ///
 /// `noun` is the relation's own word — `TABLE` on most of these and
@@ -517,6 +559,7 @@ pub(crate) fn column_change_text(
     change: ColumnChange<'_>,
     word: impl Fn(ColumnKind) -> String,
     nulls: NullStyle,
+    alter: AlterStyle,
 ) -> DbResult<String> {
     let clause = match change {
         ColumnChange::Add(column) => {
@@ -548,10 +591,82 @@ pub(crate) fn column_change_text(
                 dialect.quote(to)
             )
         }
+        ColumnChange::Alter {
+            name,
+            kind,
+            nullable,
+            default,
+        } => alteration_clauses(dialect, name, kind, nullable, default, word, alter)?,
     };
     let mut script = Script::new();
     script.statement(&format!("ALTER {noun} {table} {clause}"));
     Ok(script.finish())
+}
+
+/// The `ALTER COLUMN` clauses for whichever properties are being changed.
+///
+/// One statement carrying every clause, where upstream's PostgreSQL manager
+/// emits one statement per property. Deliberate: PostgreSQL applies the actions
+/// of a single `ALTER TABLE` together or not at all, and a type change that
+/// succeeds followed by a `SET NOT NULL` that fails would leave a column
+/// half-altered with nothing to undo it. Upstream's split comes from its command
+/// framework rather than from the grammar — the grammar has taken a comma-joined
+/// list since long before either of us.
+fn alteration_clauses(
+    dialect: &'static Dialect,
+    name: &str,
+    kind: Option<ColumnKind>,
+    nullable: Option<bool>,
+    default: DefaultChange<'_>,
+    word: impl Fn(ColumnKind) -> String,
+    alter: AlterStyle,
+) -> DbResult<String> {
+    if name.is_empty() {
+        return Err(DbError::new("a column needs a name"));
+    }
+    if let AlterStyle::Refused(why) = alter {
+        return Err(DbError::new(why));
+    }
+    if let AlterStyle::DefaultOnly(why) = alter
+        && (kind.is_some() || nullable.is_some())
+    {
+        return Err(DbError::new(why));
+    }
+
+    let quoted = dialect.quote(name);
+    let mut clauses = Vec::new();
+    if let Some(kind) = kind {
+        let kind = word(kind);
+        // `USING` as upstream writes it, and for the same reason: without a cast
+        // PostgreSQL takes only the changes it can make implicitly, and text to
+        // a number — the one somebody actually wants — is not one of them. The
+        // cast is explicit, so it truncates and rounds where an implicit one
+        // would have refused; the statement is on screen before it runs.
+        clauses.push(format!(
+            "ALTER COLUMN {quoted} TYPE {kind} USING {quoted}::{kind}"
+        ));
+    }
+    if let Some(nullable) = nullable {
+        let verb = if nullable { "DROP" } else { "SET" };
+        clauses.push(format!("ALTER COLUMN {quoted} {verb} NOT NULL"));
+    }
+    match default {
+        DefaultChange::Keep => {}
+        DefaultChange::Drop => clauses.push(format!("ALTER COLUMN {quoted} DROP DEFAULT")),
+        DefaultChange::Set(value) => {
+            if value.is_empty() {
+                return Err(DbError::new("a default needs a value"));
+            }
+            clauses.push(format!("ALTER COLUMN {quoted} SET DEFAULT {value}"));
+        }
+    }
+
+    if clauses.is_empty() {
+        return Err(DbError::new(format!(
+            "nothing about {name} was changed, so there is no statement to write"
+        )));
+    }
+    Ok(clauses.join(", "))
 }
 
 /// The half of DDL generation that is genuinely per-database.
@@ -639,6 +754,18 @@ pub trait Renderer: Send + Sync {
     /// would be asserting something upstream does not.
     fn changes_columns(&self) -> bool;
 
+    /// Whether this renderer writes any [`ColumnChange::Alter`] at all.
+    ///
+    /// The third flag over the same objects, and the line between it and
+    /// `changes_columns` is which columns a table has against what one of them
+    /// is. SQLite is the reason it is drawn there: `ALTER TABLE` adds, drops and
+    /// renames a column on SQLite and reaches nothing inside one, which is why
+    /// upstream's SQLite manager inherits a modify path that writes only a
+    /// comment. An Edit Column item drawn from `changes_columns` would refuse
+    /// every time it was clicked there, and a menu item that always refuses is a
+    /// menu item that lies.
+    fn alters_columns(&self) -> bool;
+
     /// Whether this renderer writes either [`DatabaseChange`].
     ///
     /// Separate from `changes_relations` and not implied by it. SQLite is the
@@ -716,6 +843,16 @@ pub fn column_change(
 /// [`column_change`] answers that one where the statement would have been.
 pub fn changes_columns(dialect: &'static Dialect) -> bool {
     for_dialect(dialect).is_some_and(|renderer| renderer.changes_columns())
+}
+
+/// Whether this build alters a column's own definition on `dialect`.
+///
+/// What the Structure tab reads to decide whether the Edit Column item exists.
+/// Narrower than [`changes_columns`] and deliberately not folded into it: a
+/// server can have every statement that changes the set of columns and none that
+/// changes one of them.
+pub fn alters_columns(dialect: &'static Dialect) -> bool {
+    for_dialect(dialect).is_some_and(|renderer| renderer.alters_columns())
 }
 
 /// Whether this build writes any change to a relation on `dialect`.
@@ -801,7 +938,7 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnChange, ColumnKind, DatabaseChange, NewColumn, TableChange};
+    use super::{ColumnChange, ColumnKind, DatabaseChange, DefaultChange, NewColumn, TableChange};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use dbconn::{RelationInfo, RelationKind};
     use dbsql::Dialect;
@@ -1644,6 +1781,251 @@ ORDER BY tuple();"
                 "{change:?}: wanted {expected:?}, got {error}"
             );
         }
+    }
+
+    /// One clause per property that moved, and none for the ones that did not.
+    ///
+    /// The whole of what makes an alteration safe is here. A column read back
+    /// from PostgreSQL as `character varying(64)` has no [`ColumnKind`], so a
+    /// statement that restated the type on every alteration would retype it to
+    /// `text` while somebody was changing its default — which is why "leave it
+    /// alone" is a value each property carries rather than a state of the form.
+    #[test]
+    fn an_alteration_writes_a_clause_for_each_property_that_moved() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let alter = |kind, nullable, default| ColumnChange::Alter {
+            name: "qty",
+            kind,
+            nullable,
+            default,
+        };
+        let cases: &[(ColumnChange, &str)] = &[
+            // The cast is what makes text-to-number work at all, and it is
+            // upstream's: without `USING`, PostgreSQL takes only the casts it
+            // can make implicitly.
+            (
+                alter(Some(ColumnKind::Int), None, DefaultChange::Keep),
+                "ALTER TABLE staging.orders ALTER COLUMN qty TYPE bigint USING qty::bigint;",
+            ),
+            (
+                alter(None, Some(false), DefaultChange::Keep),
+                "ALTER TABLE staging.orders ALTER COLUMN qty SET NOT NULL;",
+            ),
+            (
+                alter(None, Some(true), DefaultChange::Keep),
+                "ALTER TABLE staging.orders ALTER COLUMN qty DROP NOT NULL;",
+            ),
+            (
+                alter(None, None, DefaultChange::Set("0")),
+                "ALTER TABLE staging.orders ALTER COLUMN qty SET DEFAULT 0;",
+            ),
+            (
+                alter(None, None, DefaultChange::Drop),
+                "ALTER TABLE staging.orders ALTER COLUMN qty DROP DEFAULT;",
+            ),
+            // All three in the one statement, where upstream writes three. A
+            // PostgreSQL `ALTER TABLE` applies its actions together or not at
+            // all, and a type change that lands before a `SET NOT NULL` that
+            // fails would leave the column half-altered.
+            (
+                alter(Some(ColumnKind::Int), Some(false), DefaultChange::Set("0")),
+                "ALTER TABLE staging.orders ALTER COLUMN qty TYPE bigint USING qty::bigint, \
+                 ALTER COLUMN qty SET NOT NULL, ALTER COLUMN qty SET DEFAULT 0;",
+            ),
+        ];
+        for (change, expected) in cases {
+            let statement = super::column_change(&dbsql::POSTGRES, &orders, *change)
+                .unwrap_or_else(|e| panic!("PostgreSQL refused {change:?}: {e}"));
+            assert_eq!(statement, *expected, "the wrong statement for {change:?}");
+        }
+
+        // The name is quoted in both halves of the type clause, the cast naming
+        // the same column the clause does.
+        let quoted = super::column_change(
+            &dbsql::POSTGRES,
+            &orders,
+            ColumnChange::Alter {
+                name: "Order Qty",
+                kind: Some(ColumnKind::Text),
+                nullable: None,
+                default: DefaultChange::Keep,
+            },
+        )
+        .expect("PostgreSQL alters a column whose name needs quoting");
+        assert_eq!(
+            quoted,
+            "ALTER TABLE staging.orders ALTER COLUMN \"Order Qty\" TYPE text \
+             USING \"Order Qty\"::text;"
+        );
+    }
+
+    /// MySQL alters the default and refuses the other two by name.
+    ///
+    /// The divergence the rename above already forced, reaching its second
+    /// statement: `MODIFY COLUMN` carries the whole declaration back, and this
+    /// build cannot restate a character set, a collation, an `AUTO_INCREMENT` or
+    /// a comment it never read. `ALTER COLUMN … SET DEFAULT` touches nothing
+    /// else, so that much is written.
+    #[test]
+    fn a_server_that_cannot_restate_a_declaration_alters_only_its_default() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let alter = |kind, nullable, default| ColumnChange::Alter {
+            name: "qty",
+            kind,
+            nullable,
+            default,
+        };
+
+        let written = super::column_change(
+            &dbsql::MYSQL,
+            &orders,
+            alter(None, None, DefaultChange::Set("0")),
+        )
+        .expect("MySQL sets a default");
+        assert_eq!(
+            written,
+            "ALTER TABLE staging.orders ALTER COLUMN qty SET DEFAULT 0;"
+        );
+        let dropped = super::column_change(
+            &dbsql::MYSQL,
+            &orders,
+            alter(None, None, DefaultChange::Drop),
+        )
+        .expect("MySQL drops a default");
+        assert_eq!(
+            dropped,
+            "ALTER TABLE staging.orders ALTER COLUMN qty DROP DEFAULT;"
+        );
+
+        for change in [
+            alter(Some(ColumnKind::Int), None, DefaultChange::Keep),
+            alter(None, Some(false), DefaultChange::Keep),
+            // Refused as a whole rather than written in part: half of what was
+            // asked for is not what was asked for.
+            alter(Some(ColumnKind::Int), None, DefaultChange::Set("0")),
+        ] {
+            let error = super::column_change(&dbsql::MYSQL, &orders, change)
+                .expect_err("MySQL wrote a declaration it cannot restate");
+            assert!(
+                error.to_string().contains("AUTO_INCREMENT"),
+                "the refusal should say what would have been lost: {error}"
+            );
+        }
+    }
+
+    /// SQLite alters no column at all, and says so as a limit rather than a
+    /// delay.
+    ///
+    /// The distinction every refusal in this crate draws, and the one that makes
+    /// `alters_columns` worth having: SQLite answers `changes_columns` true.
+    #[test]
+    fn a_server_whose_alter_table_reaches_no_column_says_so() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let error = super::column_change(
+            &dbsql::SQLITE,
+            &orders,
+            ColumnChange::Alter {
+                name: "qty",
+                kind: None,
+                nullable: None,
+                default: DefaultChange::Set("0"),
+            },
+        )
+        .expect_err("SQLite wrote an ALTER COLUMN");
+        assert!(!error.to_string().contains("yet"), "{error}");
+        assert!(error.to_string().contains("ALTER TABLE"), "{error}");
+    }
+
+    /// The two alterations no statement should be written for.
+    #[test]
+    fn an_alteration_that_says_nothing_is_refused_rather_than_sent() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let cases: &[(&str, ColumnChange)] = &[
+            // Nothing moved, so there are no clauses — and `ALTER TABLE t` on
+            // its own is a syntax error rather than a statement that does
+            // nothing.
+            (
+                "nothing about qty was changed",
+                ColumnChange::Alter {
+                    name: "qty",
+                    kind: None,
+                    nullable: None,
+                    default: DefaultChange::Keep,
+                },
+            ),
+            (
+                "a column needs a name",
+                ColumnChange::Alter {
+                    name: "",
+                    kind: Some(ColumnKind::Int),
+                    nullable: None,
+                    default: DefaultChange::Keep,
+                },
+            ),
+            // `SET DEFAULT` with nothing after it is a syntax error; removing a
+            // default is `DefaultChange::Drop` and says so.
+            (
+                "a default needs a value",
+                ColumnChange::Alter {
+                    name: "qty",
+                    kind: None,
+                    nullable: None,
+                    default: DefaultChange::Set(""),
+                },
+            ),
+        ];
+        for (expected, change) in cases {
+            let error = super::column_change(&dbsql::POSTGRES, &orders, *change)
+                .expect_err("a statement was written for an alteration that says nothing");
+            assert!(
+                error.to_string().contains(expected),
+                "{change:?}: wanted {expected:?}, got {error}"
+            );
+        }
+    }
+
+    /// `alters_columns` and the `Alter` arm say the same thing.
+    ///
+    /// The fourth of these, and the one that pins the flag apart from
+    /// `changes_columns`: SQLite answers the two differently, which is the whole
+    /// reason there are two.
+    #[test]
+    fn a_renderer_that_claims_column_alterations_writes_one() {
+        let table = relation("s", "t", RelationKind::Table);
+        let alteration = ColumnChange::Alter {
+            name: "c",
+            kind: None,
+            nullable: None,
+            default: DefaultChange::Set("0"),
+        };
+        for dialect in dbsql::ALL {
+            let Some(renderer) = super::for_dialect(dialect) else {
+                continue;
+            };
+            let written = renderer.column_change(&table, alteration).is_ok();
+            assert_eq!(
+                renderer.alters_columns(),
+                written,
+                "{} says it {} alter a column and {} write the statement",
+                dialect.name,
+                if renderer.alters_columns() {
+                    "can"
+                } else {
+                    "cannot"
+                },
+                if written { "does" } else { "does not" }
+            );
+            assert_eq!(
+                super::alters_columns(dialect),
+                written,
+                "{} answers differently through the crate's own entry point",
+                dialect.name
+            );
+        }
+
+        // The two flags are not one flag, and SQLite is where that is visible.
+        assert!(super::changes_columns(&dbsql::SQLITE));
+        assert!(!super::alters_columns(&dbsql::SQLITE));
     }
 
     /// `changes_columns` and `column_change` say the same thing.

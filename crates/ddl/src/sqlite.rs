@@ -36,8 +36,8 @@
 //! preference whose default had to be established before this could be written.
 
 use crate::{
-    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
-    new_table_text,
+    AlterStyle, ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script,
+    TableChange, new_table_text,
 };
 use arrow::array::{Array, StringArray};
 use async_trait::async_trait;
@@ -164,12 +164,29 @@ impl Renderer for Sqlite {
             change,
             word,
             NullStyle::Suffix,
+            AlterStyle::Refused(
+                "SQLite's ALTER TABLE adds, drops and renames a column and reaches nothing \
+                 inside one: changing a type, a nullability or a default means building the \
+                 table again around it, which this is not the place to do",
+            ),
         )
     }
 
     /// All three are written above.
     fn changes_columns(&self) -> bool {
         true
+    }
+
+    /// None of them, and not because nobody has written it.
+    ///
+    /// SQLite's `ALTER TABLE` has four forms — `RENAME TO`, `RENAME COLUMN`,
+    /// `ADD COLUMN`, `DROP COLUMN` — and none of them reaches inside a column.
+    /// Upstream says the same by inheritance: `SQLiteTableColumnManager` extends
+    /// the generic one, whose modify path writes a comment and nothing else.
+    /// This is the flag's whole reason for being separate from
+    /// `changes_columns`, which SQLite answers true.
+    fn alters_columns(&self) -> bool {
+        false
     }
 
     /// Neither, and not because nobody has written them.

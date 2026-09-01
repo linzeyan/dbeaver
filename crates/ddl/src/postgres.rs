@@ -160,11 +160,22 @@ impl Renderer for Postgres {
             change,
             word,
             crate::NullStyle::Suffix,
+            crate::AlterStyle::EveryProperty,
         )
     }
 
     /// All three are written above.
     fn changes_columns(&self) -> bool {
+        true
+    }
+
+    /// Every property, which is what `PostgreTableColumnManager` writes.
+    ///
+    /// `ALTER COLUMN … TYPE`, `SET`/`DROP NOT NULL` and `SET`/`DROP DEFAULT`,
+    /// one clause each. The two upstream also writes — `SET STORAGE` and the
+    /// column's comment — are not offered: neither is a property this build
+    /// reads back, and a form cannot honestly edit what it cannot show.
+    fn alters_columns(&self) -> bool {
         true
     }
 

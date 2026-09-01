@@ -25,6 +25,9 @@ enum ColumnChangeChecks {
         checkARenameToTheSameNameIsRefusedHere()
         checkTheFormAnswersItsOwnEmptyFields()
         checkAnAddedKeyColumnCannotBeLeftNullable()
+        checkAnAlterationCrossesOnlyWhatMoved()
+        checkAlteringIsAskedSeparatelyFromChanging()
+        checkAnAlterationThatSaysNothingIsRefusedHere()
         if failures == 0 {
             fputs("column-change: all checks passed\n", stderr)
         } else {
@@ -45,12 +48,14 @@ enum ColumnChangeChecks {
         expect(ColumnChange.add(NewTableColumn()).verb, "add", "the word the core reads for an add")
         expect(ColumnChange.drop(name: "n").verb, "drop", "and for a drop")
         expect(ColumnChange.rename(name: "n", to: "m").verb, "rename", "and for a rename")
+        expect(ColumnChange.alter(alteration()).verb, "alter", "and for an alteration")
         expect(
             [
                 ColumnChange.add(NewTableColumn()).isDestructive,
                 ColumnChange.drop(name: "n").isDestructive,
-                ColumnChange.rename(name: "n", to: "m").isDestructive
-            ], [false, true, false],
+                ColumnChange.rename(name: "n", to: "m").isDestructive,
+                ColumnChange.alter(alteration()).isDestructive
+            ], [false, true, false, false],
             "and only the drop destroys anything, which is what takes Return off its button")
 
         let dropped = encoded(.drop(name: "note"))
@@ -247,15 +252,139 @@ enum ColumnChangeChecks {
         expect(after.nullable, false, "and marking it part of the key settles the other answer")
     }
 
+    /// An alteration sends the properties that moved and leaves out the rest.
+    ///
+    /// The rule this whole verb rests on. A column the server describes as
+    /// `character varying(64)` is none of the seven kinds the picker offers, so
+    /// a payload that carried a type on every alteration would retype it to
+    /// `text` while somebody was changing its default — silently, and in the one
+    /// direction that loses the length.
+    private static func checkAnAlterationCrossesOnlyWhatMoved() {
+        let untouched = encoded(.alter(alteration()))
+        expect(untouched["change"] as? String, "alter", "an alteration crosses as its word")
+        expect(untouched["name"] as? String, "qty", "naming the column it acts on")
+        expect(
+            untouched["kind"] == nil, true,
+            "and sends no type where none was picked, the column's own being one this build "
+                + "cannot always spell")
+        expect(untouched["nullable"] == nil, true, "nor a nullability nobody changed")
+        expect(
+            untouched["default"] as? String, "keep",
+            "while the default says which of its three answers this is, a null being unable to "
+                + "mean both leave it and take it away")
+
+        var moved = alteration()
+        moved.kind = .decimal(precision: 12, scale: 2)
+        moved.nullable = false
+        moved.defaultChange = .set("  0  ")
+        let sent = encoded(.alter(moved))
+        expect(sent["kind"] as? String, "decimal(12,2)", "a type picked crosses with its size")
+        expect(sent["nullable"] as? Bool, false, "and a nullability chosen crosses as itself")
+        expect(
+            (sent["default"] as? [String: String])?["set"], "0",
+            "and a default set crosses trimmed and tagged, as the Create Table form sends one")
+
+        var removed = alteration()
+        removed.defaultChange = .drop
+        expect(
+            encoded(.alter(removed))["default"] as? String, "drop",
+            "while removing one is its own answer rather than an empty string")
+
+        // The three that are not sent are still shown, which is what the sheet
+        // reads to say what the column is now.
+        let standing = alteration()
+        expect(standing.currentType, "integer", "the server's own word for the type is kept")
+        expect(standing.currentNullable, false, "and its nullability")
+        expect(standing.currentDefault, "1", "and its default")
+    }
+
+    /// Altering a column and changing which columns there are do not answer
+    /// together.
+    ///
+    /// SQLite is the whole reason: its `ALTER TABLE` adds, drops and renames a
+    /// column and reaches nothing inside one, so the Edit Column item has to be
+    /// drawn from its own flag or it would refuse every time it was clicked
+    /// there.
+    private static func checkAlteringIsAskedSeparatelyFromChanging() {
+        let model = makeModel()
+
+        model.sessions[0].capabilities = capabilities(changesColumns: true, altersColumns: false)
+        expect(
+            [model.changesColumns, model.altersColumns], [true, false],
+            "SQLite's answer, which one flag could not give")
+
+        model.sessions[0].capabilities = capabilities(changesColumns: false, altersColumns: true)
+        expect(
+            [model.changesColumns, model.altersColumns], [false, true],
+            "and the other way round")
+
+        model.sessions[0].capabilities = capabilities(changesColumns: true, altersColumns: true)
+        model.sessions[0].safety = ConnectionSafety(isReadOnly: true)
+        expect(model.altersColumns, false, "a read-only connection offers neither")
+        model.sessions[0].safety = ConnectionSafety()
+        model.sessions[0].isBusy = true
+        expect(model.altersColumns, false, "and nothing is offered over a statement in flight")
+    }
+
+    /// An alteration that asks for nothing is stopped before a round trip.
+    ///
+    /// `ALTER TABLE t` with no clauses after it is a syntax error rather than a
+    /// statement that does nothing, and this is the state the sheet opens in —
+    /// so the answer has to be here rather than in the core's reply.
+    private static func checkAnAlterationThatSaysNothingIsRefusedHere() {
+        let model = opened(.alter(alteration()), altersColumns: true)
+        expect(
+            model.columnChangeObstacle, "Nothing about this column has been changed.",
+            "the sheet opens with every property unchanged and says so")
+
+        model.editColumnChange { pending in
+            guard case .alter(var edited) = pending else { return }
+            edited.defaultChange = .set("   ")
+            pending = .alter(edited)
+        }
+        expect(
+            model.columnChangeObstacle, "A default needs a value; removing one is its own answer.",
+            "and a default set to nothing is a syntax error rather than a shorter statement")
+
+        model.editColumnChange { pending in
+            guard case .alter(var edited) = pending else { return }
+            edited.defaultChange = .set("0")
+            pending = .alter(edited)
+        }
+        answer(model, "ALTER TABLE public.orders ALTER COLUMN qty SET DEFAULT 0;")
+        expect(model.columnChangeObstacle, nil, "a property that moved releases the button")
+
+        // And the statement is written for the alteration as it is now, the
+        // whole change being what the plan compares.
+        model.editColumnChange { pending in
+            guard case .alter(var edited) = pending else { return }
+            edited.nullable = false
+            pending = .alter(edited)
+        }
+        expect(
+            model.columnChangeObstacle, "Writing it…",
+            "a second property picked makes the statement on screen the wrong one")
+    }
+
     // MARK: - Harness
+
+    /// One column as the server describes it, and an alteration over it that
+    /// asks for nothing yet.
+    private static func alteration() -> ColumnAlteration {
+        ColumnAlteration(
+            ColumnInfo(
+                name: "qty", dataType: "integer", nullable: false, position: 1,
+                isPrimaryKey: false, defaultValue: "1"))
+    }
 
     private static let orders = RelationInfo(
         schema: "public", name: "orders", kind: .table, estimatedRows: nil)
 
     /// A model with the sheet open on `change`, over a connection that writes.
-    private static func opened(_ change: ColumnChange) -> AppModel {
+    private static func opened(_ change: ColumnChange, altersColumns: Bool = false) -> AppModel {
         let model = makeModel()
-        model.sessions[0].capabilities = capabilities(changesColumns: true)
+        model.sessions[0].capabilities = capabilities(
+            changesColumns: true, altersColumns: altersColumns)
         model.prepareColumnChange(change, of: orders)
         return model
     }
@@ -280,15 +409,15 @@ enum ColumnChangeChecks {
         return object
     }
 
-    private static func capabilities(changesColumns: Bool, changesRelations: Bool = false)
-        -> Capabilities
-    {
+    private static func capabilities(
+        changesColumns: Bool, changesRelations: Bool = false, altersColumns: Bool = false
+    ) -> Capabilities {
         Capabilities(
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: changesRelations, changesColumns: changesColumns,
-            changesDatabases: false)
+            altersColumns: altersColumns, changesDatabases: false)
     }
 
     /// A model with no connection, built the way `NewTableChecks` builds its own:

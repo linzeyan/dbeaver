@@ -230,7 +230,7 @@ enum DatabaseChangeChecks {
             // flag rather than on this one.
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
-            changesRelations: changesRelations, changesColumns: false,
+            changesRelations: changesRelations, changesColumns: false, altersColumns: false,
             changesDatabases: changesDatabases)
     }
 

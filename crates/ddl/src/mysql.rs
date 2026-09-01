@@ -27,8 +27,8 @@
 //!   parameter belongs to a driver descriptor this rewrite has no equivalent of.
 
 use crate::{
-    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
-    new_table_text,
+    AlterStyle, ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script,
+    TableChange, new_table_text,
 };
 use arrow::array::{Array, StringArray};
 use async_trait::async_trait;
@@ -160,11 +160,30 @@ impl Renderer for Mysql {
             change,
             word,
             NullStyle::Suffix,
+            AlterStyle::DefaultOnly(
+                "MySQL changes a column's type or its nullability only by restating the whole \
+                 declaration, which would drop the character set, the collation, the \
+                 AUTO_INCREMENT and the comment this build never read. The default is the one \
+                 property it can change on its own",
+            ),
         )
     }
 
     /// All three are written above.
     fn changes_columns(&self) -> bool {
+        true
+    }
+
+    /// The default, and nothing else.
+    ///
+    /// `MySQLTableColumnManager.addObjectModifyActions` writes
+    /// `MODIFY COLUMN <whole declaration>`, and its `getNestedDeclaration`
+    /// restates the AUTO_INCREMENT, the primary key and the comment because it
+    /// has them to restate. This build does not, so the same statement written
+    /// from what it knows would take those away — the hazard that already
+    /// decided the rename above. `ALTER COLUMN … SET DEFAULT` touches the
+    /// default alone, so that much is written and the rest is refused by name.
+    fn alters_columns(&self) -> bool {
         true
     }
 

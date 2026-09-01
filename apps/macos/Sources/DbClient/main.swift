@@ -1206,41 +1206,55 @@ func openNewTableSheet(model: AppModel, name: String) {
     poll()
 }
 
-/// `--change-column add|drop:<column>|rename:<column>` opens the column sheet.
+/// `--change-column add|drop:<column>|rename:<column>|alter:<column>` opens the
+/// column sheet.
 ///
-/// Exists for the reason `--change-relation` does: all three are behind a
+/// Exists for the reason `--change-relation` does: all four are behind a
 /// right-click on the Structure tab's column table, and a menu is a window of
 /// its own — not the one being photographed.
 let changeColumnArgument = argument("--change-column")
 
-/// Drives `--change-column`. Waits for the statement as well as the sheet.
+/// The verb and the column `--change-column` was given, unparsed.
+///
+/// Split out because the alteration needs the column the server described, which
+/// is not there until the Structure tab has read it — so the change is built
+/// inside the poll rather than before it.
 @MainActor
 func openColumnChangeSheet(model: AppModel, argument: String) {
     let parts = argument.split(separator: ":", maxSplits: 1)
+    let verb = String(parts[0])
     let column = parts.count == 2 ? String(parts[1]) : ""
-    let change: ColumnChange? =
-        switch parts[0] {
-        // Filled in rather than opened blank, because what a capture of the add
-        // has to show is the form deciding something: a type, a null and a
-        // default. An empty row shows the layout and none of the behaviour.
-        case "add":
-            .add(
-                NewTableColumn(
-                    name: "settled_at", kind: .timestamp, nullable: false,
-                    defaultValue: "now()"))
-        case "drop" where !column.isEmpty: .drop(name: column)
-        // Opened on the name it already has, which is the state somebody
-        // arriving at this sheet sees, then typed into.
-        case "rename" where !column.isEmpty: .rename(name: column, to: column)
-        default: nil
-        }
-    guard let change else {
-        fputs("--change-column takes add, drop:<column> or rename:<column>\n", stderr)
+    guard ["add", "drop", "rename", "alter"].contains(verb), verb == "add" || !column.isEmpty
+    else {
+        fputs(
+            "--change-column takes add, drop:<column>, rename:<column> or alter:<column>\n",
+            stderr)
         exit(2)
     }
 
     let deadline = CFAbsoluteTimeGetCurrent() + 180
     var asked = false
+
+    /// The change for `verb`, or nil while what it needs is still being read.
+    func wanted() -> ColumnChange? {
+        switch verb {
+        // Filled in rather than opened blank, because what a capture of the add
+        // has to show is the form deciding something: a type, a null and a
+        // default. An empty row shows the layout and none of the behaviour.
+        case "add":
+            return .add(
+                NewTableColumn(
+                    name: "settled_at", kind: .timestamp, nullable: false,
+                    defaultValue: "now()"))
+        case "drop": return .drop(name: column)
+        // Opened on the name it already has, which is the state somebody
+        // arriving at this sheet sees, then typed into.
+        case "rename": return .rename(name: column, to: column)
+        default:
+            guard let info = model.columns.first(where: { $0.name == column }) else { return nil }
+            return .alter(ColumnAlteration(info))
+        }
+    }
 
     func poll() {
         if let error = model.errorMessage {
@@ -1248,20 +1262,34 @@ func openColumnChangeSheet(model: AppModel, argument: String) {
             exit(1)
         }
         if let statement = model.columnPlan?.statement {
-            fputs("\(change.verb)\n\(statement)\n", stderr)
+            fputs("\(verb)\n\(statement)\n", stderr)
             return
         }
         if CFAbsoluteTimeGetCurrent() > deadline {
             fputs("column change sheet timed out\n", stderr)
             exit(1)
         }
-        if !asked, model.changesColumns, let relation = model.selected {
+        if !asked, let relation = model.selected, let change = wanted(),
+            verb == "alter" ? model.altersColumns : model.changesColumns
+        {
             asked = true
             model.prepareColumnChange(change, of: relation)
             // A rename that opens on the current name is refused by design, so
             // the capture types the change somebody would have typed.
             if case .rename(let name, _) = change {
                 model.editColumnChange { $0 = .rename(name: name, to: "\(name)_old") }
+            }
+            // An alteration opens with every property unchanged, which is
+            // refused for the same reason — so the capture asks for the three
+            // the sheet can ask for.
+            if case .alter = change {
+                model.editColumnChange { pending in
+                    guard case .alter(var alteration) = pending else { return }
+                    alteration.kind = .text
+                    alteration.nullable = false
+                    alteration.defaultChange = .set("'unknown'")
+                    pending = .alter(alteration)
+                }
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {

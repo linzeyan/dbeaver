@@ -6726,6 +6726,15 @@ final class AppModel {
         capabilities.changesColumns && safety.writeRefusal == nil && !isBusy
     }
 
+    /// Whether this connection alters a column's own definition.
+    ///
+    /// Narrower than `changesColumns` and asked separately because the answers
+    /// differ: SQLite adds, drops and renames a column and cannot change what one
+    /// is. The Edit Column item is drawn from this alone.
+    var altersColumns: Bool {
+        capabilities.altersColumns && safety.writeRefusal == nil && !isBusy
+    }
+
     /// A column about to be changed, and the statement for it.
     var columnPlan: ColumnChangePlan?
 
@@ -6802,6 +6811,13 @@ final class AppModel {
                 "A column needs a name."
             case .rename(_, let to) where to.trimmingCharacters(in: .whitespaces).isEmpty:
                 "A rename needs a new name."
+            // An alteration with nothing in it is not a short statement, it is
+            // `ALTER TABLE t` — a syntax error. Answered as the sheet opens,
+            // which is the state it opens in.
+            case .alter(let alteration) where alteration.isEmpty:
+                "Nothing about this column has been changed."
+            case .alter(let alteration) where alteration.isSettingAnEmptyDefault:
+                "A default needs a value; removing one is its own answer."
             default: String?.none
             }
         if let missing {
