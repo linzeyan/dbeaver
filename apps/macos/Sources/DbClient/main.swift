@@ -1102,6 +1102,55 @@ func openRelationChangeSheet(model: AppModel, verb: String) {
     poll()
 }
 
+/// `--change-database create:reporting` opens the New Database or Drop Database
+/// sheet and leaves it there.
+///
+/// The name is part of the argument because both halves are needed and neither
+/// has a default worth photographing: a create with an empty field shows the
+/// sheet refusing itself, and a drop needs to name a database that is there.
+/// Exists for the reason `--change-relation` does — one of these is behind a
+/// right-click and the other behind a menu, and a capture can open neither.
+let changeDatabaseArgument = argument("--change-database")
+
+/// Drives `--change-database`. Waits for the statement as well as the sheet.
+@MainActor
+func openDatabaseChangeSheet(model: AppModel, argument: String) {
+    let parts = argument.split(separator: ":", maxSplits: 1)
+    guard parts.count == 2, let change = DatabaseChange(rawValue: String(parts[0])) else {
+        fputs("--change-database takes create:<name> or drop:<name>\n", stderr)
+        exit(2)
+    }
+    let name = String(parts[1])
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("database change sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.databasePlan?.statement {
+            fputs("\(change.rawValue)\n\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("database change sheet timed out\n", stderr)
+            exit(1)
+        }
+        if !asked, model.changesDatabases {
+            asked = true
+            // A create is opened empty by design and typed into afterwards,
+            // which is what somebody arriving at this sheet does.
+            model.prepareDatabaseChange(change, named: change == .drop ? name : "")
+            if change == .create { model.setNewDatabaseName(name) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// `--fk-jump parent_id` follows the key on that column of the first row and
 /// leaves the window on whatever it landed on.
 ///
@@ -4019,6 +4068,9 @@ if benchMode {
         }
         if let changeRelationVerb {
             openRelationChangeSheet(model: model, verb: changeRelationVerb)
+        }
+        if let changeDatabaseArgument {
+            openDatabaseChangeSheet(model: model, argument: changeDatabaseArgument)
         }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
