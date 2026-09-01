@@ -9,9 +9,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo, InfoField,
-    RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, ServerInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo, scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, EndProcess,
+    IndexInfo, InfoField, ProcessInfo, RelationInfo, RelationshipInfo, ResultStream, RoutineInfo,
+    SchemaInfo, ServerInfo, ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -80,6 +80,14 @@ impl Driver for MySqlSource {
 
     async fn routine_definition(&self, schema: &str, id: &str) -> DbResult<Option<String>> {
         Ok(MySqlSource::routine_definition(self, schema, id).await?)
+    }
+
+    async fn processes(&self) -> DbResult<Vec<ProcessInfo>> {
+        Ok(MySqlSource::processes(self).await?)
+    }
+
+    async fn end_process(&self, id: &str, how: EndProcess) -> DbResult<bool> {
+        Ok(MySqlSource::end_process(self, id, how).await?)
     }
 
     async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
@@ -169,6 +177,11 @@ impl Driver for MySqlSource {
     /// is already on the column. MariaDB grew a real `CREATE SEQUENCE`; it is
     /// not the server on this wire, and the two that are not MySQL at all —
     /// StarRocks and Doris — have none either.
+    ///
+    /// The server's activity is reported and both verbs are here.
+    /// `information_schema.PROCESSLIST` is the list — the same rows `SHOW
+    /// PROCESSLIST` prints, in a form that can be selected from; `KILL QUERY`
+    /// stops a thread's statement and `KILL` closes the connection under it.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: MySqlSource::transactional(self),
@@ -177,6 +190,7 @@ impl Driver for MySqlSource {
             schema_is_the_database: true,
             reports_routines: true,
             reports_sequences: false,
+            server_processes: ServerProcesses::Interruptible,
         }
     }
 

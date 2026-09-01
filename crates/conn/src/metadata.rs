@@ -412,3 +412,47 @@ pub struct TriggerInfo {
     /// The statement it was created from.
     pub definition: Option<String>,
 }
+
+/// One thing the server is doing right now, for the list a front end draws.
+///
+/// The odd one out in this file, and knowingly so: everything else here is
+/// catalog — a fact about the database that will still be true in a minute —
+/// and this is a snapshot of a server's own activity that is stale by the time
+/// it is drawn. It lives here for the reason the module header gives, which is
+/// the one that matters at the boundary: it crosses the FFI as JSON, and a
+/// second file for one struct would be a second place to look.
+///
+/// Every field is a string, including the ones that are numbers on every server
+/// that has them. A process id is a `pid` on PostgreSQL, a `Id` on MySQL, a
+/// `spid` on SQL Server and an `opid` on MongoDB, and only one of those is
+/// something this side should be doing arithmetic on — none of them are, since
+/// the only thing done with an id is handing it back to `end_process`. The
+/// duration is a string for the reason `InfoField::value` is: the server has a
+/// function that formats an interval in its own units, and parsing one back
+/// into seconds so that this side could format it again would be reimplementing
+/// the same rounding fifteen times.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessInfo {
+    /// What `Driver::end_process` is handed back. Opaque and driver-defined, in
+    /// the way `RoutineInfo::id` is, and for the same reason: what addresses a
+    /// backend is the server's business.
+    pub id: String,
+    /// Who is running it. Empty where the server does not say — a background
+    /// worker belongs to nobody.
+    pub user: String,
+    /// Which database it is connected to. Empty for a connection that is not on
+    /// one, which is an ordinary state during login and for a server's own
+    /// workers.
+    pub database: String,
+    /// What the server calls this connection's state, in the server's own
+    /// words: `active`, `idle in transaction`, `Sleep`, `suspended`. Not
+    /// normalised into a vocabulary of ours — the words differ because the
+    /// states differ, and "idle in transaction" is the one that matters most on
+    /// PostgreSQL and has no equivalent anywhere else.
+    pub state: String,
+    /// How long it has been doing this, already formatted by the server.
+    pub duration: String,
+    /// The statement, or as much of its head as the server keeps. Empty for a
+    /// connection that is not running one, which is most of them.
+    pub statement: String,
+}

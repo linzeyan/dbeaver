@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{DatabricksError, DatabricksSource, Rows, RowsCancel, parts};
@@ -194,6 +194,10 @@ impl Driver for DatabricksSource {
     /// Sequences are not reported, and there is no such object. A Delta table
     /// numbers rows with an identity column, which is a property of the column
     /// and is already on it.
+    ///
+    /// The server's activity is not reported. A warehouse's running statements
+    /// are a list its workspace API keeps rather than something SQL answers, and
+    /// SQL is all this driver sends.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -202,6 +206,7 @@ impl Driver for DatabricksSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

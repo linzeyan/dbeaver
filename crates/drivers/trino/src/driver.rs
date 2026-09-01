@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{Rows, RowsCancel, TrinoError, TrinoSource, parts};
@@ -222,6 +222,11 @@ impl Driver for TrinoSource {
     /// Sequences are not reported, and Trino has no such object of its own. It
     /// queries what its connectors hold, and a sequence inside one of those is
     /// not something the engine exposes as a schema-level object.
+    ///
+    /// The server's activity is not reported, and that is a gap. Trino keeps
+    /// `system.runtime.queries` and ends one with `CALL
+    /// system.runtime.kill_query`, both of them reachable in the SQL this driver
+    /// already speaks.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -230,6 +235,7 @@ impl Driver for TrinoSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

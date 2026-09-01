@@ -9,8 +9,8 @@
 
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
-    IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo,
-    TxStep, UniqueKeyInfo,
+    IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
+    ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use dbedit::Edits;
 use std::collections::HashMap;
@@ -155,6 +155,7 @@ impl Driver for Fake {
             reports_routines: false,
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

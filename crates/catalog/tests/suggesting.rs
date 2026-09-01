@@ -10,7 +10,7 @@ use dbcatalog::{Kind, Names};
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
     IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -134,6 +134,7 @@ impl Driver for Fake {
             reports_routines: false,
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

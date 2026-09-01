@@ -44,6 +44,8 @@ enum AppMenu {
     /// Target of the Query menu's Format item, held for the same reason.
     private static var formatCommand: FormatCommand?
     private static var explainCommand: ExplainCommand?
+    /// Target of the Database menu's items, held for the same reason.
+    private static var serverCommands: ServerCommands?
 
     @MainActor
     static func install(into app: NSApplication, model: AppModel) {
@@ -86,6 +88,8 @@ enum AppMenu {
         formatCommand = formatting
         let explain = ExplainCommand(model: model)
         explainCommand = explain
+        let server = ServerCommands(model: model)
+        serverCommands = server
         let main = NSMenu()
         main.addItem(appMenu(named: name, settings: settings))
         main.addItem(fileMenu(connection: connection, export: commands, queryTabs: queryTabs))
@@ -99,6 +103,7 @@ enum AppMenu {
             queryMenu(
                 target: query, stop: stop, history: queryHistory, transactions: transactions,
                 formatting: formatting, explain: explain))
+        main.addItem(databaseMenu(server: server))
         main.addItem(windowMenu(for: app))
         app.mainMenu = main
     }
@@ -635,6 +640,28 @@ enum AppMenu {
         return item
     }
 
+    /// The server itself, as opposed to the data on it.
+    ///
+    /// Its own menu rather than more items under Query, because nothing in it is
+    /// about the statement in front of you: Query acts on the buffer and the
+    /// result, and this asks the server what it is doing for everybody. One item
+    /// today and the read-only variables sheet beside it next, which is the
+    /// other half of the same question.
+    private static func databaseMenu(server: ServerCommands) -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Database")
+        // No key equivalent. It is a sheet somebody opens deliberately when a
+        // server is misbehaving, not something reached mid-typing, and the
+        // shortcuts near it are all things that act on the query in front.
+        let processes = menu.addItem(
+            withTitle: "Server Processes…",
+            action: #selector(ServerCommands.showServerProcesses(_:)), keyEquivalent: "")
+        processes.target = server
+
+        item.submenu = menu
+        return item
+    }
+
     private static func windowMenu(for app: NSApplication) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Window")
@@ -1037,6 +1064,27 @@ final class QueryHistoryCommand: NSObject, NSMenuItemValidation {
     /// which is the only way a user finds out the feature exists before they
     /// need it.
     func validateMenuItem(_ item: NSMenuItem) -> Bool { model.canShowHistory }
+}
+
+/// The Database menu's target.
+///
+/// Validation is the whole of what this adds over a closure: the item is offered
+/// only where the connection in front can answer. The connections that cannot —
+/// SQLite, which is a file and has no sessions, and the several this build has
+/// not been taught to ask — would otherwise open a sheet whose only content
+/// would be the refusal.
+@MainActor
+final class ServerCommands: NSObject, NSMenuItemValidation {
+    private let model: AppModel
+
+    init(model: AppModel) {
+        self.model = model
+        super.init()
+    }
+
+    @objc func showServerProcesses(_ sender: Any?) { model.openProcesses() }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool { model.watchesServerProcesses }
 }
 
 /// The Query menu's transaction items, as something a menu can send to.

@@ -18,7 +18,7 @@
 //! about the checks changed, which is the useful result: the contract was about
 //! databases after all, and only the harness had assumed otherwise.
 
-use dbconn::{Browse, Driver, TxStep};
+use dbconn::{Browse, Driver, EndProcess, TxStep};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -51,6 +51,19 @@ struct Subject {
     /// wrong, so it requires only that the driver be consistent about which it
     /// does.
     missing_is_a_failure: bool,
+    /// A process id of this server's own shape that could not name anything.
+    ///
+    /// Shaped rather than arbitrary: what the contract needs to establish is
+    /// that a *stale* id — one the front end was holding when the process behind
+    /// it ended — comes back as "nothing there" instead of as a failure, and a
+    /// string that is not an id at all would be a different question. A driver
+    /// is entitled to refuse one of those by name and PostgreSQL's does.
+    ///
+    /// Unread where `capabilities().server_processes` is `Unreported`, which is
+    /// thirteen of the fifteen; those leave it empty. A driver taught to report
+    /// processes and not given one here fails this clause rather than skipping
+    /// it, because an empty string is not an id of anybody's shape.
+    absent_process: &'static str,
     /// Whether this database can hold a cursor open at all.
     ///
     /// False for GreptimeDB, and it is the one place protocol compatibility
@@ -218,6 +231,7 @@ async fn sqlite() -> Subject {
         broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors: true,
         positions: true,
         scratch: Some(Scratch::sql("contract_tx")),
@@ -256,6 +270,7 @@ async fn duckdb() -> Subject {
         broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors: true,
         positions: true,
         // The one subject here whose database has transactions and no
@@ -282,6 +297,10 @@ async fn postgres() -> Subject {
         broken: "SELECT id FROM bench_wide WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        // Inside `pid`'s `int4` and far past `max_connections`: PostgreSQL
+        // allocates pids from the operating system's range, and 2^31 - 1 is
+        // the largest value the column could hold rather than one it hands out.
+        absent_process: "2147483647",
         cursors: true,
         positions: true,
         scratch: Some(Scratch::sql("contract_tx")),
@@ -312,6 +331,7 @@ async fn clickhouse() -> Subject {
         broken: "SELECT id FROM bench_wide WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors: true,
         positions: true,
         // ClickHouse's transactions are experimental, off by default, and cover
@@ -365,6 +385,7 @@ async fn mongodb() -> Subject {
         missing: r#"{"find": "no_such_relation_anywhere"}"#.to_string(),
         cursors: true,
         missing_is_a_failure: false,
+        absent_process: "",
         // The server names the field it disliked; it does not say where in the
         // text that field was written, and inventing an offset from a field name
         // would put the caret wherever that name first appeared.
@@ -451,6 +472,7 @@ async fn redis() -> Subject {
         // with no keys walks the keyspace and returns nothing, which is the same
         // answer as reading an empty table.
         missing_is_a_failure: false,
+        absent_process: "",
         // False, and this is the one place Redis cannot meet the trait. `SCAN`
         // is its own cursor and it gives the first half of what `Driver::cursor`
         // asks for exactly — page *n* costs what page one costs — but not the
@@ -576,6 +598,7 @@ async fn cassandra() -> Subject {
         broken: "SELECT id FROM dbclient_contract.nums WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM dbclient_contract.no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors: true,
         // Cassandra's parser reports `line 1:34`, counted in characters, which
         // is one of the few here that needs no reconstructing.
@@ -636,6 +659,7 @@ async fn trino() -> Subject {
         broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         // A query and a cursor are the same call here. The chain of `nextUri`s a
         // statement answers with is one execution read forward, so both of the
         // properties the trait asks a cursor for hold without a second mechanism.
@@ -760,6 +784,10 @@ async fn mysql() -> Subject {
         broken: "SELECT id FROM nums WHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        // Thread ids count up from one per server start and are `bigint
+        // unsigned`, so the top of that range is a well-formed id no server
+        // has reached.
+        absent_process: "18446744073709551615",
         cursors: true,
         // MySQL's parse error names the text it stopped at — "near 'ORDER BY
         // id'" — and never an offset. Recovering one by searching for that
@@ -849,6 +877,7 @@ async fn mssql() -> Subject {
         broken: "SELECT id FROM dbo.nums\nWHERE ORDER BY id".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors: true,
         positions: true,
         // T-SQL rather than `Scratch::sql`, because SQL Server has no `CREATE
@@ -904,6 +933,7 @@ async fn flightsql() -> Subject {
         broken: "SELECT o_orderkey FROM orders WHERE ORDER BY o_orderkey".to_string(),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         // A Flight ticket names a result the server has already planned, so
         // paging one is what `DoGet` does rather than something built on top.
         cursors: true,
@@ -969,6 +999,7 @@ async fn pg_compatible(
         broken: format!("SELECT {key} FROM {relation} WHERE ORDER BY {key}"),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors,
         positions,
         scratch,
@@ -1044,6 +1075,7 @@ async fn mysql_compatible(
         broken: format!("SELECT {key} FROM {relation} WHERE ORDER BY {key}"),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
+        absent_process: "",
         cursors,
         positions,
         // Per server rather than per driver, which is the one place these two
@@ -1506,6 +1538,7 @@ async fn every_check(subject: &Subject) {
     moves_between_databases_only_where_it_says_it_can(subject).await;
     draws_its_databases_at_one_level_or_the_other(subject).await;
     reports_its_routines_only_where_it_says_it_does(subject).await;
+    reports_the_servers_own_work_only_where_it_says_it_does(subject).await;
     reports_its_sequences_only_where_it_says_it_does(subject).await;
     marks_the_engines_own_schemas_without_hiding_them(subject).await;
     describes_a_relation_without_saying_anything_twice(subject).await;
@@ -1696,6 +1729,91 @@ async fn reports_its_routines_only_where_it_says_it_does(subject: &Subject) {
         stranger.is_none(),
         "an id that names nothing cannot come back with somebody else's source"
     );
+}
+
+/// `processes`, `end_process` and `capabilities().server_processes` say the same
+/// thing.
+///
+/// The pairing is checked for the reason
+/// `reports_its_routines_only_where_it_says_it_does` checks its own: a driver
+/// that claims a state it has not implemented gives the front end a menu item it
+/// will draw and cannot fill, and one that implements the methods and leaves the
+/// field `Unreported` is never asked. Both are silent.
+///
+/// The `end_process` half is the one this design can get wrong, and it is
+/// checked with an id that names nothing rather than by ending a real process —
+/// a contract check that killed a connection would be killing whichever one the
+/// suite happened to find, on a server somebody else may be using. An id that
+/// names nothing has to come back `false` and not as a failure, because that is
+/// the ordinary race: a process ends between the list being drawn and a row
+/// being chosen, and a front end that reported an error there would be
+/// reporting the outcome the user asked for.
+async fn reports_the_servers_own_work_only_where_it_says_it_does(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    let reach = driver.capabilities().server_processes;
+
+    if !reach.are_reported() {
+        driver
+            .processes()
+            .await
+            .expect_err("this driver says it does not report the server's work, so it must refuse");
+        return;
+    }
+
+    let processes = driver
+        .processes()
+        .await
+        .expect("a driver that says it reports the server's work has to answer");
+    assert!(
+        !processes.is_empty(),
+        "the connection doing the asking is itself one of the server's processes, \
+         so this list cannot be empty"
+    );
+    for process in &processes {
+        assert!(
+            !process.id.is_empty(),
+            "a process has an id, which is the only thing that can be done with a row"
+        );
+        assert!(
+            !process.state.is_empty(),
+            "a process has a state to draw; {} has a blank where the word goes",
+            process.id
+        );
+    }
+
+    // Stable across two reads, which is what the sheet's timer needs. The set of
+    // rows changes between them — this suite is not the only thing on the
+    // server — so what is compared is the order of the ids they have in common.
+    let again = driver.processes().await.expect("a second read answers too");
+    let first: Vec<&String> = processes
+        .iter()
+        .map(|p| &p.id)
+        .filter(|id| again.iter().any(|p| &&p.id == id))
+        .collect();
+    let second: Vec<&String> = again
+        .iter()
+        .map(|p| &p.id)
+        .filter(|id| processes.iter().any(|p| &&p.id == id))
+        .collect();
+    assert_eq!(
+        first, second,
+        "two reads put the same processes in the same order, or a list that \
+         refreshes on a timer reshuffles under the pointer"
+    );
+
+    for how in [EndProcess::Statement, EndProcess::Session] {
+        let answer = driver.end_process(subject.absent_process, how).await;
+        if reach.ends(how) {
+            assert!(
+                !answer.expect("an id that names nothing is not a failure, it is nothing"),
+                "an id that names nothing cannot report that something was stopped"
+            );
+        } else {
+            answer.expect_err(
+                "this driver says it cannot end a process that way, so it has to refuse to",
+            );
+        }
+    }
 }
 
 /// `use_database` and `capabilities().switches_database` say the same thing.

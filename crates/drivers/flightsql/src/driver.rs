@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{FlightSqlError, FlightSqlSource, Rows, RowsCancel};
@@ -162,6 +162,10 @@ impl Driver for FlightSqlSource {
     /// Sequences are not reported, and here too there is nothing to ask: the
     /// catalog commands the protocol defines include none about sequences, for
     /// the same reason they include none about routines.
+    ///
+    /// The server's activity is not reported, and the protocol has no such
+    /// notion. Flight SQL describes statements and the streams they produce; what
+    /// is behind it is whatever the server chose to be, and it is not asked.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -170,6 +174,7 @@ impl Driver for FlightSqlSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

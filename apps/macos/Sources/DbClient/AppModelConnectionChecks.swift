@@ -795,7 +795,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: false, schemaIsTheDatabase: true,
-                reportsRoutines: false, reportsSequences: false)
+                reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported)
 
             expect(model.canEditCell, false, "no cell of a Redis key type is editable")
             expect(
@@ -810,7 +810,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: true, schemaIsTheDatabase: true,
-                reportsRoutines: false, reportsSequences: false)
+                reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported)
             expect(
                 model.editObstacle == nil, true,
                 "a database with a grammar has nothing to explain")
@@ -832,7 +832,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: true, schemaIsTheDatabase: false,
-                reportsRoutines: false, reportsSequences: false)
+                reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported)
             expect(
                 model.structureSections.contains(.ddl), true,
                 "a loading relation on a dialect the core writes offers DDL at once")
@@ -840,7 +840,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].capabilities = Capabilities(
                 transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
                 writesStatements: false, schemaIsTheDatabase: false,
-                reportsRoutines: false, reportsSequences: false)
+                reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported)
             expect(
                 model.structureSections.contains(.ddl), false,
                 "and one the core writes nothing for never grows the section")
@@ -916,7 +916,7 @@ enum AppModelConnectionChecks {
                 Capabilities(
                     transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
                     writesStatements: false, schemaIsTheDatabase: schemaIsTheDatabase,
-                    reportsRoutines: false, reportsSequences: false)
+                    reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported)
             }
 
             model.sessions[0].connString = "redis://127.0.0.1:6379/0"

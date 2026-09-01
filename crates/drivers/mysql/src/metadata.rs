@@ -35,11 +35,12 @@
 //! though it were live.
 
 use dbconn::{
-    ColumnInfo, ConstraintInfo, ConstraintKind, IndexInfo, InfoField, RelationInfo, RelationKind,
-    RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo, TriggerInfo, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, ConstraintKind, EndProcess, IndexInfo, InfoField, ProcessInfo,
+    RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo,
+    TriggerInfo, UniqueKeyInfo,
 };
-use mysql_async::Conn;
 use mysql_async::prelude::Queryable;
+use mysql_async::{Conn, Row};
 use std::collections::BTreeMap;
 
 use crate::MySqlError;
@@ -939,6 +940,101 @@ pub async fn triggers(
         .collect())
 }
 
+/// Everything `SHOW FULL PROCESSLIST` reports.
+///
+/// `SHOW` rather than `information_schema.PROCESSLIST`, which would have been
+/// the tidier read — a typed tuple, `coalesce`, `SEC_TO_TIME` doing the
+/// formatting server-side. This driver reaches MariaDB, StarRocks and Doris as
+/// well as MySQL, and the `SHOW` form is the one all four have had since before
+/// any of them forked; the table is a convenience some of them added later.
+/// Nothing else in this file has to make that choice, because nothing else in
+/// this file is asking about the server rather than about the catalog.
+///
+/// Read by position and not by arity: MariaDB appends a `Progress` column, so a
+/// tuple of eight would fail to decode there while the first eight columns are
+/// the same eight everywhere.
+///
+/// The duration is formatted here rather than by the server, which is the one
+/// place this file departs from the rule `table_info` follows. `SHOW` takes no
+/// expressions, so `SEC_TO_TIME` is not available — and seconds into hours,
+/// minutes and seconds is arithmetic with no units question and no rounding to
+/// disagree about, which is what made the rule worth following elsewhere.
+pub async fn processes(conn: &mut Conn) -> Result<Vec<ProcessInfo>, MySqlError> {
+    let rows: Vec<Row> = conn.query("SHOW FULL PROCESSLIST").await?;
+    Ok(rows
+        .iter()
+        .map(|row| {
+            let text = |index: usize| row.get::<Option<String>, usize>(index).flatten();
+            ProcessInfo {
+                id: row
+                    .get::<Option<u64>, usize>(0)
+                    .flatten()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                user: text(1).unwrap_or_default(),
+                database: text(3).unwrap_or_default(),
+                // Two columns, because MySQL splits what one question means.
+                // `Command` is what the connection is doing at all — `Sleep`,
+                // `Query`, `Binlog Dump` — and `State` is where inside a
+                // statement it has got to: `Sending data`, `Waiting for table
+                // metadata lock`. The second is the one that says why a query
+                // is not finishing, and dropping it would leave every busy
+                // connection reading `Query`.
+                state: match text(6).filter(|state| !state.is_empty()) {
+                    Some(detail) => format!("{} · {detail}", text(4).unwrap_or_default()),
+                    None => text(4).unwrap_or_default(),
+                },
+                duration: row
+                    .get::<Option<i64>, usize>(5)
+                    .flatten()
+                    .map(clock)
+                    .unwrap_or_default(),
+                statement: text(7).unwrap_or_default(),
+            }
+        })
+        .collect())
+}
+
+/// Seconds as `H:MM:SS`, the shape `SEC_TO_TIME` would have returned.
+///
+/// Signed because `Time` is: a replica applying a transaction committed in the
+/// future on the source reports a negative one, and printing it as an enormous
+/// positive number would be worse than printing the minus sign.
+fn clock(seconds: i64) -> String {
+    let sign = if seconds < 0 { "-" } else { "" };
+    let seconds = seconds.unsigned_abs();
+    format!(
+        "{sign}{:02}:{:02}:{:02}",
+        seconds / 3600,
+        (seconds / 60) % 60,
+        seconds % 60
+    )
+}
+
+/// `KILL QUERY <id>` or `KILL <id>`, by the id `processes` gave.
+///
+/// A thread that is not there comes back `false` rather than as a failure, for
+/// the reason the trait gives: a connection that ended between the list being
+/// drawn and a row being chosen has already done what was asked of it. MySQL
+/// says so with error 1094, which is the only one folded away here — 1095, the
+/// refusal to kill somebody else's thread, is a real answer and is passed on.
+pub async fn end_process(conn: &mut Conn, id: &str, how: EndProcess) -> Result<bool, MySqlError> {
+    // The id came from `processes` and is a thread id, so anything else is a
+    // caller that made one up. Refused by name rather than interpolated, which
+    // is also what keeps this `format!` out of reach of anything but digits.
+    let thread: u64 = id
+        .parse()
+        .map_err(|_| MySqlError::NotAThread(id.to_string()))?;
+    let statement = match how {
+        EndProcess::Statement => format!("KILL QUERY {thread}"),
+        EndProcess::Session => format!("KILL {thread}"),
+    };
+    match conn.query_drop(statement).await {
+        Ok(()) => Ok(true),
+        Err(mysql_async::Error::Server(e)) if e.code == 1094 => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, CursorCancel, DatabaseInfo, DbResult,
     Driver, IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use dbtransfer::{Step, Transfer};
 use driver_duckdb::DuckSource;
@@ -260,6 +260,7 @@ impl Driver for Deaf {
             reports_routines: false,
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
     async fn server_info(&self) -> DbResult<ServerInfo> {

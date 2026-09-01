@@ -48,8 +48,8 @@ mod metadata;
 
 pub use metadata::{
     ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, InfoField,
-    RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo,
-    SequenceInfo, TriggerInfo, UniqueKeyInfo,
+    ProcessInfo, RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind,
+    SchemaInfo, SequenceInfo, TriggerInfo, UniqueKeyInfo,
 };
 
 use arrow::array::RecordBatch;
@@ -339,6 +339,83 @@ pub struct Capabilities {
     /// False carries the same two meanings `reports_routines` false does, and
     /// each driver says which where it answers.
     pub reports_sequences: bool,
+
+    /// How much this driver can say and do about what the server is running.
+    ///
+    /// One field of four states rather than the three bools it replaces —
+    /// listed, closable, interruptible — because those three have only four
+    /// legal combinations between them and the other four would each be a lie a
+    /// contract clause would have to rule out. A driver that could close a
+    /// connection but not list one has nothing to name in the call.
+    pub server_processes: ServerProcesses,
+}
+
+/// What a driver can report and do about the server's own activity.
+///
+/// Ordered, and the order is the point: each state is the one before it plus
+/// one more thing, so a front end reads it as a threshold rather than as a set
+/// of flags to combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerProcesses {
+    /// Not reported. The menu item is not drawn at all.
+    ///
+    /// False carries the two meanings `reports_routines` false does — an engine
+    /// with no such list, and a driver not taught to read one — and each driver
+    /// says which where it answers.
+    Unreported,
+    /// Listed, and nothing may be done to a row.
+    ///
+    /// A real state rather than a placeholder: a login without the privilege to
+    /// end somebody else's connection can still read the list on most servers,
+    /// and a reader who can see what is blocking them has most of what they came
+    /// for. That case is not this field, though — the privilege is per-login and
+    /// this is per-driver — so what lands here is an engine whose list has no
+    /// verb attached to it.
+    ReadOnly,
+    /// Listed, and a connection may be closed, taking whatever it was doing.
+    Closable,
+    /// Listed, a connection may be closed, and a statement may be stopped
+    /// without closing the connection it runs on.
+    ///
+    /// The distinction is worth a state of its own because the two are
+    /// different decisions with different costs: stopping a statement loses the
+    /// statement, closing the connection loses the open transaction, the
+    /// temporary tables and the session state as well. PostgreSQL and MySQL
+    /// each have both verbs; SQL Server has only the second.
+    Interruptible,
+}
+
+impl ServerProcesses {
+    /// Whether the list can be asked for at all.
+    pub fn are_reported(self) -> bool {
+        !matches!(self, Self::Unreported)
+    }
+
+    /// Whether `end_process` is answered for the given kind of ending.
+    pub fn ends(self, how: EndProcess) -> bool {
+        match (self, how) {
+            (Self::Unreported | Self::ReadOnly, _) => false,
+            (Self::Closable, EndProcess::Session) => true,
+            (Self::Closable, EndProcess::Statement) => false,
+            (Self::Interruptible, _) => true,
+        }
+    }
+}
+
+/// What to do to a process the list named.
+///
+/// Two verbs rather than one "kill", because the servers that have both draw
+/// the line in the same place and a front end that offered only the second
+/// would be closing connections to stop queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndProcess {
+    /// Stop the statement and leave the connection open. PostgreSQL's
+    /// `pg_cancel_backend`, MySQL's `KILL QUERY`.
+    Statement,
+    /// Close the connection, and the transaction and session state with it.
+    /// PostgreSQL's `pg_terminate_backend`, MySQL's `KILL`, SQL Server's `KILL`.
+    Session,
 }
 
 /// One session against one database.
@@ -458,6 +535,56 @@ pub trait Driver: Send + Sync {
     /// already — which is also why nothing here takes an opaque id.
     async fn sequences(&self, _schema: &str) -> DbResult<Vec<SequenceInfo>> {
         Err(DbError::new("this connection does not report sequences"))
+    }
+
+    // ---- The server's own activity --------------------------------------
+
+    /// What the server is running right now, this connection included.
+    ///
+    /// Only where `capabilities().server_processes` is not `Unreported`, under
+    /// the rule `routines` is written under, and for the same reason: the
+    /// per-driver answer is forced next door where there is room to say which
+    /// kind of "no" it is.
+    ///
+    /// Not filtered. Which rows matter depends on why somebody opened the list —
+    /// a lock they are blocked on, a runaway report, their own idle transaction —
+    /// and a driver that dropped the idle connections would be answering the
+    /// first question and hiding the third. The front end has a filter field.
+    ///
+    /// Ordered by the driver, and stably: the sheet refreshes on a timer, and an
+    /// order that changed with the data would reshuffle the rows under whichever
+    /// one the pointer was over.
+    ///
+    /// The list includes the connections this client itself is holding, and
+    /// nothing marks them. See `limitations.md`: a driver may hold a pool, so
+    /// "this session" is several rows rather than one, and marking one of them
+    /// would be worse than marking none.
+    async fn processes(&self) -> DbResult<Vec<ProcessInfo>> {
+        Err(DbError::new(
+            "this connection does not report what the server is running",
+        ))
+    }
+
+    /// Stops what one of those processes is doing, addressed by its `id`.
+    ///
+    /// Only where `capabilities().server_processes.ends(how)`. A driver that
+    /// answers `Closable` refuses `EndProcess::Statement` here, and the front
+    /// end does not offer it — the refusal is for a caller that asked anyway.
+    ///
+    /// Success means the server accepted the request, in the way `cancel`'s
+    /// does. It does not mean the process is gone: a backend is signalled and
+    /// stops when it next looks, and one already finishing stops for its own
+    /// reasons. A front end that wants to know refreshes the list, which is
+    /// what the sheet's own refresh is for.
+    ///
+    /// An id that names nothing is not a failure. Processes end on their own
+    /// between the list being drawn and a row being chosen, and that race is the
+    /// ordinary case rather than a mistake — `false` says the server had nothing
+    /// by that name, which is the same outcome the caller wanted.
+    async fn end_process(&self, _id: &str, _how: EndProcess) -> DbResult<bool> {
+        Err(DbError::new(
+            "this connection cannot end what the server is running",
+        ))
     }
 
     /// What this engine has to say about one relation, beyond its shape.

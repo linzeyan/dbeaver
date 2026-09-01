@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, DuckError, DuckSource};
@@ -151,6 +151,10 @@ impl Driver for DuckSource {
     /// here and `duckdb_sequences()` lists them with their schema, their
     /// increment and their current value. Unlike the macros above there is no
     /// wall of built-ins to filter out of it — this one is only unwritten.
+    ///
+    /// The server's activity is not reported, and there is no server. DuckDB
+    /// runs in this process, so the only work there is to list is the work this
+    /// application started.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -159,6 +163,7 @@ impl Driver for DuckSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

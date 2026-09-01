@@ -92,17 +92,26 @@ struct Capabilities: Codable, Hashable {
     /// than an object in a catalog.
     let reportsSequences: Bool
 
+    /// How far this connection can see into what the server itself is doing.
+    ///
+    /// One value rather than three flags, because the states are a ladder and
+    /// the combinations off it do not exist: nothing can stop a statement it
+    /// cannot list. See `ServerProcesses`.
+    let serverProcesses: ServerProcesses
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
     /// transaction control it might not have, promises no cancel it might not be
     /// able to deliver, claims no switch it might have to take back, draws no
     /// control that writes, calls the level it has not read yet by the neutral
-    /// word, and lists no routines it has not been told are there.
+    /// word, lists no routines it has not been told are there, and does not
+    /// offer to show a server's activity before the server has said it keeps
+    /// any.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
-        reportsSequences: false)
+        reportsSequences: false, serverProcesses: .unreported)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -112,6 +121,78 @@ struct Capabilities: Codable, Hashable {
         case schemaIsTheDatabase = "schema_is_the_database"
         case reportsRoutines = "reports_routines"
         case reportsSequences = "reports_sequences"
+        case serverProcesses = "server_processes"
+    }
+}
+
+/// How much of the server's own activity a connection can see and interrupt.
+///
+/// A ladder, and each rung includes the one below it. The illegal combinations
+/// are the reason this is not three booleans: a driver cannot offer to kill a
+/// connection it cannot list, and a menu built from separate flags would have to
+/// be told so in a comment instead of by the type.
+enum ServerProcesses: String, Codable, Hashable {
+    /// This driver was never taught to ask, or there is nothing to ask —
+    /// SQLite is a file, and a file has no sessions.
+    case unreported
+    /// The list can be drawn and nothing on it can be stopped from here.
+    case readOnly = "read_only"
+    /// A whole session can be closed, taking any transaction it holds.
+    case closable
+    /// A running statement can be cancelled and the session left alone, which
+    /// is the gentler of the two and the one to offer first.
+    case interruptible
+
+    /// Whether there is a list worth drawing at all, and so whether the menu
+    /// item is offered.
+    var areReported: Bool { self != .unreported }
+
+    /// Whether `EndProcess.statement` is something this server will do.
+    var cancelsStatements: Bool { self == .interruptible }
+
+    /// Whether a session can be closed. True for both rungs above `readOnly`:
+    /// a server that cancels statements can always also close the session.
+    var closesSessions: Bool { self == .closable || self == .interruptible }
+}
+
+/// Which of the two ways to stop a process is being asked for.
+///
+/// The raw values are the words the C boundary takes. They are spelled rather
+/// than numbered there because the two are one bit apart and the wrong one is
+/// the destructive one — see `db_end_process`.
+enum EndProcess: String, Codable, Hashable {
+    /// Cancel what it is running and leave the connection open. Nothing is
+    /// rolled back; the session keeps whatever transaction it had.
+    case statement
+    /// Close the connection. Anything uncommitted on it goes back.
+    case session
+}
+
+/// One thing the server is doing, as of the moment it was asked.
+///
+/// Every field is a string, including the id and the duration, because the
+/// server formatted them and this side has no arithmetic to do on either — the
+/// id goes back to `endProcess` unread, and the duration was rendered by the
+/// engine's own interval formatting.
+///
+/// Named for the server rather than mirroring the core's `ProcessInfo`, which is
+/// the one place a Swift name here departs from its Rust one: Foundation already
+/// has a `ProcessInfo`, this module reads `ProcessInfo.processInfo` in five
+/// places, and a type of ours by that name would quietly win the lookup.
+struct ServerProcess: Codable, Hashable, Identifiable {
+    let id: String
+    let user: String
+    let database: String
+    let state: String
+    let duration: String
+    let statement: String
+
+    /// What a filter matches on: everything the row shows, lowercased once.
+    ///
+    /// Built here rather than at each keystroke because the list is redrawn on a
+    /// timer and a busy server has thousands of rows.
+    var searchable: String {
+        "\(id) \(user) \(database) \(state) \(statement)".lowercased()
     }
 }
 

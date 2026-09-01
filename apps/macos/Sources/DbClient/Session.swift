@@ -493,6 +493,43 @@ final class Session: Identifiable {
     /// otherwise where it landed or that it found nothing.
     var gridFindReport = ""
 
+    // MARK: - What the server itself is doing
+
+    /// Whether the Server Processes sheet is up.
+    ///
+    /// Per connection, like everything else here: the list is one server's, and
+    /// a sheet left open on one tab has nothing to say about the tab beside it.
+    var isProcessesOpen = false
+
+    /// The last list read, in the order the server gave. Not sorted here — each
+    /// driver orders by the thing its own users read down the page, and
+    /// re-sorting would replace that with a preference of ours.
+    var processes: [ServerProcess] = []
+
+    /// What is typed into the sheet's filter, matched against every column.
+    var processFilter = ""
+
+    /// Which row is selected, by process id. Held by id rather than by index
+    /// because the list is replaced wholesale on every refresh and an index
+    /// would point at whatever moved into that slot.
+    var selectedProcess: String?
+
+    /// How often the list re-reads itself, in seconds; nil is not at all.
+    ///
+    /// Off by default. A refresh is a round trip to a server somebody is already
+    /// worried about — this sheet is opened when something is wrong — and a
+    /// client that polls a struggling database every five seconds without being
+    /// asked is adding to the problem it was opened to diagnose.
+    var processRefresh: Int?
+
+    /// Set while a read or a kill is in flight, so the sheet can say so rather
+    /// than looking idle.
+    var isReadingProcesses = false
+
+    /// What the sheet says under the table: what the last kill did, or why the
+    /// last read failed. Empty when there is nothing to report.
+    var processReport = ""
+
     // MARK: - Transfers
 
     /// Set while a result is being written to a file. The write happens off the

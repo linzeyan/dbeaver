@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MongoError, MongoSource};
@@ -160,6 +160,11 @@ impl Driver for MongoSource {
     /// out numbers is a document somebody wrote and updates with
     /// `findAndModify` — an application's convention, not a thing in the
     /// catalog.
+    ///
+    /// The server's activity is not reported, and that is a gap rather than an
+    /// absence: `$currentOp` and `killOp` are the pair `cancel` above already
+    /// uses for this session's own operations. What is missing is the general
+    /// read, not the mechanism.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -168,6 +173,7 @@ impl Driver for MongoSource {
             schema_is_the_database: true,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 
