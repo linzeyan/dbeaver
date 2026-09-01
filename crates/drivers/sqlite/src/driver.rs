@@ -136,6 +136,12 @@ impl Driver for SqliteSource {
     /// activity it would be. The engine runs in this process, so what it is
     /// doing is what this application asked for a moment ago — a list of one
     /// row describing the caller.
+    ///
+    /// The server's settings are not listed, and there is no server whose
+    /// settings they would be. The nearest thing is a pragma, and a pragma is
+    /// either this file's — its page size, its journal mode — or this process's
+    /// own; listing them would be this client reading back the configuration it
+    /// chose a moment ago.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -145,6 +151,7 @@ impl Driver for SqliteSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

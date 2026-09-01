@@ -166,6 +166,11 @@ impl Driver for MsSqlSource {
     /// absence. `sys.dm_exec_sessions` and `sys.dm_exec_requests` are the list
     /// and `KILL` takes a session id, so one of the two verbs is there to
     /// read — this driver has been taught neither.
+    ///
+    /// The server's settings are not listed, and that is a gap.
+    /// `sys.configurations` holds them, and keeps the value in force and the
+    /// one that will apply after a restart in separate columns; this driver
+    /// does not read it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -175,6 +180,7 @@ impl Driver for MsSqlSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

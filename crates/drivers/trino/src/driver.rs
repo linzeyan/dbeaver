@@ -227,6 +227,11 @@ impl Driver for TrinoSource {
     /// `system.runtime.queries` and ends one with `CALL
     /// system.runtime.kill_query`, both of them reachable in the SQL this driver
     /// already speaks.
+    ///
+    /// The server's settings are not listed, and that is a gap. `SHOW SESSION`
+    /// returns every session property with its value and the default it came
+    /// from. The cluster's own configuration is not reachable from SQL at all,
+    /// so a Trino answer here would be `Session` rows only.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -236,6 +241,7 @@ impl Driver for TrinoSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

@@ -184,6 +184,10 @@ impl Driver for RedisSource {
     /// The server's activity is not reported, and that is a gap. `CLIENT LIST`
     /// names every connection and `CLIENT KILL` closes one; this driver asks
     /// for neither yet.
+    ///
+    /// The server's settings are not listed, and that is a gap. `CONFIG GET *`
+    /// returns every one of them in a single reply; this driver does not ask
+    /// for it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -193,6 +197,7 @@ impl Driver for RedisSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

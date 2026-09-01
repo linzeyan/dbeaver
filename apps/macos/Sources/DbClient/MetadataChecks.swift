@@ -132,7 +132,8 @@ enum MetadataChecks {
             #"""
             {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
-             "reports_sequences":true,"server_processes":"interruptible"}
+             "reports_sequences":true,"server_processes":"interruptible",
+             "reports_variables":true}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -149,6 +150,9 @@ enum MetadataChecks {
         expect(
             both?.serverProcesses, .interruptible,
             "and that its sessions can be both listed and interrupted")
+        expect(
+            both?.reportsVariables, true,
+            "and that the settings it is running with can be read")
 
         // Cassandra's answer, which is the one `cancel_stops_the_statement`
         // exists to carry — and Redis's for the field beside it.
@@ -156,7 +160,8 @@ enum MetadataChecks {
             #"""
             {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
              "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,
-             "reports_sequences":false,"server_processes":"unreported"}
+             "reports_sequences":false,"server_processes":"unreported",
+             "reports_variables":false}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -174,6 +179,9 @@ enum MetadataChecks {
         expect(
             neither?.serverProcesses, .unreported,
             "and nothing to say about what the server is doing, so the menu item stays shut")
+        expect(
+            neither?.reportsVariables, false,
+            "nor about what it is configured with, which is the item beside it")
 
         // A field the core stopped writing is refused rather than read as false,
         // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
@@ -182,7 +190,8 @@ enum MetadataChecks {
             #"""
             {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
-             "reports_sequences":true,"server_processes":"unreported"}
+             "reports_sequences":true,"server_processes":"unreported",
+             "reports_variables":false}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 

@@ -99,6 +99,12 @@ struct Capabilities: Codable, Hashable {
     /// cannot list. See `ServerProcesses`.
     let serverProcesses: ServerProcesses
 
+    /// Whether the settings the server is running with can be listed.
+    ///
+    /// A flag and not a ladder, because there is only the one verb: the list is
+    /// read and nothing is done to a row. See `ServerVariable`.
+    let reportsVariables: Bool
+
     /// What a window has before it has asked.
     ///
     /// All false, which is the cautious reading in every direction: it offers no
@@ -107,11 +113,11 @@ struct Capabilities: Codable, Hashable {
     /// control that writes, calls the level it has not read yet by the neutral
     /// word, lists no routines it has not been told are there, and does not
     /// offer to show a server's activity before the server has said it keeps
-    /// any.
+    /// any, nor its settings before it has said it will hand them over.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
-        reportsSequences: false, serverProcesses: .unreported)
+        reportsSequences: false, serverProcesses: .unreported, reportsVariables: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -122,6 +128,7 @@ struct Capabilities: Codable, Hashable {
         case reportsRoutines = "reports_routines"
         case reportsSequences = "reports_sequences"
         case serverProcesses = "server_processes"
+        case reportsVariables = "reports_variables"
     }
 }
 
@@ -194,6 +201,53 @@ struct ServerProcess: Codable, Hashable, Identifiable {
     var searchable: String {
         "\(id) \(user) \(database) \(state) \(statement)".lowercased()
     }
+}
+
+/// One setting the server is running with.
+///
+/// Read-only, and the read is the whole feature: there is no `setVariable` at
+/// the boundary and no control here that would call one. Changing a setting is
+/// `SET GLOBAL` in the Query tab, where it is a statement somebody typed and can
+/// see, rather than a text field two rows below `max_connections`.
+///
+/// Identified by name, which is what makes the list a list. The core promises
+/// one row per name — `contract.rs` refuses a driver that reports two — because
+/// a duplicate here would be handed to SwiftUI as one identity and drawn over
+/// itself.
+///
+/// Named for the server for the reason `ServerProcess` is: `Variable` alone
+/// would be a word this module uses in a dozen other senses.
+struct ServerVariable: Codable, Hashable, Identifiable {
+    var id: String { name }
+    let name: String
+    let value: String
+    let scope: VariableScope
+
+    /// What a filter matches on: the name and the value, lowercased once.
+    ///
+    /// The value is included because half of what anybody asks this list is
+    /// which settings mention a path, a size, or `off`. The scope is not — it is
+    /// two words that would match a third of the rows apiece, and the sheet
+    /// draws it in a column that can be read directly.
+    var searchable: String { "\(name) \(value)".lowercased() }
+}
+
+/// Whose value a setting's is.
+///
+/// Two cases and not the server's own vocabulary, which is where this differs
+/// from `ServerProcess.state`: every engine draws this same line, and a column
+/// that said `sighup` on PostgreSQL and `GLOBAL` on MySQL could not be sorted,
+/// filtered or read across connections.
+enum VariableScope: String, Codable, Hashable {
+    /// The server's, and so everybody's.
+    case server
+    /// This connection's alone — either set on it, or a setting that has no
+    /// server-wide value to have.
+    case session
+
+    /// The word the sheet draws. Capitalised here rather than at the call site
+    /// so the two spellings cannot drift apart.
+    var label: String { self == .server ? "Server" : "Session" }
 }
 
 /// One database on the server this connection reached.

@@ -166,6 +166,11 @@ impl Driver for FlightSqlSource {
     /// The server's activity is not reported, and the protocol has no such
     /// notion. Flight SQL describes statements and the streams they produce; what
     /// is behind it is whatever the server chose to be, and it is not asked.
+    ///
+    /// The server's settings are not listed, and Flight SQL has no call for
+    /// them. The protocol describes catalogs, statements and streams; what the
+    /// engine behind it is configured with is reachable only in that engine's
+    /// own dialect.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -175,6 +180,7 @@ impl Driver for FlightSqlSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

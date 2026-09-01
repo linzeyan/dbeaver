@@ -331,6 +331,16 @@ char* db_processes_json(DbHandle* handle, char** err);
 // taking a flag.
 int db_end_process(DbHandle* handle, const char* id, const char* how, char** err);
 
+// The settings the server is running with: name, value and scope per row, in
+// name order. Fails where reports_variables is false, like the calls above —
+// every engine is configured somehow, so an empty array is never the answer and
+// a caller could not tell it from a driver that was never taught to look.
+//
+// Read-only. Writing one is SET GLOBAL or an edit to a config file, which is a
+// statement the Query tab already runs; there is no db_set_variable and there is
+// not meant to be.
+char* db_variables_json(DbHandle* handle, char** err);
+
 // The statements that would recreate one relation, as plain text — released with
 // db_string_free like the JSON above, and unlike it in being the value itself.
 // Wrapping one string in a document would make a caller decode to reach the only

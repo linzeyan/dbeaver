@@ -4427,6 +4427,93 @@ final class AppModel {
             })
     }
 
+    // MARK: - What the server is configured with
+
+    /// Whether this connection can be asked, which is what decides whether the
+    /// menu item is offered.
+    var readsServerVariables: Bool { capabilities.reportsVariables }
+
+    var isVariablesOpen: Bool {
+        get { session.isVariablesOpen }
+        set { session.isVariablesOpen = newValue }
+    }
+
+    var variableFilter: String {
+        get { session.variableFilter }
+        set { session.variableFilter = newValue }
+    }
+
+    var isReadingVariables: Bool { session.isReadingVariables }
+    var variableReport: String { session.variableReport }
+
+    /// The rows the sheet draws: everything read, narrowed by the filter.
+    ///
+    /// A plain substring over the name and the value, for the reason
+    /// `visibleProcesses` gives. It matters more here — six hundred settings are
+    /// unreadable without it, and it is how anybody finds the one they came for.
+    var visibleVariables: [ServerVariable] {
+        let wanted = variableFilter.lowercased()
+        guard !wanted.isEmpty else { return session.variables }
+        return session.variables.filter { $0.searchable.contains(wanted) }
+    }
+
+    /// Opens the sheet and reads the list once.
+    func openVariables() {
+        guard readsServerVariables else { return }
+        session.variableReport = ""
+        session.isVariablesOpen = true
+        loadVariables()
+    }
+
+    func closeVariables() {
+        session.isVariablesOpen = false
+        session.isReadingVariables = false
+    }
+
+    /// Reads the list again, dropping a request made while one is in flight for
+    /// the reason `loadProcesses` drops one.
+    func loadVariables() {
+        guard readsServerVariables, db != nil, !session.isReadingVariables else { return }
+        session.isReadingVariables = true
+        run(
+            { db in try db.variables() },
+            then: { [self] rows in
+                session.variables = rows
+                session.isReadingVariables = false
+            })
+    }
+
+    /// Puts what the sheet is showing on the pasteboard, one setting per line.
+    ///
+    /// What is showing and not everything read, which is the whole point of
+    /// having it: somebody filters to the eight `innodb_log_*` settings and
+    /// copies those into a ticket. Copying all six hundred is a filter away and
+    /// is rarely what was meant.
+    ///
+    /// Tab-separated, because that is what a spreadsheet and a Markdown table
+    /// both take, and because a value can contain spaces, commas and equals
+    /// signs — `log_line_prefix` is `%m [%p] ` on a default install — while none
+    /// of them can contain a tab.
+    func copyVisibleVariables() {
+        let rows = visibleVariables
+        guard !rows.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(copiedVariables, forType: .string)
+        session.variableReport = "Copied \(AppModel.pluralized(rows.count, "setting", "settings"))."
+    }
+
+    /// Exactly what the line above puts on the pasteboard.
+    ///
+    /// A property rather than a step inside `copyVisibleVariables`, so that
+    /// `--verify-variables` can check both halves of the rule — which rows are
+    /// taken and how they are written — without touching the clipboard of
+    /// whoever is running the checks. Reading it through the same
+    /// `visibleVariables` the button does is the half that matters: a Copy
+    /// wired to every row read would be indistinguishable here otherwise.
+    var copiedVariables: String {
+        visibleVariables.map { "\($0.name)\t\($0.value)" }.joined(separator: "\n")
+    }
+
     // MARK: - Finding a value in the fetched rows
 
     /// Everything this searches is already in this window.
@@ -6585,6 +6672,7 @@ final class AppModel {
         // is still in flight would refuse every later one, including the Refresh
         // pressed to find out what went wrong.
         session.isReadingProcesses = false
+        session.isReadingVariables = false
         // Through `endImport` rather than by clearing the flag, so a failure
         // takes the handle down with it: a Stop button over an import that is no
         // longer running is a button that does nothing and says nothing.

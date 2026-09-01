@@ -198,6 +198,10 @@ impl Driver for DatabricksSource {
     /// The server's activity is not reported. A warehouse's running statements
     /// are a list its workspace API keeps rather than something SQL answers, and
     /// SQL is all this driver sends.
+    ///
+    /// The server's settings are not listed, and that is a gap. `SET -v`
+    /// returns every SQL configuration parameter with its value and its
+    /// default; this driver does not ask for it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -207,6 +211,7 @@ impl Driver for DatabricksSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

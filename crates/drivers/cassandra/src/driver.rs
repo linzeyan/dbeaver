@@ -198,6 +198,10 @@ impl Driver for CassandraSource {
     /// coordinator's in-flight work is per-node and reached over JMX or
     /// `nodetool`, which is a different protocol from the one this driver
     /// speaks.
+    ///
+    /// The server's settings are not listed, and that is a gap. Cassandra 4.0
+    /// added `system_views.settings`, one row per configuration key of the node
+    /// being talked to; this driver does not read it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -207,6 +211,7 @@ impl Driver for CassandraSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

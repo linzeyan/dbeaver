@@ -11,7 +11,8 @@ use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, EndProcess,
     IndexInfo, InfoField, ProcessInfo, RelationInfo, RelationshipInfo, ResultStream, RoutineInfo,
-    SchemaInfo, ServerInfo, ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    SchemaInfo, ServerInfo, ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo, VariableInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MySqlError, MySqlSource};
@@ -88,6 +89,10 @@ impl Driver for MySqlSource {
 
     async fn end_process(&self, id: &str, how: EndProcess) -> DbResult<bool> {
         Ok(MySqlSource::end_process(self, id, how).await?)
+    }
+
+    async fn variables(&self) -> DbResult<Vec<VariableInfo>> {
+        Ok(MySqlSource::variables(self).await?)
     }
 
     async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
@@ -182,6 +187,10 @@ impl Driver for MySqlSource {
     /// `information_schema.PROCESSLIST` is the list — the same rows `SHOW
     /// PROCESSLIST` prints, in a form that can be selected from; `KILL QUERY`
     /// stops a thread's statement and `KILL` closes the connection under it.
+    ///
+    /// The server's settings are listed. `SHOW GLOBAL VARIABLES` and `SHOW
+    /// SESSION VARIABLES` between them say which values are the server's and
+    /// which this connection's.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: MySqlSource::transactional(self),
@@ -191,6 +200,7 @@ impl Driver for MySqlSource {
             reports_routines: true,
             reports_sequences: false,
             server_processes: ServerProcesses::Interruptible,
+            reports_variables: true,
         }
     }
 

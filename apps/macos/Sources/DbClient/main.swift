@@ -76,7 +76,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-filter-rows`,
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
-// `--verify-grid-find`, `--verify-processes`,
+// `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -132,6 +132,9 @@ if CommandLine.arguments.contains("--verify-grid-find") {
 }
 if CommandLine.arguments.contains("--verify-processes") {
     exit(MainActor.assumeIsolated { ProcessesChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-variables") {
+    exit(MainActor.assumeIsolated { VariablesChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -908,6 +911,46 @@ func openProcessesSheet(model: AppModel) {
         if !asked, model.watchesServerProcesses {
             asked = true
             model.openProcesses()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--variables` opens the Server Variables sheet and leaves it up.
+///
+/// Exists for the reason `--processes` does. It types nothing into the filter:
+/// what is worth photographing is the unfiltered list, which is what shows that
+/// six hundred settings need the field in the first place.
+let showVariables = CommandLine.arguments.contains("--variables")
+
+/// Drives `--variables`, the way `openProcessesSheet` drives its own.
+@MainActor
+func openVariablesSheet(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("variables sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if asked, !model.isReadingVariables {
+            let session = model.visibleVariables.filter { $0.scope == .session }.count
+            fputs(
+                "variables      \(model.visibleVariables.count) listed"
+                    + ", \(session) this connection's\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("variables sheet timed out waiting for a connection\n", stderr)
+            exit(1)
+        }
+        if !asked, model.readsServerVariables {
+            asked = true
+            model.openVariables()
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -3908,6 +3951,7 @@ if benchMode {
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let mapImportPath { openImportSheet(model: model, from: mapImportPath) }
         if showProcesses { openProcessesSheet(model: model) }
+        if showVariables { openVariablesSheet(model: model) }
         if let fkJumpColumn { followForeignKey(model: model, from: fkJumpColumn) }
         if let findText {
             findInGrid(model: model, text: findText, column: findColumn)

@@ -202,6 +202,11 @@ impl Driver for BigQuerySource {
     /// connection. BigQuery runs jobs, listed in `INFORMATION_SCHEMA.JOBS` and
     /// stopped through `jobs.cancel` in the REST API; neither is something this
     /// driver reaches.
+    ///
+    /// The server's settings are not listed, and BigQuery has none of this
+    /// kind. How a query runs and what it may spend is decided per job and per
+    /// reservation, both of them API objects rather than values a session
+    /// reads.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -211,6 +216,7 @@ impl Driver for BigQuerySource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

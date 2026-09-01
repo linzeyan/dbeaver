@@ -140,6 +140,11 @@ impl Driver for ChSource {
     /// The server's activity is not reported, and that is a gap: `system.processes`
     /// is the list and `KILL QUERY` is already used above for this session's own
     /// statements. The general read is what is missing.
+    ///
+    /// The server's settings are not listed, and that is a gap.
+    /// `system.settings` holds the ones a query may change and
+    /// `system.server_settings` the ones it may not; this driver reads neither
+    /// yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -149,6 +154,7 @@ impl Driver for ChSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

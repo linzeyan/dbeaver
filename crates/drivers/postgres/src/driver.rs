@@ -12,7 +12,7 @@ use dbconn::{
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, EndProcess,
     IndexInfo, InfoField, ProcessInfo, RelationInfo, RelationshipInfo, ResultStream, RoutineInfo,
     SchemaInfo, SequenceInfo, ServerInfo, ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
-    scalar_text,
+    VariableInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -77,6 +77,10 @@ impl Driver for PgSource {
 
     async fn end_process(&self, id: &str, how: EndProcess) -> DbResult<bool> {
         Ok(PgSource::end_process(self, id, how).await?)
+    }
+
+    async fn variables(&self) -> DbResult<Vec<VariableInfo>> {
+        Ok(PgSource::variables(self).await?)
     }
 
     async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
@@ -159,6 +163,10 @@ impl Driver for PgSource {
     /// `pg_stat_activity` is the list; `pg_cancel_backend` stops a backend's
     /// statement and leaves its connection open, `pg_terminate_backend` closes
     /// the connection and loses the transaction with it.
+    ///
+    /// The server's settings are listed. `pg_settings` gives the value in force
+    /// for this connection and, in `source`, whether it is the server's own or
+    /// one this connection set.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -168,6 +176,7 @@ impl Driver for PgSource {
             reports_routines: true,
             reports_sequences: true,
             server_processes: ServerProcesses::Interruptible,
+            reports_variables: true,
         }
     }
 

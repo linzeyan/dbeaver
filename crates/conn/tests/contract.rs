@@ -1539,6 +1539,7 @@ async fn every_check(subject: &Subject) {
     draws_its_databases_at_one_level_or_the_other(subject).await;
     reports_its_routines_only_where_it_says_it_does(subject).await;
     reports_the_servers_own_work_only_where_it_says_it_does(subject).await;
+    lists_the_settings_it_runs_under_only_where_it_says_it_does(subject).await;
     reports_its_sequences_only_where_it_says_it_does(subject).await;
     marks_the_engines_own_schemas_without_hiding_them(subject).await;
     describes_a_relation_without_saying_anything_twice(subject).await;
@@ -1814,6 +1815,69 @@ async fn reports_the_servers_own_work_only_where_it_says_it_does(subject: &Subje
             );
         }
     }
+}
+
+/// `variables` and `capabilities().reports_variables` say the same thing.
+///
+/// The pairing is checked for the reason the two clauses above check theirs. The
+/// rest is about the one shape the front end cannot defend itself against: it
+/// keys the rows by name, so two settings called the same thing are handed to
+/// SwiftUI as one identity and the second is drawn over the first — silently,
+/// and on a list six hundred long nobody counts the rows.
+///
+/// Order is checked because the trait promises it and because it is the only
+/// thing making a list this long readable. A driver that reported MySQL's own
+/// order — which is by name, until it is not — would pass every other check here
+/// and leave somebody scrolling for `wait_timeout` in the wrong place.
+///
+/// Nothing is asserted about scope beyond both words being spellable. Which
+/// settings are the server's is the server's business and changes with the
+/// server's configuration: a `postgresql.conf` that sets nothing leaves every
+/// row `Server`, and a suite that demanded one of each would fail on a default
+/// install for being a default install.
+async fn lists_the_settings_it_runs_under_only_where_it_says_it_does(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+
+    if !driver.capabilities().reports_variables {
+        driver.variables().await.expect_err(
+            "this driver says it does not report the server's settings, so it must \
+                         refuse",
+        );
+        return;
+    }
+
+    let variables = driver
+        .variables()
+        .await
+        .expect("a driver that says it reports the server's settings has to answer");
+    assert!(
+        !variables.is_empty(),
+        "a server this connection reached is a server that is configured somehow, \
+         so this list cannot be empty"
+    );
+
+    let mut seen = std::collections::HashSet::new();
+    for variable in &variables {
+        assert!(
+            !variable.name.is_empty(),
+            "a setting has a name, which is the only thing a reader can search for"
+        );
+        assert!(
+            seen.insert(variable.name.as_str()),
+            "{} is reported twice, and the sheet keys its rows by the name — the \
+             second would be drawn over the first",
+            variable.name
+        );
+    }
+
+    let mut sorted: Vec<&String> = variables.iter().map(|v| &v.name).collect();
+    let listed = sorted.clone();
+    sorted.sort();
+    assert_eq!(
+        listed, sorted,
+        "the settings are listed in name order, which is the only order six \
+         hundred of them can be read in"
+    );
 }
 
 /// `use_database` and `capabilities().switches_database` say the same thing.

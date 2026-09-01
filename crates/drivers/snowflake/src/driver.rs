@@ -218,6 +218,11 @@ impl Driver for SnowflakeSource {
     /// The server's activity is not reported, and that is a gap. Snowflake lists
     /// running statements through its query history and stops one with
     /// `SYSTEM$CANCEL_QUERY`; this driver asks for neither.
+    ///
+    /// The server's settings are not listed, and that is a gap. `SHOW
+    /// PARAMETERS` returns them with the level each was set at — account, user
+    /// or session — which is the distinction `VariableScope` draws; this driver
+    /// does not read it yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -227,6 +232,7 @@ impl Driver for SnowflakeSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

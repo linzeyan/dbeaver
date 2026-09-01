@@ -178,6 +178,11 @@ impl Driver for AthenaSource {
     /// The server's activity is not reported, and the unit would not be a
     /// connection. Athena runs query executions, listed and stopped through its
     /// own API rather than through SQL.
+    ///
+    /// The server's settings are not listed, and there is no server holding
+    /// any. What Athena can be configured with lives in a workgroup, which is
+    /// an AWS resource read through the API rather than a value a query can ask
+    /// for.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -187,6 +192,7 @@ impl Driver for AthenaSource {
             reports_routines: false,
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
+            reports_variables: false,
         }
     }
 

@@ -55,7 +55,7 @@ use dbffi::{
     db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
     db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
     db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
-    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json, db_variables_json,
 };
 
 // Test db_connect with null connection string
@@ -321,6 +321,41 @@ fn a_driver_that_does_not_watch_the_server_says_so() {
 
     assert!(result.is_null(), "SQLite has no server to watch");
     assert!(!err.is_null(), "db_processes_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_variables_json with null handle
+#[test]
+fn test_variables_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_variables_json(ptr::null_mut(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_variables_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// A driver that does not report settings fails rather than answering `[]`.
+//
+// The same distinction `a_driver_that_does_not_watch_the_server_says_so` draws,
+// and the empty array is more tempting here: every engine is configured somehow,
+// so "no settings" is never a true answer and the front end has no way to tell
+// it from one.
+#[test]
+fn a_driver_that_does_not_read_its_settings_says_so() {
+    let path = std::env::temp_dir().join("dbffi-variables-unreported.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let result = unsafe { db_variables_json(handle, &mut err) };
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+
+    assert!(result.is_null(), "SQLite has no server to be configured");
+    assert!(!err.is_null(), "db_variables_json must say why it failed");
     unsafe { db_string_free(err) };
 }
 
