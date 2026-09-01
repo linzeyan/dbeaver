@@ -4498,16 +4498,20 @@ final class AppModel {
         let rows = visibleVariables
         guard !rows.isEmpty else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(AppModel.clipboardText(for: rows), forType: .string)
+        NSPasteboard.general.setString(copiedVariables, forType: .string)
         session.variableReport = "Copied \(AppModel.pluralized(rows.count, "setting", "settings"))."
     }
 
-    /// What the line above puts on the pasteboard.
+    /// Exactly what the line above puts on the pasteboard.
     ///
-    /// Split out from the write so `--verify-variables` can check what would be
-    /// copied without taking the clipboard of whoever is running the checks.
-    static func clipboardText(for rows: [ServerVariable]) -> String {
-        rows.map { "\($0.name)\t\($0.value)" }.joined(separator: "\n")
+    /// A property rather than a step inside `copyVisibleVariables`, so that
+    /// `--verify-variables` can check both halves of the rule — which rows are
+    /// taken and how they are written — without touching the clipboard of
+    /// whoever is running the checks. Reading it through the same
+    /// `visibleVariables` the button does is the half that matters: a Copy
+    /// wired to every row read would be indistinguishable here otherwise.
+    var copiedVariables: String {
+        visibleVariables.map { "\($0.name)\t\($0.value)" }.joined(separator: "\n")
     }
 
     // MARK: - Finding a value in the fetched rows

@@ -123,20 +123,19 @@ enum VariablesChecks {
 
         model.variableFilter = "wal_"
         expect(
-            AppModel.clipboardText(for: model.visibleVariables), "wal_level\treplica",
-            "the filtered row, name and value with a tab between them")
+            model.copiedVariables, "wal_level\treplica",
+            "the filtered row and only it, name and value with a tab between them")
 
         model.variableFilter = ""
-        let all = AppModel.clipboardText(for: model.visibleVariables)
-        expect(all.split(separator: "\n").count, 6, "and with no filter, one line per setting")
         expect(
-            all.contains("log_line_prefix\t%m [%p] "), true,
+            model.copiedVariables.split(separator: "\n").count, 6,
+            "and with no filter, one line per setting")
+        expect(
+            model.copiedVariables.contains("log_line_prefix\t%m [%p] "), true,
             "a value with spaces and brackets in it survives, which is why the separator is a tab")
 
         model.variableFilter = "no such setting"
-        expect(
-            AppModel.clipboardText(for: model.visibleVariables), "",
-            "and nothing showing is nothing to copy")
+        expect(model.copiedVariables, "", "and nothing showing is nothing to copy")
     }
 
     // MARK: - Reading the core's answer
