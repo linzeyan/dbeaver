@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, RedisError, RedisSource};
@@ -180,6 +180,10 @@ impl Driver for RedisSource {
     /// Sequences are not reported, and there are none. `INCR` on a key is how a
     /// counter is kept here, which makes it a key like any other and already a
     /// row in the tree.
+    ///
+    /// The server's activity is not reported, and that is a gap. `CLIENT LIST`
+    /// names every connection and `CLIENT KILL` closes one; this driver asks
+    /// for neither yet.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -188,6 +192,7 @@ impl Driver for RedisSource {
             schema_is_the_database: true,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

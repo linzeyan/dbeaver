@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MsSqlError, MsSqlSource};
@@ -161,6 +161,11 @@ impl Driver for MsSqlSource {
     /// Sequences are not reported, and that is a gap: `sys.sequences` has held
     /// them since 2012, with every column the pane would show. Unwritten rather
     /// than absent.
+    ///
+    /// The server's activity is not reported, and that is a gap rather than an
+    /// absence. `sys.dm_exec_sessions` and `sys.dm_exec_requests` are the list
+    /// and `KILL` takes a session id, so one of the two verbs is there to
+    /// read — this driver has been taught neither.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -169,6 +174,7 @@ impl Driver for MsSqlSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

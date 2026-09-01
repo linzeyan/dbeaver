@@ -76,7 +76,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-filter-rows`,
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
-// `--verify-grid-find`,
+// `--verify-grid-find`, `--verify-processes`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -129,6 +129,9 @@ if CommandLine.arguments.contains("--verify-fk-nav") {
 }
 if CommandLine.arguments.contains("--verify-grid-find") {
     exit(MainActor.assumeIsolated { GridFindChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-processes") {
+    exit(MainActor.assumeIsolated { ProcessesChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -873,6 +876,46 @@ let exportPath = argument("--export")
 /// exits. The format follows the extension, as it does through the menu.
 let importPath = argument("--import")
 
+/// `--processes` opens the Server Processes sheet and leaves it up.
+///
+/// Exists for the reason `--map-import` does: the sheet is behind a menu item and
+/// a capture cannot click one. It presses nothing else — what is photographed is
+/// the list, and a kill would remove the row that makes the picture worth taking.
+let showProcesses = CommandLine.arguments.contains("--processes")
+
+/// Drives `--processes`. Polls for a connection, opens the sheet, and reports
+/// what came back — then stays up for the shutter, like `openImportSheet`.
+@MainActor
+func openProcessesSheet(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("processes sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if asked, !model.isReadingProcesses {
+            fputs(
+                "processes      \(model.visibleProcesses.count) listed"
+                    + ", first=\(model.visibleProcesses.first?.state ?? "(none)")\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("processes sheet timed out waiting for a connection\n", stderr)
+            exit(1)
+        }
+        if !asked, model.watchesServerProcesses {
+            asked = true
+            model.openProcesses()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// `--map-import <file>` opens the import sheet on a file and leaves it there.
 ///
 /// Exists for the reason `--cell` does: the sheet is reachable by a menu item and
@@ -1580,6 +1623,10 @@ func probeSessions(model: AppModel) {
     }
     let deadline = CFAbsoluteTimeGetCurrent() + 180
     let marker = "select 'kept' as marker"
+    /// What the second connection's long statement is recognised by in the first
+    /// connection's process list. A word of its own rather than the statement
+    /// text, because the list also holds this probe's own reads.
+    let killMarker = "dbclient-kill-me"
 
     /// One line per session plus the pointer, which together are the whole
     /// claim. Printed rather than asserted so that a wrong answer is legible as
@@ -1612,8 +1659,11 @@ func probeSessions(model: AppModel) {
         return session.db != nil && !session.isBusy
     }
 
-    enum Phase { case first, second, away, landed }
+    enum Phase { case first, second, away, listing, killing, landed }
     var phase = Phase.first
+    /// When the statement the other connection is meant to kill was started, so
+    /// that "it stopped" can be told from "it finished".
+    var startedSleeping = CFAbsoluteTimeGetCurrent()
 
     func poll() {
         switch phase {
@@ -1681,6 +1731,73 @@ func probeSessions(model: AppModel) {
             guard model.sessions[0].errorMessage == nil else {
                 fail("the connection on screen was given the other one's banner")
             }
+            // A statement long enough that finishing on its own is not one of
+            // the ways this can pass. The marker rides in the text because
+            // `pg_stat_activity` reports the statement, and that is how the
+            // other connection recognises this one among the server's own
+            // workers and the probe's own reads.
+            model.selectSession(1)
+            model.activeTab = .query
+            model.queryText = "select pg_sleep(30)::text, '\(killMarker)' as marker"
+            model.runCurrentQuery()
+            model.selectSession(0)
+            // Answered yes without a person, for the reason `confirmDeletion` is
+            // injectable: the question is a modal alert and there is nobody here
+            // to press the button.
+            model.confirmKill = { _ in true }
+            model.openProcesses()
+            startedSleeping = CFAbsoluteTimeGetCurrent()
+            phase = .listing
+            return again()
+
+        case .listing:
+            // The other connection's statement, seen from this one. This is the
+            // whole of what the sheet is: one connection asking the server what
+            // every other connection is doing.
+            guard
+                let target = model.sessions[0].processes.first(where: {
+                    $0.statement.contains(killMarker)
+                })
+            else {
+                // Asked again until it appears: the statement was sent a moment
+                // ago and the server publishes it when it starts, not when the
+                // client returns from `runCurrentQuery`.
+                model.loadProcesses()
+                return again()
+            }
+            fputs("sessions listed: \(target.id) \(target.state) \(target.duration)\n", stderr)
+            guard target.user.isEmpty == false, target.database.isEmpty == false else {
+                fail("the row naming the other connection has no user or database on it")
+            }
+            model.selectedProcess = target.id
+            guard model.chosenProcess?.id == target.id else {
+                fail("the row selected is not the row a kill would act on")
+            }
+            model.endChosenProcess(.statement)
+            phase = .killing
+            return again()
+
+        case .killing:
+            guard !model.sessions[1].isBusy else {
+                // Thirty seconds is what the statement would take on its own, so
+                // anything under twenty proves the kill arrived rather than the
+                // sleep expiring.
+                if CFAbsoluteTimeGetCurrent() - startedSleeping > 20 {
+                    fail("the statement was not stopped — it ran on past the kill")
+                }
+                return again()
+            }
+            fputs(
+                "sessions killed: after "
+                    + String(format: "%.1f", CFAbsoluteTimeGetCurrent() - startedSleeping)
+                    + "s, report=\(model.sessions[0].processReport)\n", stderr)
+            guard model.sessions[0].processReport.contains("Cancelled the statement") else {
+                fail("the sheet did not say what it had done: \(model.sessions[0].processReport)")
+            }
+            guard model.sessions[0].db != nil, model.queryText == marker else {
+                fail("killing the other connection's statement disturbed this one")
+            }
+            model.closeProcesses()
             // Closing the one that is not in front. The pointer has to stay on
             // the connection somebody is looking at, which is the case a
             // by-position pointer gets wrong.
@@ -3790,6 +3907,7 @@ if benchMode {
         if let exportPath { exportWhenReady(model: model, to: exportPath) }
         if let importPath { importWhenReady(model: model, from: importPath) }
         if let mapImportPath { openImportSheet(model: model, from: mapImportPath) }
+        if showProcesses { openProcessesSheet(model: model) }
         if let fkJumpColumn { followForeignKey(model: model, from: fkJumpColumn) }
         if let findText {
             findInGrid(model: model, text: findText, column: findColumn)

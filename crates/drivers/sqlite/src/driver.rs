@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, SqliteError, SqliteSource};
@@ -131,6 +131,11 @@ impl Driver for SqliteSource {
     /// `sqlite_sequence` table exists but is bookkeeping for `AUTOINCREMENT`
     /// columns rather than an object anybody creates, and listing it as one
     /// would invent a level this file does not have.
+    ///
+    /// The server's activity is not reported, and there is no server whose
+    /// activity it would be. The engine runs in this process, so what it is
+    /// doing is what this application asked for a moment ago — a list of one
+    /// row describing the caller.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -139,6 +144,7 @@ impl Driver for SqliteSource {
             schema_is_the_database: true,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

@@ -16,7 +16,7 @@ mod session;
 use arrow::array::{Array, RecordBatch, StructArray};
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 use dbcatalog::{Kind, Names};
-use dbconn::{Cursor, CursorCancel, Driver, ResultStream};
+use dbconn::{Cursor, CursorCancel, Driver, EndProcess, ResultStream};
 use dbsql::{Dialect, Origin, TokenKind};
 use dbtunnel::{Credential, Tunnel, TunnelConfig};
 use session::Session;
@@ -1119,6 +1119,94 @@ pub unsafe extern "C" fn db_sequences_json(
         Err(e) => {
             unsafe { set_err(err, e) };
             ptr::null_mut()
+        }
+    }
+}
+
+/// What the server is doing right now, as a JSON array. Release with
+/// `db_string_free`.
+///
+/// Fails on a connection whose `server_processes` is `unreported`, rather than
+/// answering with an empty array, for the reason `db_routines_json` fails: a
+/// front end that cannot tell "nothing is running" from "this driver was never
+/// taught to ask" would draw an idle server and call it the truth.
+///
+/// Asked again on every refresh, and never cached. This is the one metadata call
+/// whose answer is stale the moment it is given — that is what it is for.
+///
+/// # Safety
+/// `handle` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_processes_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.driver.processes()) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Stops one of them: `1` if the server did it, `0` if there was nothing there
+/// to stop, `-1` on failure with `err` set.
+///
+/// Three answers and not two, because "the process ended between the list being
+/// drawn and a row being chosen" is the ordinary case rather than a fault, and a
+/// front end that reported it as one would be showing an error for a race it
+/// won.
+///
+/// `how` is the word `statement` or the word `session`, and anything else is
+/// refused by name. A number would have been shorter, and the two values are one
+/// bit apart: `statement` cancels the query and leaves the connection, `session`
+/// closes the connection and takes any open transaction with it. A caller that
+/// passed the wrong integer would silently do the more destructive of the two,
+/// so the boundary spells it.
+///
+/// # Safety
+/// `handle` must be live; `id` and `how` must be valid NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_end_process(
+    handle: *mut DbHandle,
+    id: *const c_char,
+    how: *const c_char,
+    err: *mut *mut c_char,
+) -> c_int {
+    if handle.is_null() || id.is_null() || how.is_null() {
+        unsafe { set_err(err, "null handle, id, or how") };
+        return -1;
+    }
+    let h = unsafe { &*handle };
+    let (id, how) = unsafe {
+        match (CStr::from_ptr(id).to_str(), CStr::from_ptr(how).to_str()) {
+            (Ok(id), Ok(how)) => (id, how),
+            (Err(e), _) | (_, Err(e)) => {
+                set_err(err, e);
+                return -1;
+            }
+        }
+    };
+    let how = match how {
+        "statement" => EndProcess::Statement,
+        "session" => EndProcess::Session,
+        other => {
+            unsafe { set_err(err, format!("{other:?} is not `statement` or `session`")) };
+            return -1;
+        }
+    };
+    match runtime().block_on(h.driver.end_process(id, how)) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            -1
         }
     }
 }

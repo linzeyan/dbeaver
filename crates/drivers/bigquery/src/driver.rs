@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{BigQueryError, BigQuerySource, Rows, RowsCancel};
@@ -197,6 +197,11 @@ impl Driver for BigQuerySource {
     ///
     /// Sequences are not reported, and BigQuery has none. A generated key is a
     /// value an INSERT computes; nothing in a dataset holds a counter.
+    ///
+    /// The server's activity is not reported, and the unit would not be a
+    /// connection. BigQuery runs jobs, listed in `INFORMATION_SCHEMA.JOBS` and
+    /// stopped through `jobs.cancel` in the REST API; neither is something this
+    /// driver reaches.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -205,6 +210,7 @@ impl Driver for BigQuerySource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

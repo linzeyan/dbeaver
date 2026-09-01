@@ -15,7 +15,7 @@
 use dbconn::{
     Browse, Capabilities, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor,
     DatabaseInfo, DbResult, Driver, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
-    ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    ResultStream, SchemaInfo, ServerInfo, ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_postgres::PgSource;
 
@@ -264,6 +264,7 @@ impl Driver for Fixture {
             reports_routines: false,
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

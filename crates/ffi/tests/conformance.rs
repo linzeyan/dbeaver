@@ -47,15 +47,15 @@ use dbffi::{
     db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json,
     db_create_table_sql, db_cursor, db_cursor_cancel, db_cursor_close, db_cursor_free,
     db_cursor_next, db_cursor_schema, db_databases_json, db_ddl_text, db_definition_json,
-    db_edit_sql_json, db_export, db_export_sql, db_file_columns_json, db_foreign_keys_json,
-    db_free, db_import_cancel, db_import_free, db_import_start, db_import_step, db_indexes_json,
-    db_names_forget, db_query, db_query_free, db_query_next, db_query_rows_affected,
-    db_query_schema, db_referenced_by_json, db_relations_json, db_routine_definition_json,
-    db_routines_json, db_row_identity_json, db_schemas_json, db_sequences_json,
-    db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free, db_table_info_json,
-    db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step, db_triggers_json,
-    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
-    db_tx_savepoint, db_tx_state_json,
+    db_edit_sql_json, db_end_process, db_export, db_export_sql, db_file_columns_json,
+    db_foreign_keys_json, db_free, db_import_cancel, db_import_free, db_import_start,
+    db_import_step, db_indexes_json, db_names_forget, db_processes_json, db_query, db_query_free,
+    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
+    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
+    db_string_free, db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start,
+    db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release,
+    db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
 };
 
 // Test db_connect with null connection string
@@ -212,6 +212,115 @@ fn test_relations_invalid_utf8_schema() {
     let result = unsafe { db_relations_json(ptr::null_mut(), invalid_cstring.as_ptr(), &mut err) };
     assert!(result.is_null());
     assert!(!err.is_null(), "db_relations_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_processes_json with null handle
+#[test]
+fn test_processes_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_processes_json(ptr::null_mut(), &mut err) };
+    assert!(result.is_null());
+    assert!(!err.is_null(), "db_processes_json must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_end_process with null handle
+#[test]
+fn test_end_process_null_handle() {
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe { db_end_process(ptr::null_mut(), ptr::null(), ptr::null(), &mut err) };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_end_process must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// Test db_end_process with invalid UTF-8 in the id
+#[test]
+fn test_end_process_invalid_utf8_id() {
+    let invalid_cstring = CString::new(vec![b'v', b'a', b'l', b'i', b'd', 0xff, 0xfe]).unwrap();
+    let how = CString::new("statement").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let result = unsafe {
+        db_end_process(
+            ptr::null_mut(),
+            invalid_cstring.as_ptr(),
+            how.as_ptr(),
+            &mut err,
+        )
+    };
+    assert_eq!(result, -1);
+    assert!(!err.is_null(), "db_end_process must say why it failed");
+    unsafe { db_string_free(err) };
+}
+
+// A `how` that is neither word is refused by the boundary, and says so.
+//
+// On the one driver that needs no server, so the call gets past the null checks
+// and reaches the word. Both halves matter: the two words are one bit apart and
+// the wrong guess is the destructive one, so a misspelled "session" must not
+// arrive at a driver as either of them. Asserting the two messages *differ* is
+// what makes this fail if the word were no longer read — a driver that reports
+// no processes refuses everything, so a test that only checked for failure
+// would pass with the parsing deleted.
+#[test]
+fn a_word_that_is_neither_is_refused_before_any_driver_sees_it() {
+    let path = std::env::temp_dir().join("dbffi-end-process-how.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let id = CString::new("1234").unwrap();
+    let message = |word: &str| {
+        let how = CString::new(word).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let result = unsafe { db_end_process(handle, id.as_ptr(), how.as_ptr(), &mut err) };
+        assert_eq!(result, -1, "{word} should not have ended anything here");
+        assert!(!err.is_null(), "db_end_process must say why it failed");
+        let text = unsafe { CStr::from_ptr(err) }.to_str().unwrap().to_string();
+        unsafe { db_string_free(err) };
+        text
+    };
+
+    let nonsense = message("kill");
+    let real = message("session");
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        nonsense.contains("statement") && nonsense.contains("session"),
+        "the refusal should name the two words it accepts, got {nonsense:?}"
+    );
+    assert_ne!(
+        nonsense, real,
+        "a word the boundary rejects must not read like a driver that cannot do it"
+    );
+}
+
+// A driver that does not report processes fails rather than answering `[]`.
+//
+// The distinction the empty array cannot make: a front end drawing an idle
+// server is showing a fact, and a front end drawing an idle server because
+// nobody taught this driver to look is showing a lie.
+#[test]
+fn a_driver_that_does_not_watch_the_server_says_so() {
+    let path = std::env::temp_dir().join("dbffi-processes-unreported.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let result = unsafe { db_processes_json(handle, &mut err) };
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+
+    assert!(result.is_null(), "SQLite has no server to watch");
+    assert!(!err.is_null(), "db_processes_json must say why it failed");
     unsafe { db_string_free(err) };
 }
 

@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{Rows, RowsCancel, SnowflakeError, SnowflakeSource, parts, quote};
@@ -214,6 +214,10 @@ impl Driver for SnowflakeSource {
     /// Sequences are not reported, and that is a gap: a Snowflake schema can
     /// hold them and `information_schema.sequences` lists them. Nothing here
     /// reads it yet.
+    ///
+    /// The server's activity is not reported, and that is a gap. Snowflake lists
+    /// running statements through its query history and stops one with
+    /// `SYSTEM$CANCEL_QUERY`; this driver asks for neither.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -222,6 +226,7 @@ impl Driver for SnowflakeSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

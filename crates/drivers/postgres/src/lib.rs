@@ -12,8 +12,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType, arrow_field};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, DatabaseInfo, IndexInfo, InfoField, RelationInfo, RelationshipInfo,
-    RoutineInfo, SchemaInfo, SequenceInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, DatabaseInfo, EndProcess, IndexInfo, InfoField, ProcessInfo,
+    RelationInfo, RelationshipInfo, RoutineInfo, SchemaInfo, SequenceInfo, TriggerInfo, TxStep,
+    UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use std::collections::HashMap;
@@ -50,6 +51,8 @@ pub enum PgError {
     RootCertificate { path: String, reason: String },
     #[error("TLS could not be set up: {0}")]
     Tls(String),
+    #[error("{0} is not a backend id this server would have reported")]
+    NotABackend(String),
 }
 
 impl PgError {
@@ -503,6 +506,18 @@ impl PgSource {
         let result = metadata::table_info(&conn, schema, relation).await;
         // Connection is automatically returned to pool when conn goes out of scope
         result
+    }
+
+    /// What this server is running, its own background workers included.
+    pub async fn processes(&self) -> Result<Vec<ProcessInfo>, PgError> {
+        let conn = self.acquire_connection().await?;
+        metadata::processes(&conn).await
+    }
+
+    /// Stops one of those, by the pid `processes` reported.
+    pub async fn end_process(&self, id: &str, how: EndProcess) -> Result<bool, PgError> {
+        let conn = self.acquire_connection().await?;
+        metadata::end_process(&conn, id, how).await
     }
 
     /// Sequences within a schema, whole: there is no second call.

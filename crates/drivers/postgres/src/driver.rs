@@ -9,9 +9,10 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
-    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo, InfoField,
-    RelationInfo, RelationshipInfo, ResultStream, RoutineInfo, SchemaInfo, SequenceInfo,
-    ServerInfo, TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
+    CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, EndProcess,
+    IndexInfo, InfoField, ProcessInfo, RelationInfo, RelationshipInfo, ResultStream, RoutineInfo,
+    SchemaInfo, SequenceInfo, ServerInfo, ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
+    scalar_text,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, PgError, PgSource};
@@ -68,6 +69,14 @@ impl Driver for PgSource {
 
     async fn sequences(&self, schema: &str) -> DbResult<Vec<SequenceInfo>> {
         Ok(PgSource::sequences(self, schema).await?)
+    }
+
+    async fn processes(&self) -> DbResult<Vec<ProcessInfo>> {
+        Ok(PgSource::processes(self).await?)
+    }
+
+    async fn end_process(&self, id: &str, how: EndProcess) -> DbResult<bool> {
+        Ok(PgSource::end_process(self, id, how).await?)
     }
 
     async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
@@ -145,6 +154,11 @@ impl Driver for PgSource {
     /// `pg_get_functiondef` hands back the source of either. Sequences too —
     /// `pg_sequences` is a documented catalog view, and a sequence here is a
     /// first-class object rather than a property of a column.
+    ///
+    /// The server's activity is reported and both verbs are here.
+    /// `pg_stat_activity` is the list; `pg_cancel_backend` stops a backend's
+    /// statement and leaves its connection open, `pg_terminate_backend` closes
+    /// the connection and loses the transaction with it.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: true,
@@ -153,6 +167,7 @@ impl Driver for PgSource {
             schema_is_the_database: false,
             reports_routines: true,
             reports_sequences: true,
+            server_processes: ServerProcesses::Interruptible,
         }
     }
 

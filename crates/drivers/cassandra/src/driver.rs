@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{CassandraError, CassandraSource, Rows, RowsCancel};
@@ -193,6 +193,11 @@ impl Driver for CassandraSource {
     /// Sequences are not reported, and there is no such object. A counter column
     /// is the nearest thing and belongs to a table; nothing a keyspace holds
     /// hands out increasing numbers.
+    ///
+    /// The server's activity is not reported, and CQL is not where it lives. A
+    /// coordinator's in-flight work is per-node and reached over JMX or
+    /// `nodetool`, which is a different protocol from the one this driver
+    /// speaks.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -201,6 +206,7 @@ impl Driver for CassandraSource {
             schema_is_the_database: false,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

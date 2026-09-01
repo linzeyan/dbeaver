@@ -15,8 +15,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo, scalar_text,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo, scalar_text,
 };
 
 use crate::{ChError, ChSource, Rows, RowsCancel};
@@ -136,6 +136,10 @@ impl Driver for ChSource {
     /// Sequences are not reported, and there is no such object. ClickHouse
     /// numbers rows with functions evaluated at insert time; nothing in a
     /// database holds a counter a client could list.
+    ///
+    /// The server's activity is not reported, and that is a gap: `system.processes`
+    /// is the list and `KILL QUERY` is already used above for this session's own
+    /// statements. The general read is what is missing.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -144,6 +148,7 @@ impl Driver for ChSource {
             schema_is_the_database: true,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

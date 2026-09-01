@@ -15,7 +15,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
     IndexInfo, RelationInfo, RelationKind, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use driver_duckdb::DuckSource;
 use std::path::PathBuf;
@@ -182,6 +182,7 @@ impl Driver for Fixture {
             reports_routines: false,
             // Nor sequences, for the same reason as the line above.
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

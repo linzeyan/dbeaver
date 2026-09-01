@@ -131,7 +131,8 @@ enum MetadataChecks {
         let both: Capabilities? = decode(
             #"""
             {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
-             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,"reports_sequences":true}
+             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
+             "reports_sequences":true,"server_processes":"interruptible"}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -142,13 +143,20 @@ enum MetadataChecks {
             "and that its schemas are schemas, since it has a level of databases above them")
         expect(both?.reportsRoutines, true, "and that it can list its functions and procedures")
         expect(both?.reportsSequences, true, "and its sequences, which is a separate question")
+        // A word rather than a bool, and the one field here whose wire form can
+        // be wrong without being absent: a spelling the core does not write
+        // decodes to nothing at all, which is why this names the value.
+        expect(
+            both?.serverProcesses, .interruptible,
+            "and that its sessions can be both listed and interrupted")
 
         // Cassandra's answer, which is the one `cancel_stops_the_statement`
         // exists to carry — and Redis's for the field beside it.
         let neither: Capabilities? = decode(
             #"""
             {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
-             "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,"reports_sequences":false}
+             "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,
+             "reports_sequences":false,"server_processes":"unreported"}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -163,6 +171,9 @@ enum MetadataChecks {
         expect(
             neither?.reportsSequences, false,
             "nor sequences — a counter here is a key, and the tree already has it")
+        expect(
+            neither?.serverProcesses, .unreported,
+            "and nothing to say about what the server is doing, so the menu item stays shut")
 
         // A field the core stopped writing is refused rather than read as false,
         // for the same reason `checkARenamedFieldIsRefusedRatherThanGuessed`
@@ -170,7 +181,8 @@ enum MetadataChecks {
         let renamed: Capabilities? = decode(
             #"""
             {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
-             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,"reports_sequences":true}
+             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
+             "reports_sequences":true,"server_processes":"unreported"}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 

@@ -314,6 +314,23 @@ char* db_routine_definition_json(DbHandle* handle, const char* schema, const cha
 // Fails where reports_sequences is false, like the two above.
 char* db_sequences_json(DbHandle* handle, const char* schema, char** err);
 
+// What the server is doing right now: id, user, database, state, duration and
+// statement per row. Fails where server_processes is "unreported", like the
+// three above, so that a driver that was never taught to ask cannot be mistaken
+// for an idle server. Never cached — the answer is stale as it is given, which
+// is the point of it.
+char* db_processes_json(DbHandle* handle, char** err);
+// Stops one: 1 if the server did, 0 if there was nothing left to stop, -1 with
+// err set. Zero is not a failure — a process that ended between the list being
+// drawn and a row being chosen is the ordinary race, already won.
+//
+// `how` is the word "statement" or the word "session"; anything else is refused.
+// They are one bit apart and the wrong one is the destructive one — "statement"
+// cancels the query and leaves the connection, "session" closes the connection
+// and rolls back whatever it had open — so this spells the word rather than
+// taking a flag.
+int db_end_process(DbHandle* handle, const char* id, const char* how, char** err);
+
 // The statements that would recreate one relation, as plain text — released with
 // db_string_free like the JSON above, and unlike it in being the value itself.
 // Wrapping one string in a document would make a caller decode to reach the only

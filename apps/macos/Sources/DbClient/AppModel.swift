@@ -4252,6 +4252,181 @@ final class AppModel {
         }
     }
 
+    // MARK: - What the server itself is doing
+
+    /// Whether this connection can be asked at all, which is what decides
+    /// whether the menu item is offered.
+    var watchesServerProcesses: Bool { capabilities.serverProcesses.areReported }
+
+    /// What this server will do to a process, which decides which buttons the
+    /// sheet draws. Read straight off the capability rather than remembered, so
+    /// a sheet left open across a reconnect cannot offer a kill the new
+    /// connection cannot deliver.
+    var serverProcesses: ServerProcesses { capabilities.serverProcesses }
+
+    var isProcessesOpen: Bool {
+        get { session.isProcessesOpen }
+        set { session.isProcessesOpen = newValue }
+    }
+
+    var processFilter: String {
+        get { session.processFilter }
+        set { session.processFilter = newValue }
+    }
+
+    var selectedProcess: String? {
+        get { session.selectedProcess }
+        set { session.selectedProcess = newValue }
+    }
+
+    var processRefresh: Int? {
+        get { session.processRefresh }
+        set { session.processRefresh = newValue }
+    }
+
+    var isReadingProcesses: Bool { session.isReadingProcesses }
+    var processReport: String { session.processReport }
+
+    /// The rows the sheet draws: everything read, narrowed by the filter.
+    ///
+    /// The filter is a plain substring over every column of the row, which is
+    /// what somebody typing a username or a table name into it means. It is not
+    /// a WHERE clause and does not reach the server — the list has already
+    /// arrived, and asking again to narrow it would make the sheet slower the
+    /// more precisely it was used.
+    var visibleProcesses: [ServerProcess] {
+        let wanted = processFilter.lowercased()
+        guard !wanted.isEmpty else { return session.processes }
+        return session.processes.filter { $0.searchable.contains(wanted) }
+    }
+
+    /// The row a Kill would act on, or nil when the selection names nothing in
+    /// the list in front.
+    ///
+    /// Looked up rather than remembered, which is what makes the selection safe
+    /// across a refresh: a process that ended is no longer in the list, so the
+    /// buttons go quiet instead of aiming an id at whatever the server has since
+    /// given that number to.
+    var chosenProcess: ServerProcess? {
+        guard let selectedProcess else { return nil }
+        return visibleProcesses.first { $0.id == selectedProcess }
+    }
+
+    /// Opens the sheet and reads the list once.
+    func openProcesses() {
+        guard watchesServerProcesses else { return }
+        session.processReport = ""
+        session.isProcessesOpen = true
+        loadProcesses()
+    }
+
+    func closeProcesses() {
+        session.isProcessesOpen = false
+        // The timer stops with the sheet. A window that went on polling a server
+        // after the sheet was shut would be doing it where nobody could see it
+        // happening or turn it off.
+        session.processRefresh = nil
+        session.isReadingProcesses = false
+    }
+
+    /// Reads the list again.
+    ///
+    /// A read already in flight is not joined by a second one: the timer and the
+    /// Refresh button both land here, and a slow server would otherwise queue up
+    /// one round trip per tick for as long as it stayed slow.
+    func loadProcesses() {
+        // `db` as well as the capability, because `run` drops the work when the
+        // connection has gone and the flag set for it would never be cleared —
+        // a sheet left open across a disconnect would refuse every later read.
+        guard watchesServerProcesses, db != nil, !session.isReadingProcesses else { return }
+        session.isReadingProcesses = true
+        run(
+            { db in try db.processes() },
+            then: { [self] rows in
+                session.processes = rows
+                session.isReadingProcesses = false
+            })
+    }
+
+    /// What a Kill puts to the user before it goes.
+    ///
+    /// Always asked, unlike the deletion question, which a setting can turn off.
+    /// The difference is whose work is at stake: a staged deletion is the user's
+    /// own, sitting on their screen where they put it, and this reaches into
+    /// somebody else's session on a shared server. There is also nothing on
+    /// screen beforehand that says what is about to happen — a selected row
+    /// looks the same whichever button is over it — so the sentence naming the
+    /// user and the statement is the only warning there is.
+    struct KillConfirmation: Equatable {
+        let process: ServerProcess
+        let how: EndProcess
+
+        var question: String {
+            how == .statement
+                ? "Cancel the statement running as \(who)?"
+                : "Close the connection belonging to \(who)?"
+        }
+
+        /// The statement itself, because it is the one thing that identifies
+        /// which session this is to somebody who did not open it. Trimmed: a
+        /// server keeps as much of the head as it likes and an alert is not a
+        /// place to read a page of SQL.
+        var detail: String {
+            let what =
+                how == .statement
+                ? "The connection stays open and nothing is rolled back."
+                : "Anything it has not committed will be rolled back."
+            let statement = process.statement.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !statement.isEmpty else { return what }
+            return "\(what)\n\n\(statement.prefix(300))"
+        }
+
+        private var who: String {
+            let named = [process.user, process.database].filter { !$0.isEmpty }
+            return named.isEmpty ? "process \(process.id)" : named.joined(separator: " on ")
+        }
+    }
+
+    /// Puts the kill question. Injectable for the reason `confirmDeletion` is:
+    /// the alert is modal, and `--verify-processes` has nobody at the keyboard.
+    @ObservationIgnored
+    var confirmKill: @MainActor (KillConfirmation) -> Bool = { confirmation in
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = confirmation.question
+        alert.informativeText = confirmation.detail
+        // The destructive word leads, as in `confirmDeletion`, and Cancel takes
+        // escape — so dismissing this without reading it leaves the server alone.
+        alert.addButton(withTitle: confirmation.how == .statement ? "Cancel Statement" : "Close")
+        let stop = alert.addButton(withTitle: "Leave It")
+        stop.keyEquivalent = "\u{1b}"
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// Stops the chosen process, the gentler way where the server offers one.
+    ///
+    /// The answer is reported rather than assumed. `false` means the process was
+    /// already gone, which is not a failure and is worth saying plainly — the
+    /// alternative is a row that vanishes on the next refresh with no
+    /// explanation, leaving somebody unsure whether they did it.
+    func endChosenProcess(_ how: EndProcess) {
+        guard let target = chosenProcess, db != nil else { return }
+        guard !session.isReadingProcesses else { return }
+        guard confirmKill(KillConfirmation(process: target, how: how)) else { return }
+        session.isReadingProcesses = true
+        let id = target.id
+        run(
+            { db in try db.endProcess(id: id, how: how) },
+            then: { [self] ended in
+                session.isReadingProcesses = false
+                session.processReport =
+                    ended
+                    ? "\(how == .statement ? "Cancelled the statement on" : "Closed") \(id)."
+                    : "\(id) had already finished."
+                loadProcesses()
+            })
+    }
+
     // MARK: - Finding a value in the fetched rows
 
     /// Everything this searches is already in this window.
@@ -6401,6 +6576,11 @@ final class AppModel {
         let message = String(describing: statement?.error ?? error)
         isBusy = false
         isExporting = false
+        // Cleared here for the reason the two above are: the read that failed is
+        // the one this flag was standing for, and a sheet left thinking a read
+        // is still in flight would refuse every later one, including the Refresh
+        // pressed to find out what went wrong.
+        session.isReadingProcesses = false
         // Through `endImport` rather than by clearing the flag, so a failure
         // takes the handle down with it: a Stop button over an import that is no
         // longer running is a button that does nothing and says nothing.

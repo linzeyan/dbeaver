@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, TriggerInfo, TxStep,
-    UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
+    TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{AthenaError, AthenaSource, Rows, RowsCancel};
@@ -174,6 +174,10 @@ impl Driver for AthenaSource {
     /// Sequences are not reported, and there is nothing to report. Athena reads
     /// files through a catalog of tables; a sequence would have to be held
     /// somewhere that writes, and nothing here does.
+    ///
+    /// The server's activity is not reported, and the unit would not be a
+    /// connection. Athena runs query executions, listed and stopped through its
+    /// own API rather than through SQL.
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             transactional: false,
@@ -182,6 +186,7 @@ impl Driver for AthenaSource {
             schema_is_the_database: true,
             reports_routines: false,
             reports_sequences: false,
+            server_processes: ServerProcesses::Unreported,
         }
     }
 

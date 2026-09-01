@@ -46,8 +46,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow_map::{ColBuilder, ColumnType};
 use dbconn::{
-    ColumnInfo, ConstraintInfo, IndexInfo, InfoField, RelationInfo, RelationshipInfo, RoutineInfo,
-    SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
+    ColumnInfo, ConstraintInfo, EndProcess, IndexInfo, InfoField, ProcessInfo, RelationInfo,
+    RelationshipInfo, RoutineInfo, SchemaInfo, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 use futures_util::StreamExt;
 use metadata::Capabilities;
@@ -90,6 +90,8 @@ pub enum MySqlError {
     },
     #[error("arrow: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
+    #[error("{0} is not a thread id this server would have reported")]
+    NotAThread(String),
 }
 
 /// Renders a failure the way a banner should read.
@@ -497,6 +499,22 @@ impl MySqlSource {
     pub async fn relations(&self, schema: &str) -> Result<Vec<RelationInfo>, MySqlError> {
         let mut spare = self.acquire().await?;
         let out = metadata::relations(&mut spare.conn, schema).await;
+        self.release(spare, &out);
+        out
+    }
+
+    /// What this server is running, on every connection it is holding.
+    pub async fn processes(&self) -> Result<Vec<ProcessInfo>, MySqlError> {
+        let mut spare = self.acquire().await?;
+        let out = metadata::processes(&mut spare.conn).await;
+        self.release(spare, &out);
+        out
+    }
+
+    /// Stops one of those, by the thread id `processes` reported.
+    pub async fn end_process(&self, id: &str, how: EndProcess) -> Result<bool, MySqlError> {
+        let mut spare = self.acquire().await?;
+        let out = metadata::end_process(&mut spare.conn, id, how).await;
         self.release(spare, &out);
         out
     }

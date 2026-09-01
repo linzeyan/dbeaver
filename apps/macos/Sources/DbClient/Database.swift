@@ -229,6 +229,33 @@ final class Database: @unchecked Sendable {
         try decodeJSON(db_sequences_json(handle, schema, &errOut), as: [SequenceInfo].self)
     }
 
+    /// What the server is doing, as of now.
+    ///
+    /// Only ask where `capabilities().serverProcesses.areReported`, under the
+    /// rule `routines` is asked under. Never cached: this is the one metadata
+    /// call whose answer is out of date before it is drawn, which is what it is
+    /// for.
+    func processes() throws -> [ServerProcess] {
+        try decodeJSON(db_processes_json(handle, &errOut), as: [ServerProcess].self)
+    }
+
+    /// Stops one of them, and says whether there was anything left to stop.
+    ///
+    /// `false` is not a failure: a process that finished between the list being
+    /// drawn and a row being chosen has already done what was being asked of it,
+    /// and a race won is not an error to show somebody.
+    ///
+    /// `id` is what `processes` reported, handed back unread — what addresses a
+    /// backend is the server's business, in the way `RoutineInfo.id` is.
+    @discardableResult
+    func endProcess(id: String, how: EndProcess) throws -> Bool {
+        let answer = db_end_process(handle, id, how.rawValue, &errOut)
+        guard answer >= 0 else {
+            throw DbError(description: Database.take(&errOut) ?? "could not end that process")
+        }
+        return answer == 1
+    }
+
     func columns(schema: String, relation: String) throws -> [ColumnInfo] {
         try decodeJSON(
             db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)

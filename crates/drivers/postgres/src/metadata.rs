@@ -10,9 +10,9 @@
 //! side trivial.
 
 use dbconn::{
-    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, IndexInfo, InfoField,
-    RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind, SchemaInfo,
-    SequenceInfo, TriggerInfo, UniqueKeyInfo,
+    ColumnInfo, Computed, ConstraintInfo, ConstraintKind, DatabaseInfo, EndProcess, IndexInfo,
+    InfoField, ProcessInfo, RelationInfo, RelationKind, RelationshipInfo, RoutineInfo, RoutineKind,
+    SchemaInfo, SequenceInfo, TriggerInfo, UniqueKeyInfo,
 };
 use tokio_postgres::Client;
 
@@ -816,4 +816,80 @@ pub(crate) async fn triggers(
             }
         })
         .collect())
+}
+
+/// Everything `pg_stat_activity` can see, this client's own connections
+/// included.
+///
+/// Unfiltered, under the rule the trait states: the background workers are in
+/// here beside the client backends, and so are the idle connections. A reader
+/// looking for what is holding a lock wants the idle-in-transaction rows most
+/// of all, and they are exactly what a "show me the busy ones" filter would
+/// drop.
+///
+/// The duration is time in the current *state* rather than time connected.
+/// For an `active` backend those are the same question — `state_change` is when
+/// the statement started — and for the row that matters most they are not: an
+/// `idle in transaction` connection may have been dialled this morning and gone
+/// idle four minutes ago, and four minutes is the number somebody deciding
+/// whether to end it needs.
+///
+/// A backend with no visible query is not a mistake. `pg_stat_activity` shows
+/// the statement text only to a superuser or to a member of
+/// `pg_read_all_stats`, and to the owner of the backend; everybody else reads
+/// the row with an empty `query`. The list is still worth drawing — who is
+/// connected, from where, and in what state, is most of it.
+pub(crate) async fn processes(client: &Client) -> Result<Vec<ProcessInfo>, PgError> {
+    let rows = client
+        .query(
+            "SELECT pid::text, \
+                    coalesce(usename, ''), \
+                    coalesce(datname, ''), \
+                    coalesce(state, backend_type, ''), \
+                    coalesce(date_trunc('second', now() - state_change)::text, ''), \
+                    coalesce(query, '') \
+             FROM pg_catalog.pg_stat_activity \
+             ORDER BY pid",
+            &[],
+        )
+        .await?;
+    Ok(rows
+        .iter()
+        .map(|row| ProcessInfo {
+            id: row.get(0),
+            user: row.get(1),
+            database: row.get(2),
+            state: row.get(3),
+            duration: row.get(4),
+            statement: row.get(5),
+        })
+        .collect())
+}
+
+/// `pg_cancel_backend` or `pg_terminate_backend`, by the id `processes` gave.
+///
+/// Both answer `false` for a pid that is not there, which is the answer this
+/// wants: a backend that ended between the list being drawn and a row being
+/// chosen has already done what was being asked of it. They also answer `false`
+/// without the privilege to signal that backend — `pg_signal_backend` or
+/// ownership — and the caller cannot tell the two apart from here. That is the
+/// server's own reporting and not something to improve on by guessing: what a
+/// front end does either way is refresh the list, which shows which it was.
+pub(crate) async fn end_process(
+    client: &Client,
+    id: &str,
+    how: EndProcess,
+) -> Result<bool, PgError> {
+    // The id came from `processes` and is a pid, so anything else is a caller
+    // that made one up. Refused by name rather than passed to the server, which
+    // would report it as a type error about `$1`.
+    let pid: i32 = id
+        .parse()
+        .map_err(|_| PgError::NotABackend(id.to_string()))?;
+    let statement = match how {
+        EndProcess::Statement => "SELECT pg_catalog.pg_cancel_backend($1)",
+        EndProcess::Session => "SELECT pg_catalog.pg_terminate_backend($1)",
+    };
+    let row = client.query_one(statement, &[&pid]).await?;
+    Ok(row.get::<_, Option<bool>>(0).unwrap_or(false))
 }
