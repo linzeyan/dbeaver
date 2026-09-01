@@ -10,12 +10,18 @@
 //! `GenericView.getObjectDefinitionText` → `SQLiteMetaModel.getViewDDL` → the
 //! same function. Those are what this file reproduces.
 //!
-//! Nothing here goes through [`crate::Script`], which is not an oversight:
-//! `Script` reproduces `SQLUtils.generateScript`, and SQLite's path never reaches
-//! it. `readMasterDefinition` does its own joining — every statement followed by
-//! a semicolon and a newline — and `getTableDDL` puts one blank line between the
-//! table and its indexes. Those two rules are the whole of the arrangement, and
-//! borrowing PostgreSQL's would produce a script upstream does not write.
+//! The DDL here does not go through [`crate::Script`], which is not an
+//! oversight: `Script` reproduces `SQLUtils.generateScript`, and the path a
+//! table's DDL takes never reaches it. `readMasterDefinition` does its own
+//! joining — every statement followed by a semicolon and a newline — and
+//! `getTableDDL` puts one blank line between the table and its indexes. Those
+//! two rules are the whole of the arrangement, and borrowing PostgreSQL's would
+//! produce a script upstream does not write.
+//!
+//! [`Renderer::table_change`] is the exception, and for the reason the rule has:
+//! `SQLiteTableManager` inherits `addObjectDeleteActions` and overrides
+//! `addObjectRenameActions`, both of which are the shared editor path that ends
+//! in `SQLUtils.generateScript`. Same crate, different upstream route.
 //!
 //! Two things absent from a table's DDL here that PostgreSQL's has, stated
 //! because their absence looks like a gap. There is no commented-out `DROP
@@ -29,7 +35,7 @@
 //! `getTableDDL` and `getViewDDL` take the map and never read it, so there is no
 //! preference whose default had to be established before this could be written.
 
-use crate::{ColumnKind, Renderer, create_table_text};
+use crate::{ColumnKind, Renderer, Script, TableChange, create_table_text};
 use arrow::array::{Array, StringArray};
 use arrow::datatypes::Schema;
 use async_trait::async_trait;
@@ -69,6 +75,55 @@ impl Renderer for Sqlite {
     /// table back, and is chosen to match what will actually be in it.
     fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
         create_table_text(&dbsql::SQLITE, table, columns, word, "")
+    }
+
+    /// Two of the three. SQLite has no `TRUNCATE` at all.
+    fn table_change(&self, relation: &RelationInfo, change: TableChange<'_>) -> DbResult<String> {
+        let name = qualified(&relation.schema, &relation.name);
+        let noun = match relation.kind {
+            // A virtual table drops as a table, which is how it was made:
+            // `CREATE VIRTUAL TABLE` has no `DROP VIRTUAL TABLE` to match it.
+            RelationKind::Table | RelationKind::Virtual => "TABLE",
+            RelationKind::View => "VIEW",
+            kind => {
+                return Err(DbError::new(format!(
+                    "SQLite has no {kind:?}, so there is no statement to write for one"
+                )));
+            }
+        };
+        match change {
+            TableChange::Drop => Ok(crate::drop_text(noun, &name)),
+            // Not `DELETE FROM`, which is what SQLite offers instead and is not
+            // the same statement: it fires triggers, it can be rolled back, and
+            // it leaves the rowid counter where it was. Offering it under the
+            // word `Truncate` would be answering a question nobody asked, so the
+            // refusal says what SQLite does have and lets somebody type it.
+            TableChange::Truncate => Err(DbError::new(format!(
+                "SQLite has no TRUNCATE; emptying {name} is `DELETE FROM {name}`, which is a \
+                 different statement — it fires triggers and can be rolled back"
+            ))),
+            // `SQLiteTableManager.addObjectRenameActions`: the old name
+            // qualified by its schema, the new one bare.
+            //
+            // A table only. SQLite's `ALTER TABLE` reaches nothing else, and
+            // renaming a view means dropping it and creating it again under
+            // another name — two statements, one of which loses the definition
+            // if the second fails.
+            TableChange::Rename { to } => {
+                if noun != "TABLE" {
+                    return Err(DbError::new(format!(
+                        "SQLite cannot rename a view; {name} would have to be dropped and \
+                         created again under the new name"
+                    )));
+                }
+                let mut script = Script::new();
+                script.statement(&format!(
+                    "ALTER TABLE {name} RENAME TO {}",
+                    dbsql::SQLITE.quote(to)
+                ));
+                Ok(script.finish())
+            }
+        }
     }
 }
 

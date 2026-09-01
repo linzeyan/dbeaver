@@ -80,6 +80,72 @@ pub fn create_table(dialect: &'static Dialect, table: &str, columns: &Schema) ->
     }
 }
 
+/// The statement that would make `change` to a relation that is already there,
+/// in the SQL `dialect` writes.
+///
+/// Rendered and handed back rather than run. Everything in this crate composes
+/// SQL and nothing in it executes any, which is what lets the front end show the
+/// statement before it goes — and these three are the ones where showing it
+/// matters most, two of them being irreversible.
+pub fn table_change(
+    dialect: &'static Dialect,
+    relation: &RelationInfo,
+    change: TableChange<'_>,
+) -> DbResult<String> {
+    match for_dialect(dialect) {
+        Some(renderer) => renderer.table_change(relation, change),
+        None => Err(DbError::new(format!(
+            "DDL for {} has not been written yet",
+            dialect.name
+        ))),
+    }
+}
+
+/// What to do to a relation that already exists.
+///
+/// Three verbs rather than one `alter` with a payload, because they are not
+/// variations on each other. Two destroy something and the third does not; the
+/// one in the middle needs an argument the others have no use for; and upstream
+/// keeps them in three different places — `addObjectDeleteActions` on the shared
+/// table manager, `addObjectRenameActions` per database, and truncate not an
+/// editor action at all but a per-database tool.
+///
+/// Deliberately not extended to cover a relation's columns or indexes. Those are
+/// `ALTER` statements whose text differs per database in ways these do not, and
+/// folding them in here would make one enum stand for two different amounts of
+/// per-dialect work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TableChange<'a> {
+    /// Remove the relation and everything in it.
+    Drop,
+    /// Remove every row and leave the relation standing.
+    Truncate,
+    /// Give it another name, in the schema it is already in.
+    ///
+    /// Moving between schemas is a different statement on several of these
+    /// databases and is not offered: `ALTER TABLE … SET SCHEMA` on PostgreSQL,
+    /// a qualified `RENAME TABLE` on MySQL, and nothing at all on SQLite.
+    Rename { to: &'a str },
+}
+
+/// `DROP <word> <name>`, which is the one of the three that is shared.
+///
+/// `SQLTableManager.addObjectDeleteActions` writes every database's `DROP` and
+/// only the noun after it is per-dialect, so the shape lives here and the word
+/// is the renderer's. The other two do not share: `addObjectRenameActions`
+/// throws by default and each manager that supports one writes its own.
+///
+/// No `CASCADE`. Upstream appends it only when `OPTION_DELETE_CASCADE` is set,
+/// which is a checkbox that defaults off — and the default is the one to keep,
+/// since a cascade takes objects that are not on the screen the button was
+/// pressed on. A drop the server refuses for having dependents is an answer
+/// somebody can act on; one that quietly took four other tables is not.
+pub(crate) fn drop_text(word: &str, name: &str) -> String {
+    let mut script = Script::new();
+    script.statement(&format!("DROP {word} {name}"));
+    script.finish()
+}
+
 /// What a file can ask a table's column to be.
 ///
 /// Arrow has some fifty types; this is what a file being imported can actually
@@ -190,6 +256,22 @@ pub trait Renderer: Send + Sync {
     /// does not run — the same reason `for_dialect` refuses rather than falling
     /// back. Each renderer answers with the words its own server reads.
     fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String>;
+
+    /// The statement for one change to a relation that is already there.
+    ///
+    /// No default, for the reason `create_table` has none, and one more: a
+    /// default that wrote `DROP TABLE` for everybody would be right often enough
+    /// to look correct and wrong exactly where it costs the most — a
+    /// materialized view, a foreign table, a database that spells rename with
+    /// `sp_rename`. Each renderer answers for its own database or refuses by
+    /// name.
+    ///
+    /// A refusal here is per relation as well as per database: SQLite renames a
+    /// table and cannot rename a view, and no server truncates a view, because a
+    /// view has no rows of its own to remove. The front end shows the refusal
+    /// where it would have shown the statement, which is the same place and the
+    /// same gesture — see the sheet this feeds.
+    fn table_change(&self, relation: &RelationInfo, change: TableChange<'_>) -> DbResult<String>;
 }
 
 /// The renderer written for `dialect`, and `None` where none is yet.
@@ -264,7 +346,10 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
+    use super::TableChange;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use dbconn::{RelationInfo, RelationKind};
+    use dbsql::Dialect;
 
     /// The seven kinds at once, and a name that has to be quoted.
     fn a_files_columns() -> Schema {
@@ -437,6 +522,212 @@ ORDER BY tuple();",
             assert!(
                 super::for_dialect(dialect).is_some(),
                 "{} is a dialect this build connects with and cannot write DDL for",
+                dialect.name
+            );
+        }
+    }
+
+    fn relation(schema: &str, name: &str, kind: RelationKind) -> RelationInfo {
+        RelationInfo {
+            schema: schema.to_string(),
+            name: name.to_string(),
+            kind,
+            estimated_rows: None,
+        }
+    }
+
+    /// Each change written out in full, for each database that writes it.
+    ///
+    /// Strings and not a rule, for the reason
+    /// `a_files_columns_become_a_table_in_each_databases_own_words` is written
+    /// that way: the whole of what is being checked is the words, and a rename
+    /// that reads perfectly well and spells MySQL's form for PostgreSQL is
+    /// exactly the failure this catches.
+    ///
+    /// These are also the statements nobody gets a second try at. Two of the
+    /// three destroy something, so a test that asserted only "some statement
+    /// came back" would be no test at all — what matters is that the noun, the
+    /// name and the verb are the ones the server will read.
+    #[test]
+    fn a_change_is_spelled_the_way_the_server_being_changed_reads_it() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let cases: &[(&Dialect, &RelationInfo, TableChange, &str)] = &[
+            (
+                &dbsql::POSTGRES,
+                &orders,
+                TableChange::Drop,
+                "DROP TABLE staging.orders;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                &orders,
+                TableChange::Truncate,
+                "TRUNCATE TABLE staging.orders;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                &orders,
+                TableChange::Rename { to: "orders_old" },
+                "ALTER TABLE staging.orders RENAME TO orders_old;",
+            ),
+            (
+                &dbsql::MYSQL,
+                &orders,
+                TableChange::Drop,
+                "DROP TABLE staging.orders;",
+            ),
+            (
+                &dbsql::MYSQL,
+                &orders,
+                TableChange::Truncate,
+                "TRUNCATE TABLE staging.orders;",
+            ),
+            // Both ends named, which is MySQL's own form and is what keeps the
+            // table in the database it is in.
+            (
+                &dbsql::MYSQL,
+                &orders,
+                TableChange::Rename { to: "orders_old" },
+                "RENAME TABLE staging.orders TO staging.orders_old;",
+            ),
+            (
+                &dbsql::SQLITE,
+                &orders,
+                TableChange::Drop,
+                "DROP TABLE staging.orders;",
+            ),
+            (
+                &dbsql::SQLITE,
+                &orders,
+                TableChange::Rename { to: "orders_old" },
+                "ALTER TABLE staging.orders RENAME TO orders_old;",
+            ),
+        ];
+        for (dialect, relation, change, expected) in cases {
+            let statement = super::table_change(dialect, relation, *change)
+                .unwrap_or_else(|e| panic!("{} refused {change:?}: {e}", dialect.name));
+            assert_eq!(
+                statement, *expected,
+                "{} wrote the wrong statement for {change:?}",
+                dialect.name
+            );
+        }
+    }
+
+    /// PostgreSQL says which kind of relation it is dropping, and so must this.
+    ///
+    /// The one place this crate knowingly departs from upstream in a way that
+    /// changes the statement. `SQLTableManager.getDropTableType` reduces to
+    /// `isView(table) ? "VIEW" : "TABLE"`, so DBeaver emits `DROP VIEW` for a
+    /// materialized view and PostgreSQL answers "…is not a view. Use DROP
+    /// MATERIALIZED VIEW". A statement that cannot run is not a specification to
+    /// match, and the noun PostgreSQL's own rename path already uses is the one
+    /// written here.
+    #[test]
+    fn postgres_names_the_kind_of_relation_it_is_dropping() {
+        let cases = [
+            (RelationKind::View, "DROP VIEW staging.summary;"),
+            (
+                RelationKind::MaterializedView,
+                "DROP MATERIALIZED VIEW staging.summary;",
+            ),
+            (
+                RelationKind::ForeignTable,
+                "DROP FOREIGN TABLE staging.summary;",
+            ),
+            // A partition is a table to every statement here; only `CREATE`
+            // cares that it was made with a partition clause.
+            (
+                RelationKind::PartitionedTable,
+                "DROP TABLE staging.summary;",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let statement = super::table_change(
+                &dbsql::POSTGRES,
+                &relation("staging", "summary", kind),
+                TableChange::Drop,
+            )
+            .unwrap_or_else(|e| panic!("PostgreSQL refused to drop a {kind:?}: {e}"));
+            assert_eq!(statement, expected, "the noun for a {kind:?} is wrong");
+        }
+    }
+
+    /// A name the server would not read bare is quoted, in each database's own
+    /// delimiter.
+    ///
+    /// The one thing about these statements that is not visible in the ones
+    /// above, and the one that turns a drop into a syntax error or — worse — a
+    /// drop of something else. The capital letters are the case that matters on
+    /// PostgreSQL, where an unquoted `Daily Totals` is not merely unreadable but
+    /// a different identifier from the one in the catalog.
+    #[test]
+    fn a_name_the_server_could_not_read_bare_is_quoted() {
+        let awkward = relation("staging", "Daily Totals", RelationKind::Table);
+        assert_eq!(
+            super::table_change(&dbsql::POSTGRES, &awkward, TableChange::Drop).expect("rendered"),
+            "DROP TABLE staging.\"Daily Totals\";"
+        );
+        assert_eq!(
+            super::table_change(&dbsql::MYSQL, &awkward, TableChange::Drop).expect("rendered"),
+            "DROP TABLE staging.`Daily Totals`;"
+        );
+        // And the new name too, which is the half a renderer can forget: the old
+        // name arrives from the catalog and the new one was typed by hand.
+        assert_eq!(
+            super::table_change(
+                &dbsql::POSTGRES,
+                &relation("staging", "orders", RelationKind::Table),
+                TableChange::Rename { to: "Orders 2026" }
+            )
+            .expect("rendered"),
+            "ALTER TABLE staging.orders RENAME TO \"Orders 2026\";"
+        );
+    }
+
+    /// What each database refuses, and why the refusal says so.
+    ///
+    /// Every one of these is a statement that would otherwise be written,
+    /// accepted by the sheet, sent, and refused by the server — with a message
+    /// about syntax rather than about the thing that was actually wrong. The
+    /// refusals here are the ones that can say what to do instead.
+    #[test]
+    fn a_change_the_database_cannot_make_is_refused_by_name() {
+        let view = relation("staging", "summary", RelationKind::View);
+        let table = relation("main", "orders", RelationKind::Table);
+
+        for dialect in [&dbsql::POSTGRES, &dbsql::MYSQL] {
+            let error = super::table_change(dialect, &view, TableChange::Truncate)
+                .expect_err("a view was truncated");
+            assert!(
+                error.to_string().contains("rows of its own"),
+                "{}: {error}",
+                dialect.name
+            );
+        }
+
+        let error = super::table_change(&dbsql::SQLITE, &table, TableChange::Truncate)
+            .expect_err("SQLite truncated a table");
+        assert!(
+            error.to_string().contains("DELETE FROM"),
+            "the refusal should name what SQLite has instead: {error}"
+        );
+
+        let error = super::table_change(&dbsql::SQLITE, &view, TableChange::Rename { to: "s2" })
+            .expect_err("SQLite renamed a view");
+        assert!(
+            error.to_string().contains("cannot rename a view"),
+            "{error}"
+        );
+
+        // The three whose renderers have not been written. A refusal naming the
+        // database, rather than a statement composed from another one's rules.
+        for dialect in [&dbsql::CLICKHOUSE, &dbsql::MSSQL, &dbsql::DUCKDB] {
+            let error = super::table_change(dialect, &table, TableChange::Drop)
+                .expect_err("a renderer that was never written answered");
+            assert!(
+                error.to_string().contains("has not been written"),
+                "{}: {error}",
                 dialect.name
             );
         }
