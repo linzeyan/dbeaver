@@ -36,7 +36,8 @@
 //! preference whose default had to be established before this could be written.
 
 use crate::{
-    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
+    new_table_text,
 };
 use arrow::array::{Array, StringArray};
 use async_trait::async_trait;
@@ -130,6 +131,44 @@ impl Renderer for Sqlite {
     /// Two of the three are written above, which is enough for the items to be
     /// worth drawing; the third refuses where its statement would have been.
     fn changes_relations(&self) -> bool {
+        true
+    }
+
+    /// All three, and the drop is a deliberate departure from upstream.
+    ///
+    /// `SQLiteTableColumnManager.addObjectDeleteActions` throws
+    /// "Column deletion needs table recreation", and `deleteObject` beside it
+    /// runs `SQLiteUtils.makeRecreateTableCommand` — which builds a new table,
+    /// copies the rows across, drops the old one and renames the new. That was
+    /// the only way before SQLite 3.35 (2021), which added
+    /// `ALTER TABLE … DROP COLUMN`. This build has no table-recreation machine
+    /// and is not getting one for this: the native statement is one line, the
+    /// server refuses it by name when the column is in an index, a key or a
+    /// view, and that refusal is a better answer than a four-statement rewrite
+    /// nobody watched.
+    ///
+    /// A table only. SQLite's `ALTER TABLE` reaches nothing else, which is the
+    /// same limit `table_change` runs into above.
+    fn column_change(&self, relation: &RelationInfo, change: ColumnChange<'_>) -> DbResult<String> {
+        let name = qualified(&relation.schema, &relation.name);
+        if relation.kind != RelationKind::Table {
+            return Err(DbError::new(format!(
+                "{name} is a {:?}, and SQLite's ALTER TABLE reaches nothing but a table",
+                relation.kind
+            )));
+        }
+        crate::column_change_text(
+            &dbsql::SQLITE,
+            "TABLE",
+            &name,
+            change,
+            word,
+            NullStyle::Suffix,
+        )
+    }
+
+    /// All three are written above.
+    fn changes_columns(&self) -> bool {
         true
     }
 

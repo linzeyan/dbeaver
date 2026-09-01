@@ -6714,6 +6714,188 @@ final class AppModel {
         let schemas: [SchemaInfo]
     }
 
+    // MARK: - Changing a column
+
+    /// Whether this connection changes a column at all.
+    ///
+    /// Its own capability and not a second reading of `changesRelations`, though
+    /// the two answer alike today. Upstream is where they come apart: DBeaver
+    /// writes SQLite's `DROP TABLE` and refuses its column drop, recreating the
+    /// whole table instead.
+    var changesColumns: Bool {
+        capabilities.changesColumns && safety.writeRefusal == nil && !isBusy
+    }
+
+    /// A column about to be changed, and the statement for it.
+    var columnPlan: ColumnChangePlan?
+
+    var isColumnChangeSheetOpen: Bool {
+        get { columnPlan != nil }
+        set { if !newValue { columnPlan = nil } }
+    }
+
+    /// One relation, one change to one of its columns, and the statement written
+    /// for exactly that change.
+    struct ColumnChangePlan {
+        let relation: RelationInfo
+        var change: ColumnChange
+        var written: Written?
+
+        struct Written {
+            /// The change this was written for. The whole change and not one
+            /// field of it, because all three verbs carry something that alters
+            /// the statement — a new name, a type, a default — and a statement
+            /// arriving after any of them moved on is about a different column.
+            let change: ColumnChange
+            let text: String?
+            let refusal: String?
+        }
+
+        var statement: String? { written?.change == change ? written?.text : nil }
+        var refusal: String? { written?.change == change ? written?.refusal : nil }
+
+        /// What the pane shows: the last statement written, current or not.
+        var preview: String { written?.text ?? "" }
+
+        /// The relation, spelled the way the tree spells it.
+        var qualified: String { "\(relation.schema).\(relation.name)" }
+    }
+
+    /// Opens the sheet showing what `change` would do to a column of `relation`.
+    func prepareColumnChange(_ change: ColumnChange, of relation: RelationInfo) {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) \(relation.schema).\(relation.name) is unchanged."
+            return
+        }
+        errorMessage = nil
+        columnPlan = ColumnChangePlan(relation: relation, change: change, written: nil)
+        renderColumnChange()
+    }
+
+    /// Applies an edit to the plan's change and rewrites the statement.
+    ///
+    /// One entry point for every field of every verb, for the reason
+    /// `editNewTable` is one: the re-render is the same in all of them, and a
+    /// setter per field is a setter to forget it in.
+    func editColumnChange(_ edit: (inout ColumnChange) -> Void) {
+        guard var plan = columnPlan else { return }
+        edit(&plan.change)
+        // The rule `editNewTable` applies, and here for one column: a key column
+        // cannot hold a null, and two of these servers settle that silently.
+        if case .add(var column) = plan.change, column.isPrimaryKey, column.nullable {
+            column.nullable = false
+            plan.change = .add(column)
+        }
+        columnPlan = plan
+        renderColumnChange()
+    }
+
+    private func renderColumnChange() {
+        guard let plan = columnPlan else { return }
+        let (relation, change) = (plan.relation, plan.change)
+        // The empty fields are answered here rather than after a round trip, so
+        // that they appear as the field empties. Everything else is the core's.
+        let missing =
+            switch change {
+            case .add(let column)
+            where column.name.trimmingCharacters(in: .whitespaces).isEmpty:
+                "A column needs a name."
+            case .rename(_, let to) where to.trimmingCharacters(in: .whitespaces).isEmpty:
+                "A rename needs a new name."
+            default: String?.none
+            }
+        if let missing {
+            columnPlan?.written = ColumnChangePlan.Written(
+                change: change, text: nil, refusal: missing)
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(
+                    try db.columnChangeSQL(
+                        schema: relation.schema, relation: relation.name, change: change))
+            } catch {
+                // Caught rather than thrown, as the sheets beside this catch: a
+                // change this relation cannot take belongs on the sheet.
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            guard columnPlan?.relation == relation else { return }
+            columnPlan?.written =
+                switch answer {
+                case .success(let statement):
+                    ColumnChangePlan.Written(change: change, text: statement, refusal: nil)
+                case .failure(let error):
+                    ColumnChangePlan.Written(
+                        change: change, text: nil, refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var columnChangeObstacle: String? {
+        guard let plan = columnPlan else { return "Nothing to change." }
+        if let refusal = plan.refusal { return refusal }
+        guard let statement = plan.statement, !statement.isEmpty else { return "Writing it…" }
+        // A rename to the name it already has: some servers take it and do
+        // nothing, which is worse than a refusal because it looks like it worked.
+        if case .rename(let name, let to) = plan.change, name == to {
+            return "That is the name it already has."
+        }
+        return nil
+    }
+
+    /// Runs the statement the sheet has been showing, then reads the columns back.
+    func applyColumnChange() {
+        guard let plan = columnPlan, let statement = plan.statement, columnChangeObstacle == nil
+        else {
+            return
+        }
+        columnPlan = nil
+        let (relation, change) = (plan.relation, plan.change)
+        isBusy = true
+        status = "\(change.progressive) \(plan.qualified).\(change.columnName)…"
+        errorMessage = nil
+        run { db -> ChangedColumns in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained: a column an index or a key depends on is refused while
+            // the statement executes rather than while it is accepted.
+            while try query.nextBatch() != nil {}
+            db.forgetNames()
+            // Both, for the reason `loadColumns` reads both: dropping or renaming
+            // a key column changes which columns name one row, and a pane
+            // holding the old answer would offer to edit rows it can no longer
+            // address.
+            return ChangedColumns(
+                affected: query.rowsAffected ?? 0,
+                columns: try db.columns(schema: relation.schema, relation: relation.name),
+                identity: try db.rowIdentity(schema: relation.schema, relation: relation.name))
+        } then: { [self] changed in
+            isBusy = false
+            // Only if the window is still on the relation that changed. These two
+            // properties belong to whatever is selected, and a sheet can outlive
+            // the selection that opened it.
+            if selected == relation {
+                columns = changed.columns
+                rowIdentity = changed.identity
+            }
+            history.record(
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+            status = "\(change.pastTense) \(plan.qualified).\(change.columnName)"
+            // The grid is over columns that just moved, so whatever it is showing
+            // is a row shape the server no longer has.
+            refreshTransaction()
+        }
+    }
+
+    /// A relation's columns as they are after a change to one of them.
+    private struct ChangedColumns: Sendable {
+        let affected: Int
+        let columns: [ColumnInfo]
+        let identity: RowIdentity?
+    }
+
     // MARK: - Making a table
 
     /// Whether this connection can be asked to make a table.

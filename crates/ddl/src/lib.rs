@@ -390,9 +390,6 @@ pub(crate) fn new_table_text(
     }
     let mut body = Vec::new();
     for (index, column) in columns.iter().enumerate() {
-        if column.name.is_empty() {
-            return Err(DbError::new("a column needs a name"));
-        }
         // Exact match rather than case-insensitive, because the servers disagree
         // about that and this crate has no business deciding it: `Qty` and `qty`
         // are two columns on PostgreSQL and one on MySQL. What is caught here is
@@ -407,29 +404,10 @@ pub(crate) fn new_table_text(
                 column.name
             )));
         }
-        if column.primary_key && column.nullable {
-            return Err(DbError::new(format!(
-                "{} is part of the primary key, which cannot hold a null",
-                column.name
-            )));
-        }
-
-        let kind = word(column.kind);
-        let mut declaration = format!(
-            "    {} {}",
-            dialect.quote(&column.name),
-            match (nulls, column.nullable) {
-                (NullStyle::Wrapped, true) => format!("Nullable({kind})"),
-                _ => kind,
-            }
-        );
-        if let Some(default) = &column.default {
-            declaration.push_str(&format!(" DEFAULT {default}"));
-        }
-        if nulls == NullStyle::Suffix && !column.nullable {
-            declaration.push_str(" NOT NULL");
-        }
-        body.push(declaration);
+        body.push(format!(
+            "    {}",
+            column_declaration(dialect, column, &word, nulls)?
+        ));
     }
 
     let key: Vec<String> = columns
@@ -446,6 +424,133 @@ pub(crate) fn new_table_text(
         "CREATE TABLE {table} (\n{}\n){suffix}",
         body.join(",\n")
     ));
+    Ok(script.finish())
+}
+
+/// One column as a statement declares it: name, type, default, nullability.
+///
+/// Shared by the two statements that declare a column — the `CREATE TABLE` that
+/// makes a table and the `ALTER TABLE … ADD COLUMN` that puts one into a table
+/// already there — because the servers spell those two the same way. Splitting
+/// them would be two places for `DEFAULT` and `NOT NULL` to end up in a
+/// different order.
+///
+/// The clause order is type, `DEFAULT`, then nullability, which is
+/// `PostgreTableColumnManager.getSupportedModifiers` and is also what
+/// [`postgres::column`] writes for a column that already exists. It reads
+/// backwards — `qty bigint DEFAULT 1 NOT NULL` — and it is upstream's order, and
+/// every server here takes column constraints in any order.
+pub(crate) fn column_declaration(
+    dialect: &'static Dialect,
+    column: &NewColumn,
+    word: impl Fn(ColumnKind) -> String,
+    nulls: NullStyle,
+) -> DbResult<String> {
+    if column.name.is_empty() {
+        return Err(DbError::new("a column needs a name"));
+    }
+    if column.primary_key && column.nullable {
+        return Err(DbError::new(format!(
+            "{} is part of the primary key, which cannot hold a null",
+            column.name
+        )));
+    }
+    let kind = word(column.kind);
+    let mut declaration = format!(
+        "{} {}",
+        dialect.quote(&column.name),
+        match (nulls, column.nullable) {
+            (NullStyle::Wrapped, true) => format!("Nullable({kind})"),
+            _ => kind,
+        }
+    );
+    if let Some(default) = &column.default {
+        declaration.push_str(&format!(" DEFAULT {default}"));
+    }
+    if nulls == NullStyle::Suffix && !column.nullable {
+        declaration.push_str(" NOT NULL");
+    }
+    Ok(declaration)
+}
+
+/// What to do to a column of a table that already exists.
+///
+/// Three verbs and not six. Changing a column's *type*, its nullability or its
+/// default is the same family of statement on paper and a different one on every
+/// server — PostgreSQL writes one `ALTER COLUMN` per property changed, MySQL
+/// writes a single `MODIFY COLUMN` carrying the whole declaration back, SQL
+/// Server splits it again — and those three are left out of this enum
+/// deliberately rather than folded in. What is here is what the servers agree
+/// about: a column is added, dropped, or given another name.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColumnChange<'a> {
+    /// Put a new column into the table.
+    ///
+    /// The same [`NewColumn`] the Create Table form fills in, because it is the
+    /// same five answers. `primary_key` is refused: a key is a statement about
+    /// the table rather than about one column, and a table that already has rows
+    /// cannot take a new key column at all.
+    Add(&'a NewColumn),
+    /// Remove the column and everything in it.
+    Drop { name: &'a str },
+    /// Give it another name, leaving everything else about it alone.
+    Rename { name: &'a str, to: &'a str },
+}
+
+/// `ALTER <noun> <table> …` for one column change, which is the shape all three
+/// verbs share.
+///
+/// `noun` is the relation's own word — `TABLE` on most of these and
+/// `FOREIGN TABLE` on one of PostgreSQL's — because every one of these
+/// statements opens with it. Which relations have a noun at all is the
+/// renderer's to decide before calling this: a view's columns come from its
+/// query and there is no statement that alters one.
+///
+/// `ADD COLUMN` and not the bare `ADD` upstream's PostgreSQL manager writes.
+/// The keyword is optional in every grammar here and upstream varies it on a
+/// per-driver flag whose only effect is whether it appears; written the same way
+/// everywhere so that a reader comparing two of these files finds one word.
+pub(crate) fn column_change_text(
+    dialect: &'static Dialect,
+    noun: &str,
+    table: &str,
+    change: ColumnChange<'_>,
+    word: impl Fn(ColumnKind) -> String,
+    nulls: NullStyle,
+) -> DbResult<String> {
+    let clause = match change {
+        ColumnChange::Add(column) => {
+            if column.primary_key {
+                return Err(DbError::new(format!(
+                    "{} cannot be added as part of the primary key: a key is a rule about the \
+                     whole table, and a table with rows in it has no room for another",
+                    column.name
+                )));
+            }
+            format!(
+                "ADD COLUMN {}",
+                column_declaration(dialect, column, word, nulls)?
+            )
+        }
+        ColumnChange::Drop { name } => {
+            if name.is_empty() {
+                return Err(DbError::new("a column needs a name"));
+            }
+            format!("DROP COLUMN {}", dialect.quote(name))
+        }
+        ColumnChange::Rename { name, to } => {
+            if name.is_empty() || to.is_empty() {
+                return Err(DbError::new("a rename needs a name at both ends"));
+            }
+            format!(
+                "RENAME COLUMN {} TO {}",
+                dialect.quote(name),
+                dialect.quote(to)
+            )
+        }
+    };
+    let mut script = Script::new();
+    script.statement(&format!("ALTER {noun} {table} {clause}"));
     Ok(script.finish())
 }
 
@@ -513,6 +618,27 @@ pub trait Renderer: Send + Sync {
     /// making the wrong object on half of these servers.
     fn database_change(&self, change: DatabaseChange<'_>) -> DbResult<String>;
 
+    /// The statement for one change to a column of a relation that is there.
+    ///
+    /// No default, for the reason `table_change` has none. A refusal here is per
+    /// relation as well as per database: no server alters a view's columns,
+    /// those coming from the query the view is, and the front end shows the
+    /// refusal where it would have shown the statement.
+    fn column_change(&self, relation: &RelationInfo, change: ColumnChange<'_>) -> DbResult<String>;
+
+    /// Whether this renderer writes any [`ColumnChange`] at all.
+    ///
+    /// Asked separately from `column_change` for the reason `changes_relations`
+    /// is asked separately from `table_change`: the Structure tab draws its
+    /// column controls before anybody has chosen a column for them to act on.
+    ///
+    /// Its own flag rather than a second reading of `changes_relations`, though
+    /// the two answer alike today. They are not one question: upstream itself
+    /// writes SQLite's `DROP TABLE` and refuses its column drop outright,
+    /// recreating the table instead — so a build that read one flag for both
+    /// would be asserting something upstream does not.
+    fn changes_columns(&self) -> bool;
+
     /// Whether this renderer writes either [`DatabaseChange`].
     ///
     /// Separate from `changes_relations` and not implied by it. SQLite is the
@@ -567,6 +693,29 @@ pub fn database_change(dialect: &'static Dialect, change: DatabaseChange<'_>) ->
 /// database row's Drop item exist at all.
 pub fn changes_databases(dialect: &'static Dialect) -> bool {
     for_dialect(dialect).is_some_and(|renderer| renderer.changes_databases())
+}
+
+/// The statement that would make `change` to a column of `relation`, in the SQL
+/// `dialect` writes.
+///
+/// Rendered and handed back rather than run, like [`table_change`]. A drop is
+/// irreversible and a rename breaks everything that names the column, so both
+/// are worth reading before they go.
+pub fn column_change(
+    dialect: &'static Dialect,
+    relation: &RelationInfo,
+    change: ColumnChange<'_>,
+) -> DbResult<String> {
+    render(dialect, |renderer| renderer.column_change(relation, change))
+}
+
+/// Whether this build writes any change to a column on `dialect`.
+///
+/// What the Structure tab reads to decide whether its column controls exist.
+/// Which change a *particular* column can take is the narrower question, and
+/// [`column_change`] answers that one where the statement would have been.
+pub fn changes_columns(dialect: &'static Dialect) -> bool {
+    for_dialect(dialect).is_some_and(|renderer| renderer.changes_columns())
 }
 
 /// Whether this build writes any change to a relation on `dialect`.
@@ -652,7 +801,7 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnKind, DatabaseChange, NewColumn, TableChange};
+    use super::{ColumnChange, ColumnKind, DatabaseChange, NewColumn, TableChange};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use dbconn::{RelationInfo, RelationKind};
     use dbsql::Dialect;
@@ -1323,6 +1472,227 @@ ORDER BY tuple();"
         )
         .expect("MySQL makes a database");
         assert_eq!(awkward.trim_end(), "CREATE SCHEMA `wei``rd order`;");
+    }
+
+    /// Each column change written out in full, for each database that writes it.
+    ///
+    /// Strings and not a rule, for the reason the two tests above are written
+    /// that way. What differs between these three is smaller than it looks and
+    /// more dangerous for being small: one noun, one optional keyword, and — on
+    /// MySQL — a whole clause upstream writes that this deliberately does not.
+    #[test]
+    fn a_column_change_is_spelled_the_way_the_server_being_changed_reads_it() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let note = column("note", ColumnKind::Text, true);
+        let cases: &[(&Dialect, ColumnChange, &str)] = &[
+            (
+                &dbsql::POSTGRES,
+                ColumnChange::Add(&note),
+                "ALTER TABLE staging.orders ADD COLUMN note text;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                ColumnChange::Drop { name: "note" },
+                "ALTER TABLE staging.orders DROP COLUMN note;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                ColumnChange::Rename {
+                    name: "note",
+                    to: "Comment",
+                },
+                "ALTER TABLE staging.orders RENAME COLUMN note TO \"Comment\";",
+            ),
+            (
+                &dbsql::MYSQL,
+                ColumnChange::Add(&note),
+                "ALTER TABLE staging.orders ADD COLUMN note TEXT;",
+            ),
+            (
+                &dbsql::MYSQL,
+                ColumnChange::Drop { name: "note" },
+                "ALTER TABLE staging.orders DROP COLUMN note;",
+            ),
+            // `RENAME COLUMN` and not upstream's `CHANGE note note TEXT`, which
+            // restates a declaration this build cannot restate in full.
+            (
+                &dbsql::MYSQL,
+                ColumnChange::Rename {
+                    name: "note",
+                    to: "Comment",
+                },
+                "ALTER TABLE staging.orders RENAME COLUMN note TO `Comment`;",
+            ),
+            (
+                &dbsql::SQLITE,
+                ColumnChange::Add(&note),
+                "ALTER TABLE staging.orders ADD COLUMN note TEXT;",
+            ),
+            // Written where upstream throws and recreates the table instead.
+            (
+                &dbsql::SQLITE,
+                ColumnChange::Drop { name: "note" },
+                "ALTER TABLE staging.orders DROP COLUMN note;",
+            ),
+            (
+                &dbsql::SQLITE,
+                ColumnChange::Rename {
+                    name: "note",
+                    to: "Comment",
+                },
+                "ALTER TABLE staging.orders RENAME COLUMN note TO \"Comment\";",
+            ),
+        ];
+        for (dialect, change, expected) in cases {
+            let statement = super::column_change(dialect, &orders, *change)
+                .unwrap_or_else(|e| panic!("{} refused {change:?}: {e}", dialect.name));
+            assert_eq!(
+                statement, *expected,
+                "{} wrote the wrong statement for {change:?}",
+                dialect.name
+            );
+        }
+
+        // A column added with everything a form can say about it, which is the
+        // one arm that shares its text with `CREATE TABLE`.
+        let stamped = super::column_change(
+            &dbsql::POSTGRES,
+            &orders,
+            ColumnChange::Add(&column_with(
+                "seen_at",
+                ColumnKind::Timestamp,
+                false,
+                Some("now()"),
+                false,
+            )),
+        )
+        .expect("PostgreSQL adds a column");
+        assert_eq!(
+            stamped,
+            "ALTER TABLE staging.orders ADD COLUMN seen_at timestamp DEFAULT now() NOT NULL;"
+        );
+
+        // PostgreSQL's own noun, which is the half of this statement that is not
+        // shared: a foreign table is altered as a foreign table.
+        let foreign = super::column_change(
+            &dbsql::POSTGRES,
+            &relation("staging", "remote", RelationKind::ForeignTable),
+            ColumnChange::Drop { name: "note" },
+        )
+        .expect("PostgreSQL drops a foreign table's column");
+        assert_eq!(
+            foreign,
+            "ALTER FOREIGN TABLE staging.remote DROP COLUMN note;"
+        );
+    }
+
+    /// A view's columns are its query's, and no server alters one.
+    ///
+    /// Refused per relation rather than per database, which is the distinction
+    /// `table_change` already draws: the front end draws its controls from
+    /// `changes_columns` and reads this refusal where the statement would have
+    /// been. All three that write these statements have to agree, because a
+    /// build where one of them wrote `ALTER VIEW … DROP COLUMN` would be one
+    /// that composed a statement no server has.
+    #[test]
+    fn no_database_alters_the_columns_of_a_view() {
+        let view = relation("staging", "summary", RelationKind::View);
+        for dialect in [&dbsql::POSTGRES, &dbsql::MYSQL, &dbsql::SQLITE] {
+            let error = super::column_change(dialect, &view, ColumnChange::Drop { name: "note" })
+                .unwrap_err();
+            assert!(
+                !error.to_string().contains("yet"),
+                "{}: a view is not a later release, it is a view: {error}",
+                dialect.name
+            );
+        }
+    }
+
+    /// The three answers no column change should be written for.
+    #[test]
+    fn a_column_change_that_contradicts_itself_is_refused_rather_than_sent() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let keyed = column_with("id", ColumnKind::Int, false, None, true);
+        let unnamed = column("", ColumnKind::Text, true);
+        let cases: &[(&str, ColumnChange)] = &[
+            // A key is a rule about the whole table, and a table with rows in it
+            // has no room for another — so the checkbox the Create Table form
+            // offers is not offered here, and the core says so if it arrives.
+            ("primary key", ColumnChange::Add(&keyed)),
+            ("a column needs a name", ColumnChange::Add(&unnamed)),
+            ("a column needs a name", ColumnChange::Drop { name: "" }),
+            (
+                "both ends",
+                ColumnChange::Rename {
+                    name: "note",
+                    to: "",
+                },
+            ),
+            (
+                "both ends",
+                ColumnChange::Rename {
+                    name: "",
+                    to: "note",
+                },
+            ),
+        ];
+        for (expected, change) in cases {
+            let error = super::column_change(&dbsql::POSTGRES, &orders, *change)
+                .expect_err("a statement was written for {change:?}");
+            assert!(
+                error.to_string().contains(expected),
+                "{change:?}: wanted {expected:?}, got {error}"
+            );
+        }
+    }
+
+    /// `changes_columns` and `column_change` say the same thing.
+    ///
+    /// The third of these, and its own test rather than a branch inside the
+    /// others: the three capabilities are deliberately independent, and a check
+    /// that asserted them together would be the drift it exists to catch.
+    ///
+    /// Asked with a drop from an ordinary table, which is the change every
+    /// renderer that writes any of the three writes — the narrower refusals are
+    /// about a particular relation, and `changes_columns` is not.
+    #[test]
+    fn a_renderer_that_claims_column_changes_writes_one() {
+        let table = relation("s", "t", RelationKind::Table);
+        for dialect in dbsql::ALL {
+            let Some(renderer) = super::for_dialect(dialect) else {
+                continue;
+            };
+            let written = renderer
+                .column_change(&table, ColumnChange::Drop { name: "c" })
+                .is_ok();
+            assert_eq!(
+                renderer.changes_columns(),
+                written,
+                "{} says it {} change a column and {} write the statement",
+                dialect.name,
+                if renderer.changes_columns() {
+                    "can"
+                } else {
+                    "cannot"
+                },
+                if written { "does" } else { "does not" }
+            );
+            assert_eq!(
+                super::changes_columns(dialect),
+                written,
+                "{} answers differently through the crate's own entry point",
+                dialect.name
+            );
+        }
+
+        // The three that are not lit say so by name and say "yet", which is the
+        // distinction every refusal in this crate draws: these servers all have
+        // the statements, and nobody has read the Java for them.
+        for dialect in [&dbsql::CLICKHOUSE, &dbsql::MSSQL, &dbsql::DUCKDB] {
+            let error = super::column_change(dialect, &table, ColumnChange::Drop { name: "c" })
+                .expect_err("a statement was written for an unlit database");
+            assert!(error.to_string().contains("yet"), "{error}");
+        }
     }
 
     /// `changes_databases` and `database_change` say the same thing.

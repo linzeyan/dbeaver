@@ -18,7 +18,8 @@
 //! aggregates them in.
 
 use crate::{
-    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
+    new_table_text,
 };
 use async_trait::async_trait;
 use dbconn::{
@@ -68,6 +69,26 @@ impl Renderer for MsSql {
 
     /// None are written, so the items are not drawn at all.
     fn changes_relations(&self) -> bool {
+        false
+    }
+
+    /// None of the three yet, for the reason the relation changes are not:
+    /// upstream is the specification and the families are lit one at a time. The
+    /// statements exist on this server — a column here is added, dropped and
+    /// renamed like anywhere else — so this is a refusal about what has been
+    /// written rather than about what SQL Server can do.
+    fn column_change(
+        &self,
+        _relation: &RelationInfo,
+        _change: ColumnChange<'_>,
+    ) -> DbResult<String> {
+        Err(DbError::new(
+            "changing a column has not been written for SQL Server yet",
+        ))
+    }
+
+    /// None are written, so the controls are not drawn at all.
+    fn changes_columns(&self) -> bool {
         false
     }
 

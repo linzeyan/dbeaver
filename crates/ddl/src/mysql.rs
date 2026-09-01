@@ -27,7 +27,8 @@
 //!   parameter belongs to a driver descriptor this rewrite has no equivalent of.
 
 use crate::{
-    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
+    new_table_text,
 };
 use arrow::array::{Array, StringArray};
 use async_trait::async_trait;
@@ -120,6 +121,50 @@ impl Renderer for Mysql {
 
     /// All three are written above.
     fn changes_relations(&self) -> bool {
+        true
+    }
+
+    /// All three, and the rename is a deliberate departure from upstream.
+    ///
+    /// `MySQLTableColumnManager.addObjectRenameActions` writes
+    /// `ALTER TABLE t CHANGE <old> <the whole declaration again>`, which is how
+    /// MySQL renamed a column before 8.0 and the only way it could. Rebuilding
+    /// that declaration means restating everything about the column, and
+    /// `ColumnInfo` does not carry everything: no character set, no collation,
+    /// no `AUTO_INCREMENT`, no comment. A `CHANGE` written from what this build
+    /// knows would rename the column and quietly strip whatever it did not —
+    /// an `AUTO_INCREMENT` primary key would stop generating keys. `RENAME
+    /// COLUMN` changes the name and touches nothing else, and MySQL has had it
+    /// since 8.0.
+    ///
+    /// The same divergence in kind as `table_change`'s materialized-view drop:
+    /// upstream's statement is one this build cannot write correctly, so the
+    /// smaller statement that does only what was asked is the one written.
+    fn column_change(&self, relation: &RelationInfo, change: ColumnChange<'_>) -> DbResult<String> {
+        let name = qualified(&relation.schema, &relation.name);
+        match relation.kind {
+            RelationKind::Table | RelationKind::PartitionedTable => {}
+            // MySQL refuses `ALTER TABLE` on a view outright, and there is no
+            // `ALTER VIEW … COLUMN`: a view's columns are its query's.
+            kind => {
+                return Err(DbError::new(format!(
+                    "{name} is a {kind:?}, and its columns come from its query rather than \
+                     from a definition that can be altered"
+                )));
+            }
+        }
+        crate::column_change_text(
+            &dbsql::MYSQL,
+            "TABLE",
+            &name,
+            change,
+            word,
+            NullStyle::Suffix,
+        )
+    }
+
+    /// All three are written above.
+    fn changes_columns(&self) -> bool {
         true
     }
 

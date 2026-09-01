@@ -230,7 +230,8 @@ enum DatabaseChangeChecks {
             // flag rather than on this one.
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
-            changesRelations: changesRelations, changesDatabases: changesDatabases)
+            changesRelations: changesRelations, changesColumns: false,
+            changesDatabases: changesDatabases)
     }
 
     /// A model with no connection, built the way `VariablesChecks` builds its

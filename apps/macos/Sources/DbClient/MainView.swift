@@ -114,6 +114,7 @@ struct MainView: View {
         .sheet(isPresented: $model.isRelationChangeSheetOpen) { RelationChangeSheet(model: model) }
         .sheet(isPresented: $model.isDatabaseChangeSheetOpen) { DatabaseChangeSheet(model: model) }
         .sheet(isPresented: $model.isNewTableSheetOpen) { NewTableSheet(model: model) }
+        .sheet(isPresented: $model.isColumnChangeSheetOpen) { ColumnChangeSheet(model: model) }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
@@ -1499,12 +1500,51 @@ struct StructurePane: View {
             }
         }
         .structureTableSurface()
+        // The three column changes, on the rows they act on. A right-click on
+        // nothing still offers Add: a column that does not exist yet has no row
+        // to click, which is the same reason New Database lives in a menu.
+        .contextMenu(forSelectionType: ColumnInfo.ID.self) { positions in
+            columnMenu(for: positions)
+        }
         // A focus target so this pane has somewhere for focus to be.
         // Clearing focus is not enough — SwiftUI then falls back to the
         // only text field on screen, which is the sidebar's filter, and the
         // tab opens with a ring on a control in a different pane.
         .focusable()
         .focused($focus, equals: .structureTable)
+    }
+
+    /// Add, and — on a row — rename and drop.
+    ///
+    /// Nothing is drawn where the core writes no statement for this database,
+    /// rather than drawn and refusing whichever is clicked: the rule the
+    /// navigator's own row menu follows, and the reason `changesColumns` is a
+    /// capability rather than something worked out per click.
+    @ViewBuilder
+    private func columnMenu(for positions: Set<ColumnInfo.ID>) -> some View {
+        if model.changesColumns, let relation = model.selected {
+            Button(ColumnChange.add(NewTableColumn()).menuTitle) {
+                model.prepareColumnChange(.add(NewTableColumn()), of: relation)
+            }
+            // One row only. Two of these statements name a single column and the
+            // third carries one, so a menu acting on several would be several
+            // statements — and the sheet shows one.
+            if positions.count == 1,
+                let column = model.columns.first(where: { positions.contains($0.id) })
+            {
+                Divider()
+                Button(ColumnChange.rename(name: column.name, to: column.name).menuTitle) {
+                    // Opens with the name it already has, so the field says what
+                    // is being changed from and the button waits for a different
+                    // one. The rule the relation rename sheet follows.
+                    model.prepareColumnChange(
+                        .rename(name: column.name, to: column.name), of: relation)
+                }
+                Button(ColumnChange.drop(name: column.name).menuTitle) {
+                    model.prepareColumnChange(.drop(name: column.name), of: relation)
+                }
+            }
+        }
     }
 
     /// The engine's own description of the relation, label beside value.
