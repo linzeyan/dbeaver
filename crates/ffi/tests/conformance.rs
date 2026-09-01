@@ -44,10 +44,10 @@ use std::time::Duration;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
-    db_cancel, db_columns_json, db_complete_json, db_connect, db_constraints_json,
-    db_create_table_sql, db_cursor, db_cursor_cancel, db_cursor_close, db_cursor_free,
-    db_cursor_next, db_cursor_schema, db_database_change_sql, db_databases_json, db_ddl_text,
-    db_definition_json, db_edit_sql_json, db_end_process, db_export, db_export_sql,
+    db_cancel, db_column_change_sql, db_columns_json, db_complete_json, db_connect,
+    db_constraints_json, db_create_table_sql, db_cursor, db_cursor_cancel, db_cursor_close,
+    db_cursor_free, db_cursor_next, db_cursor_schema, db_database_change_sql, db_databases_json,
+    db_ddl_text, db_definition_json, db_edit_sql_json, db_end_process, db_export, db_export_sql,
     db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
     db_import_start, db_import_step, db_indexes_json, db_names_forget, db_new_table_sql,
     db_processes_json, db_query, db_query_free, db_query_next, db_query_rows_affected,
@@ -2513,6 +2513,169 @@ fn a_table_described_column_by_column_is_composed_or_refused_by_name() {
 
     unsafe { db_free(handle) };
     let _ = std::fs::remove_file(&path);
+}
+
+/// A column is added, renamed and dropped, and the server is asked each time.
+///
+/// Asked on SQLite, which needs no server and can therefore *run* what this
+/// composes. Each statement is checked against the table it changed rather than
+/// against its own text: a column added is one a row can be put in, a column
+/// renamed is one the old name no longer finds, a column dropped is one that is
+/// not there. That is the only thing that says these are statements.
+///
+/// SQLite's drop is also the one this build writes where upstream refuses and
+/// recreates the whole table instead, so running it is what says the departure
+/// works.
+#[test]
+fn a_column_change_is_composed_and_runs_or_is_refused_by_name() {
+    let path = std::env::temp_dir().join("dbffi-column-change.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+    ran(handle, "CREATE TABLE main.invoice (id INTEGER)");
+    ran(
+        handle,
+        "CREATE VIEW main.paid AS SELECT id FROM main.invoice",
+    );
+
+    let compose = |relation: &str, change: &str| {
+        let schema = CString::new("main").unwrap();
+        let relation = CString::new(relation).unwrap();
+        let change = CString::new(change).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_column_change_sql(
+                handle,
+                schema.as_ptr(),
+                relation.as_ptr(),
+                change.as_ptr(),
+                &mut err,
+            )
+        };
+        if raw.is_null() {
+            return Err(complaint(&mut err));
+        }
+        assert!(err.is_null(), "a written statement must not also set err");
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        Ok(text)
+    };
+
+    let added = compose(
+        "invoice",
+        r#"{"change":"add","column":{"name":"note","kind":"text","nullable":false,
+            "default":"'none'","primary_key":false}}"#,
+    )
+    .expect("SQLite adds a column");
+    ran(handle, &added);
+    // The default went with it, which is the half of the declaration a bare
+    // `ADD COLUMN note TEXT` would have dropped on the floor.
+    ran(handle, "INSERT INTO main.invoice (id) VALUES (1)");
+    assert_eq!(
+        ran(handle, "SELECT 1 FROM main.invoice WHERE note = 'none'"),
+        1,
+        "the column this added is the one the default filled"
+    );
+
+    // Asked of the catalog and not by selecting the column, because SQLite reads
+    // a double-quoted name that resolves to nothing as a *string literal*:
+    // `SELECT "Note Text" FROM invoice` succeeds whether or not the column is
+    // there, which makes it no evidence at all.
+    let listed = |column: &str| {
+        ran(
+            handle,
+            &format!("SELECT 1 FROM pragma_table_info('invoice') WHERE name = '{column}'"),
+        )
+    };
+
+    let renamed = compose(
+        "invoice",
+        r#"{"change":"rename","name":"note","to":"Note Text"}"#,
+    )
+    .expect("SQLite renames a column");
+    ran(handle, &renamed);
+    assert_eq!(listed("Note Text"), 1, "the new name is in the catalog");
+    assert_eq!(listed("note"), 0, "and the old one is not");
+    assert_eq!(
+        ran(
+            handle,
+            "SELECT 1 FROM main.invoice WHERE \"Note Text\" = 'none'"
+        ),
+        1,
+        "and the row that was in it is still in it, a rename moving nothing"
+    );
+
+    let dropped = compose("invoice", r#"{"change":"drop","name":"Note Text"}"#)
+        .expect("SQLite drops a column");
+    ran(handle, &dropped);
+    assert_eq!(listed("Note Text"), 0, "the dropped column is gone");
+    assert_eq!(listed("id"), 1, "and the one beside it is not");
+
+    // A view's columns are its query's, and the refusal says that rather than
+    // promising a later release.
+    let why = compose("paid", r#"{"change":"drop","name":"id"}"#)
+        .expect_err("a view's column was altered");
+    assert!(!why.contains("yet"), "got {why}");
+
+    // A key is a rule about the whole table, so the checkbox the Create Table
+    // form offers is refused here.
+    let why = compose(
+        "invoice",
+        r#"{"change":"add","column":{"name":"k","kind":"int","nullable":false,
+            "default":null,"primary_key":true}}"#,
+    )
+    .expect_err("a key column was added to a table that exists");
+    assert!(why.contains("key"), "got {why}");
+
+    // A verb this build does not have must not fall through to one it does.
+    // `alter` is the tempting one, being the word the statement opens with.
+    for change in [
+        r#"{"change":"alter","name":"id"}"#,
+        r#"{"change":"drop"}"#,
+        r#"{"name":"id"}"#,
+        "",
+    ] {
+        let why = compose("invoice", change).expect_err("there is no such change");
+        assert!(!why.is_empty(), "the refusal must say something");
+    }
+
+    // A relation that is not there is not a change with an empty statement.
+    let why = compose(
+        "no_such_relation_anywhere",
+        r#"{"change":"drop","name":"id"}"#,
+    )
+    .expect_err("a column was dropped from a table nobody has");
+    assert!(why.contains("no_such_relation_anywhere"), "got {why}");
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The arguments this call refuses to read at all.
+#[test]
+fn the_column_change_call_says_why_it_could_not_read_its_arguments() {
+    let public = CString::new("public").unwrap();
+    let change = CString::new(r#"{"change":"drop","name":"id"}"#).unwrap();
+    let invalid = CString::new(vec![b'p', b'u', b'b', 0xff, 0xfe]).unwrap();
+    for (schema, relation, requested) in [
+        (public.as_ptr(), public.as_ptr(), change.as_ptr()),
+        (ptr::null(), public.as_ptr(), change.as_ptr()),
+        (public.as_ptr(), ptr::null(), change.as_ptr()),
+        (public.as_ptr(), public.as_ptr(), ptr::null()),
+        (invalid.as_ptr(), public.as_ptr(), change.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw =
+            unsafe { db_column_change_sql(ptr::null_mut(), schema, relation, requested, &mut err) };
+        assert!(raw.is_null());
+        assert!(
+            !err.is_null(),
+            "db_column_change_sql must say why it refused"
+        );
+        unsafe { db_string_free(err) };
+    }
 }
 
 /// The arguments this call refuses to read at all.

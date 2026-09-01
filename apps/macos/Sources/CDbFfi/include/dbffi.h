@@ -440,6 +440,38 @@ char* db_database_change_sql(DbHandle* handle, const char* change, const char* n
 char* db_new_table_sql(DbHandle* handle, const char* schema, const char* name,
                        const char* columns, char** err);
 
+// The statement for one change to a column of a relation that is there — released
+// with db_string_free, written rather than run like the calls above it.
+//
+// `change` is tagged JSON, one of:
+//
+//   {"change": "add", "column": {"name": …, "kind": …, "nullable": …,
+//                                "default": …, "primary_key": false}}
+//   {"change": "drop", "name": …}
+//   {"change": "rename", "name": …, "to": …}
+//
+// Tagged rather than positional, unlike db_table_change_sql's verb-and-name pair,
+// because one of the three carries a whole column. The column being added is the
+// shape db_new_table_sql reads, being the same five answers; `primary_key` is
+// refused, a key being a rule about the whole table rather than about one column,
+// and a table with rows in it having no room for another. A tag this library does
+// not know is refused rather than falling through to a verb it does.
+//
+// Three verbs and not six. Changing a column's type, its nullability or its
+// default is one family of statement on paper and a different one on every server
+// — PostgreSQL writes one ALTER COLUMN per property, MySQL a single MODIFY COLUMN
+// carrying the whole declaration back — and those are left out rather than folded
+// in. What is here is what the servers agree about.
+//
+// The relation's kind is read here, like db_table_change_sql reads it: no server
+// alters a view's columns, those being the columns its query selects.
+//
+// Whether this connection writes any of the three at all is db_capabilities_json's
+// changes_columns, which is not implied by changes_relations — DBeaver itself
+// writes SQLite's DROP TABLE and refuses its column drop, recreating the table.
+char* db_column_change_sql(DbHandle* handle, const char* schema, const char* relation,
+                           const char* change, char** err);
+
 // The statement that reads one relation's rows, as plain text — released with
 // db_string_free, and written rather than run, like db_edit_sql_json.
 //

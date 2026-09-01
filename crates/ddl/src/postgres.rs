@@ -19,7 +19,8 @@
 //! produce a shape nobody reads.
 
 use crate::{
-    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
+    new_table_text,
 };
 use async_trait::async_trait;
 use dbconn::{
@@ -120,6 +121,50 @@ impl Renderer for Postgres {
 
     /// All three are written above.
     fn changes_relations(&self) -> bool {
+        true
+    }
+
+    /// All three, with PostgreSQL's own noun and only for relations that store
+    /// their own columns.
+    ///
+    /// `PostgreTableColumnManager` writes `ALTER <noun> <table> ADD <decl>`,
+    /// `… DROP COLUMN <name>` (the shared manager's) and
+    /// `… RENAME COLUMN <old> TO <new>`, all three opening with
+    /// `getTableTypeName` — the same noun `table_change` above writes, and for
+    /// the same reason.
+    ///
+    /// A view is refused. `ALTER VIEW` has no column clause at all: a view's
+    /// columns are the columns its query selects, and the statement that changes
+    /// one is a `CREATE OR REPLACE VIEW`. Upstream reaches the same place by a
+    /// longer road — its manager is registered for `PostgreTableColumn`, which a
+    /// view's attributes are not.
+    fn column_change(&self, relation: &RelationInfo, change: ColumnChange<'_>) -> DbResult<String> {
+        let name = qualified(&relation.schema, &relation.name);
+        let noun = match relation.kind {
+            // A foreign table takes all three, the columns being this server's
+            // description of what is at the other end.
+            RelationKind::Table | RelationKind::PartitionedTable | RelationKind::ForeignTable => {
+                noun_for(relation.kind)?
+            }
+            kind => {
+                return Err(DbError::new(format!(
+                    "{name} is a {kind:?}, and its columns come from its query rather than \
+                     from a definition that can be altered"
+                )));
+            }
+        };
+        crate::column_change_text(
+            &dbsql::POSTGRES,
+            noun,
+            &name,
+            change,
+            word,
+            crate::NullStyle::Suffix,
+        )
+    }
+
+    /// All three are written above.
+    fn changes_columns(&self) -> bool {
         true
     }
 

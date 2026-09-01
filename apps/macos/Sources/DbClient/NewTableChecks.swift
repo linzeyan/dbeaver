@@ -313,7 +313,7 @@ enum NewTableChecks {
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
             writesStatements: writesStatements, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
-            changesRelations: changesRelations, changesDatabases: false)
+            changesRelations: changesRelations, changesColumns: false, changesDatabases: false)
     }
 
     /// A model with no connection, built the way `DatabaseChangeChecks` builds

@@ -116,6 +116,16 @@ struct Capabilities: Codable, Hashable {
     /// the reason appears in place of the statement.
     let changesRelations: Bool
 
+    /// Whether the core writes an add, a drop or a rename for a column.
+    ///
+    /// Its own flag rather than a second reading of `changesRelations`, though
+    /// the two answer alike today. They are not one question, and upstream is
+    /// where that shows: DBeaver writes SQLite's `DROP TABLE` and refuses its
+    /// column drop outright, recreating the whole table instead. What the
+    /// Structure tab draws comes from this; what a *particular* relation will
+    /// take — no server alters a view's columns — is answered in the sheet.
+    let changesColumns: Bool
+
     /// Whether the core writes a statement that makes or drops a whole database.
     ///
     /// Not a second reading of `changesRelations`, and SQLite is what keeps them
@@ -138,7 +148,7 @@ struct Capabilities: Codable, Hashable {
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
         reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
-        changesRelations: false, changesDatabases: false)
+        changesRelations: false, changesColumns: false, changesDatabases: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -151,6 +161,7 @@ struct Capabilities: Codable, Hashable {
         case serverProcesses = "server_processes"
         case reportsVariables = "reports_variables"
         case changesRelations = "changes_relations"
+        case changesColumns = "changes_columns"
         case changesDatabases = "changes_databases"
     }
 }
@@ -414,6 +425,112 @@ struct NewTableColumn: Identifiable, Hashable, Encodable {
         let trimmed = defaultValue.trimmingCharacters(in: .whitespaces)
         try container.encode(trimmed.isEmpty ? nil : trimmed, forKey: .defaultValue)
         try container.encode(isPrimaryKey, forKey: .isPrimaryKey)
+    }
+}
+
+/// What is being done to a column of a relation that already exists.
+///
+/// Three and not six. A column's type, its nullability and its default are one
+/// family of statement on paper and a different one on every server — PostgreSQL
+/// writes an `ALTER COLUMN` per property changed, MySQL a single `MODIFY COLUMN`
+/// carrying the whole declaration back — and the core leaves them out rather
+/// than folding them in. What is here is what the servers agree about.
+///
+/// The payload rides along because two of the three need one and each needs a
+/// different one: a drop names a column, a rename names two, and an add carries
+/// the same five answers the Create Table form fills in. Encoded as the tagged
+/// JSON `db_column_change_sql` reads.
+enum ColumnChange: Hashable, Encodable {
+    /// Put a new column into the table. `isPrimaryKey` is refused by the core: a
+    /// key is a rule about the whole table, and a table with rows in it has no
+    /// room for another.
+    case add(NewTableColumn)
+    /// Remove the column and everything in it.
+    case drop(name: String)
+    /// Give it another name, leaving everything else about it alone.
+    case rename(name: String, to: String)
+
+    /// The word the core reads, and what the status line calls this.
+    var verb: String {
+        switch self {
+        case .add: return "add"
+        case .drop: return "drop"
+        case .rename: return "rename"
+        }
+    }
+
+    /// What the menu item says.
+    var menuTitle: String {
+        switch self {
+        case .add: return "Add Column…"
+        case .drop: return "Drop Column…"
+        case .rename: return "Rename Column…"
+        }
+    }
+
+    /// What the button that runs it says. No ellipsis: this one is the doing.
+    var actionTitle: String {
+        switch self {
+        case .add: return "Add"
+        case .drop: return "Drop"
+        case .rename: return "Rename"
+        }
+    }
+
+    /// What the status line says while it is happening, and afterwards. Both
+    /// spelled out rather than derived from `actionTitle`, English being what it
+    /// is — "Adding" doubles a letter and "Renamed" drops one.
+    var progressive: String {
+        switch self {
+        case .add: return "Adding"
+        case .drop: return "Dropping"
+        case .rename: return "Renaming"
+        }
+    }
+
+    var pastTense: String {
+        switch self {
+        case .add: return "Added"
+        case .drop: return "Dropped"
+        case .rename: return "Renamed"
+        }
+    }
+
+    /// Whether pressing the button loses something that cannot be got back.
+    ///
+    /// Only the drop. A rename breaks whatever names the column and does not
+    /// take the values with it, and an add takes nothing at all.
+    var isDestructive: Bool {
+        if case .drop = self { return true }
+        return false
+    }
+
+    /// The column this acts on, which the sheet puts at the top.
+    var columnName: String {
+        switch self {
+        case .add(let column): return column.name
+        case .drop(let name): return name
+        case .rename(let name, _): return name
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case change
+        case column
+        case name
+        case to
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(verb, forKey: .change)
+        switch self {
+        case .add(let column): try container.encode(column, forKey: .column)
+        case .drop(let name): try container.encode(name, forKey: .name)
+        case .rename(let name, let to):
+            try container.encode(name, forKey: .name)
+            try container.encode(to, forKey: .to)
+        }
     }
 }
 

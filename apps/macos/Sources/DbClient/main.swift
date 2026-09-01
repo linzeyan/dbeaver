@@ -78,6 +78,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
 // `--verify-relation-change`, `--verify-database-change`, `--verify-new-table`,
+// `--verify-column-change`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -145,6 +146,9 @@ if CommandLine.arguments.contains("--verify-database-change") {
 }
 if CommandLine.arguments.contains("--verify-new-table") {
     exit(MainActor.assumeIsolated { NewTableChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-column-change") {
+    exit(MainActor.assumeIsolated { ColumnChangeChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -1193,6 +1197,71 @@ func openNewTableSheet(model: AppModel, name: String) {
                         defaultValue: "0"),
                     NewTableColumn(name: "note", kind: .text)
                 ]
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--change-column add|drop:<column>|rename:<column>` opens the column sheet.
+///
+/// Exists for the reason `--change-relation` does: all three are behind a
+/// right-click on the Structure tab's column table, and a menu is a window of
+/// its own — not the one being photographed.
+let changeColumnArgument = argument("--change-column")
+
+/// Drives `--change-column`. Waits for the statement as well as the sheet.
+@MainActor
+func openColumnChangeSheet(model: AppModel, argument: String) {
+    let parts = argument.split(separator: ":", maxSplits: 1)
+    let column = parts.count == 2 ? String(parts[1]) : ""
+    let change: ColumnChange? =
+        switch parts[0] {
+        // Filled in rather than opened blank, because what a capture of the add
+        // has to show is the form deciding something: a type, a null and a
+        // default. An empty row shows the layout and none of the behaviour.
+        case "add":
+            .add(
+                NewTableColumn(
+                    name: "settled_at", kind: .timestamp, nullable: false,
+                    defaultValue: "now()"))
+        case "drop" where !column.isEmpty: .drop(name: column)
+        // Opened on the name it already has, which is the state somebody
+        // arriving at this sheet sees, then typed into.
+        case "rename" where !column.isEmpty: .rename(name: column, to: column)
+        default: nil
+        }
+    guard let change else {
+        fputs("--change-column takes add, drop:<column> or rename:<column>\n", stderr)
+        exit(2)
+    }
+
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("column change sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.columnPlan?.statement {
+            fputs("\(change.verb)\n\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("column change sheet timed out\n", stderr)
+            exit(1)
+        }
+        if !asked, model.changesColumns, let relation = model.selected {
+            asked = true
+            model.prepareColumnChange(change, of: relation)
+            // A rename that opens on the current name is refused by design, so
+            // the capture types the change somebody would have typed.
+            if case .rename(let name, _) = change {
+                model.editColumnChange { $0 = .rename(name: name, to: "\(name)_old") }
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -4124,6 +4193,9 @@ if benchMode {
             openDatabaseChangeSheet(model: model, argument: changeDatabaseArgument)
         }
         if let newTableName { openNewTableSheet(model: model, name: newTableName) }
+        if let changeColumnArgument {
+            openColumnChangeSheet(model: model, argument: changeColumnArgument)
+        }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
 }

@@ -133,7 +133,8 @@ enum MetadataChecks {
             {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
              "reports_sequences":true,"server_processes":"interruptible",
-             "reports_variables":true,"changes_relations":true,"changes_databases":true}
+             "reports_variables":true,"changes_relations":true,"changes_columns":true,
+             "changes_databases":true}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -157,6 +158,9 @@ enum MetadataChecks {
             both?.changesRelations, true,
             "and that the core writes a drop, an empty and a rename for it")
         expect(
+            both?.changesColumns, true,
+            "and an add, a drop and a rename for one of a table's columns")
+        expect(
             both?.changesDatabases, true,
             "and a create and a drop for a whole database, which is a separate question")
 
@@ -167,7 +171,8 @@ enum MetadataChecks {
             {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
              "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,
              "reports_sequences":false,"server_processes":"unreported",
-             "reports_variables":false,"changes_relations":false,"changes_databases":false}
+             "reports_variables":false,"changes_relations":false,"changes_columns":false,
+             "changes_databases":false}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -192,6 +197,9 @@ enum MetadataChecks {
             neither?.changesRelations, false,
             "and no statement for changing a relation, so the row menu is not drawn")
         expect(
+            neither?.changesColumns, false,
+            "nor for a column, so the Structure tab draws no controls over its columns")
+        expect(
             neither?.changesDatabases, false,
             "nor for making one, so New Database is greyed")
 
@@ -203,7 +211,8 @@ enum MetadataChecks {
             {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
              "reports_sequences":true,"server_processes":"unreported",
-             "reports_variables":false,"changes_relations":false,"changes_databases":false}
+             "reports_variables":false,"changes_relations":false,"changes_columns":false,
+             "changes_databases":false}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 

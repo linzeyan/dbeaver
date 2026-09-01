@@ -469,6 +469,7 @@ pub unsafe extern "C" fn db_capabilities_json(
             driver: h.driver.capabilities(),
             writes_statements: h.dialect.is_some(),
             changes_relations: h.dialect.is_some_and(dbddl::changes_relations),
+            changes_columns: h.dialect.is_some_and(dbddl::changes_columns),
             changes_databases: h.dialect.is_some_and(dbddl::changes_databases),
         },
         err,
@@ -515,6 +516,21 @@ struct Surface {
     /// one is answered by `db_table_change_sql` in place of the statement, so
     /// the reason is read where the statement would have been shown.
     changes_relations: bool,
+
+    /// Whether `db_column_change_sql` writes anything at all for this database.
+    ///
+    /// Its own flag rather than a second reading of `changes_relations`, though
+    /// the two answer alike today. They are not one question, and upstream is
+    /// where that shows: DBeaver writes SQLite's `DROP TABLE` and refuses its
+    /// column drop outright, recreating the whole table instead. A build reading
+    /// one flag for both would be asserting something its own specification
+    /// does not.
+    ///
+    /// Whether a *particular* relation takes a *particular* change is the
+    /// narrower question — no server alters a view's columns, those being its
+    /// query's — and `db_column_change_sql` answers that in place of the
+    /// statement.
+    changes_columns: bool,
 
     /// Whether `db_database_change_sql` writes anything at all for this
     /// database.
@@ -1719,13 +1735,139 @@ pub unsafe extern "C" fn db_database_change_sql(
     }
 }
 
+/// One change to one column, as it crosses the boundary.
+///
+/// Tagged rather than positional, unlike `db_table_change_sql`'s verb-and-name
+/// pair, because one of the three verbs carries a whole column: an argument list
+/// with five strings on it, four of them null for two of the verbs, is a call
+/// nobody can read at the site. A tag serde does not know is refused rather than
+/// falling through to a verb, which is the property that matters here — the
+/// three destroy, keep and rename respectively.
+#[derive(serde::Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+enum ColumnChangeRequest {
+    Add { column: NewColumnRequest },
+    Drop { name: String },
+    Rename { name: String, to: String },
+}
+
+/// The statement for one change to a column of a relation that is there, as
+/// text. Release with `db_string_free`.
+///
+/// Written and not run, like the three change calls above it.
+///
+/// `change` is one of:
+///
+/// ```json
+/// {"change": "add", "column": {"name": …, "kind": …, "nullable": …,
+///                              "default": …, "primary_key": false}}
+/// {"change": "drop", "name": …}
+/// {"change": "rename", "name": …, "to": …}
+/// ```
+///
+/// The column being added is the same shape `db_new_table_sql` reads, because it
+/// is the same five answers — and `primary_key` is refused here, a key being a
+/// rule about the whole table rather than about one column.
+///
+/// The relation's kind is read from the server, like `db_table_change_sql` reads
+/// it and for the same reason: no server alters a view's columns, those being
+/// the columns its query selects, and a caller passing the kind back would be
+/// the one to get it wrong.
+///
+/// Whether this connection writes any of the three at all is
+/// `db_capabilities_json`'s `changes_columns`. Whether *this* relation takes
+/// *this* change is answered here, in place of the statement.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `schema`,
+/// `relation` and `change` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_column_change_sql(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    change: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() || change.is_null() {
+        unsafe { set_err(err, "null handle, schema, relation, or change") };
+        return ptr::null_mut();
+    }
+    let (schema, relation, change) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+            CStr::from_ptr(change).to_str(),
+        ) {
+            (Ok(s), Ok(r), Ok(c)) => (s, r, c),
+            _ => {
+                set_err(err, "schema, relation, or change is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let requested: ColumnChangeRequest = match serde_json::from_str(change) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, format!("that is not a change to a column: {e}")) };
+            return ptr::null_mut();
+        }
+    };
+    // The added column is built out here rather than inside the block below,
+    // because `dbddl::ColumnChange::Add` borrows it and the borrow has to outlive
+    // the call it is passed to.
+    let added = match &requested {
+        ColumnChangeRequest::Add { column } => match column.clone().into_column() {
+            Ok(column) => Some(column),
+            Err(e) => {
+                unsafe { set_err(err, e) };
+                return ptr::null_mut();
+            }
+        },
+        _ => None,
+    };
+    let change = match (&requested, &added) {
+        (ColumnChangeRequest::Add { .. }, Some(column)) => dbddl::ColumnChange::Add(column),
+        (ColumnChangeRequest::Drop { name }, _) => dbddl::ColumnChange::Drop { name },
+        (ColumnChangeRequest::Rename { name, to }, _) => dbddl::ColumnChange::Rename { name, to },
+        (ColumnChangeRequest::Add { .. }, None) => unreachable!("an add always builds a column"),
+    };
+
+    let h = unsafe { &*handle };
+    let written = runtime().block_on(async {
+        let Some(dialect) = h.dialect else {
+            return Err(dbconn::DbError::new(
+                "this build does not write DDL for this database",
+            ));
+        };
+        let listed = h.driver.relations(schema).await?;
+        match listed.into_iter().find(|info| info.name == relation) {
+            Some(info) => dbddl::column_change(dialect, &info, change),
+            None => Err(dbconn::DbError::new(format!(
+                "{schema}.{relation} is not there"
+            ))),
+        }
+    });
+    match written.and_then(|text| {
+        CString::new(text)
+            .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// One column of a table that does not exist yet, as it crosses the boundary.
 ///
 /// Owned, because the JSON it comes from is a C string this side does not keep.
 /// `kind` is [`dbddl::ColumnKind`]'s own word rather than a database's type name,
 /// which is what keeps the front end out of the business of spelling SQL for a
 /// server it does not know.
-#[derive(serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct NewColumnRequest {
     name: String,
     kind: String,
@@ -1735,6 +1877,19 @@ struct NewColumnRequest {
     /// the ordinary case.
     default: Option<String>,
     primary_key: bool,
+}
+
+impl NewColumnRequest {
+    /// The column this describes, or a refusal naming the kind it asked for.
+    fn into_column(self) -> dbconn::DbResult<dbddl::NewColumn> {
+        Ok(dbddl::NewColumn {
+            kind: dbddl::ColumnKind::parse(&self.kind)?,
+            name: self.name,
+            nullable: self.nullable,
+            default: self.default,
+            primary_key: self.primary_key,
+        })
+    }
 }
 
 /// The `CREATE TABLE` for a table described column by column, as text. Release
@@ -1806,15 +1961,7 @@ pub unsafe extern "C" fn db_new_table_sql(
     let h = unsafe { &*handle };
     let written = requested
         .into_iter()
-        .map(|column| {
-            Ok(dbddl::NewColumn {
-                kind: dbddl::ColumnKind::parse(&column.kind)?,
-                name: column.name,
-                nullable: column.nullable,
-                default: column.default,
-                primary_key: column.primary_key,
-            })
-        })
+        .map(NewColumnRequest::into_column)
         .collect::<dbconn::DbResult<Vec<_>>>()
         .and_then(|columns| match h.dialect {
             Some(dialect) => dbddl::new_table(dialect, schema, name, &columns),
