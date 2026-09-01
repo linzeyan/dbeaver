@@ -126,6 +126,16 @@ struct Capabilities: Codable, Hashable {
     /// take — no server alters a view's columns — is answered in the sheet.
     let changesColumns: Bool
 
+    /// Whether the core writes a statement that alters a column's own definition
+    /// — its type, whether it takes a null, its default.
+    ///
+    /// The line between this and `changesColumns` is which columns a table has
+    /// against what one of them is, and SQLite is why it is drawn there: its
+    /// `ALTER TABLE` adds, drops and renames a column and reaches nothing inside
+    /// one. The Edit Column item comes from this flag alone, so that it is not a
+    /// menu item that refuses every time it is clicked.
+    let altersColumns: Bool
+
     /// Whether the core writes a statement that makes or drops a whole database.
     ///
     /// Not a second reading of `changesRelations`, and SQLite is what keeps them
@@ -148,7 +158,8 @@ struct Capabilities: Codable, Hashable {
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
         reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
-        changesRelations: false, changesColumns: false, changesDatabases: false)
+        changesRelations: false, changesColumns: false, altersColumns: false,
+        changesDatabases: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -162,6 +173,7 @@ struct Capabilities: Codable, Hashable {
         case reportsVariables = "reports_variables"
         case changesRelations = "changes_relations"
         case changesColumns = "changes_columns"
+        case altersColumns = "alters_columns"
         case changesDatabases = "changes_databases"
     }
 }
@@ -449,6 +461,9 @@ enum ColumnChange: Hashable, Encodable {
     case drop(name: String)
     /// Give it another name, leaving everything else about it alone.
     case rename(name: String, to: String)
+    /// Change what the column is: its type, whether it takes a null, its
+    /// default, or any two of the three at once.
+    case alter(ColumnAlteration)
 
     /// The word the core reads, and what the status line calls this.
     var verb: String {
@@ -456,6 +471,7 @@ enum ColumnChange: Hashable, Encodable {
         case .add: return "add"
         case .drop: return "drop"
         case .rename: return "rename"
+        case .alter: return "alter"
         }
     }
 
@@ -465,6 +481,7 @@ enum ColumnChange: Hashable, Encodable {
         case .add: return "Add Column…"
         case .drop: return "Drop Column…"
         case .rename: return "Rename Column…"
+        case .alter: return "Edit Column…"
         }
     }
 
@@ -474,6 +491,7 @@ enum ColumnChange: Hashable, Encodable {
         case .add: return "Add"
         case .drop: return "Drop"
         case .rename: return "Rename"
+        case .alter: return "Apply"
         }
     }
 
@@ -485,6 +503,7 @@ enum ColumnChange: Hashable, Encodable {
         case .add: return "Adding"
         case .drop: return "Dropping"
         case .rename: return "Renaming"
+        case .alter: return "Altering"
         }
     }
 
@@ -493,6 +512,7 @@ enum ColumnChange: Hashable, Encodable {
         case .add: return "Added"
         case .drop: return "Dropped"
         case .rename: return "Renamed"
+        case .alter: return "Altered"
         }
     }
 
@@ -511,6 +531,7 @@ enum ColumnChange: Hashable, Encodable {
         case .add(let column): return column.name
         case .drop(let name): return name
         case .rename(let name, _): return name
+        case .alter(let alteration): return alteration.name
         }
     }
 
@@ -519,6 +540,9 @@ enum ColumnChange: Hashable, Encodable {
         case column
         case name
         case to
+        case kind
+        case nullable
+        case defaultValue = "default"
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -530,6 +554,82 @@ enum ColumnChange: Hashable, Encodable {
         case .rename(let name, let to):
             try container.encode(name, forKey: .name)
             try container.encode(to, forKey: .to)
+        case .alter(let alteration):
+            try container.encode(alteration.name, forKey: .name)
+            // Each property crosses only where it moved. An absent key is the
+            // core's "leave this one alone", and sending the type on every
+            // alteration would retype a `character varying(64)` column to `text`
+            // on the way past — the picker only ever holds one of seven kinds.
+            try container.encodeIfPresent(alteration.kind?.word, forKey: .kind)
+            try container.encodeIfPresent(alteration.nullable, forKey: .nullable)
+            try container.encode(alteration.defaultChange, forKey: .defaultValue)
+        }
+    }
+}
+
+/// What is being changed about one column that already exists.
+///
+/// Each property carries its own "leave it alone", and the column as the server
+/// last described it rides along unsent: the sheet says what is there now, and
+/// the core is told only what moved.
+struct ColumnAlteration: Hashable {
+    let name: String
+    /// The server's own words for the column as it stands. Shown and never sent:
+    /// `dataType` is a string this build cannot always spell — `character
+    /// varying(64)` is not one of the seven kinds — which is the whole reason
+    /// the three properties below are optional.
+    let currentType: String
+    let currentNullable: Bool
+    let currentDefault: String?
+
+    var kind: ColumnKind?
+    var nullable: Bool?
+    var defaultChange: DefaultChange = .keep
+
+    /// Whether anything is being asked for at all. The core refuses an
+    /// alteration with no clauses — `ALTER TABLE t` alone is a syntax error
+    /// rather than a statement that does nothing — and this asks the same
+    /// question early enough to keep the button off.
+    var isEmpty: Bool { kind == nil && nullable == nil && defaultChange == .keep }
+
+    /// Whether the default is being set to nothing, which is not a shorter
+    /// statement but a syntax error — and removing a default is `.drop`, which
+    /// says so.
+    var isSettingAnEmptyDefault: Bool {
+        guard case .set(let value) = defaultChange else { return false }
+        return value.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    init(_ column: ColumnInfo) {
+        name = column.name
+        currentType = column.dataType
+        currentNullable = column.nullable
+        currentDefault = column.defaultValue
+    }
+}
+
+/// What an alteration does to a column's default.
+///
+/// Three answers rather than an optional string, because "leave it" and "take it
+/// away" are different statements and only one of them runs.
+enum DefaultChange: Hashable, Encodable {
+    case keep
+    case drop
+    case set(String)
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .keep: try container.encode("keep")
+        case .drop: try container.encode("drop")
+        // Externally tagged, which is what serde reads at the other end: the two
+        // answers carrying nothing are bare words and the one carrying a value
+        // is an object.
+        // Trimmed on the way out, the rule `NewTableColumn` follows: a default
+        // is written into the statement exactly as it arrives, and trailing
+        // space in `DEFAULT 0 ` is space nobody typed on purpose.
+        case .set(let value):
+            try container.encode(["set": value.trimmingCharacters(in: .whitespaces)])
         }
     }
 }

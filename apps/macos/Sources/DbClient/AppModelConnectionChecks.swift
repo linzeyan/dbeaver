@@ -797,6 +797,7 @@ enum AppModelConnectionChecks {
                 writesStatements: false, schemaIsTheDatabase: true,
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
+                altersColumns: false,
                 changesDatabases: false)
 
             expect(model.canEditCell, false, "no cell of a Redis key type is editable")
@@ -814,6 +815,7 @@ enum AppModelConnectionChecks {
                 writesStatements: true, schemaIsTheDatabase: true,
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
+                altersColumns: false,
                 changesDatabases: false)
             expect(
                 model.editObstacle == nil, true,
@@ -838,6 +840,7 @@ enum AppModelConnectionChecks {
                 writesStatements: true, schemaIsTheDatabase: false,
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
+                altersColumns: false,
                 changesDatabases: false)
             expect(
                 model.structureSections.contains(.ddl), true,
@@ -848,6 +851,7 @@ enum AppModelConnectionChecks {
                 writesStatements: false, schemaIsTheDatabase: false,
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
+                altersColumns: false,
                 changesDatabases: false)
             expect(
                 model.structureSections.contains(.ddl), false,
@@ -926,6 +930,7 @@ enum AppModelConnectionChecks {
                     writesStatements: false, schemaIsTheDatabase: schemaIsTheDatabase,
                     reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                     reportsVariables: false, changesRelations: false, changesColumns: false,
+                    altersColumns: false,
                     changesDatabases: false)
             }
 

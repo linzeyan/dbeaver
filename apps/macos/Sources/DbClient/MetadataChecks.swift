@@ -134,7 +134,7 @@ enum MetadataChecks {
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
              "reports_sequences":true,"server_processes":"interruptible",
              "reports_variables":true,"changes_relations":true,"changes_columns":true,
-             "changes_databases":true}
+             "alters_columns":true,"changes_databases":true}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -161,6 +161,9 @@ enum MetadataChecks {
             both?.changesColumns, true,
             "and an add, a drop and a rename for one of a table's columns")
         expect(
+            both?.altersColumns, true,
+            "and an ALTER COLUMN for one, which is the narrower of the two")
+        expect(
             both?.changesDatabases, true,
             "and a create and a drop for a whole database, which is a separate question")
 
@@ -172,7 +175,7 @@ enum MetadataChecks {
              "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,
              "reports_sequences":false,"server_processes":"unreported",
              "reports_variables":false,"changes_relations":false,"changes_columns":false,
-             "changes_databases":false}
+             "alters_columns":false,"changes_databases":false}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -200,6 +203,9 @@ enum MetadataChecks {
             neither?.changesColumns, false,
             "nor for a column, so the Structure tab draws no controls over its columns")
         expect(
+            neither?.altersColumns, false,
+            "nor for altering one, which SQLite answers differently from the field above")
+        expect(
             neither?.changesDatabases, false,
             "nor for making one, so New Database is greyed")
 
@@ -212,7 +218,7 @@ enum MetadataChecks {
              "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
              "reports_sequences":true,"server_processes":"unreported",
              "reports_variables":false,"changes_relations":false,"changes_columns":false,
-             "changes_databases":false}
+             "alters_columns":false,"changes_databases":false}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 

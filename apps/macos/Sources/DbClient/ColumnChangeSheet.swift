@@ -49,6 +49,13 @@ struct ColumnChangeSheet: View {
             }
             switch change {
             case .add(let column): addFields(column)
+            case .alter(let alteration):
+                Text(standing(alteration))
+                    .font(Theme.Typography.mono)
+                    .foregroundStyle(Theme.text.color)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                alterFields(alteration)
             case .drop(let name):
                 Text(name)
                     .font(Theme.Typography.mono)
@@ -87,20 +94,14 @@ struct ColumnChangeSheet: View {
     @ViewBuilder
     private func addFields(_ column: NewTableColumn) -> some View {
         HStack(spacing: Theme.Space.sm) {
-            Text("Name")
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
-                .frame(width: 56, alignment: .leading)
+            fieldLabel("Name")
             TextField("column_name", text: addBinding(\.name))
                 .textFieldStyle(.roundedBorder)
                 .font(Theme.Typography.mono)
                 .accessibilityLabel("The name of the new column")
         }
         HStack(spacing: Theme.Space.sm) {
-            Text("Type")
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
-                .frame(width: 56, alignment: .leading)
+            fieldLabel("Type")
             Picker("", selection: kindBinding) {
                 ForEach(ColumnKind.offered, id: \.self) { kind in
                     Text(kind.label).tag(kind)
@@ -123,15 +124,105 @@ struct ColumnChangeSheet: View {
             Spacer(minLength: 0)
         }
         HStack(spacing: Theme.Space.sm) {
-            Text("Default")
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
-                .frame(width: 56, alignment: .leading)
+            fieldLabel("Default")
             TextField("none", text: addBinding(\.defaultValue))
                 .textFieldStyle(.roundedBorder)
                 .font(Theme.Typography.mono)
                 .accessibilityLabel("The default for the new column")
         }
+    }
+
+    /// The column as the server last described it, which is the sentence the
+    /// three pickers below are read against.
+    ///
+    /// Said once, here, rather than repeated inside each control's "leave it"
+    /// row: a picker reading "Leave as character varying(64)" is a picker whose
+    /// own label has to be truncated.
+    private func standing(_ alteration: ColumnAlteration) -> String {
+        var parts = [alteration.name, alteration.currentType]
+        parts.append(alteration.currentNullable ? "null" : "not null")
+        if let value = alteration.currentDefault {
+            parts.append("default \(value)")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Three properties, each with "Unchanged" as its first answer.
+    ///
+    /// Pickers rather than checkboxes beside controls, so that leaving a
+    /// property alone is a state somebody chose and can read back. The type is
+    /// the reason this matters: a column the server calls
+    /// `character varying(64)` is none of the seven kinds offered, and a form
+    /// that started the picker on a guess would retype it whenever somebody came
+    /// here to change the default.
+    @ViewBuilder
+    private func alterFields(_ alteration: ColumnAlteration) -> some View {
+        HStack(spacing: Theme.Space.sm) {
+            fieldLabel("Type")
+            Picker("", selection: alterKindBinding(alteration)) {
+                Text("Unchanged").tag(ColumnKind?.none)
+                Divider()
+                ForEach(ColumnKind.offered, id: \.self) { kind in
+                    Text(kind.label).tag(ColumnKind?.some(kind))
+                }
+            }
+            .labelsHidden()
+            .frame(width: 150)
+            .accessibilityLabel("What this column will hold")
+            if let size = alteration.kind?.decimalSize {
+                sizeField(value: size.precision, label: "Digits before and after the point") {
+                    .decimal(precision: $0, scale: size.scale)
+                }
+                sizeField(value: size.scale, label: "Digits after the point") {
+                    .decimal(precision: size.precision, scale: $0)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        HStack(spacing: Theme.Space.sm) {
+            fieldLabel("Null")
+            Picker("", selection: alterNullableBinding) {
+                Text("Unchanged").tag(Bool?.none)
+                Divider()
+                Text("Can be null").tag(Bool?.some(true))
+                Text("Cannot be null").tag(Bool?.some(false))
+            }
+            .labelsHidden()
+            .frame(width: 150)
+            .accessibilityLabel("Whether this column will take a null")
+            Spacer(minLength: 0)
+        }
+        HStack(spacing: Theme.Space.sm) {
+            fieldLabel("Default")
+            Picker("", selection: alterDefaultBinding) {
+                Text("Unchanged").tag(DefaultKind.keep)
+                Divider()
+                Text("Set to…").tag(DefaultKind.set)
+                Text("Remove it").tag(DefaultKind.drop)
+            }
+            .labelsHidden()
+            .frame(width: 150)
+            .accessibilityLabel("What happens to this column's default")
+            if case .set(let value) = alteration.defaultChange {
+                TextField(
+                    "",
+                    text: Binding(
+                        get: { value },
+                        set: { typed in editAlteration { $0.defaultChange = .set(typed) } })
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(Theme.Typography.mono)
+                .accessibilityLabel("The column's new default")
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.Typography.body)
+            .foregroundStyle(Theme.textSecondary.color)
+            .frame(width: 56, alignment: .leading)
     }
 
     /// One half of a decimal's size, as the Create Table form's row takes it.
@@ -160,6 +251,10 @@ struct ColumnChangeSheet: View {
         case .add:
             return "The rows already in the table get this column's default, or a null where "
                 + "there is none."
+        case .alter:
+            return "The server reads every row to check it. A value that will not fit the new "
+                + "type, or a null in a column that stops taking one, refuses the whole "
+                + "statement."
         case .drop:
             return "This cannot be undone. The values go with the column, and anything that "
                 + "names it — an index, a view, an application — will refuse or break."
@@ -221,6 +316,84 @@ struct ColumnChangeSheet: View {
             change(&column)
             pending = .add(column)
         }
+    }
+
+    /// The same for an alteration.
+    private func editAlteration(_ change: (inout ColumnAlteration) -> Void) {
+        model.editColumnChange { pending in
+            guard case .alter(var alteration) = pending else { return }
+            change(&alteration)
+            pending = .alter(alteration)
+        }
+    }
+
+    /// Which of the default's three answers a picker row stands for.
+    ///
+    /// A separate type from `DefaultChange` because the value the third one
+    /// carries must survive being switched away from and back — a picker tag
+    /// holding the typed text would make every keystroke a different row.
+    private enum DefaultKind: Hashable {
+        case keep
+        case set
+        case drop
+    }
+
+    /// The type, which starts at "Unchanged" and stays there until somebody
+    /// moves it. Decimal sizes behave as the Create Table form's picker does:
+    /// one menu row stands for many values, so a size already chosen survives
+    /// being reselected.
+    private func alterKindBinding(_ alteration: ColumnAlteration) -> Binding<ColumnKind?> {
+        Binding(
+            get: {
+                guard let kind = alteration.kind else { return nil }
+                return ColumnKind.offered.first { $0.isSameKind(as: kind) } ?? kind
+            },
+            set: { chosen in
+                editAlteration { alteration in
+                    guard let chosen else {
+                        alteration.kind = nil
+                        return
+                    }
+                    if let current = alteration.kind, chosen.isSameKind(as: current) { return }
+                    alteration.kind = chosen
+                }
+            })
+    }
+
+    private var alterNullableBinding: Binding<Bool?> {
+        Binding(
+            get: {
+                guard case .alter(let alteration) = change else { return nil }
+                return alteration.nullable
+            },
+            set: { chosen in editAlteration { $0.nullable = chosen } })
+    }
+
+    private var alterDefaultBinding: Binding<DefaultKind> {
+        Binding(
+            get: {
+                guard case .alter(let alteration) = change else { return .keep }
+                switch alteration.defaultChange {
+                case .keep: return .keep
+                case .drop: return .drop
+                case .set: return .set
+                }
+            },
+            set: { chosen in
+                editAlteration { alteration in
+                    switch chosen {
+                    case .keep: alteration.defaultChange = .keep
+                    case .drop: alteration.defaultChange = .drop
+                    // Opened on the default the column already has, which is
+                    // what somebody editing one rather than replacing it starts
+                    // from. Empty where there is none, and the button waits for
+                    // it — `SET DEFAULT` with nothing after it is a syntax error.
+                    case .set:
+                        if case .set = alteration.defaultChange { return }
+                        alteration.defaultChange = .set(alteration.currentDefault ?? "")
+                    }
+                }
+            })
     }
 
     // MARK: - What will run

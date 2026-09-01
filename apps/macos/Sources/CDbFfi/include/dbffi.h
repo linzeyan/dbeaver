@@ -449,26 +449,32 @@ char* db_new_table_sql(DbHandle* handle, const char* schema, const char* name,
 //                                "default": …, "primary_key": false}}
 //   {"change": "drop", "name": …}
 //   {"change": "rename", "name": …, "to": …}
+//   {"change": "alter", "name": …, "kind": …, "nullable": …,
+//                       "default": "keep" | "drop" | {"set": …}}
 //
 // Tagged rather than positional, unlike db_table_change_sql's verb-and-name pair,
-// because one of the three carries a whole column. The column being added is the
+// because two of the four carry more than a name. The column being added is the
 // shape db_new_table_sql reads, being the same five answers; `primary_key` is
 // refused, a key being a rule about the whole table rather than about one column,
 // and a table with rows in it having no room for another. A tag this library does
 // not know is refused rather than falling through to a verb it does.
 //
-// Three verbs and not six. Changing a column's type, its nullability or its
-// default is one family of statement on paper and a different one on every server
-// — PostgreSQL writes one ALTER COLUMN per property, MySQL a single MODIFY COLUMN
-// carrying the whole declaration back — and those are left out rather than folded
-// in. What is here is what the servers agree about.
+// An alteration's `kind` and `nullable` are optional and absent means leave that
+// property alone. Not brevity: a column the server describes as
+// character varying(64) has no kind among this build's seven, and a caller made to
+// send one on every alteration would retype the column each time it changed a
+// default. The default's three answers are tagged for the same reason — a JSON
+// null would have to mean both "leave it" and "take it away".
 //
 // The relation's kind is read here, like db_table_change_sql reads it: no server
 // alters a view's columns, those being the columns its query selects.
 //
-// Whether this connection writes any of the three at all is db_capabilities_json's
-// changes_columns, which is not implied by changes_relations — DBeaver itself
-// writes SQLite's DROP TABLE and refuses its column drop, recreating the table.
+// Whether this connection writes any of the first three at all is
+// db_capabilities_json's changes_columns, which is not implied by
+// changes_relations — DBeaver itself writes SQLite's DROP TABLE and refuses its
+// column drop, recreating the table. Whether it writes the fourth is the separate
+// alters_columns: SQLite's ALTER TABLE changes which columns a table has and
+// reaches nothing inside one, so it answers the first yes and the second no.
 char* db_column_change_sql(DbHandle* handle, const char* schema, const char* relation,
                            const char* change, char** err);
 

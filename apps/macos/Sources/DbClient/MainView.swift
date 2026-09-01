@@ -1545,6 +1545,17 @@ struct StructurePane: View {
                 }
             }
         }
+        // Its own capability and its own `if`, rather than a fourth item inside
+        // the block above: SQLite adds, drops and renames a column and alters
+        // none, so on SQLite the first three are drawn and this one is not.
+        if model.altersColumns, let relation = model.selected, positions.count == 1,
+            let column = model.columns.first(where: { positions.contains($0.id) })
+        {
+            Divider()
+            Button(ColumnChange.alter(ColumnAlteration(column)).menuTitle) {
+                model.prepareColumnChange(.alter(ColumnAlteration(column)), of: relation)
+            }
+        }
     }
 
     /// The engine's own description of the relation, label beside value.

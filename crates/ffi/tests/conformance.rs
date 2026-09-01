@@ -2629,10 +2629,40 @@ fn a_column_change_is_composed_and_runs_or_is_refused_by_name() {
     .expect_err("a key column was added to a table that exists");
     assert!(why.contains("key"), "got {why}");
 
+    // SQLite is where the fourth verb is refused, and this is the whole reason
+    // `alters_columns` is asked separately: everything above ran here.
+    let why = compose(
+        "invoice",
+        r#"{"change":"alter","name":"id","default":{"set":"0"}}"#,
+    )
+    .expect_err("SQLite altered a column");
+    assert!(!why.contains("yet"), "got {why}");
+    assert!(why.contains("ALTER TABLE"), "got {why}");
+
+    // The kind is read on this side of the boundary, so a word this build does
+    // not know is refused by name rather than reaching a renderer as text.
+    let why = compose(
+        "invoice",
+        r#"{"change":"alter","name":"id","kind":"jsonb"}"#,
+    )
+    .expect_err("an alteration named a kind this build does not have");
+    assert!(why.contains("jsonb"), "got {why}");
+
+    // And the default's three answers are tagged, so a fourth is not silently
+    // one of them — "unset" reading as "keep" would be a statement that ran and
+    // did nothing.
+    let why = compose(
+        "invoice",
+        r#"{"change":"alter","name":"id","default":"unset"}"#,
+    )
+    .expect_err("an alteration asked for a default answer that does not exist");
+    assert!(!why.is_empty(), "the refusal must say something");
+
     // A verb this build does not have must not fall through to one it does.
-    // `alter` is the tempting one, being the word the statement opens with.
+    // `reorder` is the tempting one: upstream writes it, this build does not,
+    // and it carries the same argument a rename does.
     for change in [
-        r#"{"change":"alter","name":"id"}"#,
+        r#"{"change":"reorder","name":"id","to":"first"}"#,
         r#"{"change":"drop"}"#,
         r#"{"name":"id"}"#,
         "",
