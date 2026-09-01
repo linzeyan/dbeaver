@@ -748,6 +748,28 @@ final class Database: @unchecked Sendable {
         return String(cString: written)
     }
 
+    /// The `CREATE TABLE` for a table described column by column.
+    ///
+    /// Written and not run, like the three above it. Every field of the form
+    /// changes the statement, so the statement is what the form shows.
+    ///
+    /// The whole table crosses at once: a primary key over two columns is a
+    /// clause about the table rather than about either of them, and so is the
+    /// refusal for a name used twice.
+    func newTableSQL(schema: String, name: String, columns: [NewTableColumn]) throws -> String {
+        let requested = try JSONEncoder().encode(columns)
+        guard let json = String(data: requested, encoding: .utf8) else {
+            throw DbError(description: "the columns could not be written as text")
+        }
+        var err: UnsafeMutablePointer<CChar>?
+        guard let written = db_new_table_sql(handle, schema, name, json, &err) else {
+            throw DbError(
+                description: Database.take(&err) ?? "could not write that table for this database")
+        }
+        defer { db_string_free(written) }
+        return String(cString: written)
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }

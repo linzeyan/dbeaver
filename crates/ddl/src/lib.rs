@@ -67,12 +67,71 @@ pub async fn definition(
 /// writes one: a qualified name is the caller's to spell, and quoting it here
 /// would turn `public.orders` into a single identifier with a dot in it.
 ///
-/// The one entry point in this crate that renders something the database has
-/// never seen. Everything else here describes what is already there, which is
-/// why everything else here reads a `Driver` and this reads a file's columns.
+/// One of two entry points that render something the database has never seen.
+/// Everything else here describes what is already there, which is why everything
+/// else here reads a `Driver` and this reads a file's columns.
+///
+/// No column is written `NOT NULL`, whatever the file's schema says, and no
+/// column is part of a key. Parquet records which of its columns had no nulls in
+/// it, and that is a fact about the file rather than a rule about the table: a
+/// column that happens to be full today would otherwise become a table that
+/// starts refusing rows part way through the second import into it. The form
+/// this shares a renderer with departs from exactly that, a checkbox being a
+/// decision somebody took rather than a shape somebody's file happened to have.
 pub fn create_table(dialect: &'static Dialect, table: &str, columns: &Schema) -> DbResult<String> {
+    let columns = columns
+        .fields()
+        .iter()
+        .map(|field| {
+            Ok(NewColumn {
+                name: field.name().clone(),
+                kind: kind_of(field)?,
+                nullable: true,
+                default: None,
+                primary_key: false,
+            })
+        })
+        .collect::<DbResult<Vec<_>>>()?;
+    render(dialect, |renderer| renderer.new_table(table, &columns))
+}
+
+/// The statement that would make a table somebody has described column by
+/// column, in the SQL `dialect` writes.
+///
+/// The other of the two, and the difference from [`create_table`] is where the
+/// answers came from rather than what is done with them: both end in the same
+/// renderer. The name is given in two parts and quoted here, unlike the file
+/// path's single pre-spelled string, because this one is typed into a form and
+/// a schema called `Sales Data` has to survive reaching the server.
+///
+/// Rendered and handed back rather than run, like everything else in this crate.
+pub fn new_table(
+    dialect: &'static Dialect,
+    schema: &str,
+    name: &str,
+    columns: &[NewColumn],
+) -> DbResult<String> {
+    if name.is_empty() {
+        return Err(DbError::new("a table needs a name"));
+    }
+    // An empty schema is not an empty identifier: SQLite and DuckDB have a
+    // container the front end may have nothing to call, and `.orders` is a
+    // syntax error where `orders` is the table the connection would have found
+    // anyway.
+    let table = match schema.is_empty() {
+        true => dialect.quote(name),
+        false => format!("{}.{}", dialect.quote(schema), dialect.quote(name)),
+    };
+    render(dialect, |renderer| renderer.new_table(&table, columns))
+}
+
+/// `f` applied to the renderer for `dialect`, or the refusal that names it.
+fn render(
+    dialect: &'static Dialect,
+    f: impl FnOnce(&'static dyn Renderer) -> DbResult<String>,
+) -> DbResult<String> {
     match for_dialect(dialect) {
-        Some(renderer) => renderer.create_table(table, columns),
+        Some(renderer) => f(renderer),
         None => Err(DbError::new(format!(
             "DDL for {} has not been written yet",
             dialect.name
@@ -146,7 +205,7 @@ pub(crate) fn drop_text(word: &str, name: &str) -> String {
     script.finish()
 }
 
-/// What a file can ask a table's column to be.
+/// What a column of a new table can be asked to be.
 ///
 /// Arrow has some fifty types; this is what a file being imported can actually
 /// mean by them, reduced once here rather than six times over in the renderers.
@@ -154,18 +213,117 @@ pub(crate) fn drop_text(word: &str, name: &str) -> String {
 /// whole number the database has — because a column made too wide takes the
 /// whole file and a column made too narrow takes most of it, which is the worse
 /// of the two by far.
+///
+/// The same seven are what the Create Table form offers, and that is the reason
+/// this is public. A form could instead take the type as text and pass it
+/// through, which is what most tools do, and it would put the front end in the
+/// business of spelling SQL for a database it does not know — `nvarchar(max)` on
+/// one server, `TEXT` on the next. Choosing from a closed set costs a ceiling
+/// and buys a statement that is correct wherever it is sent.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum ColumnKind {
+pub enum ColumnKind {
     Bool,
     Int,
     Float,
-    /// Precision and scale as the file states them. The one kind that carries a
-    /// size, because a decimal held at a different scale is a different number
-    /// and no server will mention it.
+    /// Precision and scale as the file states them, or as the form was set to.
+    /// The one kind that carries a size, because a decimal held at a different
+    /// scale is a different number and no server will mention it.
     Decimal(u8, i8),
     Text,
     Date,
     Timestamp,
+}
+
+impl ColumnKind {
+    /// The spelling that crosses the FFI, which is the variant in lower case.
+    ///
+    /// Deliberately not a database's word for the type: this names the kind and
+    /// each renderer names the column, so a build that starts writing `bigint`
+    /// here would be spelling PostgreSQL for everybody. Paired with
+    /// [`ColumnKind::parse`], and the two are checked against each other.
+    pub fn word(self) -> String {
+        match self {
+            ColumnKind::Bool => "bool".to_string(),
+            ColumnKind::Int => "int".to_string(),
+            ColumnKind::Float => "float".to_string(),
+            ColumnKind::Decimal(precision, scale) => format!("decimal({precision},{scale})"),
+            ColumnKind::Text => "text".to_string(),
+            ColumnKind::Date => "date".to_string(),
+            ColumnKind::Timestamp => "timestamp".to_string(),
+        }
+    }
+
+    /// The kind `word` names, or a refusal quoting what arrived.
+    ///
+    /// A word this does not know is refused rather than defaulted to text: a
+    /// column silently made `text` because the front end sent a spelling this
+    /// build stopped reading is a table that takes every row and sorts none of
+    /// them the way anybody meant.
+    pub fn parse(word: &str) -> DbResult<Self> {
+        Ok(match word {
+            "bool" => ColumnKind::Bool,
+            "int" => ColumnKind::Int,
+            "float" => ColumnKind::Float,
+            "text" => ColumnKind::Text,
+            "date" => ColumnKind::Date,
+            "timestamp" => ColumnKind::Timestamp,
+            other => {
+                let size = other
+                    .strip_prefix("decimal(")
+                    .and_then(|rest| rest.strip_suffix(')'))
+                    .and_then(|rest| rest.split_once(','));
+                match size {
+                    Some((precision, scale)) => ColumnKind::Decimal(
+                        precision.trim().parse().map_err(|_| bad_kind(other))?,
+                        scale.trim().parse().map_err(|_| bad_kind(other))?,
+                    ),
+                    None => return Err(bad_kind(other)),
+                }
+            }
+        })
+    }
+}
+
+fn bad_kind(word: &str) -> DbError {
+    DbError::new(format!("{word:?} is not a kind of column"))
+}
+
+/// One column of a table that does not exist yet.
+///
+/// What a hand-written form produces, and what a file's schema is reduced to
+/// before it reaches a renderer — one shape rather than two, so that the
+/// bracket-and-comma layout is written once. The file path fills the last three
+/// fields the same way every time, which is exactly the difference between the
+/// two callers: an import infers, and a form is told.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewColumn {
+    pub name: String,
+    pub kind: ColumnKind,
+    pub nullable: bool,
+    /// Written after `DEFAULT` exactly as given.
+    ///
+    /// Not quoted and not checked. A default is an expression — `0`, `now()`,
+    /// `'unknown'` — and telling one of those from a literal that needs quotes
+    /// means parsing the server's own grammar, which this build does not do. So
+    /// what was typed is what is sent, and the statement is shown before it goes,
+    /// which is where a caller reads what they wrote.
+    pub default: Option<String>,
+    pub primary_key: bool,
+}
+
+/// How a database spells a column that refuses NULL.
+///
+/// Five of the six put a modifier after the type and ClickHouse puts the answer
+/// inside it: a plain `Int64` there already refuses NULL, and a column that
+/// accepts one is `Nullable(Int64)`. The difference is small enough to look like
+/// a detail and large enough to invert the meaning of every column in the
+/// statement, so it is stated per renderer rather than assumed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum NullStyle {
+    /// `NOT NULL` after the type, and nothing at all for a column that allows it.
+    Suffix,
+    /// The type wrapped in `Nullable(…)` when the column allows NULL.
+    Wrapped,
 }
 
 /// The kind `field` asks for, or a refusal naming the column.
@@ -202,34 +360,87 @@ fn kind_of(field: &Field) -> DbResult<ColumnKind> {
 
 /// The shared half of a `CREATE TABLE`: the shape of the statement.
 ///
-/// `word` is the whole of what differs between databases, plus whatever one of
-/// them insists on after the closing bracket — ClickHouse has no table without
-/// an engine. Six copies of the bracket-and-comma layout would be six places for
-/// a trailing comma to be introduced in one of them.
+/// `word`, `nulls` and `suffix` are the whole of what differs between databases
+/// — the type names, where nullability is spelled, and whatever one of them
+/// insists on after the closing bracket, ClickHouse having no table without an
+/// engine. Six copies of the bracket-and-comma layout would be six places for a
+/// trailing comma to be introduced in one of them.
 ///
-/// No column is written `NOT NULL`, whatever the file's schema says. Parquet
-/// records which of its columns had no nulls in it, and that is a fact about the
-/// file rather than a rule about the table: a column that happens to be full
-/// today would otherwise become a table that starts refusing rows part way
-/// through the second import into it.
-pub(crate) fn create_table_text(
+/// The clause order inside a column is type, `DEFAULT`, then nullability, which
+/// is `PostgreTableColumnManager.getSupportedModifiers` and is also what
+/// [`postgres::column`] writes for a table that already exists. It reads
+/// backwards — `qty bigint DEFAULT 1 NOT NULL` — and it is upstream's order, and
+/// every server here takes column constraints in any order.
+///
+/// The primary key is a table constraint even when it is one column, rather than
+/// `PRIMARY KEY` after that column's type. One shape for both cases: a key over
+/// two columns can only be written this way, and having the single-column case
+/// take the other branch would leave a form's commonest output on the path the
+/// other tests never reach.
+pub(crate) fn new_table_text(
     dialect: &'static Dialect,
     table: &str,
-    columns: &Schema,
+    columns: &[NewColumn],
     word: impl Fn(ColumnKind) -> String,
+    nulls: NullStyle,
     suffix: &str,
 ) -> DbResult<String> {
-    if columns.fields().is_empty() {
+    if columns.is_empty() {
         return Err(DbError::new("a table needs at least one column"));
     }
     let mut body = Vec::new();
-    for field in columns.fields() {
-        body.push(format!(
+    for (index, column) in columns.iter().enumerate() {
+        if column.name.is_empty() {
+            return Err(DbError::new("a column needs a name"));
+        }
+        // Exact match rather than case-insensitive, because the servers disagree
+        // about that and this crate has no business deciding it: `Qty` and `qty`
+        // are two columns on PostgreSQL and one on MySQL. What is caught here is
+        // the pair nobody could have meant, and the rest is the server's to
+        // refuse — with the statement already on screen to compare against.
+        if columns[..index]
+            .iter()
+            .any(|other| other.name == column.name)
+        {
+            return Err(DbError::new(format!(
+                "two columns are both called {}",
+                column.name
+            )));
+        }
+        if column.primary_key && column.nullable {
+            return Err(DbError::new(format!(
+                "{} is part of the primary key, which cannot hold a null",
+                column.name
+            )));
+        }
+
+        let kind = word(column.kind);
+        let mut declaration = format!(
             "    {} {}",
-            dialect.quote(field.name()),
-            word(kind_of(field)?)
-        ));
+            dialect.quote(&column.name),
+            match (nulls, column.nullable) {
+                (NullStyle::Wrapped, true) => format!("Nullable({kind})"),
+                _ => kind,
+            }
+        );
+        if let Some(default) = &column.default {
+            declaration.push_str(&format!(" DEFAULT {default}"));
+        }
+        if nulls == NullStyle::Suffix && !column.nullable {
+            declaration.push_str(" NOT NULL");
+        }
+        body.push(declaration);
     }
+
+    let key: Vec<String> = columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| dialect.quote(&column.name))
+        .collect();
+    if !key.is_empty() {
+        body.push(format!("    PRIMARY KEY ({})", key.join(", ")));
+    }
+
     let mut script = Script::new();
     script.statement(&format!(
         "CREATE TABLE {table} (\n{}\n){suffix}",
@@ -249,13 +460,19 @@ pub(crate) fn create_table_text(
 pub trait Renderer: Send + Sync {
     async fn definition(&self, driver: &dyn Driver, relation: &RelationInfo) -> DbResult<String>;
 
-    /// The `CREATE TABLE` for a set of columns that came from a file.
+    /// The `CREATE TABLE` for a set of columns, however they were arrived at.
+    ///
+    /// One method for both callers. A file's schema is reduced to the same
+    /// columns before it gets here, so the difference between an import and a
+    /// hand-filled form is which answers the [`NewColumn`]s carry and not which
+    /// code writes them — and a nullability rule that held on one path and not
+    /// the other would be a second `CREATE TABLE` per database to keep in step.
     ///
     /// No default. A default would have to pick some database's type words, and
     /// a statement spelled for the wrong database is one that looks right and
     /// does not run — the same reason `for_dialect` refuses rather than falling
     /// back. Each renderer answers with the words its own server reads.
-    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String>;
+    fn new_table(&self, table: &str, columns: &[NewColumn]) -> DbResult<String>;
 
     /// The statement for one change to a relation that is already there.
     ///
@@ -435,7 +652,7 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
-    use super::{DatabaseChange, TableChange};
+    use super::{ColumnKind, DatabaseChange, NewColumn, TableChange};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use dbconn::{RelationInfo, RelationKind};
     use dbsql::Dialect;
@@ -554,6 +771,249 @@ ORDER BY tuple();",
                 "{}",
                 dialect.name
             );
+        }
+    }
+
+    /// A table somebody filled a form in for, written out in full.
+    ///
+    /// The counterpart to the test above and not a variation on it: every field
+    /// a file cannot state is set here, so what these strings pin is the half of
+    /// `new_table_text` the import path never reaches — `NOT NULL`, `DEFAULT`,
+    /// and a key over two columns. PostgreSQL and MySQL are what M5a lights, and
+    /// they differ in the delimiter and in every type word.
+    #[test]
+    fn a_form_becomes_a_table_in_each_databases_own_words() {
+        let columns = a_filled_in_form();
+        let expected = [
+            (
+                &dbsql::POSTGRES,
+                "CREATE TABLE staging.orders (
+    id bigint NOT NULL,
+    \"Order Date\" date NOT NULL,
+    amount numeric(12, 2) DEFAULT 0 NOT NULL,
+    note text,
+    seen_at timestamp DEFAULT now(),
+    PRIMARY KEY (id, \"Order Date\")
+);",
+            ),
+            (
+                &dbsql::MYSQL,
+                "CREATE TABLE staging.orders (
+    id BIGINT NOT NULL,
+    `Order Date` DATE NOT NULL,
+    amount DECIMAL(12, 2) DEFAULT 0 NOT NULL,
+    note TEXT,
+    seen_at DATETIME DEFAULT now(),
+    PRIMARY KEY (id, `Order Date`)
+);",
+            ),
+        ];
+        for (dialect, statement) in expected {
+            assert_eq!(
+                super::new_table(dialect, "staging", "orders", &columns).expect(dialect.name),
+                statement,
+                "{}",
+                dialect.name
+            );
+        }
+    }
+
+    /// ClickHouse puts the same answer inside the type instead of after it.
+    ///
+    /// The reason [`super::NullStyle`] exists, and the case that would otherwise
+    /// be silently inverted: a build that dropped the wrapping would make every
+    /// column refuse the nulls the form said it accepts, and ClickHouse would
+    /// take that statement without complaint.
+    #[test]
+    fn clickhouse_says_nullable_inside_the_type() {
+        let statement = super::new_table(
+            &dbsql::CLICKHOUSE,
+            "staging",
+            "orders",
+            &[
+                column("id", ColumnKind::Int, false),
+                column("note", ColumnKind::Text, true),
+            ],
+        )
+        .expect("ClickHouse makes a table");
+        assert_eq!(
+            statement,
+            "CREATE TABLE staging.orders (
+    \"id\" Int64,
+    note Nullable(String)
+)
+ENGINE = MergeTree
+ORDER BY tuple();"
+        );
+    }
+
+    /// ClickHouse says why it will not take the key, rather than writing one the
+    /// server rejects.
+    ///
+    /// A `PRIMARY KEY (id)` under `ORDER BY tuple()` is refused by ClickHouse
+    /// itself — the key has to be a prefix of the sort order — so the choice is
+    /// between refusing here with a sentence about ordering and sending a
+    /// statement that can only fail. The other five write the key, which is what
+    /// the second half asserts: this is one database's answer and not a hole in
+    /// the feature.
+    #[test]
+    fn clickhouse_refuses_a_key_it_would_have_to_choose_an_order_for() {
+        let keyed = [column_with("id", ColumnKind::Int, false, None, true)];
+        let error = super::new_table(&dbsql::CLICKHOUSE, "staging", "orders", &keyed)
+            .expect_err("ClickHouse wrote a key it cannot order by");
+        assert!(error.to_string().contains("order"), "{error}");
+
+        for dialect in [
+            &dbsql::POSTGRES,
+            &dbsql::MYSQL,
+            &dbsql::SQLITE,
+            &dbsql::MSSQL,
+            &dbsql::DUCKDB,
+        ] {
+            let statement = super::new_table(dialect, "staging", "orders", &keyed)
+                .unwrap_or_else(|e| panic!("{} refused a primary key: {e}", dialect.name));
+            assert!(
+                statement.contains("PRIMARY KEY"),
+                "{} wrote no key: {statement}",
+                dialect.name
+            );
+        }
+    }
+
+    /// A container the front end has no name for does not become an empty one.
+    ///
+    /// SQLite and DuckDB reach this with nothing to call the schema, and
+    /// `CREATE TABLE .orders` is a syntax error where `CREATE TABLE orders` is
+    /// the table the connection would have found anyway.
+    #[test]
+    fn a_table_with_no_schema_is_not_qualified_by_a_bare_dot() {
+        let statement = super::new_table(
+            &dbsql::SQLITE,
+            "",
+            "orders",
+            &[column("id", ColumnKind::Int, true)],
+        )
+        .expect("SQLite makes a table");
+        assert!(
+            statement.starts_with("CREATE TABLE orders ("),
+            "{statement}"
+        );
+    }
+
+    /// The four answers a form can give that no statement should be written for.
+    ///
+    /// Each is a mistake the server would also catch, and catching them here is
+    /// what puts the sentence next to the field rather than in a failed query —
+    /// except the third, which no server catches at all: PostgreSQL and MySQL
+    /// both make a primary key column `NOT NULL` on their own, so a form that
+    /// said "nullable" and got a column that refuses nulls would have been
+    /// quietly overruled.
+    #[test]
+    fn a_form_that_contradicts_itself_is_refused_rather_than_sent() {
+        let cases: &[(&str, Vec<NewColumn>)] = &[
+            ("at least one column", vec![]),
+            ("needs a name", vec![column("", ColumnKind::Int, true)]),
+            (
+                "cannot hold a null",
+                vec![column_with("id", ColumnKind::Int, true, None, true)],
+            ),
+            (
+                "both called qty",
+                vec![
+                    column("qty", ColumnKind::Int, true),
+                    column("qty", ColumnKind::Text, true),
+                ],
+            ),
+        ];
+        for (expected, columns) in cases {
+            let error = super::new_table(&dbsql::POSTGRES, "staging", "orders", columns)
+                .expect_err("a statement was written for {expected}");
+            assert!(
+                error.to_string().contains(expected),
+                "wanted {expected:?}, got {error}"
+            );
+        }
+
+        // And the name of the table itself, which is the one the front end asks
+        // about before there are any columns to ask about.
+        let error = super::new_table(&dbsql::POSTGRES, "staging", "", &[])
+            .expect_err("a table with no name was rendered");
+        assert!(
+            error.to_string().contains("a table needs a name"),
+            "{error}"
+        );
+    }
+
+    /// The word for a kind survives the trip to the front end and back.
+    ///
+    /// The seam that has no compiler on it: the front end sends a string and
+    /// this reads one, so a spelling changed on either side is a column silently
+    /// refused — or, for the decimal, a size silently lost. Every variant is
+    /// round-tripped, including one whose scale is negative, which is legal in
+    /// Arrow and is what a file of round thousands infers.
+    #[test]
+    fn every_kind_is_spelled_the_same_in_both_directions() {
+        for kind in [
+            ColumnKind::Bool,
+            ColumnKind::Int,
+            ColumnKind::Float,
+            ColumnKind::Text,
+            ColumnKind::Date,
+            ColumnKind::Timestamp,
+            ColumnKind::Decimal(12, 2),
+            ColumnKind::Decimal(38, -3),
+        ] {
+            let word = kind.word();
+            assert_eq!(
+                ColumnKind::parse(&word).unwrap_or_else(|e| panic!("{word}: {e}")),
+                kind,
+                "{word} did not come back as the kind that wrote it"
+            );
+        }
+
+        // A word this build does not know is refused rather than defaulted to
+        // text, which is the failure that would look like a working feature.
+        for word in ["", "varchar(64)", "decimal", "decimal(x,2)", "Int"] {
+            let error = ColumnKind::parse(word)
+                .expect_err("a kind was invented for a word this build does not write");
+            assert!(error.to_string().contains(word), "{error}");
+        }
+    }
+
+    /// Five columns with every field a file cannot state.
+    fn a_filled_in_form() -> Vec<NewColumn> {
+        vec![
+            column_with("id", ColumnKind::Int, false, None, true),
+            column_with("Order Date", ColumnKind::Date, false, None, true),
+            column_with(
+                "amount",
+                ColumnKind::Decimal(12, 2),
+                false,
+                Some("0"),
+                false,
+            ),
+            column("note", ColumnKind::Text, true),
+            column_with("seen_at", ColumnKind::Timestamp, true, Some("now()"), false),
+        ]
+    }
+
+    fn column(name: &str, kind: ColumnKind, nullable: bool) -> NewColumn {
+        column_with(name, kind, nullable, None, false)
+    }
+
+    fn column_with(
+        name: &str,
+        kind: ColumnKind,
+        nullable: bool,
+        default: Option<&str>,
+        primary_key: bool,
+    ) -> NewColumn {
+        NewColumn {
+            name: name.to_string(),
+            kind,
+            nullable,
+            default: default.map(str::to_string),
+            primary_key,
         }
     }
 

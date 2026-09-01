@@ -77,7 +77,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
-// `--verify-relation-change`, `--verify-database-change`,
+// `--verify-relation-change`, `--verify-database-change`, `--verify-new-table`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -142,6 +142,9 @@ if CommandLine.arguments.contains("--verify-relation-change") {
 }
 if CommandLine.arguments.contains("--verify-database-change") {
     exit(MainActor.assumeIsolated { DatabaseChangeChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-new-table") {
+    exit(MainActor.assumeIsolated { NewTableChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -1143,6 +1146,54 @@ func openDatabaseChangeSheet(model: AppModel, argument: String) {
             // which is what somebody arriving at this sheet does.
             model.prepareDatabaseChange(change, named: change == .drop ? name : "")
             if change == .create { model.setNewDatabaseName(name) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--new-table orders` opens the Create Table form for a table of that name.
+///
+/// Filled with three columns rather than the one it opens with, because what a
+/// capture of this sheet has to show is the form deciding something: a key, a
+/// column that refuses a null, and a default. An empty row shows the layout and
+/// none of the behaviour.
+let newTableName = argument("--new-table")
+
+/// Drives `--new-table`. Waits for the statement as well as the sheet.
+@MainActor
+func openNewTableSheet(model: AppModel, name: String) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("new table sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.newTablePlan?.statement {
+            fputs("\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("new table sheet timed out\n", stderr)
+            exit(1)
+        }
+        if !asked, model.makesTables {
+            asked = true
+            model.prepareNewTable()
+            model.editNewTable { plan in
+                plan.name = name
+                plan.columns = [
+                    NewTableColumn(name: "id", kind: .int, nullable: false, isPrimaryKey: true),
+                    NewTableColumn(
+                        name: "amount", kind: .decimal(precision: 12, scale: 2), nullable: false,
+                        defaultValue: "0"),
+                    NewTableColumn(name: "note", kind: .text)
+                ]
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -4072,6 +4123,7 @@ if benchMode {
         if let changeDatabaseArgument {
             openDatabaseChangeSheet(model: model, argument: changeDatabaseArgument)
         }
+        if let newTableName { openNewTableSheet(model: model, name: newTableName) }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
 }

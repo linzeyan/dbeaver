@@ -406,6 +406,40 @@ char* db_table_change_sql(DbHandle* handle, const char* schema, const char* rela
 // renames a table, and a SQLite database is a file.
 char* db_database_change_sql(DbHandle* handle, const char* change, const char* name, char** err);
 
+// The CREATE TABLE for a table described column by column — released with
+// db_string_free, written rather than run like the two above it.
+//
+// `columns` is the whole table at once, as JSON:
+//
+//   [{"name": …, "kind": "int", "nullable": false, "default": null,
+//     "primary_key": true}]
+//
+// One call and not one per column, because a primary key over two of them is a
+// clause about the table rather than about either, and so is the refusal for a
+// name used twice.
+//
+// `kind` is this library's own word for what a column holds — "bool", "int",
+// "float", "text", "date", "timestamp", or "decimal(P,S)" — and never a database's
+// type name. Each is spelled per database on this side: "text" is `text` on
+// PostgreSQL and `nvarchar(max)` on SQL Server. A word this build does not know is
+// refused rather than read as text, so a caller sending a spelling that has been
+// retired gets a message instead of a column of the wrong kind. `default` is
+// written after DEFAULT exactly as given, unquoted, an expression being
+// indistinguishable from a literal without parsing the server's own grammar.
+//
+// `schema` and `name` are quoted here, unlike db_create_table_sql's single
+// pre-spelled `table`: this name was typed into a form. An empty `schema` means no
+// container was named, which is a table the connection would have found anyway
+// rather than a container called nothing.
+//
+// Whether this connection writes DDL at all is db_capabilities_json's
+// writes_statements. There is no narrower flag: every dialect this build renders
+// makes a table. What one of them will not do is answered here in place of the
+// statement — ClickHouse stores a table in the order of its primary key, which is
+// not something this form chooses.
+char* db_new_table_sql(DbHandle* handle, const char* schema, const char* name,
+                       const char* columns, char** err);
+
 // The statement that reads one relation's rows, as plain text — released with
 // db_string_free, and written rather than run, like db_edit_sql_json.
 //

@@ -26,9 +26,10 @@
 //!   MySQL takes. Written as that constant rather than as the test, because the
 //!   parameter belongs to a driver descriptor this rewrite has no equivalent of.
 
-use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
+use crate::{
+    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+};
 use arrow::array::{Array, StringArray};
-use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo, RelationKind};
 
@@ -62,8 +63,8 @@ impl Renderer for Mysql {
     }
 
     /// MySQL's words for the kinds a file can ask for.
-    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
-        create_table_text(&dbsql::MYSQL, table, columns, word, "")
+    fn new_table(&self, table: &str, columns: &[NewColumn]) -> DbResult<String> {
+        new_table_text(&dbsql::MYSQL, table, columns, word, NullStyle::Suffix, "")
     }
 
     /// All three. MySQL has two nouns and a rename that names both ends.

@@ -668,7 +668,7 @@ enum AppMenu {
             action: #selector(ServerCommands.showServerVariables(_:)), keyEquivalent: "")
         variables.target = server
 
-        // Behind a separator, because it is the one item here that changes
+        // Behind a separator, because these are the items here that change
         // something. The two above read. This is also the only place a database
         // can be *made* from: dropping one is a right-click on the row that is
         // going, and a database that does not exist yet has no row to click.
@@ -680,6 +680,15 @@ enum AppMenu {
             withTitle: DatabaseChange.create.menuTitle,
             action: #selector(ServerCommands.newDatabase(_:)), keyEquivalent: "")
         newDatabase.target = server
+
+        // Under it and not in a menu of its own, for the reason above: a table
+        // that does not exist yet has no row to right-click, so a menu is the
+        // only place it can be started from. The sidebar's plus is the other,
+        // and both open the same form.
+        let newTable = menu.addItem(
+            withTitle: "New Table…", action: #selector(ServerCommands.newTable(_:)),
+            keyEquivalent: "")
+        newTable.target = server
 
         item.submenu = menu
         return item
@@ -1114,6 +1123,10 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
     /// would be one somebody had to notice before changing it.
     @objc func newDatabase(_ sender: Any?) { model.prepareDatabaseChange(.create) }
 
+    /// No schema either: the form opens on whatever is selected, or on the first
+    /// the tree has, which is the answer on most connections.
+    @objc func newTable(_ sender: Any?) { model.prepareNewTable() }
+
     /// One answer per item, because the capabilities are separate questions and
     /// a driver may well answer one and not the others — reading
     /// `SHOW VARIABLES` is a query, listing somebody else's sessions is a
@@ -1124,6 +1137,7 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
         case #selector(showServerProcesses(_:)): model.watchesServerProcesses
         case #selector(showServerVariables(_:)): model.readsServerVariables
         case #selector(newDatabase(_:)): model.changesDatabases
+        case #selector(newTable(_:)): model.makesTables
         default: false
         }
     }

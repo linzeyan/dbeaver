@@ -35,9 +35,10 @@
 //! `getTableDDL` and `getViewDDL` take the map and never read it, so there is no
 //! preference whose default had to be established before this could be written.
 
-use crate::{ColumnKind, DatabaseChange, Renderer, Script, TableChange, create_table_text};
+use crate::{
+    ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange, new_table_text,
+};
 use arrow::array::{Array, StringArray};
-use arrow::datatypes::Schema;
 use async_trait::async_trait;
 use dbconn::{DbError, DbResult, Driver, RelationInfo, RelationKind};
 
@@ -73,8 +74,8 @@ impl Renderer for Sqlite {
     /// looking at the value, and a column's type only sets which conversion it
     /// tries first. What is written here is therefore for whoever reads the
     /// table back, and is chosen to match what will actually be in it.
-    fn create_table(&self, table: &str, columns: &Schema) -> DbResult<String> {
-        create_table_text(&dbsql::SQLITE, table, columns, word, "")
+    fn new_table(&self, table: &str, columns: &[NewColumn]) -> DbResult<String> {
+        new_table_text(&dbsql::SQLITE, table, columns, word, NullStyle::Suffix, "")
     }
 
     /// Two of the three. SQLite has no `TRUNCATE` at all.

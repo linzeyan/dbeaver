@@ -340,6 +340,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-variables
 	./$(APP_BIN) --verify-relation-change
 	./$(APP_BIN) --verify-database-change
+	./$(APP_BIN) --verify-new-table
 	./$(APP_BIN) --verify-preferences
 	./$(APP_BIN) --verify-accessibility
 	./$(APP_BIN) --verify-quitting

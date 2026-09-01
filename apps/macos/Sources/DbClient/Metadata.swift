@@ -260,6 +260,163 @@ enum TableChange: String, Codable, Hashable, CaseIterable {
     var isDestructive: Bool { self != .rename }
 }
 
+/// What a column of a new table can be asked to hold.
+///
+/// Seven kinds and not a free-text type field, which is what most tools offer.
+/// A type typed by hand is SQL, and spelling SQL for a database this side does
+/// not know is the mistake the whole boundary exists to avoid: `nvarchar(max)`
+/// on SQL Server is `text` on PostgreSQL is `String` on ClickHouse. What crosses
+/// is the kind, and the core writes the word its own server reads.
+///
+/// The cost is the ceiling — no `varchar(64)`, no `uuid`, no `jsonb` — which is
+/// what a form for making a table quickly should cost. Anything past it is
+/// written in the SQL editor, which is a tab away and takes the whole language.
+///
+/// The raw values are what `db_new_table_sql` reads. `decimal` is the one kind
+/// that carries a size, because a decimal held at another scale is a different
+/// number and no server will mention it.
+enum ColumnKind: Hashable, Encodable {
+    case text
+    case int
+    case float
+    case decimal(precision: Int, scale: Int)
+    case bool
+    case date
+    case timestamp
+
+    /// The word the core reads, which is the case name plus a decimal's size.
+    ///
+    /// Encoded as this single string rather than as a struct, so that the wire
+    /// form has one shape for seven kinds and the core's `ColumnKind::parse` is
+    /// the only thing that reads it.
+    var word: String {
+        switch self {
+        case .text: return "text"
+        case .int: return "int"
+        case .float: return "float"
+        case .decimal(let precision, let scale): return "decimal(\(precision),\(scale))"
+        case .bool: return "bool"
+        case .date: return "date"
+        case .timestamp: return "timestamp"
+        }
+    }
+
+    /// What the picker says, which is the noun rather than the word.
+    ///
+    /// "Whole number" and not `int`: the picker is read by somebody deciding
+    /// what a column is for, and the type name they would have typed is the one
+    /// this build is not asking them to know. The same four words the file
+    /// import already infers in, so that the two features name one thing once.
+    ///
+    /// A decimal's size is not in the label. The two fields beside the picker
+    /// carry it, and saying it twice made the row too narrow to read either.
+    var label: String {
+        switch self {
+        case .text: return "Text"
+        case .int: return "Whole number"
+        case .float: return "Number"
+        case .decimal: return "Exact decimal"
+        case .bool: return "True or false"
+        case .date: return "Date"
+        case .timestamp: return "Date and time"
+        }
+    }
+
+    /// The kinds the picker offers, in the order it offers them.
+    ///
+    /// Text first because it takes anything, which is what somebody unsure of a
+    /// column wants. The decimal's size is the one number here that had to be
+    /// picked rather than read: 18 digits with 4 after the point holds money in
+    /// any currency and every quantity a form like this is used for, and the two
+    /// steppers beside the picker are how it is changed.
+    static let offered: [ColumnKind] = [
+        .text, .int, .float, .decimal(precision: 18, scale: 4), .bool, .date, .timestamp
+    ]
+
+    /// Whether this is the same kind as `other`, a decimal's size aside.
+    ///
+    /// What the picker's selection is compared with: `decimal(18, 4)` and
+    /// `decimal(12, 2)` are one row of the menu and two values, so `==` would
+    /// leave the row unselected the moment a stepper moved.
+    func isSameKind(as other: ColumnKind) -> Bool {
+        switch (self, other) {
+        case (.decimal, .decimal): return true
+        default: return self == other
+        }
+    }
+
+    /// The size, for the kind that has one.
+    var decimalSize: (precision: Int, scale: Int)? {
+        guard case .decimal(let precision, let scale) = self else { return nil }
+        return (precision, scale)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(word)
+    }
+
+    /// The kind `word` names, which is `word`'s inverse.
+    ///
+    /// Nothing on this side decodes a kind — they only ever go out — so this
+    /// exists for the checks: a spelling that changed on one side of the
+    /// boundary is a column silently refused, and the pair is what makes that
+    /// testable without a connection.
+    init?(word: String) {
+        switch word {
+        case "text": self = .text
+        case "int": self = .int
+        case "float": self = .float
+        case "bool": self = .bool
+        case "date": self = .date
+        case "timestamp": self = .timestamp
+        default:
+            guard word.hasPrefix("decimal("), word.hasSuffix(")") else { return nil }
+            let size = word.dropFirst("decimal(".count).dropLast().split(separator: ",")
+            guard size.count == 2, let precision = Int(size[0]), let scale = Int(size[1]) else {
+                return nil
+            }
+            self = .decimal(precision: precision, scale: scale)
+        }
+    }
+}
+
+/// One column of a table that does not exist yet.
+///
+/// Encoded straight to what `db_new_table_sql` reads, so the keys are the core's
+/// spelling rather than Swift's. `id` is not encoded: it exists so that the form
+/// can reorder and delete rows without SwiftUI losing which field has focus, and
+/// the core identifies a column by its name.
+struct NewTableColumn: Identifiable, Hashable, Encodable {
+    let id = UUID()
+    var name: String = ""
+    var kind: ColumnKind = .text
+    var nullable: Bool = true
+    /// Written after `DEFAULT` exactly as typed, or absent when the field is
+    /// empty — `DEFAULT` with nothing after it is a syntax error, and no default
+    /// is the ordinary case.
+    var defaultValue: String = ""
+    var isPrimaryKey: Bool = false
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case kind
+        case nullable
+        case defaultValue = "default"
+        case isPrimaryKey = "primary_key"
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(nullable, forKey: .nullable)
+        let trimmed = defaultValue.trimmingCharacters(in: .whitespaces)
+        try container.encode(trimmed.isEmpty ? nil : trimmed, forKey: .defaultValue)
+        try container.encode(isPrimaryKey, forKey: .isPrimaryKey)
+    }
+}
+
 /// How much of the server's own activity a connection can see and interrupt.
 ///
 /// A ladder, and each rung includes the one below it. The illegal combinations
