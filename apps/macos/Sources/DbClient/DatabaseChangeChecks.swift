@@ -231,6 +231,7 @@ enum DatabaseChangeChecks {
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: changesRelations, changesColumns: false, altersColumns: false,
+            changesIndexes: false, indexMethods: [],
             changesDatabases: changesDatabases)
     }
 

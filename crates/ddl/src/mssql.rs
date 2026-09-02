@@ -18,8 +18,8 @@
 //! aggregates them in.
 
 use crate::{
-    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
-    new_table_text,
+    ColumnChange, ColumnKind, DatabaseChange, IndexChange, NewColumn, NullStyle, Renderer, Script,
+    TableChange, new_table_text,
 };
 use async_trait::async_trait;
 use dbconn::{
@@ -97,6 +97,22 @@ impl Renderer for MsSql {
     /// alters none of them.
     fn alters_columns(&self) -> bool {
         false
+    }
+
+    /// Neither is written yet, for the reason the column changes are not:
+    /// upstream is the specification and the families are lit one at a time.
+    fn index_change(&self, _relation: &RelationInfo, _change: IndexChange<'_>) -> DbResult<String> {
+        Err(DbError::new(
+            "making or removing an index has not been written for SQL Server yet",
+        ))
+    }
+
+    fn changes_indexes(&self) -> bool {
+        false
+    }
+
+    fn index_methods(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Neither is written yet, for the reason the relation changes are not:

@@ -49,14 +49,15 @@ use dbffi::{
     db_cursor_free, db_cursor_next, db_cursor_schema, db_database_change_sql, db_databases_json,
     db_ddl_text, db_definition_json, db_edit_sql_json, db_end_process, db_export, db_export_sql,
     db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
-    db_import_start, db_import_step, db_indexes_json, db_names_forget, db_new_table_sql,
-    db_processes_json, db_query, db_query_free, db_query_next, db_query_rows_affected,
-    db_query_schema, db_referenced_by_json, db_relations_json, db_routine_definition_json,
-    db_routines_json, db_row_identity_json, db_schemas_json, db_sequences_json,
-    db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free, db_table_change_sql,
-    db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
-    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
-    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json, db_variables_json,
+    db_import_start, db_import_step, db_index_change_sql, db_indexes_json, db_names_forget,
+    db_new_table_sql, db_processes_json, db_query, db_query_free, db_query_next,
+    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
+    db_routine_definition_json, db_routines_json, db_row_identity_json, db_schemas_json,
+    db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free,
+    db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
+    db_transfer_start, db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit,
+    db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
+    db_variables_json,
 };
 
 // Test db_connect with null connection string
@@ -2681,6 +2682,173 @@ fn a_column_change_is_composed_and_runs_or_is_refused_by_name() {
 
     unsafe { db_free(handle) };
     let _ = std::fs::remove_file(&path);
+}
+
+/// An index is made and dropped, and the server is asked each time.
+///
+/// On SQLite, which needs no server and can therefore *run* what this composes.
+/// Each statement is checked against `sqlite_master` rather than against its own
+/// text: an index made is one the catalog lists, an index dropped is one it does
+/// not. That is the only thing that says these are statements.
+///
+/// SQLite is also where the two shape differences show at once — the schema goes
+/// on the index and not on the table, which is the reverse of both other
+/// servers — so a statement written in PostgreSQL's arrangement would be refused
+/// here rather than quietly accepted.
+#[test]
+fn an_index_change_is_composed_and_runs_or_is_refused_by_name() {
+    let path = std::env::temp_dir().join("dbffi-index-change.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+    ran(
+        handle,
+        "CREATE TABLE main.invoice (id INTEGER, sku TEXT, qty INTEGER)",
+    );
+    ran(
+        handle,
+        "CREATE VIEW main.paid AS SELECT id FROM main.invoice",
+    );
+
+    let compose = |relation: &str, change: &str| {
+        let schema = CString::new("main").unwrap();
+        let relation = CString::new(relation).unwrap();
+        let change = CString::new(change).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_index_change_sql(
+                handle,
+                schema.as_ptr(),
+                relation.as_ptr(),
+                change.as_ptr(),
+                &mut err,
+            )
+        };
+        if raw.is_null() {
+            return Err(complaint(&mut err));
+        }
+        assert!(err.is_null(), "a written statement must not also set err");
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        Ok(text)
+    };
+
+    let listed = |index: &str| {
+        ran(
+            handle,
+            &format!("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = '{index}'"),
+        )
+    };
+
+    let made = compose(
+        "invoice",
+        r#"{"change":"create","index":{"name":"invoice_sku_idx",
+            "columns":["sku","qty"],"unique":false}}"#,
+    )
+    .expect("SQLite makes an index");
+    ran(handle, &made);
+    assert_eq!(listed("invoice_sku_idx"), 1, "the index is in the catalog");
+
+    // Unique means unique, which is the one property of these that the server
+    // will demonstrate on request.
+    let unique = compose(
+        "invoice",
+        r#"{"change":"create","index":{"name":"invoice_id_key",
+            "columns":["id"],"unique":true}}"#,
+    )
+    .expect("SQLite makes a unique index");
+    ran(handle, &unique);
+    ran(handle, "INSERT INTO main.invoice (id) VALUES (1)");
+    let mut err: *mut c_char = ptr::null_mut();
+    let mut position: c_int = 0;
+    let sql = CString::new("INSERT INTO main.invoice (id) VALUES (1)").unwrap();
+    let again = unsafe { db_query(handle, sql.as_ptr(), 1, &mut err, &mut position) };
+    assert!(
+        again.is_null(),
+        "a second row with the same id must be refused by the unique index"
+    );
+    unsafe { db_string_free(err) };
+
+    let dropped = compose("invoice", r#"{"change":"drop","name":"invoice_sku_idx"}"#)
+        .expect("SQLite drops an index");
+    ran(handle, &dropped);
+    assert_eq!(listed("invoice_sku_idx"), 0, "the dropped index is gone");
+    assert_eq!(listed("invoice_id_key"), 1, "and the one beside it is not");
+
+    // A view has no indexes, and the refusal says that rather than promising a
+    // later release.
+    let why =
+        compose("paid", r#"{"change":"drop","name":"i"}"#).expect_err("a view's index was dropped");
+    assert!(!why.contains("yet"), "got {why}");
+
+    // SQLite names no access method, so one arriving is refused rather than
+    // written somewhere it does not go.
+    let why = compose(
+        "invoice",
+        r#"{"change":"create","index":{"name":"i","columns":["sku"],"method":"hash"}}"#,
+    )
+    .expect_err("SQLite took an access method");
+    assert!(why.contains("hash"), "got {why}");
+
+    // An index over nothing, and one that names a column twice — the second of
+    // which SQLite itself accepts.
+    for change in [
+        r#"{"change":"create","index":{"name":"i","columns":[]}}"#,
+        r#"{"change":"create","index":{"name":"i","columns":["sku","sku"]}}"#,
+    ] {
+        let why = compose("invoice", change).expect_err("an index over nothing was written");
+        assert!(!why.is_empty(), "the refusal must say something");
+    }
+
+    // A verb this build does not have must not fall through to one it does.
+    // `rename` is the tempting one: PostgreSQL has `ALTER INDEX … RENAME TO`.
+    for change in [
+        r#"{"change":"rename","name":"i","to":"j"}"#,
+        r#"{"change":"create"}"#,
+        r#"{"name":"i"}"#,
+        "",
+    ] {
+        let why = compose("invoice", change).expect_err("there is no such change");
+        assert!(!why.is_empty(), "the refusal must say something");
+    }
+
+    // A relation that is not there is not a change with an empty statement.
+    let why = compose(
+        "no_such_relation_anywhere",
+        r#"{"change":"drop","name":"i"}"#,
+    )
+    .expect_err("an index was dropped from a table nobody has");
+    assert!(why.contains("no_such_relation_anywhere"), "got {why}");
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The arguments this call refuses to read at all.
+#[test]
+fn the_index_change_call_says_why_it_could_not_read_its_arguments() {
+    let public = CString::new("public").unwrap();
+    let change = CString::new(r#"{"change":"drop","name":"i"}"#).unwrap();
+    let invalid = CString::new(vec![b'p', b'u', b'b', 0xff, 0xfe]).unwrap();
+    for (schema, relation, requested) in [
+        (public.as_ptr(), public.as_ptr(), change.as_ptr()),
+        (ptr::null(), public.as_ptr(), change.as_ptr()),
+        (public.as_ptr(), ptr::null(), change.as_ptr()),
+        (public.as_ptr(), public.as_ptr(), ptr::null()),
+        (invalid.as_ptr(), public.as_ptr(), change.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw =
+            unsafe { db_index_change_sql(ptr::null_mut(), schema, relation, requested, &mut err) };
+        assert!(raw.is_null());
+        assert!(
+            !err.is_null(),
+            "db_index_change_sql must say why it refused"
+        );
+        unsafe { db_string_free(err) };
+    }
 }
 
 /// The arguments this call refuses to read at all.

@@ -6912,6 +6912,163 @@ final class AppModel {
         let identity: RowIdentity?
     }
 
+    // MARK: - Changing an index
+
+    /// Whether this connection makes or drops an index.
+    ///
+    /// Its own capability, like the two above: an index is a different object
+    /// from the table it is on.
+    var changesIndexes: Bool {
+        capabilities.changesIndexes && safety.writeRefusal == nil && !isBusy
+    }
+
+    /// An index about to be made or dropped, and the statement for it.
+    var indexPlan: IndexChangePlan?
+
+    var isIndexChangeSheetOpen: Bool {
+        get { indexPlan != nil }
+        set { if !newValue { indexPlan = nil } }
+    }
+
+    /// One relation, one change to one of its indexes, and the statement written
+    /// for exactly that change.
+    struct IndexChangePlan {
+        let relation: RelationInfo
+        var change: IndexChange
+        var written: Written?
+
+        struct Written {
+            /// The whole change, for the reason `ColumnChangePlan` stores the
+            /// whole one: a column added to the list or the uniqueness unticked
+            /// while the round trip is in the air would otherwise be sent as the
+            /// statement that had the old answer.
+            let change: IndexChange
+            let text: String?
+            let refusal: String?
+        }
+
+        var statement: String? { written?.change == change ? written?.text : nil }
+        var refusal: String? { written?.change == change ? written?.refusal : nil }
+
+        /// What the pane shows: the last statement written, current or not.
+        var preview: String { written?.text ?? "" }
+
+        var qualified: String { "\(relation.schema).\(relation.name)" }
+    }
+
+    /// Opens the sheet showing what `change` would do to an index of `relation`.
+    func prepareIndexChange(_ change: IndexChange, of relation: RelationInfo) {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) \(relation.schema).\(relation.name) is unchanged."
+            return
+        }
+        errorMessage = nil
+        indexPlan = IndexChangePlan(relation: relation, change: change, written: nil)
+        renderIndexChange()
+    }
+
+    /// Applies an edit to the plan's change and rewrites the statement.
+    func editIndexChange(_ edit: (inout IndexChange) -> Void) {
+        guard var plan = indexPlan else { return }
+        edit(&plan.change)
+        indexPlan = plan
+        renderIndexChange()
+    }
+
+    private func renderIndexChange() {
+        guard let plan = indexPlan else { return }
+        let (relation, change) = (plan.relation, plan.change)
+        // Answered here rather than after a round trip, so that they appear as
+        // the field empties. Everything else is the core's.
+        let missing =
+            switch change {
+            case .create(let index)
+            where index.name.trimmingCharacters(in: .whitespaces).isEmpty:
+                "An index needs a name."
+            case .create(let index) where index.columns.contains(where: { $0.name.isEmpty }):
+                "Every column of an index needs a name."
+            default: String?.none
+            }
+        if let missing {
+            indexPlan?.written = IndexChangePlan.Written(
+                change: change, text: nil, refusal: missing)
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(
+                    try db.indexChangeSQL(
+                        schema: relation.schema, relation: relation.name, change: change))
+            } catch {
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            guard indexPlan?.relation == relation else { return }
+            indexPlan?.written =
+                switch answer {
+                case .success(let statement):
+                    IndexChangePlan.Written(change: change, text: statement, refusal: nil)
+                case .failure(let error):
+                    IndexChangePlan.Written(
+                        change: change, text: nil, refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var indexChangeObstacle: String? {
+        guard let plan = indexPlan else { return "Nothing to change." }
+        if let refusal = plan.refusal { return refusal }
+        guard let statement = plan.statement, !statement.isEmpty else { return "Writing it…" }
+        return nil
+    }
+
+    /// Runs the statement the sheet has been showing, then reads the indexes back.
+    func applyIndexChange() {
+        guard let plan = indexPlan, let statement = plan.statement, indexChangeObstacle == nil
+        else {
+            return
+        }
+        indexPlan = nil
+        let (relation, change) = (plan.relation, plan.change)
+        isBusy = true
+        status = "\(change.progressive) \(change.indexName) on \(plan.qualified)…"
+        errorMessage = nil
+        run { db -> ChangedIndexes in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained: an index over a column that will not take one, or a
+            // unique index over values that are not, is refused while the
+            // statement executes rather than while it is accepted.
+            while try query.nextBatch() != nil {}
+            db.forgetNames()
+            // The identity as well as the list, for the reason a column change
+            // reads both: a unique index over columns that cannot be null is one
+            // of the things that can name a row, so making or dropping one
+            // changes whether the grid can edit at all.
+            return ChangedIndexes(
+                affected: query.rowsAffected ?? 0,
+                indexes: try db.indexes(schema: relation.schema, relation: relation.name),
+                identity: try db.rowIdentity(schema: relation.schema, relation: relation.name))
+        } then: { [self] changed in
+            isBusy = false
+            if selected == relation {
+                indexes = changed.indexes
+                rowIdentity = changed.identity
+            }
+            history.record(
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+            status = "\(change.pastTense) \(change.indexName) on \(plan.qualified)"
+        }
+    }
+
+    /// A relation's indexes as they are after one of them changed.
+    private struct ChangedIndexes: Sendable {
+        let affected: Int
+        let indexes: [IndexInfo]
+        let identity: RowIdentity?
+    }
+
     // MARK: - Making a table
 
     /// Whether this connection can be asked to make a table.

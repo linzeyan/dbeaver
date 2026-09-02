@@ -226,6 +226,7 @@ enum VariablesChecks {
             reportsSequences: false, serverProcesses: serverProcesses,
             reportsVariables: reportsVariables, changesRelations: false, changesColumns: false,
             altersColumns: false,
+            changesIndexes: false, indexMethods: [],
             changesDatabases: false)
     }
 

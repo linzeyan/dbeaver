@@ -798,6 +798,7 @@ enum AppModelConnectionChecks {
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
                 altersColumns: false,
+                changesIndexes: false, indexMethods: [],
                 changesDatabases: false)
 
             expect(model.canEditCell, false, "no cell of a Redis key type is editable")
@@ -816,6 +817,7 @@ enum AppModelConnectionChecks {
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
                 altersColumns: false,
+                changesIndexes: false, indexMethods: [],
                 changesDatabases: false)
             expect(
                 model.editObstacle == nil, true,
@@ -841,6 +843,7 @@ enum AppModelConnectionChecks {
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
                 altersColumns: false,
+                changesIndexes: false, indexMethods: [],
                 changesDatabases: false)
             expect(
                 model.structureSections.contains(.ddl), true,
@@ -852,6 +855,7 @@ enum AppModelConnectionChecks {
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
                 altersColumns: false,
+                changesIndexes: false, indexMethods: [],
                 changesDatabases: false)
             expect(
                 model.structureSections.contains(.ddl), false,
@@ -931,6 +935,7 @@ enum AppModelConnectionChecks {
                     reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                     reportsVariables: false, changesRelations: false, changesColumns: false,
                     altersColumns: false,
+                    changesIndexes: false, indexMethods: [],
                     changesDatabases: false)
             }
 

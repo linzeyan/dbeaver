@@ -669,6 +669,151 @@ fn alteration_clauses(
     Ok(clauses.join(", "))
 }
 
+/// An index that does not exist yet.
+///
+/// Four answers: a name, the columns in key order, whether it is unique, and
+/// which access method — and the last is `None` on every server but PostgreSQL.
+/// What is *not* here is what upstream's index editor also offers and this build
+/// cannot show: an expression key (`lower(email)`), a descending column, a
+/// partial index's `WHERE`, an operator class, a MySQL prefix length. Each of
+/// those is SQL typed into a form, which is the boundary the Create Table form
+/// draws in the same place.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewIndex {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub unique: bool,
+    pub method: Option<String>,
+}
+
+/// What to do to an index of a relation.
+///
+/// Two verbs. An index is not altered in place on any of these servers — MySQL's
+/// own manager drops it and creates it again, which is two statements and a
+/// window where the table has no index — so what is offered is the two that are
+/// one statement each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum IndexChange<'a> {
+    Create(&'a NewIndex),
+    Drop { name: &'a str },
+}
+
+/// Where this server's `CREATE INDEX` puts the access method.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum MethodPlace {
+    /// `… ON table USING method (columns)`, which is PostgreSQL's.
+    AfterOn,
+    /// `… USING method ON table (columns)`, which is MySQL's.
+    BeforeOn,
+    /// This server names no access method at all, so one arriving is refused
+    /// rather than written somewhere it does not go.
+    None,
+}
+
+/// The three ways these servers spell an index statement differently.
+///
+/// A struct rather than three parameters because they travel together, and the
+/// same reason [`NullStyle`] exists at all: one renderer's spelling written for
+/// another is a statement that reads correctly and does not run.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IndexStyle {
+    pub method: MethodPlace,
+    /// Whether the schema goes on the index's own name and *not* on the table's,
+    /// which is SQLite's arrangement and nobody else's:
+    /// `CREATE INDEX main.by_email ON invoice (email)`.
+    pub schema_on_the_index: bool,
+    /// Whether the drop is `ALTER TABLE … DROP INDEX <name>` rather than
+    /// `DROP INDEX <index>`. MySQL is the one, an index there living under its
+    /// table rather than in the schema beside it.
+    pub drop_through_the_table: bool,
+}
+
+/// `CREATE INDEX` and the drop, which is the whole of what this offers.
+pub(crate) fn index_change_text(
+    dialect: &'static Dialect,
+    style: IndexStyle,
+    schema: &str,
+    table: &str,
+    change: IndexChange<'_>,
+) -> DbResult<String> {
+    let qualify = |name: &str| match schema.is_empty() {
+        true => dialect.quote(name),
+        false => format!("{}.{}", dialect.quote(schema), dialect.quote(name)),
+    };
+    let mut script = Script::new();
+    match change {
+        IndexChange::Create(index) => {
+            if index.name.is_empty() {
+                return Err(DbError::new("an index needs a name"));
+            }
+            if index.columns.is_empty() {
+                return Err(DbError::new(format!(
+                    "{} would be an index over no columns, which indexes nothing",
+                    index.name
+                )));
+            }
+            for (position, column) in index.columns.iter().enumerate() {
+                if column.is_empty() {
+                    return Err(DbError::new("an index column needs a name"));
+                }
+                // Named twice, the second one is doing nothing — and a server
+                // that accepts it leaves an index nobody can read the purpose
+                // of. PostgreSQL and MySQL both take it without complaint.
+                if index.columns[..position].contains(column) {
+                    return Err(DbError::new(format!(
+                        "{column} is named twice, and an index cannot be sorted by one column \
+                         twice"
+                    )));
+                }
+            }
+            let unique = if index.unique { " UNIQUE" } else { "" };
+            // The index carries the schema on SQLite and the table carries it
+            // everywhere else, and exactly one of the two does in each case:
+            // SQLite refuses a qualified table name here, and PostgreSQL refuses
+            // a qualified index name.
+            let (named, on) = match style.schema_on_the_index {
+                true => (qualify(&index.name), dialect.quote(table)),
+                false => (dialect.quote(&index.name), qualify(table)),
+            };
+            let method = match (&index.method, style.method) {
+                (None, _) => (String::new(), String::new()),
+                (Some(method), MethodPlace::AfterOn) => (String::new(), format!(" USING {method}")),
+                (Some(method), MethodPlace::BeforeOn) => {
+                    (format!(" USING {method}"), String::new())
+                }
+                (Some(method), MethodPlace::None) => {
+                    return Err(DbError::new(format!(
+                        "{} names no access method for an index, so there is nowhere to put \
+                         {method}",
+                        dialect.name
+                    )));
+                }
+            };
+            let columns: Vec<String> = index.columns.iter().map(|c| dialect.quote(c)).collect();
+            script.statement(&format!(
+                "CREATE{unique} INDEX {named}{} ON {on}{} ({})",
+                method.0,
+                method.1,
+                columns.join(", ")
+            ));
+        }
+        IndexChange::Drop { name } => {
+            if name.is_empty() {
+                return Err(DbError::new("an index needs a name"));
+            }
+            script.statement(&match style.drop_through_the_table {
+                true => format!(
+                    "ALTER TABLE {} DROP INDEX {}",
+                    qualify(table),
+                    dialect.quote(name)
+                ),
+                false => format!("DROP INDEX {}", qualify(name)),
+            });
+        }
+    }
+    Ok(script.finish())
+}
+
 /// The half of DDL generation that is genuinely per-database.
 ///
 /// One method, because that is how much the databases share. Upstream's own
@@ -766,6 +911,29 @@ pub trait Renderer: Send + Sync {
     /// menu item that lies.
     fn alters_columns(&self) -> bool;
 
+    /// The statement for making or removing an index of `relation`.
+    ///
+    /// No default, for the reason `table_change` has none — and here the shape
+    /// of the statement differs as much as the words do: PostgreSQL puts an
+    /// index in the schema beside its table and drops it by its own name, MySQL
+    /// keeps it under the table and drops it through an `ALTER TABLE`, and
+    /// SQLite puts the schema on the index's name and refuses it on the table's.
+    fn index_change(&self, relation: &RelationInfo, change: IndexChange<'_>) -> DbResult<String>;
+
+    /// Whether this renderer writes either [`IndexChange`] at all.
+    fn changes_indexes(&self) -> bool;
+
+    /// The access methods this build offers for an index on this server, in the
+    /// order a picker should show them.
+    ///
+    /// A list rather than a flag, because the answer is neither yes nor no: the
+    /// methods are per server and naming one from the wrong server is a
+    /// statement that reads correctly and is refused. Empty means "say nothing
+    /// and take the server's default", which is not the same as having no
+    /// methods — MySQL has `USING HASH` and it is left out on purpose, InnoDB
+    /// accepting it and then ignoring it.
+    fn index_methods(&self) -> &'static [&'static str];
+
     /// Whether this renderer writes either [`DatabaseChange`].
     ///
     /// Separate from `changes_relations` and not implied by it. SQLite is the
@@ -843,6 +1011,31 @@ pub fn column_change(
 /// [`column_change`] answers that one where the statement would have been.
 pub fn changes_columns(dialect: &'static Dialect) -> bool {
     for_dialect(dialect).is_some_and(|renderer| renderer.changes_columns())
+}
+
+/// The statement that would make `change` to an index of `relation`, in the SQL
+/// `dialect` writes.
+///
+/// Rendered and handed back rather than run, like [`table_change`]. A dropped
+/// index is rebuilt by reading the whole table, which on a large one is a wait
+/// nobody should be surprised by.
+pub fn index_change(
+    dialect: &'static Dialect,
+    relation: &RelationInfo,
+    change: IndexChange<'_>,
+) -> DbResult<String> {
+    render(dialect, |renderer| renderer.index_change(relation, change))
+}
+
+/// Whether this build makes or removes an index on `dialect`.
+pub fn changes_indexes(dialect: &'static Dialect) -> bool {
+    for_dialect(dialect).is_some_and(|renderer| renderer.changes_indexes())
+}
+
+/// The access methods offered for an index on `dialect`, empty where the front
+/// end should not draw the picker at all.
+pub fn index_methods(dialect: &'static Dialect) -> &'static [&'static str] {
+    for_dialect(dialect).map_or(&[], |renderer| renderer.index_methods())
 }
 
 /// Whether this build alters a column's own definition on `dialect`.
@@ -938,7 +1131,10 @@ impl Script {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColumnChange, ColumnKind, DatabaseChange, DefaultChange, NewColumn, TableChange};
+    use super::{
+        ColumnChange, ColumnKind, DatabaseChange, DefaultChange, IndexChange, NewColumn, NewIndex,
+        TableChange,
+    };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use dbconn::{RelationInfo, RelationKind};
     use dbsql::Dialect;
@@ -2026,6 +2222,258 @@ ORDER BY tuple();"
         // The two flags are not one flag, and SQLite is where that is visible.
         assert!(super::changes_columns(&dbsql::SQLITE));
         assert!(!super::alters_columns(&dbsql::SQLITE));
+    }
+
+    /// Each index statement written out in full, for each database that writes
+    /// one.
+    ///
+    /// Strings and not a rule, for the reason the other spelling tests are
+    /// written that way — and here there is more to get wrong than words. The
+    /// three differ in *shape*: PostgreSQL names the method after `ON` and drops
+    /// the index by its own name, MySQL names the method before `ON` and drops
+    /// it through an `ALTER TABLE`, and SQLite puts the schema on the index and
+    /// refuses it on the table. Each of the three spellings runs on exactly one
+    /// of these servers.
+    #[test]
+    fn an_index_is_spelled_the_way_the_server_being_indexed_reads_it() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let by_sku = NewIndex {
+            name: "orders_sku_idx".into(),
+            columns: vec!["sku".into(), "Line No".into()],
+            unique: false,
+            method: None,
+        };
+        let unique = NewIndex {
+            name: "orders_sku_key".into(),
+            columns: vec!["sku".into()],
+            unique: true,
+            method: None,
+        };
+        let cases: &[(&Dialect, IndexChange, &str)] = &[
+            (
+                &dbsql::POSTGRES,
+                IndexChange::Create(&by_sku),
+                "CREATE INDEX orders_sku_idx ON staging.orders (sku, \"Line No\");",
+            ),
+            (
+                &dbsql::POSTGRES,
+                IndexChange::Create(&unique),
+                "CREATE UNIQUE INDEX orders_sku_key ON staging.orders (sku);",
+            ),
+            (
+                &dbsql::POSTGRES,
+                IndexChange::Drop {
+                    name: "orders_sku_idx",
+                },
+                "DROP INDEX staging.orders_sku_idx;",
+            ),
+            (
+                &dbsql::MYSQL,
+                IndexChange::Create(&by_sku),
+                "CREATE INDEX orders_sku_idx ON staging.orders (sku, `Line No`);",
+            ),
+            // Through the table, `MySQLIndexManager.getDropIndexPattern`, an
+            // index there being part of its table rather than of the schema.
+            (
+                &dbsql::MYSQL,
+                IndexChange::Drop {
+                    name: "orders_sku_idx",
+                },
+                "ALTER TABLE staging.orders DROP INDEX orders_sku_idx;",
+            ),
+            // The schema on the index and the bare name on the table, which is
+            // SQLite's grammar and the reverse of both above.
+            (
+                &dbsql::SQLITE,
+                IndexChange::Create(&by_sku),
+                "CREATE INDEX staging.orders_sku_idx ON orders (sku, \"Line No\");",
+            ),
+            (
+                &dbsql::SQLITE,
+                IndexChange::Drop {
+                    name: "orders_sku_idx",
+                },
+                "DROP INDEX staging.orders_sku_idx;",
+            ),
+        ];
+        for (dialect, change, expected) in cases {
+            let statement = super::index_change(dialect, &orders, *change)
+                .unwrap_or_else(|e| panic!("{} refused {change:?}: {e}", dialect.name));
+            assert_eq!(
+                statement, *expected,
+                "{} wrote the wrong statement for {change:?}",
+                dialect.name
+            );
+        }
+    }
+
+    /// The access method goes where the server being written for takes it.
+    ///
+    /// Before `ON` and after `ON` are the same six characters in a different
+    /// place, and each server refuses the other's arrangement — which is the
+    /// kind of mistake that reads perfectly well.
+    #[test]
+    fn an_access_method_is_named_where_that_server_takes_it() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let hashed = NewIndex {
+            name: "orders_sku_idx".into(),
+            columns: vec!["sku".into()],
+            unique: false,
+            method: Some("hash".into()),
+        };
+        assert_eq!(
+            super::index_change(&dbsql::POSTGRES, &orders, IndexChange::Create(&hashed)).unwrap(),
+            "CREATE INDEX orders_sku_idx ON staging.orders USING hash (sku);"
+        );
+        // Written although the picker offers nothing on MySQL, so that the
+        // spelling is right the day a MEMORY table needs it.
+        assert_eq!(
+            super::index_change(&dbsql::MYSQL, &orders, IndexChange::Create(&hashed)).unwrap(),
+            "CREATE INDEX orders_sku_idx USING hash ON staging.orders (sku);"
+        );
+        // SQLite has nowhere to put it, and says that rather than dropping it.
+        let error = super::index_change(&dbsql::SQLITE, &orders, IndexChange::Create(&hashed))
+            .expect_err("SQLite named an access method");
+        assert!(error.to_string().contains("hash"), "{error}");
+
+        // What each server offers, written out, for the reason the statements
+        // above are written out: nothing here can work out that `gin` is a
+        // PostgreSQL access method and not a MySQL one, so the list is the
+        // assertion. A picker offering the wrong server's method produces a
+        // statement that reads perfectly well and is refused.
+        let offered: &[(&Dialect, &[&str])] = &[
+            (&dbsql::POSTGRES, &["btree", "hash", "gin", "gist", "brin"]),
+            // Empty and not `["btree"]`: MySQL takes `USING HASH` and InnoDB
+            // builds a B-tree anyway, so the choice is left unsaid rather than
+            // offered and quietly discarded.
+            (&dbsql::MYSQL, &[]),
+            // SQLite has one kind of index and no syntax that names it.
+            (&dbsql::SQLITE, &[]),
+            (&dbsql::CLICKHOUSE, &[]),
+            (&dbsql::MSSQL, &[]),
+            (&dbsql::DUCKDB, &[]),
+        ];
+        for (dialect, expected) in offered {
+            assert_eq!(
+                super::index_methods(dialect),
+                *expected,
+                "{} offers the wrong access methods",
+                dialect.name
+            );
+            // And every one it offers is one it will write, which is what stops
+            // a list being kept for a renderer whose style names no method.
+            for method in *expected {
+                let index = NewIndex {
+                    method: Some((*method).to_string()),
+                    ..hashed.clone()
+                };
+                super::index_change(dialect, &orders, IndexChange::Create(&index)).unwrap_or_else(
+                    |e| panic!("{} offers {method} and refuses it: {e}", dialect.name),
+                );
+            }
+        }
+    }
+
+    /// The four index statements no server should be sent.
+    #[test]
+    fn an_index_that_indexes_nothing_is_refused_rather_than_sent() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let index = |name: &str, columns: &[&str]| NewIndex {
+            name: name.into(),
+            columns: columns.iter().map(|c| (*c).to_string()).collect(),
+            unique: false,
+            method: None,
+        };
+        let empty = index("", &["sku"]);
+        let no_columns = index("orders_idx", &[]);
+        let unnamed_column = index("orders_idx", &[""]);
+        let twice = index("orders_idx", &["sku", "qty", "sku"]);
+        let cases: &[(&str, IndexChange)] = &[
+            ("an index needs a name", IndexChange::Create(&empty)),
+            ("indexes nothing", IndexChange::Create(&no_columns)),
+            (
+                "an index column needs a name",
+                IndexChange::Create(&unnamed_column),
+            ),
+            // Taken without complaint by PostgreSQL and MySQL both, and the
+            // second mention does nothing at all.
+            ("named twice", IndexChange::Create(&twice)),
+            ("an index needs a name", IndexChange::Drop { name: "" }),
+        ];
+        for (expected, change) in cases {
+            let error = super::index_change(&dbsql::POSTGRES, &orders, *change)
+                .expect_err("a statement was written for an index that indexes nothing");
+            assert!(
+                error.to_string().contains(expected),
+                "{change:?}: wanted {expected:?}, got {error}"
+            );
+        }
+    }
+
+    /// A view has no indexes to make, and the refusal says so.
+    #[test]
+    fn no_database_indexes_a_view() {
+        let view = relation("staging", "summary", RelationKind::View);
+        for dialect in [&dbsql::POSTGRES, &dbsql::MYSQL, &dbsql::SQLITE] {
+            let error =
+                super::index_change(dialect, &view, IndexChange::Drop { name: "i" }).unwrap_err();
+            assert!(
+                !error.to_string().contains("yet"),
+                "{}: a view is not a later release: {error}",
+                dialect.name
+            );
+        }
+    }
+
+    /// `changes_indexes` and `index_change` say the same thing.
+    ///
+    /// The fifth of these, and its own test for the reason the four above are
+    /// each their own: the capabilities are independent, and a check asserting
+    /// them together would be the drift it exists to catch.
+    #[test]
+    fn a_renderer_that_claims_index_changes_writes_one() {
+        let table = relation("s", "t", RelationKind::Table);
+        for dialect in dbsql::ALL {
+            let Some(renderer) = super::for_dialect(dialect) else {
+                continue;
+            };
+            let written = renderer
+                .index_change(&table, IndexChange::Drop { name: "i" })
+                .is_ok();
+            assert_eq!(
+                renderer.changes_indexes(),
+                written,
+                "{} says it {} change an index and {} write the statement",
+                dialect.name,
+                if renderer.changes_indexes() {
+                    "can"
+                } else {
+                    "cannot"
+                },
+                if written { "does" } else { "does not" }
+            );
+            assert_eq!(
+                super::changes_indexes(dialect),
+                written,
+                "{} answers differently through the crate's own entry point",
+                dialect.name
+            );
+            // A picker drawn for a server this build writes no index for would
+            // be a picker with nothing behind it.
+            if !written {
+                assert!(
+                    super::index_methods(dialect).is_empty(),
+                    "{} offers a method and writes no index",
+                    dialect.name
+                );
+            }
+        }
+
+        for dialect in [&dbsql::CLICKHOUSE, &dbsql::MSSQL, &dbsql::DUCKDB] {
+            let error = super::index_change(dialect, &table, IndexChange::Drop { name: "i" })
+                .expect_err("a statement was written for an unlit database");
+            assert!(error.to_string().contains("yet"), "{error}");
+        }
     }
 
     /// `changes_columns` and `column_change` say the same thing.
