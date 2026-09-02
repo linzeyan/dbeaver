@@ -36,8 +36,8 @@
 //! preference whose default had to be established before this could be written.
 
 use crate::{
-    AlterStyle, ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script,
-    TableChange, new_table_text,
+    AlterStyle, ColumnChange, ColumnKind, DatabaseChange, IndexChange, NewColumn, NullStyle,
+    Renderer, Script, TableChange, new_table_text,
 };
 use arrow::array::{Array, StringArray};
 use async_trait::async_trait;
@@ -187,6 +187,50 @@ impl Renderer for Sqlite {
     /// `changes_columns`, which SQLite answers true.
     fn alters_columns(&self) -> bool {
         false
+    }
+
+    /// Both, and the schema goes on the index rather than on the table.
+    ///
+    /// SQLite's grammar is `CREATE INDEX [schema.]index ON table (…)`: the
+    /// index's name takes the qualifier and the table's name is refused with
+    /// one. Exactly the opposite of the other two, and the reason
+    /// `schema_on_the_index` exists at all.
+    ///
+    /// An index belonging to a UNIQUE or PRIMARY KEY constraint is named
+    /// `sqlite_autoindex_…` and cannot be dropped; SQLite says so itself, by
+    /// name, which is a better answer than a rule written here about a naming
+    /// convention.
+    fn index_change(&self, relation: &RelationInfo, change: IndexChange<'_>) -> DbResult<String> {
+        match relation.kind {
+            RelationKind::Table => {}
+            kind => {
+                return Err(DbError::new(format!(
+                    "{} is a {kind:?}, and SQLite indexes only a table",
+                    qualified(&relation.schema, &relation.name)
+                )));
+            }
+        }
+        crate::index_change_text(
+            &dbsql::SQLITE,
+            crate::IndexStyle {
+                method: crate::MethodPlace::None,
+                schema_on_the_index: true,
+                drop_through_the_table: false,
+            },
+            &relation.schema,
+            &relation.name,
+            change,
+        )
+    }
+
+    fn changes_indexes(&self) -> bool {
+        true
+    }
+
+    /// None, and here there are none: SQLite has one kind of index and no
+    /// syntax that names it.
+    fn index_methods(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// Neither, and not because nobody has written them.

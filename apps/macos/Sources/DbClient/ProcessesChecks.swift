@@ -269,6 +269,7 @@ enum ProcessesChecks {
             writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: reach, reportsVariables: false,
             changesRelations: false, changesColumns: false, altersColumns: false,
+            changesIndexes: false, indexMethods: [],
             changesDatabases: false)
     }
 

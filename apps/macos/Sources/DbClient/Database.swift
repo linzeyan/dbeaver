@@ -789,6 +789,24 @@ final class Database: @unchecked Sendable {
         return String(cString: written)
     }
 
+    /// The statement for making or removing an index of a relation.
+    ///
+    /// Written and not run, like the calls above it, and the relation's kind is
+    /// read on the other side for the same reason: a view has no indexes.
+    func indexChangeSQL(schema: String, relation: String, change: IndexChange) throws -> String {
+        let requested = try JSONEncoder().encode(change)
+        guard let json = String(data: requested, encoding: .utf8) else {
+            throw DbError(description: "the change could not be written as text")
+        }
+        var err: UnsafeMutablePointer<CChar>?
+        guard let written = db_index_change_sql(handle, schema, relation, json, &err) else {
+            throw DbError(
+                description: Database.take(&err) ?? "could not write that change for this database")
+        }
+        defer { db_string_free(written) }
+        return String(cString: written)
+    }
+
     /// Consumes an error out-parameter, releasing the Rust-owned string.
     fileprivate static func take(_ err: inout UnsafeMutablePointer<CChar>?) -> String? {
         guard let e = err else { return nil }

@@ -27,8 +27,8 @@
 //!   parameter belongs to a driver descriptor this rewrite has no equivalent of.
 
 use crate::{
-    AlterStyle, ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script,
-    TableChange, new_table_text,
+    AlterStyle, ColumnChange, ColumnKind, DatabaseChange, IndexChange, NewColumn, NullStyle,
+    Renderer, Script, TableChange, new_table_text,
 };
 use arrow::array::{Array, StringArray};
 use async_trait::async_trait;
@@ -185,6 +185,52 @@ impl Renderer for Mysql {
     /// default alone, so that much is written and the rest is refused by name.
     fn alters_columns(&self) -> bool {
         true
+    }
+
+    /// Both, and the index is dropped through its table.
+    ///
+    /// `MySQLIndexManager.getDropIndexPattern` writes
+    /// `ALTER TABLE t DROP INDEX i`, an index in MySQL belonging to its table
+    /// rather than to the schema. The `CREATE` is the shared one, and
+    /// `appendIndexType` puts the method before `ON` — which is where MySQL
+    /// takes it and PostgreSQL does not.
+    fn index_change(&self, relation: &RelationInfo, change: IndexChange<'_>) -> DbResult<String> {
+        match relation.kind {
+            RelationKind::Table | RelationKind::PartitionedTable => {}
+            kind => {
+                return Err(DbError::new(format!(
+                    "{} is a {kind:?}, and MySQL indexes only a table",
+                    qualified(&relation.schema, &relation.name)
+                )));
+            }
+        }
+        crate::index_change_text(
+            &dbsql::MYSQL,
+            crate::IndexStyle {
+                method: crate::MethodPlace::BeforeOn,
+                schema_on_the_index: false,
+                drop_through_the_table: true,
+            },
+            &relation.schema,
+            &relation.name,
+            change,
+        )
+    }
+
+    fn changes_indexes(&self) -> bool {
+        true
+    }
+
+    /// None offered, which is not the same as none existing.
+    ///
+    /// MySQL takes `USING BTREE` and `USING HASH`, and InnoDB — what a table
+    /// here almost always is — accepts `HASH` and then builds a B-tree anyway.
+    /// A picker offering a choice the server takes and ignores is worse than no
+    /// picker, so the statement says nothing and the server uses its default.
+    /// The spelling is written above regardless, so that the day a MEMORY table
+    /// needs it, the words are already in the right order.
+    fn index_methods(&self) -> &'static [&'static str] {
+        &[]
     }
 
     /// `CREATE SCHEMA` and `DROP SCHEMA`, as `MySQLDatabaseManager` writes them.

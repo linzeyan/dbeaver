@@ -475,6 +475,34 @@ char* db_new_table_sql(DbHandle* handle, const char* schema, const char* name,
 // column drop, recreating the table. Whether it writes the fourth is the separate
 // alters_columns: SQLite's ALTER TABLE changes which columns a table has and
 // reaches nothing inside one, so it answers the first yes and the second no.
+// The statement for making or removing an index of a relation, as text.
+// Release with db_string_free. Returns NULL and sets *err on failure.
+//
+// Written and not run, like the change calls above it.
+//
+// `change` is tagged JSON, one of:
+//
+//   {"change": "create", "index": {"name": …, "columns": [...],
+//                                  "unique": false, "method": …}}
+//   {"change": "drop", "name": …}
+//
+// Two verbs and not three. No server here alters an index in place — MySQL's own
+// manager drops it and creates it again, which is two statements and a window in
+// which the table has no index — so what crosses is the two that are one
+// statement each. An absent `method` takes the server's default.
+//
+// The relation's kind is read here, like db_column_change_sql reads it: a view
+// has no indexes to make.
+//
+// Whether this connection writes either at all is db_capabilities_json's
+// changes_indexes, and which access methods to offer is its index_methods — a
+// list, and empty where no picker should be drawn. Empty means "take the
+// server's default" rather than "this server has one method": MySQL takes
+// USING HASH and InnoDB ignores it, so it is left out rather than offered and
+// quietly discarded.
+char* db_index_change_sql(DbHandle* handle, const char* schema, const char* relation,
+                          const char* change, char** err);
+
 char* db_column_change_sql(DbHandle* handle, const char* schema, const char* relation,
                            const char* change, char** err);
 

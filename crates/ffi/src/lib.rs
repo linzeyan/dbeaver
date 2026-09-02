@@ -471,6 +471,8 @@ pub unsafe extern "C" fn db_capabilities_json(
             changes_relations: h.dialect.is_some_and(dbddl::changes_relations),
             changes_columns: h.dialect.is_some_and(dbddl::changes_columns),
             alters_columns: h.dialect.is_some_and(dbddl::alters_columns),
+            changes_indexes: h.dialect.is_some_and(dbddl::changes_indexes),
+            index_methods: h.dialect.map_or(&[], dbddl::index_methods),
             changes_databases: h.dialect.is_some_and(dbddl::changes_databases),
         },
         err,
@@ -540,6 +542,22 @@ struct Surface {
     /// what one of them is, and SQLite's `ALTER TABLE` does the first three and
     /// none of the fourth. The Edit Column item is drawn from this one.
     alters_columns: bool,
+
+    /// Whether `db_index_change_sql` writes either statement for this database.
+    ///
+    /// Its own flag again, and for the reason each of the others is: an index is
+    /// a different object from the table it is on, and a server this build can
+    /// drop a table on is not one it can necessarily index.
+    changes_indexes: bool,
+
+    /// The access methods offered for an index here, in the order a picker
+    /// should show them, and empty where the front end should draw no picker.
+    ///
+    /// A list rather than a flag because the answer is neither yes nor no. Empty
+    /// means "take the server's default", which is not the same as the server
+    /// having one method: MySQL takes `USING HASH` and InnoDB ignores it, so it
+    /// is left out rather than offered and quietly discarded.
+    index_methods: &'static [&'static str],
 
     /// Whether `db_database_change_sql` writes anything at all for this
     /// database.
@@ -1930,6 +1948,139 @@ pub unsafe extern "C" fn db_column_change_sql(
         let listed = h.driver.relations(schema).await?;
         match listed.into_iter().find(|info| info.name == relation) {
             Some(info) => dbddl::column_change(dialect, &info, change),
+            None => Err(dbconn::DbError::new(format!(
+                "{schema}.{relation} is not there"
+            ))),
+        }
+    });
+    match written.and_then(|text| {
+        CString::new(text)
+            .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// One change to one index, as it crosses the boundary.
+///
+/// Tagged like `db_column_change_sql`'s, and for the same reason: one of the two
+/// carries a whole index and the other carries a name.
+#[derive(serde::Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+enum IndexChangeRequest {
+    Create { index: NewIndexRequest },
+    Drop { name: String },
+}
+
+/// An index that does not exist yet, as it crosses the boundary.
+#[derive(serde::Deserialize)]
+struct NewIndexRequest {
+    name: String,
+    columns: Vec<String>,
+    #[serde(default)]
+    unique: bool,
+    /// Absent takes the server's default, which is what every one of these
+    /// writes when nothing is said. A method the server does not have is refused
+    /// by the server, by name, when the statement runs.
+    #[serde(default)]
+    method: Option<String>,
+}
+
+/// The statement for making or removing an index of a relation, as text. Release
+/// with `db_string_free`.
+///
+/// Written and not run, like the change calls above it.
+///
+/// `change` is one of:
+///
+/// ```json
+/// {"change": "create", "index": {"name": …, "columns": [...],
+///                                "unique": false, "method": …}}
+/// {"change": "drop", "name": …}
+/// ```
+///
+/// Two verbs and not three. No server here alters an index in place — MySQL's
+/// own manager drops it and creates it again, which is two statements and a
+/// window in which the table has no index — so what crosses is the two that are
+/// one statement each.
+///
+/// The relation's kind is read from the server, like `db_column_change_sql`
+/// reads it: a view has no indexes to make, and a caller passing the kind back
+/// would be the one to get it wrong.
+///
+/// Whether this connection writes either at all is `db_capabilities_json`'s
+/// `changes_indexes`, and which access methods it offers is `index_methods` —
+/// empty where the front end should draw no picker.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `schema`,
+/// `relation` and `change` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_index_change_sql(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    change: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() || change.is_null() {
+        unsafe { set_err(err, "null handle, schema, relation, or change") };
+        return ptr::null_mut();
+    }
+    let (schema, relation, change) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+            CStr::from_ptr(change).to_str(),
+        ) {
+            (Ok(s), Ok(r), Ok(c)) => (s, r, c),
+            _ => {
+                set_err(err, "schema, relation, or change is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let requested: IndexChangeRequest = match serde_json::from_str(change) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, format!("that is not a change to an index: {e}")) };
+            return ptr::null_mut();
+        }
+    };
+    // Built out here for the reason the added column is: `IndexChange::Create`
+    // borrows it, and the borrow has to outlive the call it is passed to.
+    let created = match &requested {
+        IndexChangeRequest::Create { index } => Some(dbddl::NewIndex {
+            name: index.name.clone(),
+            columns: index.columns.clone(),
+            unique: index.unique,
+            method: index.method.clone(),
+        }),
+        IndexChangeRequest::Drop { .. } => None,
+    };
+    let change = match (&requested, &created) {
+        (IndexChangeRequest::Create { .. }, Some(index)) => dbddl::IndexChange::Create(index),
+        (IndexChangeRequest::Drop { name }, _) => dbddl::IndexChange::Drop { name },
+        (IndexChangeRequest::Create { .. }, None) => {
+            unreachable!("a create always builds an index")
+        }
+    };
+
+    let h = unsafe { &*handle };
+    let written = runtime().block_on(async {
+        let Some(dialect) = h.dialect else {
+            return Err(dbconn::DbError::new(
+                "this build does not write DDL for this database",
+            ));
+        };
+        let listed = h.driver.relations(schema).await?;
+        match listed.into_iter().find(|info| info.name == relation) {
+            Some(info) => dbddl::index_change(dialect, &info, change),
             None => Err(dbconn::DbError::new(format!(
                 "{schema}.{relation} is not there"
             ))),

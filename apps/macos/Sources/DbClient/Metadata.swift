@@ -136,6 +136,22 @@ struct Capabilities: Codable, Hashable {
     /// menu item that refuses every time it is clicked.
     let altersColumns: Bool
 
+    /// Whether the core writes a `CREATE INDEX` or a drop for this database.
+    ///
+    /// Its own flag again: an index is a different object from the table it is
+    /// on, and this build lights the families one at a time.
+    let changesIndexes: Bool
+
+    /// The access methods to offer for a new index here, in the order to show
+    /// them, and empty where no picker should be drawn.
+    ///
+    /// A list rather than a flag because the answer is neither yes nor no — a
+    /// method is per server, and `gin` named for MySQL is a statement that reads
+    /// correctly and is refused. Empty means "take the server's default", which
+    /// is not the same as the server having one: MySQL takes `USING HASH` and
+    /// InnoDB ignores it, so it is left out rather than offered and discarded.
+    let indexMethods: [String]
+
     /// Whether the core writes a statement that makes or drops a whole database.
     ///
     /// Not a second reading of `changesRelations`, and SQLite is what keeps them
@@ -159,7 +175,7 @@ struct Capabilities: Codable, Hashable {
         writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
         reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
         changesRelations: false, changesColumns: false, altersColumns: false,
-        changesDatabases: false)
+        changesIndexes: false, indexMethods: [], changesDatabases: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -174,6 +190,8 @@ struct Capabilities: Codable, Hashable {
         case changesRelations = "changes_relations"
         case changesColumns = "changes_columns"
         case altersColumns = "alters_columns"
+        case changesIndexes = "changes_indexes"
+        case indexMethods = "index_methods"
         case changesDatabases = "changes_databases"
     }
 }
@@ -632,6 +650,132 @@ enum DefaultChange: Hashable, Encodable {
             try container.encode(["set": value.trimmingCharacters(in: .whitespaces)])
         }
     }
+}
+
+/// What is being done to an index of a relation.
+///
+/// Two verbs. No server here alters an index in place — MySQL's own manager
+/// drops it and creates it again, which is two statements and a window in which
+/// the table has no index — so what is offered is the two that are one statement
+/// each.
+enum IndexChange: Hashable, Encodable {
+    case create(NewIndex)
+    case drop(name: String)
+
+    /// The word the core reads.
+    var verb: String {
+        switch self {
+        case .create: return "create"
+        case .drop: return "drop"
+        }
+    }
+
+    /// What the menu item says.
+    var menuTitle: String {
+        switch self {
+        case .create: return "New Index…"
+        case .drop: return "Drop Index…"
+        }
+    }
+
+    /// What the button that runs it says.
+    var actionTitle: String {
+        switch self {
+        case .create: return "Create"
+        case .drop: return "Drop"
+        }
+    }
+
+    /// What the status line says while it is happening, and afterwards.
+    var progressive: String {
+        switch self {
+        case .create: return "Creating"
+        case .drop: return "Dropping"
+        }
+    }
+
+    var pastTense: String {
+        switch self {
+        case .create: return "Created"
+        case .drop: return "Dropped"
+        }
+    }
+
+    /// Whether pressing the button loses something.
+    ///
+    /// The drop. Its data is all in the table it indexes, so nothing is *lost* —
+    /// but the index is rebuilt by reading the whole table, which on a large one
+    /// is a wait, and that is enough to take Return off the button.
+    var isDestructive: Bool {
+        if case .drop = self { return true }
+        return false
+    }
+
+    /// The index this acts on, which the sheet puts at the top.
+    var indexName: String {
+        switch self {
+        case .create(let index): return index.name
+        case .drop(let name): return name
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case change
+        case index
+        case name
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(verb, forKey: .change)
+        switch self {
+        case .create(let index): try container.encode(index, forKey: .index)
+        case .drop(let name): try container.encode(name, forKey: .name)
+        }
+    }
+}
+
+/// An index that does not exist yet.
+///
+/// Four answers: a name, the columns in key order, whether it is unique, and
+/// which access method — the last only where the server names one. What is not
+/// here is what upstream's index editor also offers and this build cannot show:
+/// an expression key, a descending column, a partial index's `WHERE`, an
+/// operator class, a MySQL prefix length. Each of those is SQL typed into a
+/// form, and the Create Table form draws that boundary in the same place.
+struct NewIndex: Hashable, Encodable {
+    var name: String = ""
+    /// In key order, which is the order they are listed in: an index on
+    /// `(a, b)` is not an index on `(b, a)`.
+    var columns: [IndexColumn] = [IndexColumn()]
+    var unique: Bool = false
+    /// Nil takes the server's default, which is what a picker's first row says.
+    var method: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case name, columns, unique, method
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name.trimmingCharacters(in: .whitespaces), forKey: .name)
+        // The rows, not the identities of the rows: what the core reads is a
+        // list of column names in order, and the row a name is on is this side's
+        // business.
+        try container.encode(columns.map(\.name), forKey: .columns)
+        try container.encode(unique, forKey: .unique)
+        try container.encodeIfPresent(method, forKey: .method)
+    }
+}
+
+/// One row of the new index's column list.
+///
+/// A struct with an identity rather than a bare string, for the reason
+/// `NewTableColumn` has one: two rows can hold the same name while somebody is
+/// picking, and a list keyed by value would collapse them into one.
+struct IndexColumn: Identifiable, Hashable {
+    let id = UUID()
+    var name: String = ""
 }
 
 /// How much of the server's own activity a connection can see and interrupt.

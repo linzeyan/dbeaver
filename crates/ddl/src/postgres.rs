@@ -19,8 +19,8 @@
 //! produce a shape nobody reads.
 
 use crate::{
-    ColumnChange, ColumnKind, DatabaseChange, NewColumn, NullStyle, Renderer, Script, TableChange,
-    new_table_text,
+    ColumnChange, ColumnKind, DatabaseChange, IndexChange, NewColumn, NullStyle, Renderer, Script,
+    TableChange, new_table_text,
 };
 use async_trait::async_trait;
 use dbconn::{
@@ -177,6 +177,55 @@ impl Renderer for Postgres {
     /// reads back, and a form cannot honestly edit what it cannot show.
     fn alters_columns(&self) -> bool {
         true
+    }
+
+    /// Both, and the index lives in the schema beside its table.
+    ///
+    /// `PostgreIndexManager` inherits `SQLIndexManager`'s `CREATE` and overrides
+    /// `appendIndexTypeAfterOn` — PostgreSQL is the one that names the method
+    /// after `ON`. The drop is the shared `DROP INDEX <index>`, the index being
+    /// an object of the schema rather than a part of the table.
+    ///
+    /// A table only. An index on a materialized view is a real thing in
+    /// PostgreSQL, but this build reads no indexes for one, so offering to make
+    /// one here would be offering to make something the pane could not then
+    /// show.
+    fn index_change(&self, relation: &RelationInfo, change: IndexChange<'_>) -> DbResult<String> {
+        match relation.kind {
+            RelationKind::Table | RelationKind::PartitionedTable => {}
+            kind => {
+                return Err(DbError::new(format!(
+                    "{} is a {kind:?}, and this build reads no indexes for one",
+                    qualified(&relation.schema, &relation.name)
+                )));
+            }
+        }
+        crate::index_change_text(
+            &dbsql::POSTGRES,
+            crate::IndexStyle {
+                method: crate::MethodPlace::AfterOn,
+                schema_on_the_index: false,
+                drop_through_the_table: false,
+            },
+            &relation.schema,
+            &relation.name,
+            change,
+        )
+    }
+
+    fn changes_indexes(&self) -> bool {
+        true
+    }
+
+    /// The five general-purpose methods `pg_am` lists, in the order somebody
+    /// choosing one would read them: the default first, then the four that are
+    /// each for one shape of data.
+    ///
+    /// A method a column's type has no operator class for is refused by the
+    /// server, by name, when the statement runs — which is a better answer than
+    /// a picker that tried to work out which of these suits a `jsonb`.
+    fn index_methods(&self) -> &'static [&'static str] {
+        &["btree", "hash", "gin", "gist", "brin"]
     }
 
     /// `CREATE DATABASE` and `DROP DATABASE`, as `PostgreDatabaseManager`

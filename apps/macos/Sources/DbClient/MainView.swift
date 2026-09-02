@@ -115,6 +115,7 @@ struct MainView: View {
         .sheet(isPresented: $model.isDatabaseChangeSheetOpen) { DatabaseChangeSheet(model: model) }
         .sheet(isPresented: $model.isNewTableSheetOpen) { NewTableSheet(model: model) }
         .sheet(isPresented: $model.isColumnChangeSheetOpen) { ColumnChangeSheet(model: model) }
+        .sheet(isPresented: $model.isIndexChangeSheetOpen) { IndexChangeSheet(model: model) }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
@@ -1630,7 +1631,32 @@ struct StructurePane: View {
             }
             .width(min: 70, ideal: 96)
         }
+        .contextMenu(forSelectionType: IndexInfo.ID.self) { indexMenu(for: $0) }
         .structureTableSurface()
+    }
+
+    /// The indexes table's row menu, drawn only where the core writes these
+    /// statements — the rule the column table's menu follows above.
+    @ViewBuilder
+    private func indexMenu(for names: Set<IndexInfo.ID>) -> some View {
+        if model.changesIndexes, let relation = model.selected {
+            Button(IndexChange.create(NewIndex()).menuTitle) {
+                model.prepareIndexChange(.create(NewIndex()), of: relation)
+            }
+            // One row only: the statement names one index, and the sheet shows
+            // one statement.
+            if names.count == 1, let index = model.indexes.first(where: { names.contains($0.id) }) {
+                Divider()
+                Button(IndexChange.drop(name: index.name).menuTitle) {
+                    model.prepareIndexChange(.drop(name: index.name), of: relation)
+                }
+                // An index the primary key is made of goes with the constraint
+                // and not on its own. Every one of these servers refuses it, so
+                // the item is drawn shut rather than drawn and refused — the row
+                // already carries the key icon that says why.
+                .disabled(index.isPrimary)
+            }
+        }
     }
 
     private static func keyLabel(_ index: IndexInfo) -> String {

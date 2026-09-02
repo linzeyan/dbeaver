@@ -150,6 +150,10 @@ if CommandLine.arguments.contains("--verify-new-table") {
 if CommandLine.arguments.contains("--verify-column-change") {
     exit(MainActor.assumeIsolated { ColumnChangeChecks.run() } ? 0 : 1)
 }
+
+if CommandLine.arguments.contains("--verify-index-change") {
+    exit(MainActor.assumeIsolated { IndexChangeChecks.run() } ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
 }
@@ -1291,6 +1295,66 @@ func openColumnChangeSheet(model: AppModel, argument: String) {
                     pending = .alter(alteration)
                 }
             }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--change-index create:<columns>|drop:<index>` opens the index sheet.
+///
+/// Exists for the reason `--change-column` does: both are behind a right-click
+/// on the Structure tab's indexes table, and a menu is a window of its own.
+let changeIndexArgument = argument("--change-index")
+
+/// Drives `--change-index`. Waits for the statement as well as the sheet.
+@MainActor
+func openIndexChangeSheet(model: AppModel, argument: String) {
+    let parts = argument.split(separator: ":", maxSplits: 1)
+    let verb = String(parts[0])
+    let rest = parts.count == 2 ? String(parts[1]) : ""
+    let change: IndexChange? =
+        switch verb {
+        // Filled in rather than opened blank, because what a capture has to show
+        // is the form deciding something: a name, an order of columns, and
+        // whether it is unique. An empty row shows the layout and none of it.
+        case "create" where !rest.isEmpty:
+            .create(
+                NewIndex(
+                    name: "orders_lookup_idx",
+                    columns: rest.split(separator: ",").map { IndexColumn(name: String($0)) },
+                    unique: true))
+        case "drop" where !rest.isEmpty: .drop(name: rest)
+        default: nil
+        }
+    guard let change else {
+        fputs("--change-index takes create:<column,column> or drop:<index>\n", stderr)
+        exit(2)
+    }
+
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("index change sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.indexPlan?.statement {
+            fputs("\(change.verb)\n\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("index change sheet timed out\n", stderr)
+            exit(1)
+        }
+        // The columns the picker offers come from the Structure tab having read
+        // them, so this waits for those as well as for the capability.
+        if !asked, model.changesIndexes, let relation = model.selected, !model.columns.isEmpty {
+            asked = true
+            model.prepareIndexChange(change, of: relation)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -4223,6 +4287,9 @@ if benchMode {
         if let newTableName { openNewTableSheet(model: model, name: newTableName) }
         if let changeColumnArgument {
             openColumnChangeSheet(model: model, argument: changeColumnArgument)
+        }
+        if let changeIndexArgument {
+            openIndexChangeSheet(model: model, argument: changeIndexArgument)
         }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
     }
