@@ -2,27 +2,44 @@ import Foundation
 
 /// One thing the go-to palette can take you to.
 ///
-/// Relations only, though the sidebar also holds schemas. A schema is not a
-/// destination — this window opens tables, and the sidebar already expands
-/// schemas — so a schema in this list would be a row that answers Return by
-/// doing nothing. Typing one still narrows the list: a needle with a dot in it
-/// is read as schema-then-name, the way the SQL completion reads the same
-/// characters.
+/// Relations, the connections this window holds, and the saved statements —
+/// though the sidebar also holds schemas. A schema is not a destination — this
+/// window opens tables, and the sidebar already expands schemas — so a schema in
+/// this list would be a row that answers Return by doing nothing. Typing one
+/// still narrows the list: a needle with a dot in it is read as
+/// schema-then-name, the way the SQL completion reads the same characters.
 struct GoToTarget: Equatable {
-    /// What the palette does with this row: open a relation on the Content
-    /// tab, or append a saved statement to the editor.
+    /// What the palette does with this row: open a relation on the Content tab,
+    /// put another of this window's connections in front, or append a saved
+    /// statement to the editor.
     ///
     /// A case rather than a flag, because the ordering below reads it and
     /// because the strip's later kinds would each have turned a second boolean
     /// into a third.
     enum Kind: Equatable {
         case relation
+        case connection
         case favorite
+
+        /// Where this kind sits when two rows matched equally well.
+        ///
+        /// `catalog::rank`'s "then kind", with this palette's three in it. A
+        /// table named `orders` is what somebody typing `orders` into a palette
+        /// over a database meant; a connection called that is the second guess,
+        /// and the statement they filed under the name is the third.
+        var order: Int {
+            switch self {
+            case .relation: 0
+            case .connection: 1
+            case .favorite: 2
+            }
+        }
 
         /// The row's trailing label, where it needs one. Relations carry none:
         /// this is a palette over a database and tables are what it has always
         /// listed, so a badge on every row would spend the width on the word
-        /// nobody was in doubt about.
+        /// nobody was in doubt about. Connections carry none either — the driver
+        /// mark at the end of the row says more than the word would.
         var label: String? { self == .favorite ? "Favorite" : nil }
     }
 
@@ -33,6 +50,26 @@ struct GoToTarget: Equatable {
     /// opened by its name rather than by anything it carries.
     var sql = ""
 
+    /// Which of this window's tabs the row is in.
+    ///
+    /// An index rather than the session itself, for the reason `AppModel.goTo`
+    /// gives about `RelationInfo`: the ordering below is checked without a
+    /// database behind it, and this list is built and read inside one sheet, so
+    /// there is no moment in which the tabs can move under it.
+    var tab = 0
+
+    /// What the connection this row is in is called, and empty where naming it
+    /// would tell somebody nothing: the tab in front, and the saved statements,
+    /// which belong to the person rather than to a server.
+    ///
+    /// The ordering below reads it, which is what puts the database somebody is
+    /// looking at above the others — see `precedes`.
+    var connection = ""
+
+    /// The driver behind the row, for the mark at the end of it. Empty for a
+    /// favorite, and for a tab still holding a form nobody has dialled.
+    var scheme = ""
+
     /// What the list shows, and what names the row uniquely. Two schemas may
     /// hold a table of the same name, and a palette that showed both as
     /// `orders` would be asking somebody to guess.
@@ -41,7 +78,16 @@ struct GoToTarget: Equatable {
     /// The quiet second line: which schema holds the relation, or what the
     /// favorite would type. Two favorites can be named alike as easily as two
     /// tables can, and this is what tells them apart.
-    var detail: String { kind == .favorite ? sql : schema }
+    ///
+    /// Nothing for a connection. What tells two of those apart is the name
+    /// somebody gave them, which is the row itself.
+    var detail: String {
+        switch kind {
+        case .relation: schema
+        case .connection: ""
+        case .favorite: sql
+        }
+    }
 }
 
 /// The palette's matching: `catalog::rank`'s rule, written where the candidates
@@ -86,15 +132,18 @@ enum GoTo {
             }
     }
 
-    /// The tie-break both orderings share: relations before favorites, then by
+    /// The tie-break both orderings share: kind, then connection, then the
     /// qualified name.
     ///
-    /// This is `catalog::rank`'s "then kind, then name" with this palette's two
-    /// kinds put in it. A table named `orders` is what somebody typing `orders`
-    /// into a palette over a database meant; the statement they filed under
-    /// that name is the second guess, not the first.
+    /// This is `catalog::rank`'s "then kind, then name" with `Kind.order`'s
+    /// three put in it, and one key added between them for the window that holds
+    /// several databases. A window with prod and staging open has a table of the
+    /// same name in each, and the one somebody typed the name of is the one they
+    /// are looking at — which falls out of sorting by the connection's name,
+    /// because the tab in front is the row that carries none.
     private static func precedes(_ a: GoToTarget, _ b: GoToTarget) -> Bool {
-        if a.kind != b.kind { return a.kind == .relation }
+        if a.kind != b.kind { return a.kind.order < b.kind.order }
+        if a.connection != b.connection { return a.connection < b.connection }
         return a.qualified < b.qualified
     }
 

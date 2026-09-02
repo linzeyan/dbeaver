@@ -1,6 +1,9 @@
 import SwiftUI
 
-/// The ⇧⌘O palette: type a table's name, arrow to it, Return to open it.
+/// The ⇧⌘O palette: type a name, arrow to it, Return to open it.
+///
+/// Over everything the window holds rather than over the connection in front of
+/// it — every tab's tables, the other tabs themselves, and the saved statements.
 ///
 /// A sheet rather than a floating panel like `CompletionPopup`. That one has to
 /// hang under a caret in a scrolled text view and leave the keyboard where it
@@ -65,7 +68,7 @@ struct GoToPalette: View {
     }
 
     private var field: some View {
-        TextField("Go to table or saved query", text: $needle)
+        TextField("Go to table, connection or saved query", text: $needle)
             .textFieldStyle(.plain)
             .font(Theme.Typography.title)
             .focused($typing)
@@ -118,6 +121,7 @@ struct GoToPalette: View {
                         .font(Theme.Typography.micro)
                         .foregroundStyle(Theme.textTertiary.color)
                 }
+                connection(matches[index])
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 1)
@@ -126,6 +130,34 @@ struct GoToPalette: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    /// Which database the row is in, at the end of the row.
+    ///
+    /// The seam `spec.md` left when the badge was written: a mark saying which
+    /// driver a row belongs to is noise in a list that can only hold one, and
+    /// this list can now hold several. So it is drawn exactly where it means
+    /// something — on the rows that are not in the tab in front, and on the
+    /// connections themselves — and a window with one connection open looks
+    /// exactly as it did.
+    ///
+    /// The family shape and then the name, which is the order the tab bar draws
+    /// the same two marks in. Nothing at all for a tab still holding a form: an
+    /// unmapped scheme is what `DriverBadge` gives a driver nobody named yet,
+    /// and its fallback cylinder here would be the palette guessing.
+    @ViewBuilder
+    private func connection(_ target: GoToTarget) -> some View {
+        if DriverBadge.isMapped(scheme: target.scheme) {
+            Image(systemName: DriverBadge.familySymbol(forScheme: target.scheme))
+                .font(.system(size: 10))
+                .foregroundStyle(Theme.textTertiary.color)
+        }
+        if !target.connection.isEmpty {
+            Text(target.connection)
+                .font(Theme.Typography.micro)
+                .foregroundStyle(Theme.textTertiary.color)
+                .lineLimit(1)
+        }
     }
 
     /// Moves the highlight, stopping at either end.

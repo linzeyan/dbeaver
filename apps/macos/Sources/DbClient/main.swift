@@ -104,7 +104,7 @@ if CommandLine.arguments.contains("--verify-clipboard") {
     exit(GridClipboardChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-goto") {
-    exit(GoToChecks.run() ? 0 : 1)
+    exit(MainActor.assumeIsolated { GoToChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-favorites") {
     exit(QueryFavoritesChecks.run() ? 0 : 1)
