@@ -898,22 +898,39 @@ final class AppModel {
     /// wiring rather than only of the model behind it.
     private let initialSQLIsScript: Bool
 
+    /// Where the tabs this window had open are read from and written back to, or
+    /// nil for a window that keeps none.
+    ///
+    /// Injected rather than reached for, the way `history` and `preferences` are,
+    /// and nil is the default for the reason those are injectable at all: a check
+    /// or a capture that restored the developer's own last session would draw
+    /// somebody else's tabs, and one that wrote its own over theirs would lose
+    /// them. Only main.swift's real window passes a store.
+    @ObservationIgnored private let restoreStore: SessionRestoreStore?
+
     init(
         history: QueryHistory, favorites: QueryFavorites, preferences: Preferences,
         initialTab: DetailTab = .content, initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
-        initialFilter: String? = nil
+        initialFilter: String? = nil, restore: SessionRestoreStore? = nil
     ) {
         self.history = history
         self.favorites = favorites
         self.preferences = preferences
+        self.restoreStore = restore
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
+        // Before the two lines below, which write into the session this replaces.
+        // Reading the file costs nothing when the setting is off, but it is asked
+        // in that order so that a window with restore turned off never opens one
+        // — the point of turning it off is that nothing is kept, and a build that
+        // read the file anyway would be keeping it.
+        if preferences.restoresSession, let window = restore?.load() { restoreTabs(window) }
         // Onto the session directly, not through the forwarding properties, and
         // down here rather than at the top. Two reasons, and the second is the
         // one that would have been a defect rather than a compile error:
@@ -935,6 +952,11 @@ final class AppModel {
             connectionDraft = first
             deferPassword(of: first.id)
         }
+        // After the list, because a restored tab names its connection by id and
+        // this is where the ids arrive. It overrides the selection just made:
+        // the first saved row is the right guess for a window opening on
+        // nothing, and the wrong one for a window that remembers what it was on.
+        pointConnectionForm(at: sessions[activeSession])
         if let initialSQL { queryText = initialSQL }
         // `--caret` is the only way to put the caret anywhere but the start
         // without a click, and clicking is what a capture cannot do. It defaults
@@ -1576,7 +1598,11 @@ final class AppModel {
             // the two answers meet: a field somebody typed wins, and an empty
             // one means whatever the Settings window says right now.
             pinging: connectionDraft.settings.keepAliveSeconds ?? preferences.keepAliveSeconds,
-            named: connectionDraft.name.isEmpty ? nil : connectionDraft.name)
+            named: connectionDraft.name.isEmpty ? nil : connectionDraft.name,
+            // `editedConnection` rather than the draft's own id, which every
+            // draft has: Quick connect's is a real UUID that names no row, and
+            // writing it down would restore a tab pointing at nothing.
+            from: editedConnection?.id)
     }
 
     /// Connects to a raw connection URL, from `--conn`.
@@ -1612,7 +1638,7 @@ final class AppModel {
         open(
             connString, through: nil, waiting: connectionDraft.settings.timeoutSeconds,
             pinging: connectionDraft.settings.keepAliveSeconds ?? preferences.keepAliveSeconds,
-            named: nil)
+            named: nil, from: nil)
     }
 
     /// Opens another database on this server, in a tab of its own.
@@ -1626,7 +1652,8 @@ final class AppModel {
         // moved to a row with a different bastion or none at all.
         open(
             rewritten, through: session.bastion, waiting: session.timeoutSeconds,
-            pinging: session.keepAliveSeconds, named: session.savedName)
+            pinging: session.keepAliveSeconds, named: session.savedName,
+            from: session.openedFrom)
     }
 
     /// Moves this tab onto another database.
@@ -1695,7 +1722,8 @@ final class AppModel {
         // rather than the server, like everything else carried over above.
         open(
             rewritten, through: arriving.bastion, waiting: leaving.timeoutSeconds,
-            pinging: leaving.keepAliveSeconds, named: leaving.savedName)
+            pinging: leaving.keepAliveSeconds, named: leaving.savedName,
+            from: leaving.openedFrom)
     }
 
     /// Moves the session itself, for a connection whose databases are containers
@@ -1796,7 +1824,8 @@ final class AppModel {
         drain(leaving)
         open(
             leaving.connString, through: leaving.bastion, waiting: leaving.timeoutSeconds,
-            pinging: leaving.keepAliveSeconds, named: leaving.savedName)
+            pinging: leaving.keepAliveSeconds, named: leaving.savedName,
+            from: leaving.openedFrom)
     }
 
     /// The bastion these settings describe, or nothing when they describe none.
@@ -1948,12 +1977,21 @@ final class AppModel {
     /// resolved to a number of seconds — the callers that read a form settled
     /// its "use the Settings default" answer before dialling, and the ones
     /// that dial a server again hand on the number their session carries.
+    ///
+    /// `from` is the identity behind `savedName` and is carried for exactly the
+    /// reasons that is: it must be the row this tab was opened under rather than
+    /// whatever the chooser is showing by the time a second database is opened
+    /// from it. It is what restore writes down — see `AppModel.remembered`.
     private func open(
         _ connString: String, through bastion: SshConfig?, waiting: Int, pinging keepAlive: Int,
-        named savedName: String?
+        named savedName: String?, from savedConnection: UUID?
     ) {
         let filling = sessionToFill()
         sessionBeingOpened = filling
+        filling.openedFrom = savedConnection
+        // Whatever this tab was restored as is now out of date: the session
+        // itself is a better answer to every question that value was holding.
+        filling.restoredFrom = nil
         filling.timeoutSeconds = waiting
         filling.keepAliveSeconds = max(0, keepAlive)
         // The dial is itself a round trip, so the keep-alive clock starts here
@@ -2084,6 +2122,121 @@ final class AppModel {
     func selectSession(_ index: Int) {
         guard sessions.indices.contains(index) else { return }
         activeSession = index
+        pointConnectionForm(at: sessions[index])
+    }
+
+    // MARK: - Restoring what was open
+
+    /// Points the connection form at what a tab was last connected to.
+    ///
+    /// This is what makes a strip of restored tabs mean anything. `Session` says
+    /// the draft belongs to the window rather than to the connection, because it
+    /// is what somebody is typing whichever database is open; that stays true,
+    /// and this amends it by one clause — the window's one draft follows the tab
+    /// in front when that tab names a connection and has none open. Without it a
+    /// window restored with three tabs would draw the same form under all three,
+    /// and choosing between them would be choosing between three identical
+    /// screens.
+    ///
+    /// A no-op for a tab with a live connection: that tab is not showing the form
+    /// at all, and moving the draft under it would change what Connect… opens
+    /// with for a reason nobody could see.
+    private func pointConnectionForm(at session: Session) {
+        guard session.db == nil, let restored = session.restoredFrom else { return }
+        // An id that no longer names a row lands on Quick connect, which
+        // `selectConnection` already does for any id it cannot find: a connection
+        // deleted between the two launches is one somebody deleted, and a tab
+        // that put its host, port and user back would be undoing that.
+        if let id = restored.connection {
+            selectConnection(id)
+            return
+        }
+        // Quick connect first, because the fields below belong to no saved entry:
+        // written into a row's draft they would show that row's name and colour
+        // over another server's address.
+        selectConnection(nil)
+        if let settings = restored.settings { connectionDraft.settings = settings }
+    }
+
+    /// Puts back the tabs a previous window had open, all of them unconnected.
+    ///
+    /// Called from `init` only, which is why it may replace the list outright:
+    /// nothing has been opened in these sessions yet, so there is nothing to
+    /// drain and no cursor to close.
+    private func restoreTabs(_ window: RestoredWindow) {
+        sessions = window.tabs.map { tab in
+            let session = Session()
+            session.restoredFrom = tab
+            // A file with an empty label reads as a fresh tab rather than as a
+            // tab with no name, because a nameless tab is 100pt of nothing that
+            // still has to be clicked.
+            if !tab.label.isEmpty { session.connectionLabel = tab.label }
+            // An empty list would be an editor with nowhere to type, which is not
+            // a state this window has — see `closeQueryBuffer`.
+            session.queryBuffers =
+                tab.buffers.isEmpty
+                ? [QueryBuffer(name: "query 1")]
+                : tab.buffers.map { QueryBuffer(name: $0.name, text: $0.text) }
+            // Folded rather than trusted, for the reason the preferences fold
+            // their numbers: this is a file somebody can edit, and an index past
+            // the end would be a crash on the first draw.
+            session.activeQueryBufferIndex =
+                session.queryBuffers.indices.contains(tab.activeBuffer) ? tab.activeBuffer : 0
+            return session
+        }
+        activeSession = sessions.indices.contains(window.activeTab) ? window.activeTab : 0
+    }
+
+    /// What this window would be restored as.
+    ///
+    /// A property rather than something `rememberSessions` builds inside itself,
+    /// so that what gets written can be checked without a disk — which is most of
+    /// what `--verify-session-restore` does.
+    var rememberedWindow: RestoredWindow {
+        RestoredWindow(tabs: sessions.map(Self.remembered), activeTab: activeSession)
+    }
+
+    /// One tab, written down.
+    private static func remembered(_ session: Session) -> RestoredTab {
+        let buffers = session.queryBuffers.map { RestoredBuffer(name: $0.name, text: $0.text) }
+        // A tab that was restored and never connected is written back as it came
+        // in. The alternative is deriving its fields from a `connString` it has
+        // not got, which would quietly empty a filled-in form on the second
+        // launch after anybody left a tab alone.
+        if session.connString.isEmpty, let restored = session.restoredFrom {
+            var tab = restored
+            tab.buffers = buffers
+            tab.activeBuffer = session.activeQueryBufferIndex
+            return tab
+        }
+        return RestoredTab(
+            connection: session.openedFrom,
+            // Only where there is no entry to read them from. A tab opened from a
+            // saved row keeps the id and nothing else, so a connection edited
+            // between the two launches is restored as it is now rather than as it
+            // was — which is what somebody editing it asked for.
+            settings: session.openedFrom == nil && !session.connString.isEmpty
+                ? ConnectionSettings(connectionString: session.connString) : nil,
+            label: session.connectionLabel,
+            buffers: buffers,
+            activeBuffer: session.activeQueryBufferIndex)
+    }
+
+    /// Writes down what this window has open, for the next launch.
+    ///
+    /// Called on the way out rather than as things change, because the half worth
+    /// keeping is the editor text and that changes on every keystroke — a
+    /// document rewritten per keystroke would be a hundred kilobytes to disk per
+    /// character typed. What that costs is a window lost to a crash rather than
+    /// to a quit, which is a trade this file can make because everything else it
+    /// holds is already somewhere else.
+    ///
+    /// Clears the file when the setting is off rather than only declining to
+    /// write one; see `SessionRestoreStore.clear`.
+    func rememberSessions() {
+        guard let restoreStore else { return }
+        guard preferences.restoresSession else { return restoreStore.clear() }
+        restoreStore.save(rememberedWindow)
     }
 
     /// Closes a connection and takes its tab with it.

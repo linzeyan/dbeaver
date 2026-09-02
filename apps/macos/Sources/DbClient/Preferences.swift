@@ -333,8 +333,26 @@ final class Preferences {
         }
     }
 
+    /// Whether a launch puts back the tabs the last window had open.
+    ///
+    /// On. What comes back is the shell and not the connections — every restored
+    /// tab is a form filled in, and nothing is dialled until somebody presses
+    /// Enter — so there is no surprise here to protect anybody from, and the
+    /// worst it can do is put a strip of tabs on screen that somebody closes.
+    /// That is what makes it different from the settings above that default to
+    /// off: those change what a statement does, and this changes what a window
+    /// opens showing.
+    ///
+    /// Off is for somebody who wants each launch to start from nothing, and
+    /// turning it off deletes what was kept rather than only stopping the next
+    /// write — see `SessionRestoreStore.clear`.
+    var restoresSession: Bool {
+        didSet { store.set(restoresSession, forKey: Key.restoresSession) }
+    }
+
     /// What a fresh installation does. The only statement of these values.
     private static let registered: [String: Any] = [
+        Key.restoresSession: true,
         Key.hidesEmptyColumns: false,
         Key.confirmsDeletions: true,
         Key.insertsRowOfDefaults: false,
@@ -374,6 +392,7 @@ final class Preferences {
     static let editorFontSizes = 10...18
 
     private enum Key {
+        static let restoresSession = "dev.dbclient.restoresSession"
         static let hidesEmptyColumns = "dev.dbclient.hidesEmptyColumns"
         static let confirmsDeletions = "dev.dbclient.confirmsDeletions"
         static let insertsRowOfDefaults = "dev.dbclient.insertsRowOfDefaults"
@@ -504,6 +523,7 @@ final class Preferences {
     init(store: UserDefaults = .standard) {
         store.register(defaults: Self.registered)
         self.store = store
+        restoresSession = store.bool(forKey: Key.restoresSession)
         hidesEmptyColumns = store.bool(forKey: Key.hidesEmptyColumns)
         confirmsDeletions = store.bool(forKey: Key.confirmsDeletions)
         insertsRowOfDefaults = store.bool(forKey: Key.insertsRowOfDefaults)

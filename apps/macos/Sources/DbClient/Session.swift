@@ -69,6 +69,27 @@ final class Session: Identifiable {
     /// this tab's title at its next connection, not before.
     var savedName: String?
 
+    /// The saved entry this connection was opened from, as an identity rather
+    /// than as a name.
+    ///
+    /// Beside `savedName` and carried for the same reason it is: another database
+    /// opened or switched to from this tab was opened from the same row, and the
+    /// chooser may since have moved to a different one. Nil on the paths with no
+    /// entry — quick connect and `--conn` — which is what makes it the question
+    /// `SessionRestore` asks: a tab that names a row is restored by pointing the
+    /// form at that row, and one that names none carries its own fields.
+    var openedFrom: UUID?
+
+    /// What this tab was pointed at when the window last closed, for a tab put
+    /// back by restore rather than connected.
+    ///
+    /// Not written into `connString`, which would be a claim that an attempt was
+    /// made: `hasBeenAsked` reads that property, and a restored tab has asked
+    /// nothing — so the dot would draw one of its three states about a connection
+    /// nobody has dialled. Cleared when this tab does connect, because from then
+    /// on the session itself is the better answer to every question here.
+    var restoredFrom: RestoredTab?
+
     /// What the tab is called: the saved entry's name where there is one, the
     /// address in the connection string otherwise. The default is what a tab
     /// holding nothing but the connection form is called, which is the only

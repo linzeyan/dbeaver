@@ -79,6 +79,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
 // `--verify-relation-change`, `--verify-database-change`, `--verify-new-table`,
 // `--verify-column-change`,
+// `--verify-session-restore`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
 // `--verify-accessibility` and `--verify-quitting` run
@@ -153,6 +154,9 @@ if CommandLine.arguments.contains("--verify-column-change") {
 
 if CommandLine.arguments.contains("--verify-index-change") {
     exit(MainActor.assumeIsolated { IndexChangeChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-session-restore") {
+    exit(MainActor.assumeIsolated { SessionRestoreChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-import") {
     exit(ImportChecks.run() ? 0 : 1)
@@ -4022,8 +4026,16 @@ final class AppLifecycle: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Save's job and not a quit's, and losing them.
     func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            if askedOnClose { return .terminateNow }
-            return mayDiscardUnsavedWork() ? .terminateNow : .terminateCancel
+            if askedOnClose {
+                model?.rememberSessions()
+                return .terminateNow
+            }
+            guard mayDiscardUnsavedWork() else { return .terminateCancel }
+            // After the question and only on the way out, so a quit somebody
+            // cancelled leaves the last window's tabs as they were rather than
+            // overwriting them with the ones they decided not to leave.
+            model?.rememberSessions()
+            return .terminateNow
         }
     }
 
@@ -4188,7 +4200,14 @@ if benchMode {
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation,
-            initialFilter: initialFilter)
+            initialFilter: initialFilter,
+            // Only a window somebody opened themselves. A capture restores
+            // whatever the developer last had open — which would put their tabs
+            // in a screenshot — and would then write its own single tab over it
+            // on the way out, so every `make screenshot` would cost them their
+            // session. The scratch defaults suite above cannot prevent that: the
+            // file is in the config directory, not in the defaults.
+            restore: capturePane == nil && mcpProbePort == nil ? .system : nil)
         // Installed here rather than before the window is built, because the
         // File menu sends to the model and there is no model until now.
         AppMenu.install(into: app, model: model)
