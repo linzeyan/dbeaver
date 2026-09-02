@@ -2336,10 +2336,33 @@ ORDER BY tuple();"
             .expect_err("SQLite named an access method");
         assert!(error.to_string().contains("hash"), "{error}");
 
-        // Every method offered for a server is one that server writes, which is
-        // what stops a picker listing PostgreSQL's `gin` for MySQL.
-        for dialect in dbsql::ALL {
-            for method in super::index_methods(dialect) {
+        // What each server offers, written out, for the reason the statements
+        // above are written out: nothing here can work out that `gin` is a
+        // PostgreSQL access method and not a MySQL one, so the list is the
+        // assertion. A picker offering the wrong server's method produces a
+        // statement that reads perfectly well and is refused.
+        let offered: &[(&Dialect, &[&str])] = &[
+            (&dbsql::POSTGRES, &["btree", "hash", "gin", "gist", "brin"]),
+            // Empty and not `["btree"]`: MySQL takes `USING HASH` and InnoDB
+            // builds a B-tree anyway, so the choice is left unsaid rather than
+            // offered and quietly discarded.
+            (&dbsql::MYSQL, &[]),
+            // SQLite has one kind of index and no syntax that names it.
+            (&dbsql::SQLITE, &[]),
+            (&dbsql::CLICKHOUSE, &[]),
+            (&dbsql::MSSQL, &[]),
+            (&dbsql::DUCKDB, &[]),
+        ];
+        for (dialect, expected) in offered {
+            assert_eq!(
+                super::index_methods(dialect),
+                *expected,
+                "{} offers the wrong access methods",
+                dialect.name
+            );
+            // And every one it offers is one it will write, which is what stops
+            // a list being kept for a renderer whose style names no method.
+            for method in *expected {
                 let index = NewIndex {
                     method: Some((*method).to_string()),
                     ..hashed.clone()
