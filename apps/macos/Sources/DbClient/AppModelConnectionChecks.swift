@@ -52,6 +52,7 @@ enum AppModelConnectionChecks {
         checkOnlyIdleOpenConnectionsAreProbed()
         checkAPingsAnswerIsWhatTheTabShows()
         checkATransferNeedsSomewhereToSendItAndLeaveToArrive()
+        checkATransferReachesTheConnectionsInTheOtherWindows()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
         checkADatabaseWithNoGrammarOffersNoEditing()
@@ -1201,7 +1202,13 @@ enum AppModelConnectionChecks {
 
             expect(model.transferTargets.count, 1, "the second connection is somewhere to send to")
             expect(
-                model.transferTargets.first === other, true, "and it is the one that is not this")
+                model.transferTargets.first?.session === other, true,
+                "and it is the one that is not this")
+            // Called what its tab is called, with nothing about where it is: it
+            // is in the window doing the asking, which is the one place the
+            // picker never has to say anything about.
+            other.connectionLabel = "staging"
+            expect(model.transferTargets.first?.label, "staging", "under its own name")
             expect(model.canTransfer, true, "so the item is live")
             model.presentTransfer()
             expect(model.isTransferPickerOpen, true, "and the picker opens")
@@ -1226,6 +1233,72 @@ enum AppModelConnectionChecks {
                 model.errorMessage?.isEmpty == false, true,
                 "and says so rather than doing nothing visible")
             expect(other.isBusy, false, "and is not left marked busy by a transfer that never ran")
+        }
+    }
+
+    /// A transfer reaches the connections open in the other windows.
+    ///
+    /// The picker was written when a window was the whole application, so a
+    /// result in one window and the database it belongs in in another meant
+    /// exporting to a file and importing it back — through a connection that was
+    /// open the whole time.
+    ///
+    /// Wired here the way `WindowList.adopt` wires it, and through the same two
+    /// calls: `receivableSessions` on the other model and
+    /// `TransferTarget.inAnotherWindow` for the name. A fixture that built the
+    /// label out of its own string would pass whatever the window layer did.
+    private static func checkATransferReachesTheConnectionsInTheOtherWindows() {
+        MainActor.assumeIsolated {
+            let here = makeModel()
+            let elsewhere = makeModel()
+            var scratch: [URL] = []
+            defer { for file in scratch { try? FileManager.default.removeItem(at: file) } }
+
+            func opened() -> Database? {
+                let file = FileManager.default.temporaryDirectory
+                    .appending(path: "dbclient-transfer-\(UUID().uuidString).db")
+                scratch.append(file)
+                FileManager.default.createFile(atPath: file.path, contents: nil)
+                return try? Database(connString: "sqlite://\(file.path)")
+            }
+            guard let source = opened(), let sink = opened() else {
+                failures += 1
+                fputs("connection-form FAIL: a SQLite file would not open\n", stderr)
+                return
+            }
+            here.sessions[0].db = source
+            // The same name in both windows, which is the ordinary case rather
+            // than a contrived one: a second window is opened on the same saved
+            // connections as the first.
+            here.sessions[0].connectionLabel = "prod"
+            elsewhere.sessions[0].db = sink
+            elsewhere.sessions[0].connectionLabel = "prod"
+
+            expect(
+                here.transferTargets.isEmpty, true,
+                "one window with one connection has nowhere to send")
+            here.otherWindowTargets = {
+                elsewhere.receivableSessions.map(TransferTarget.inAnotherWindow)
+            }
+            expect(here.transferTargets.count, 1, "the other window's connection is a target")
+            expect(
+                here.transferTargets.first?.session === elsewhere.sessions[0], true,
+                "and it is that window's tab rather than one of this window's")
+            expect(
+                here.transferTargets.first?.label, "prod — another window",
+                "named for where it is, because both windows call it the same thing")
+
+            // The rules that keep a connection out of the list are the target's
+            // own and reach across the window boundary with it.
+            elsewhere.sessions[0].isBusy = true
+            expect(
+                here.transferTargets.isEmpty, true,
+                "a connection busy in another window is not offered either")
+            elsewhere.sessions[0].isBusy = false
+            elsewhere.sessions[0].db = nil
+            expect(
+                here.transferTargets.isEmpty, true,
+                "and neither is a tab in another window with nothing open in it")
         }
     }
 

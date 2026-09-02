@@ -173,6 +173,20 @@ final class WindowList {
     @discardableResult
     func adopt(_ model: AppModel) -> WindowController {
         let controller = WindowController(model: model, in: self)
+        // Where a transfer started in this window can send rows: the connections
+        // every other window has open. Read when the picker draws rather than
+        // taken now, because the windows this walks did not all exist when this
+        // one was built — and the one being built is left out by identity, so a
+        // window is never offered its own tabs twice.
+        // Weakly on both sides. The closure is a property of the model it asks
+        // about, so a strong capture of either would be a window that never gets
+        // released — and the model of a window that has closed outlives it for
+        // as long as `FrontWindow` is still pointing at it.
+        model.otherWindowTargets = { [weak self, weak model] in
+            guard let self, let model else { return [] }
+            return windows.filter { $0.model !== model }
+                .flatMap { $0.model.receivableSessions.map(TransferTarget.inAnotherWindow) }
+        }
         controller.show(after: windows.last)
         windows.append(controller)
         front.model = model

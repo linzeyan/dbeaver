@@ -1,5 +1,36 @@
 import SwiftUI
 
+/// A connection a transfer could send rows to, and what the picker calls it.
+///
+/// A pair rather than the session alone, because the name a connection carries
+/// stopped being enough the moment there was a second window. Two windows are
+/// most often the same saved connections opened twice — that is what a second
+/// window is *for* — so the labels collide, and a picker offering "prod" twice
+/// with nothing between them is a choice nobody can make.
+@MainActor
+struct TransferTarget: Identifiable {
+    let session: Session
+    let label: String
+
+    var id: UUID { session.id }
+
+    /// A connection in the window doing the asking, called what its tab is
+    /// called.
+    static func inThisWindow(_ session: Session) -> TransferTarget {
+        TransferTarget(session: session, label: session.connectionLabel)
+    }
+
+    /// A connection in one of the other windows, named for where it is.
+    ///
+    /// Not numbered. AppKit numbers nothing on screen — the Window menu lists
+    /// titles — so "Window 2" would be a number this application never shows
+    /// anywhere else. What the person needs to know is that the rows will land
+    /// somewhere they are not looking, and that is what this says.
+    static func inAnotherWindow(_ session: Session) -> TransferTarget {
+        TransferTarget(session: session, label: "\(session.connectionLabel) — another window")
+    }
+}
+
 /// The Transfer picker: which open connection this result's rows go to, and
 /// which table on it they go into.
 ///
@@ -25,16 +56,16 @@ struct TransferSheet: View {
     @State private var highlighted = 0
     @FocusState private var typing: Bool
 
-    private var targets: [Session] { model.transferTargets }
+    private var targets: [TransferTarget] { model.transferTargets }
 
     /// Falls back to the first target rather than to nothing, so the sheet still
     /// names a database after the selected connection has been closed under it.
-    private var target: Session? { targets.first { $0.id == chosen } ?? targets.first }
+    private var target: TransferTarget? { targets.first { $0.id == chosen } ?? targets.first }
 
     private var matches: [GoToTarget] {
         guard let target else { return [] }
         let tables =
-            target.relations.values.flatMap { $0 }
+            target.session.relations.values.flatMap { $0 }
             .filter { $0.kind != .view && $0.kind != .materializedView }
             .map { GoToTarget(schema: $0.schema, name: $0.name) }
         return GoTo.ranked(tables, matching: needle)
@@ -75,8 +106,8 @@ struct TransferSheet: View {
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.textTertiary.color)
                 Picker("", selection: $chosen) {
-                    ForEach(targets) { session in
-                        Text(session.connectionLabel).tag(Optional(session.id))
+                    ForEach(targets) { target in
+                        Text(target.label).tag(Optional(target.id))
                     }
                 }
                 .labelsHidden()
@@ -109,15 +140,17 @@ struct TransferSheet: View {
     }
 
     private var field: some View {
-        TextField("Table on \(target?.connectionLabel ?? "the other connection")", text: $needle)
-            .textFieldStyle(.plain)
-            .font(Theme.Typography.title)
-            .focused($typing)
-            .padding(Theme.Space.md)
-            .onChange(of: needle) { highlighted = 0 }
-            .onSubmit { send(highlighted) }
-            .onKeyPress(.upArrow) { move(-1) }
-            .onKeyPress(.downArrow) { move(1) }
+        TextField(
+            "Table on \(target?.session.connectionLabel ?? "the other connection")", text: $needle
+        )
+        .textFieldStyle(.plain)
+        .font(Theme.Typography.title)
+        .focused($typing)
+        .padding(Theme.Space.md)
+        .onChange(of: needle) { highlighted = 0 }
+        .onSubmit { send(highlighted) }
+        .onKeyPress(.upArrow) { move(-1) }
+        .onKeyPress(.downArrow) { move(1) }
     }
 
     @ViewBuilder
@@ -147,8 +180,12 @@ struct TransferSheet: View {
 
     private var emptyReason: String {
         guard let target else { return "No other connection is open." }
-        guard needle.isEmpty else { return "No table on \(target.connectionLabel) matches." }
-        return "\(target.connectionLabel) has no tables this window has read."
+        let name = target.session.connectionLabel
+        guard needle.isEmpty else { return "No table on \(name) matches." }
+        // Not "this window has read" any more. The connection may be open in
+        // another window, and the tables offered are the ones *that* window's
+        // navigator has read.
+        return "No tables have been read on \(name) yet."
     }
 
     private func row(at index: Int) -> some View {
@@ -188,6 +225,6 @@ struct TransferSheet: View {
         guard matches.indices.contains(index), let target else { return }
         let table = matches[index].qualified
         model.isTransferPickerOpen = false
-        model.transferCurrentResult(to: target, table: table)
+        model.transferCurrentResult(to: target.session, table: table)
     }
 }
