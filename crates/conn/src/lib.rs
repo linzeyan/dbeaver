@@ -364,6 +364,27 @@ pub struct Capabilities {
     /// The front end draws no menu item where this is false, and does not call
     /// `variables`.
     pub reports_variables: bool,
+
+    /// Whether this driver writes a grid's staged changes itself, in its own
+    /// statement language.
+    ///
+    /// False is the ordinary answer and not a refusal: a database this build
+    /// carries a SQL dialect for has its `UPDATE`, `INSERT` and `DELETE`
+    /// composed above the driver by `dbedit`, which is where one grammar can
+    /// serve thirteen drivers. True is for the two that have no dialect and no
+    /// SQL — MongoDB's command documents and Redis's commands — where the only
+    /// side that knows how to say "set this field of that row" is the driver.
+    ///
+    /// The third case is the one this field exists to keep apart from the
+    /// second: a driver with neither a dialect nor a writer of its own answers
+    /// false, and a grid over it says so instead of offering a Set button that
+    /// fails after it is pressed. Cassandra is that case today, and says why
+    /// where it answers.
+    ///
+    /// A capability rather than a bare default on [`Driver::write_rows`], for
+    /// the reason `routines` gives: the answer is forced next door, in a field
+    /// with room for the sentence that says which kind of "no" it is.
+    pub writes_rows: bool,
 }
 
 /// What a driver can report and do about the server's own activity.
@@ -722,6 +743,39 @@ pub trait Driver: Send + Sync {
     /// statement and decide not to run it.
     fn browse(&self, what: &Browse<'_>) -> String;
 
+    /// The statements that would apply a grid's pending changes, in whatever
+    /// this database's statement language is.
+    ///
+    /// The counterpart of `browse`, and written for the same reason: a grid asks
+    /// "change these rows" and the driver is the only side that knows how its
+    /// database says so. Where this build carries a SQL dialect, `dbedit`
+    /// composes the `UPDATE`, `INSERT` and `DELETE` above the driver and this is
+    /// never called — one grammar for thirteen drivers rather than thirteen
+    /// copies of it. This is for the databases that have no dialect at all.
+    ///
+    /// Statements and not writes, exactly as `browse` returns a statement: what
+    /// comes back goes to the server through `query`, inside whatever
+    /// transaction the connection is in, under the same Cancel button — and it
+    /// can be shown to whoever is about to run it, which is the whole reason
+    /// editing goes through generated statements rather than through a private
+    /// write path.
+    ///
+    /// Only where `capabilities().writes_rows` says so; the default is the
+    /// refusal thirteen drivers would have written. The third method in this
+    /// trait with a default, and it may have one for the reason `routines` may:
+    /// the per-driver answer is forced next door, where there is room for the
+    /// sentence saying which kind of "no" it is.
+    ///
+    /// Refusing part way is the expected answer for an edit this database cannot
+    /// express — a cell whose column is a rendering of something a single
+    /// command cannot put back. Nothing has been sent when this returns, so a
+    /// refusal costs the person a message rather than half a write.
+    async fn write_rows(&self, _edits: &RowEdits) -> DbResult<Vec<String>> {
+        Err(DbError::new(
+            "this build does not write statements for this database",
+        ))
+    }
+
     /// Read `statement` forward, a page at a time.
     ///
     /// Two properties, which is all this asks for — the mechanism is the
@@ -805,6 +859,58 @@ pub async fn scalar_text(driver: &dyn Driver, statement: &str) -> DbResult<Strin
     Err(DbError::new(format!(
         "the server answered nothing to `{statement}`"
     )))
+}
+
+/// Everything a grid has pending for one relation.
+///
+/// One relation, because that is what a browse shows and what a key identifies.
+/// A query pane's result can join five tables and there is no answer to which of
+/// them a cell belongs to that is right often enough to write into a database.
+///
+/// Here rather than in `dbedit` for the reason [`Browse`] is here: it is the
+/// vocabulary of a request, and two of the drivers answer it themselves. A
+/// driver that had to reach into the crate that composes SQL in order to read
+/// what a row change is would be depending on the layer above it.
+#[derive(Debug, serde::Deserialize)]
+pub struct RowEdits {
+    pub schema: String,
+    pub relation: String,
+    #[serde(default)]
+    pub updates: Vec<RowUpdate>,
+    #[serde(default)]
+    pub inserts: Vec<RowInsert>,
+    #[serde(default)]
+    pub deletes: Vec<RowDelete>,
+}
+
+/// A row that was there, with the cells that changed.
+#[derive(Debug, serde::Deserialize)]
+pub struct RowUpdate {
+    pub key: Vec<EditedCell>,
+    pub set: Vec<EditedCell>,
+}
+
+/// A row that was not there. Columns left out get whatever the table says they
+/// default to, which is the difference between an insert and an update.
+#[derive(Debug, serde::Deserialize)]
+pub struct RowInsert {
+    pub set: Vec<EditedCell>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RowDelete {
+    pub key: Vec<EditedCell>,
+}
+
+/// One column and what it now holds, as text.
+///
+/// `None` is SQL's NULL and not an empty string. A grid has to be able to say
+/// both — an empty text column and an absent value are different rows — and a
+/// single string cannot.
+#[derive(Debug, serde::Deserialize)]
+pub struct EditedCell {
+    pub column: String,
+    pub value: Option<String>,
 }
 
 /// What a browse is asking for.

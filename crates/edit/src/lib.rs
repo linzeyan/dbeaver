@@ -31,56 +31,12 @@
 //! them the way it sends any other statement — inside its transaction, through
 //! its cancel button, with its error positions.
 
-use dbconn::{ColumnInfo, DbError, DbResult, Driver, UniqueKeyInfo};
+use dbconn::{
+    ColumnInfo, DbError, DbResult, Driver, EditedCell, RowDelete, RowEdits, RowInsert, RowUpdate,
+    UniqueKeyInfo,
+};
 use dbsql::Dialect;
 use serde::{Deserialize, Serialize};
-
-/// Everything a grid has pending for one relation.
-///
-/// One relation, because that is what a browse shows and what a key identifies.
-/// A query pane's result can join five tables and there is no answer to which of
-/// them a cell belongs to that is right often enough to write into a database.
-#[derive(Debug, Deserialize)]
-pub struct Edits {
-    pub schema: String,
-    pub relation: String,
-    #[serde(default)]
-    pub updates: Vec<Update>,
-    #[serde(default)]
-    pub inserts: Vec<Insert>,
-    #[serde(default)]
-    pub deletes: Vec<Delete>,
-}
-
-/// A row that was there, with the cells that changed.
-#[derive(Debug, Deserialize)]
-pub struct Update {
-    pub key: Vec<Cell>,
-    pub set: Vec<Cell>,
-}
-
-/// A row that was not there. Columns left out get whatever the table says they
-/// default to, which is the difference between an insert and an update.
-#[derive(Debug, Deserialize)]
-pub struct Insert {
-    pub set: Vec<Cell>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Delete {
-    pub key: Vec<Cell>,
-}
-
-/// One column and what it now holds, as text.
-///
-/// `None` is SQL's NULL and not an empty string. A grid has to be able to say
-/// both — an empty text column and an absent value are different rows — and a
-/// single string cannot.
-#[derive(Debug, Deserialize)]
-pub struct Cell {
-    pub column: String,
-    pub value: Option<String>,
-}
 
 /// The statements `edits` would take, in the order they have to be sent.
 ///
@@ -96,7 +52,7 @@ pub struct Cell {
 pub async fn statements(
     driver: &dyn Driver,
     dialect: &'static Dialect,
-    edits: &Edits,
+    edits: &RowEdits,
 ) -> DbResult<Vec<String>> {
     let columns = driver.columns(&edits.schema, &edits.relation).await?;
     if columns.is_empty() {
@@ -169,7 +125,7 @@ pub enum FilterOp {
 
 /// Every row of the filter editor, over one relation.
 ///
-/// One relation for the reason `Edits` is one: this composes the `WHERE` of a
+/// One relation for the reason `RowEdits` is one: this composes the `WHERE` of a
 /// browse, and a browse shows one table.
 #[derive(Debug, Deserialize)]
 pub struct RowFilter {
@@ -650,7 +606,7 @@ struct Key<'a> {
 }
 
 impl Table<'_> {
-    fn update(&self, update: &Update) -> DbResult<String> {
+    fn update(&self, update: &RowUpdate) -> DbResult<String> {
         if update.set.is_empty() {
             return Err(DbError::new("an update with nothing to set"));
         }
@@ -678,7 +634,7 @@ impl Table<'_> {
     /// there rather than written anyway: `INSERT INTO t` with nothing after it is
     /// not a statement, and the refusal has to say which table and which
     /// database, because that pair is the whole of the reason.
-    fn insert(&self, insert: &Insert) -> DbResult<String> {
+    fn insert(&self, insert: &RowInsert) -> DbResult<String> {
         if insert.set.is_empty() {
             let Some(defaults) = self.dialect.default_row else {
                 return Err(DbError::new(format!(
@@ -703,7 +659,7 @@ impl Table<'_> {
         ))
     }
 
-    fn delete(&self, delete: &Delete) -> DbResult<String> {
+    fn delete(&self, delete: &RowDelete) -> DbResult<String> {
         Ok(format!(
             "DELETE FROM {} WHERE {}",
             self.qualified,
@@ -711,7 +667,7 @@ impl Table<'_> {
         ))
     }
 
-    fn assignment(&self, cell: &Cell) -> DbResult<String> {
+    fn assignment(&self, cell: &EditedCell) -> DbResult<String> {
         let column = self.column(&cell.column)?;
         Ok(format!(
             "{} = {}",
@@ -726,7 +682,7 @@ impl Table<'_> {
     /// and the statement changes a set of rows; a column that is not part of the
     /// key adds a condition that can be false for the row the user was looking
     /// at, so the edit silently does nothing.
-    fn matching(&self, key: &[Cell]) -> DbResult<String> {
+    fn matching(&self, key: &[EditedCell]) -> DbResult<String> {
         let identity = match &self.key {
             Ok(identity) => identity,
             Err(why) => return Err(DbError::new(why.clone())),

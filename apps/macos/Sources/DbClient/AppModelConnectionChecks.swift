@@ -55,7 +55,7 @@ enum AppModelConnectionChecks {
         checkATransferReachesTheConnectionsInTheOtherWindows()
         checkADatabaseLevelIsDrawnOnlyWhenThereIsOne()
         checkTheFilterReachesTheDatabaseLevel()
-        checkADatabaseWithNoGrammarOffersNoEditing()
+        checkADatabaseNothingCanWriteAChangeForOffersNoEditing()
         checkTheDdlSectionIsThereFromTheFirstFrameOfTheLoad()
         checkTheInfoSectionAppearsOnlyWhereTheEngineSaidSomething()
         checkTheLevelIsNamedByTheCapabilityAndNotTheScheme()
@@ -771,38 +771,75 @@ enum AppModelConnectionChecks {
         }
     }
 
-    /// A database this build writes no statements for offers no editing, and
-    /// says why instead of failing when a button is pressed.
+    /// A database nothing can write a change for offers no editing, and says why
+    /// instead of failing when a button is pressed.
     ///
     /// The defect this is about was visible and cost nothing until it was
-    /// pressed: a Redis connection drew Set, NULL, Delete Row, Add Row and
-    /// Duplicate Row over a browsed key type — every condition for editing held,
-    /// because a Redis key really is a primary key and the core really can name
-    /// one row — and the first press came back `ERR unknown command 'UPDATE'`.
-    /// Nothing between the grid and the wire knew that this build carries no
-    /// grammar to write Redis in, because the fact belongs to neither: the
-    /// driver does not know which dialects were compiled in, and `dbsql` does not
-    /// know which connection is open. The FFI knows both, which is why it is the
-    /// layer that answers.
-    private static func checkADatabaseWithNoGrammarOffersNoEditing() {
+    /// pressed: a Cassandra connection drew Set, NULL, Delete Row, Add Row and
+    /// Duplicate Row over a browsed table — every condition for editing held,
+    /// because the core really can name one row — and the first press came back
+    /// with the core's own refusal. Nothing between the grid and the wire knew
+    /// that this build carries no grammar to write CQL in, because the fact
+    /// belongs to neither: the driver does not know which dialects were compiled
+    /// in, and `dbsql` does not know which connection is open. The FFI knows
+    /// both, which is why it is the layer that answers.
+    ///
+    /// The flag it answers with is `editsRows` and not `writesStatements`, and
+    /// the middle case below is the whole reason there are two: Redis has no
+    /// dialect either, and its rows are editable all the same because its own
+    /// driver writes the `SET` and the `DEL`. A grid keyed on the narrower flag
+    /// would go on refusing to edit a database that answers.
+    private static func checkADatabaseNothingCanWriteAChangeForOffersNoEditing() {
         MainActor.assumeIsolated {
             let model = makeModel()
-            let keys = RelationInfo(
-                schema: "db0", name: "hash", kind: .table, estimatedRows: nil)
-            model.sessions[0].selected = keys
+            let rows = RelationInfo(
+                schema: "app", name: "events", kind: .table, estimatedRows: nil)
+            model.sessions[0].selected = rows
             model.sessions[0].activeTab = .content
-            model.sessions[0].rowIdentity = RowIdentity(columns: ["key"], obstacle: nil)
-            model.sessions[0].connString = "redis://127.0.0.1:6379/0"
-            model.sessions[0].capabilities = Capabilities(
-                transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
-                writesStatements: false, schemaIsTheDatabase: true,
-                reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
-                reportsVariables: false, changesRelations: false, changesColumns: false,
-                altersColumns: false,
-                changesIndexes: false, indexMethods: [],
-                changesDatabases: false)
+            model.sessions[0].rowIdentity = RowIdentity(columns: ["id"], obstacle: nil)
+            model.sessions[0].connString = "cassandra://127.0.0.1:9042/app"
 
-            expect(model.canEditCell, false, "no cell of a Redis key type is editable")
+            // A real row under a real cursor, because `canEditCell` reads both
+            // and a fixture that set them by hand would leave the flag as the
+            // only thing this check could see. SQLite is the one driver here
+            // that needs no server; what it is standing in for is a grid with
+            // something selected in it.
+            let file = FileManager.default.temporaryDirectory
+                .appending(path: "dbclient-editable-\(UUID().uuidString).db")
+            defer { try? FileManager.default.removeItem(at: file) }
+            FileManager.default.createFile(atPath: file.path, contents: nil)
+            guard let db = try? Database(connString: "sqlite://\(file.path)"),
+                let query = try? db.query("select 1 as id", batchRows: 100),
+                let schema = try? query.schema()
+            else {
+                failures += 1
+                fputs("connection-form FAIL: a SQLite result would not come back\n", stderr)
+                return
+            }
+            let result = model.browseResult
+            result.table.setSchema(schema)
+            if let release = schema.pointee.release { release(schema) }
+            schema.deallocate()
+            while let batch = (try? query.nextBatch()) ?? nil {
+                result.table.append(batch: batch)
+            }
+            result.finish(
+                statement: "select 1 as id", capped: false, milliseconds: 1, summary: "1 row")
+            model.browseSelection = GridSelection(row: 0, column: 0)
+            let saying = { (writesStatements: Bool, editsRows: Bool) in
+                Capabilities(
+                    transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
+                    writesStatements: writesStatements, editsRows: editsRows,
+                    schemaIsTheDatabase: true,
+                    reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
+                    reportsVariables: false, changesRelations: false, changesColumns: false,
+                    altersColumns: false,
+                    changesIndexes: false, indexMethods: [],
+                    changesDatabases: false)
+            }
+            model.sessions[0].capabilities = saying(false, false)
+
+            expect(model.canEditCell, false, "no cell of a Cassandra table is editable")
             expect(
                 model.editObstacle?.contains("writes no statements"), true,
                 "and the bar says so where the controls would have been")
@@ -810,19 +847,21 @@ enum AppModelConnectionChecks {
                 model.editObstacle?.contains("Query tab"), true,
                 "pointing at the pane where the change can still be made by hand")
 
-            // The same window, one field different. Everything else about this
-            // relation already said yes, which is what made the defect invisible.
-            model.sessions[0].capabilities = Capabilities(
-                transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
-                writesStatements: true, schemaIsTheDatabase: true,
-                reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
-                reportsVariables: false, changesRelations: false, changesColumns: false,
-                altersColumns: false,
-                changesIndexes: false, indexMethods: [],
-                changesDatabases: false)
+            // The same window, one field different — and the field is not the
+            // one about SQL. This is Redis: no dialect, and rows that edit.
+            model.sessions[0].capabilities = saying(false, true)
+            expect(
+                model.canEditCell, true,
+                "a driver that writes its own changes makes its rows editable")
             expect(
                 model.editObstacle == nil, true,
-                "a database with a grammar has nothing to explain")
+                "with nothing left to explain, though this build has no grammar for it")
+
+            // And a database with a dialect, which is the other twelve.
+            model.sessions[0].capabilities = saying(true, true)
+            expect(
+                model.editObstacle == nil, true,
+                "a database with a grammar has nothing to explain either")
         }
     }
 
@@ -840,7 +879,7 @@ enum AppModelConnectionChecks {
             model.sessions[0].isBusy = true
             model.sessions[0].capabilities = Capabilities(
                 transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
-                writesStatements: true, schemaIsTheDatabase: false,
+                writesStatements: true, editsRows: true, schemaIsTheDatabase: false,
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
                 altersColumns: false,
@@ -852,7 +891,7 @@ enum AppModelConnectionChecks {
 
             model.sessions[0].capabilities = Capabilities(
                 transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
-                writesStatements: false, schemaIsTheDatabase: false,
+                writesStatements: false, editsRows: false, schemaIsTheDatabase: false,
                 reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                 reportsVariables: false, changesRelations: false, changesColumns: false,
                 altersColumns: false,
@@ -932,7 +971,8 @@ enum AppModelConnectionChecks {
             func capabilities(schemaIsTheDatabase: Bool) -> Capabilities {
                 Capabilities(
                     transactional: false, cancelStopsTheStatement: true, switchesDatabase: false,
-                    writesStatements: false, schemaIsTheDatabase: schemaIsTheDatabase,
+                    writesStatements: false, editsRows: false,
+                    schemaIsTheDatabase: schemaIsTheDatabase,
                     reportsRoutines: false, reportsSequences: false, serverProcesses: .unreported,
                     reportsVariables: false, changesRelations: false, changesColumns: false,
                     altersColumns: false,

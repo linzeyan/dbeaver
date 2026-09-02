@@ -3315,7 +3315,7 @@ final class AppModel {
     /// reason here that is not a discovery about the data but a decision the user
     /// already made.
     var canEditCell: Bool {
-        safety.writeRefusal == nil && capabilities.writesStatements && activeTab == .content
+        safety.writeRefusal == nil && capabilities.editsRows && activeTab == .content
             && selected?.kind == .table && !isBusy
             && hasRowIdentity && selectedCell(in: browseResult) != nil
     }
@@ -3353,7 +3353,7 @@ final class AppModel {
         // at rows and wondering why they will not change, and it names the Query
         // pane because that is where the change can still be made by hand — in
         // whatever commands this database does have.
-        if !capabilities.writesStatements {
+        if !capabilities.editsRows {
             let product = DriverCatalog.named(session.scheme)?.label ?? "this database"
             return "This build writes no statements for \(product); change rows in the Query tab."
         }

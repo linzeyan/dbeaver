@@ -355,7 +355,22 @@ async fn mongodb() -> Subject {
         .await
         .expect("MongoDB unreachable; run `make db-up-mongo`");
     let db = client.database("dbclient_contract");
-    db.drop().await.expect("could not clear the fixture");
+    // Retried rather than attempted once, for the reason `redis()` below
+    // retries: the first connection a freshly built test binary makes can take
+    // half a minute to answer on a machine that checks a new binary's signature
+    // before letting it near a socket, and every one after it is instant. A
+    // `Client` is lazy, so the wait lands on this call rather than on the one
+    // above, and it lands within a hair of the driver's own thirty-second server
+    // selection timeout -- which made this fixture pass or fail by a second
+    // depending on how warm the machine was.
+    let mut cleared = db.drop().await;
+    for _ in 0..3 {
+        if cleared.is_ok() {
+            break;
+        }
+        cleared = db.drop().await;
+    }
+    cleared.expect("MongoDB unreachable; run `make db-up-mongo`");
     let rows: Vec<bson::Document> = (1..=500)
         .map(|i| bson::doc! { "_id": i, "label": format!("row-{i}") })
         .collect();
@@ -418,10 +433,20 @@ const REDIS_URL: &str = "redis://127.0.0.1:56379/9";
 /// fixture does not depend on the code under test being right.
 async fn redis() -> Subject {
     let client = redis::Client::open(REDIS_URL).expect("the fixture URL should parse");
-    let mut conn = client
-        .get_multiplexed_async_connection()
-        .await
-        .expect("Redis unreachable; run `make db-up-redis`");
+    // Retried rather than attempted once, for the reason `driver-redis`'s own
+    // fixture retries: the client gives up after two seconds, and the first
+    // connection a freshly built test binary makes can take longer than that to
+    // answer on a machine that checks a new binary's signature before letting it
+    // near a socket. Every connection after it is instant. A fixture that gave up
+    // there would be reporting the laptop as an unreachable server.
+    let mut conn = None;
+    for _ in 0..30 {
+        if let Ok(open) = client.get_multiplexed_async_connection().await {
+            conn = Some(open);
+            break;
+        }
+    }
+    let mut conn = conn.expect("Redis unreachable; run `make db-up-redis`");
     redis::cmd("FLUSHDB")
         .exec_async(&mut conn)
         .await
@@ -1541,6 +1566,7 @@ async fn every_check(subject: &Subject) {
     reports_the_servers_own_work_only_where_it_says_it_does(subject).await;
     lists_the_settings_it_runs_under_only_where_it_says_it_does(subject).await;
     reports_its_sequences_only_where_it_says_it_does(subject).await;
+    writes_its_own_row_changes_only_where_it_says_it_does(subject).await;
     marks_the_engines_own_schemas_without_hiding_them(subject).await;
     describes_a_relation_without_saying_anything_twice(subject).await;
     controls_a_transaction(subject).await;
@@ -1877,6 +1903,49 @@ async fn lists_the_settings_it_runs_under_only_where_it_says_it_does(subject: &S
         listed, sorted,
         "the settings are listed in name order, which is the only order six \
          hundred of them can be read in"
+    );
+}
+
+/// `write_rows` and `capabilities().writes_rows` say the same thing.
+///
+/// The pairing is what this clause exists for, and the failure it prevents was
+/// nearly shipped: MongoDB's capability was set to true a commit before its
+/// method was written, so the grid offered editing on every collection and every
+/// Set produced the trait's own "this build does not write statements for this
+/// database". A capability that is a promise the driver has not kept is worse
+/// than one that is false, because the front end has no way to tell.
+///
+/// Nothing is staged, deliberately. What the two answers have to agree on is
+/// whether this driver writes its own changes at all, and a real edit would make
+/// that question depend on the seed — a table's key, a collection's shape, a
+/// Redis key type — which the subjects do not describe in a form this clause
+/// could build one from. Those belong in each driver's own suite, where they
+/// are, and the round trip belongs in the FFI's conformance harness.
+async fn writes_its_own_row_changes_only_where_it_says_it_does(subject: &Subject) {
+    let driver = subject.driver.as_ref();
+    let nothing = dbconn::RowEdits {
+        schema: subject.schema.clone(),
+        relation: subject.relation.clone(),
+        updates: Vec::new(),
+        inserts: Vec::new(),
+        deletes: Vec::new(),
+    };
+
+    if !driver.capabilities().writes_rows {
+        driver.write_rows(&nothing).await.expect_err(
+            "this driver says its changes are composed above it, so it must refuse to \
+             write them itself",
+        );
+        return;
+    }
+
+    let written = driver.write_rows(&nothing).await.expect(
+        "a driver that says it writes its own changes has to answer, and nothing \
+         staged is an answer it can always give",
+    );
+    assert!(
+        written.is_empty(),
+        "nothing was staged, so there is nothing to send: {written:?}"
     );
 }
 

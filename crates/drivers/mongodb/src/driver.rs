@@ -12,8 +12,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, RowEdits, SchemaInfo, ServerInfo,
+    ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, MongoError, MongoSource};
@@ -131,6 +131,13 @@ impl Driver for MongoSource {
         format!("{{{}}}", parts.join(", "))
     }
 
+    /// The collection's sampled shape is read first, because it is what says
+    /// how a cell's text should be spelled as BSON — see `edits.rs`.
+    async fn write_rows(&self, edits: &RowEdits) -> DbResult<Vec<String>> {
+        let columns = MongoSource::columns(self, &edits.schema, &edits.relation).await?;
+        Ok(crate::edits::statements(edits, &columns)?)
+    }
+
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {
         Ok(Box::new(
             MongoSource::cursor(self, statement, batch_rows).await?,
@@ -179,6 +186,12 @@ impl Driver for MongoSource {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // Command documents, written by `write_rows` below. There is no
+            // dialect for MongoDB and there could not be one — it has no SELECT
+            // to compose an UPDATE beside — so the driver that already writes a
+            // `find` for a browse writes the `update`, `insert` and `delete`
+            // that go with it.
+            writes_rows: true,
         }
     }
 

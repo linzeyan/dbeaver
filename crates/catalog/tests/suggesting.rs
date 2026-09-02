@@ -136,6 +136,8 @@ impl Driver for Fake {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // Completion reads names; nothing here writes a row.
+            writes_rows: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {

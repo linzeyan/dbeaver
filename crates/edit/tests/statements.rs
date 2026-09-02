@@ -9,10 +9,9 @@
 
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor, DatabaseInfo, DbResult, Driver,
-    IndexInfo, RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo,
+    IndexInfo, RelationInfo, RelationshipInfo, ResultStream, RowEdits, SchemaInfo, ServerInfo,
     ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
-use dbedit::Edits;
 use std::collections::HashMap;
 
 /// One column of one table: name, declared type, whether it is in the primary
@@ -157,6 +156,10 @@ impl Driver for Fake {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // This double stands in for a driver this build carries a dialect
+            // for, which is the whole subject here: its rows are written above
+            // it, by the crate under test.
+            writes_rows: false,
         }
     }
     async fn transaction(&self, _: &TxStep) -> DbResult<()> {
@@ -166,7 +169,7 @@ impl Driver for Fake {
 
 /// The statements `json` produces, insisting they were produced.
 async fn written(json: &str) -> Vec<String> {
-    let edits: Edits = serde_json::from_str(json).expect("the edits should parse");
+    let edits: RowEdits = serde_json::from_str(json).expect("the edits should parse");
     dbedit::statements(&Fake, &dbsql::POSTGRES, &edits)
         .await
         .expect("the statements should be writable")
@@ -174,7 +177,7 @@ async fn written(json: &str) -> Vec<String> {
 
 /// Why `json` was refused, insisting it was.
 async fn refused(json: &str) -> String {
-    let edits: Edits = serde_json::from_str(json).expect("the edits should parse");
+    let edits: RowEdits = serde_json::from_str(json).expect("the edits should parse");
     dbedit::statements(&Fake, &dbsql::POSTGRES, &edits)
         .await
         .expect_err("this should not have been written")
@@ -236,7 +239,7 @@ async fn a_backslash_is_doubled_only_where_it_escapes() {
     let json = r#"{"schema":"public","relation":"lines","updates":[
              {"key":[{"column":"order_id","value":"1"},{"column":"line_no","value":"1"}],
               "set":[{"column":"note","value":"C:\\temp"}]}]}"#;
-    let edits: Edits = serde_json::from_str(json).unwrap();
+    let edits: RowEdits = serde_json::from_str(json).unwrap();
 
     let postgres = dbedit::statements(&Fake, &dbsql::POSTGRES, &edits)
         .await
@@ -275,7 +278,7 @@ async fn an_inserted_row_names_only_the_columns_it_was_given() {
 /// syntax error, and empty parentheses sent to PostgreSQL are another.
 #[tokio::test]
 async fn a_row_of_nothing_takes_each_database_at_its_own_word() {
-    let edits: Edits =
+    let edits: RowEdits =
         serde_json::from_str(r#"{"schema":"public","relation":"lines","inserts":[{"set":[]}]}"#)
             .unwrap();
 
@@ -498,7 +501,7 @@ async fn text_that_is_not_a_number_never_reaches_a_numeric_column() {
 async fn a_name_that_needs_quoting_gets_it() {
     // The relation, not the column: a schema or table whose name is a keyword or
     // is not lower case has to survive being written into the statement.
-    let edits: Edits = serde_json::from_str(
+    let edits: RowEdits = serde_json::from_str(
         r#"{"schema":"Order Data","relation":"lines","deletes":[
              {"key":[{"column":"order_id","value":"1"},{"column":"line_no","value":"1"}]}]}"#,
     )

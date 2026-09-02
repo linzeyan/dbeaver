@@ -11,7 +11,7 @@
 //! `cargo test --workspace -- --ignored` runs at the same time as this binary.
 
 use arrow::array::{Array, RecordBatch, StringArray};
-use dbconn::{Browse, Driver, TxStep};
+use dbconn::{Browse, Driver, EditedCell, RowDelete, RowEdits, RowInsert, RowUpdate, TxStep};
 use driver_redis::{KeyType, RedisSource, TYPES};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,11 +21,32 @@ fn url(db: u8) -> String {
 }
 
 async fn raw(db: u8) -> redis::aio::MultiplexedConnection {
-    redis::Client::open(url(db))
-        .expect("the fixture URL should parse")
-        .get_multiplexed_async_connection()
+    let client = redis::Client::open(url(db)).expect("the fixture URL should parse");
+    let mut last = None;
+    // Retried rather than attempted once. The client gives up after two seconds
+    // and a machine can take longer than that to answer the first connection a
+    // freshly built test binary makes — measured at just under thirty on one
+    // development Mac, where every connection after it took three milliseconds.
+    // A fixture that reported "Redis unreachable" there would be reporting the
+    // laptop, and the suite would look broken for a minute at a time.
+    for _ in 0..30 {
+        match client.get_multiplexed_async_connection().await {
+            Ok(conn) => return conn,
+            Err(e) => last = Some(e),
+        }
+    }
+    panic!(
+        "Redis unreachable; run `make db-up-redis`: {}",
+        last.expect("at least one attempt")
+    )
+}
+
+/// A driver connected to `db`, waiting for the server the way `raw` does.
+async fn connected(db: u8) -> RedisSource {
+    raw(db).await;
+    RedisSource::connect(&url(db))
         .await
-        .expect("Redis unreachable; run `make db-up-redis`")
+        .expect("the driver could not connect")
 }
 
 /// An empty database and a driver connected to it.
@@ -35,10 +56,7 @@ async fn fixture(db: u8) -> (RedisSource, redis::aio::MultiplexedConnection) {
         .exec_async(&mut conn)
         .await
         .expect("could not clear the fixture");
-    let source = RedisSource::connect(&url(db))
-        .await
-        .expect("the driver could not connect");
-    (source, conn)
+    (connected(db).await, conn)
 }
 
 /// Every batch a statement produces.
@@ -481,8 +499,13 @@ async fn a_statement_reaches_the_database_its_first_line_selects() {
         .exec_async(&mut here)
         .await
         .expect("seeding");
+    // `marker` alone and not the database: the `SET` below settles what this
+    // test reads, and a `FLUSHDB` here would take whatever else is in db10 with
+    // it — which is what it did, until a test that shares db10 under a prefix
+    // started losing keys between writing them and listing them.
     let mut there = raw(10).await;
-    redis::cmd("FLUSHDB")
+    redis::cmd("DEL")
+        .arg("marker")
         .exec_async(&mut there)
         .await
         .expect("clearing");
@@ -708,9 +731,7 @@ async fn a_result_reports_its_rows_only_once_it_has_been_read() {
 #[tokio::test]
 #[ignore = "requires a Redis server"]
 async fn transaction_control_is_refused_rather_than_quietly_skipped() {
-    let source = RedisSource::connect(&url(0))
-        .await
-        .expect("the driver could not connect");
+    let source = connected(0).await;
     assert!(!source.capabilities().transactional);
     // Redis does have a cancel that reaches the server, which is the other half
     // of what this subject is asserting about itself.
@@ -730,4 +751,144 @@ async fn transaction_control_is_refused_rather_than_quietly_skipped() {
             .unwrap_or_else(|| panic!("{step:?} should be refused"));
         assert!(err.to_string().contains("MULTI"), "got: {err}");
     }
+}
+
+/// A grid's staged changes reach the server, and what comes back is what was
+/// typed.
+///
+/// The unit suite settles what the commands say; this settles that they are
+/// commands. Round-tripped through `browse` rather than through `GET`, because
+/// what is under test is the pair — a write whose result the listing beside it
+/// cannot see would be a write into the wrong database or under the wrong name.
+///
+/// All three verbs in one test, and the one test in this file that owns no
+/// database of its own. All sixteen are spoken for — the connection that reads
+/// `marker` out of db10 is why that one is not free either — so this shares db10
+/// without clearing it and works under a prefix nothing else uses, with the
+/// browse given the MATCH pattern that keeps its listing to those keys.
+#[tokio::test]
+#[ignore = "requires a Redis server"]
+async fn staged_changes_are_written_read_back_expired_and_removed() {
+    let source = connected(10).await;
+    let mut conn = raw(10).await;
+    redis::cmd("DEL")
+        .arg("edit:greeting")
+        .arg("edit:token")
+        .exec_async(&mut conn)
+        .await
+        .expect("could not clear what a previous run left");
+    redis::cmd("SET")
+        .arg("edit:greeting")
+        .arg("hello")
+        .exec_async(&mut conn)
+        .await
+        .expect("could not seed");
+
+    let typed = |column: &str, value: Option<&str>| EditedCell {
+        column: column.to_string(),
+        value: value.map(str::to_string),
+    };
+    let listing = || Browse {
+        schema: "db10",
+        relation: "string",
+        // Only this test's keys. The database is shared, so an unfiltered
+        // listing would be a assertion about whatever else is in it.
+        filter: Some("edit:*"),
+        order: None,
+        keys: &[],
+        limit: None,
+    };
+    let apply = async |edits: RowEdits| {
+        for statement in source.write_rows(&edits).await.expect("commands") {
+            run(&source, &statement).await;
+        }
+    };
+    let staged = |updates, inserts, deletes| RowEdits {
+        schema: "db10".to_string(),
+        relation: "string".to_string(),
+        updates,
+        inserts,
+        deletes,
+    };
+
+    apply(staged(
+        vec![RowUpdate {
+            key: vec![typed("key", Some("edit:greeting"))],
+            set: vec![typed("value", Some("goodbye"))],
+        }],
+        vec![RowInsert {
+            set: vec![
+                typed("key", Some("edit:token")),
+                typed("value", Some("abc")),
+            ],
+        }],
+        Vec::new(),
+    ))
+    .await;
+
+    let mut seen: Vec<(String, String)> = Vec::new();
+    for batch in run(&source, &source.browse(&listing())).await.iter() {
+        for row in 0..batch.num_rows() {
+            seen.push((
+                cell(batch, "key", row).expect("a key"),
+                cell(batch, "value", row).expect("a value"),
+            ));
+        }
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            ("edit:greeting".to_string(), "goodbye".to_string()),
+            ("edit:token".to_string(), "abc".to_string())
+        ]
+    );
+
+    // A deadline, and then no deadline. Clearing one is `PERSIST` and not
+    // `EXPIRE 0`, which is how Redis spells "gone now" — the wrong answer there
+    // deletes the row, which is the failure worth a live test rather than an
+    // assertion about rendered text.
+    let deadline = |seconds: Option<&str>| {
+        staged(
+            vec![RowUpdate {
+                key: vec![typed("key", Some("edit:token"))],
+                set: vec![typed("ttl", seconds)],
+            }],
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    apply(deadline(Some("600"))).await;
+    let ttl: i64 = redis::cmd("TTL")
+        .arg("edit:token")
+        .query_async(&mut conn)
+        .await
+        .expect("TTL");
+    assert!(ttl > 0 && ttl <= 600, "the deadline is being kept: {ttl}");
+
+    apply(deadline(None)).await;
+    let ttl: i64 = redis::cmd("TTL")
+        .arg("edit:token")
+        .query_async(&mut conn)
+        .await
+        .expect("TTL");
+    assert_eq!(
+        ttl, -1,
+        "cleared means no expiry, and the key is still there"
+    );
+
+    apply(staged(
+        Vec::new(),
+        Vec::new(),
+        vec![RowDelete {
+            key: vec![typed("key", Some("edit:token"))],
+        }],
+    ))
+    .await;
+    let left: usize = run(&source, &source.browse(&listing()))
+        .await
+        .iter()
+        .map(|b| b.num_rows())
+        .sum();
+    assert_eq!(left, 1, "the deleted key is gone and the other one is not");
 }

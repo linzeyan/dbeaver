@@ -546,6 +546,15 @@ char* db_browse_statement(DbHandle* handle, const char* what, char** err);
 // is not the number its column says it is. Refusals are the point — the failure
 // they prevent is not an error message, it is an UPDATE that silently changes
 // the wrong row.
+//
+// Not always SQL, despite the name. Where this build carries no dialect for the
+// connection the driver writes the statements itself, in whatever language its
+// database has: MongoDB answers with update, insert and delete command
+// documents, Redis with SET, EXPIRE and DEL. They come back through the same
+// array and are run the same way. Whether anything comes back at all is
+// db_capabilities_json's edits_rows, which is the flag a grid's editing row asks
+// — writes_statements is narrower and stays the answer for the calls that need
+// SQL and nothing else.
 char* db_edit_sql_json(DbHandle* handle, const char* edits, char** err);
 
 // A stack of filter rows as one WHERE clause, as plain text. Released with

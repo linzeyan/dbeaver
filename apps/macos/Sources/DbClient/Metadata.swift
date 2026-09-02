@@ -65,6 +65,20 @@ struct Capabilities: Codable, Hashable {
     /// after they were pressed.
     let writesStatements: Bool
 
+    /// Whether the core can write the statements a grid's staged changes need.
+    ///
+    /// Wider than `writesStatements`, and the reason that one is no longer the
+    /// grid's question: an edit needs a grammar to say "set this field of that
+    /// row", and a SQL dialect is one way to have one but not the only way.
+    /// MongoDB says it in a command document and Redis in a command, and both
+    /// are written by their own driver.
+    ///
+    /// Still false for Cassandra, which has neither — and false is the answer
+    /// the editing row draws its sentence from, because a Set button that hands
+    /// back `ERR unknown command 'UPDATE'` after it is pressed is worse than a
+    /// row that says why it is not there.
+    let editsRows: Bool
+
     /// Whether the level `schemas()` reports is what this engine calls a
     /// database.
     ///
@@ -172,7 +186,8 @@ struct Capabilities: Codable, Hashable {
     /// offers to change no relation before it knows it can write the statement.
     static let unknown = Capabilities(
         transactional: false, cancelStopsTheStatement: false, switchesDatabase: false,
-        writesStatements: false, schemaIsTheDatabase: false, reportsRoutines: false,
+        writesStatements: false, editsRows: false, schemaIsTheDatabase: false,
+        reportsRoutines: false,
         reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
         changesRelations: false, changesColumns: false, altersColumns: false,
         changesIndexes: false, indexMethods: [], changesDatabases: false)
@@ -182,6 +197,7 @@ struct Capabilities: Codable, Hashable {
         case cancelStopsTheStatement = "cancel_stops_the_statement"
         case switchesDatabase = "switches_database"
         case writesStatements = "writes_statements"
+        case editsRows = "edits_rows"
         case schemaIsTheDatabase = "schema_is_the_database"
         case reportsRoutines = "reports_routines"
         case reportsSequences = "reports_sequences"

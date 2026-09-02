@@ -454,3 +454,144 @@ async fn asking_about_a_collection_that_is_not_there_is_an_empty_answer() {
     assert!(src.triggers(&db, missing).await.unwrap().is_empty());
     assert_eq!(src.definition(&db, missing).await.unwrap(), None);
 }
+
+// ---------------------------------------------------------------------------
+// Writing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires a MongoDB server"]
+async fn staged_changes_are_written_run_and_read_back() {
+    // The one thing the unit tests in `edits.rs` cannot show: that the documents
+    // this driver writes are documents this server accepts, and that an edit to
+    // an Int32 field leaves it an Int32 rather than widening it on the way
+    // through JSON.
+    let (src, db) = fixture("staged_changes_are_written_run_and_read_back").await;
+    let client = Client::with_uri_str(URI).await.expect("a second client");
+    let people = client.database(&db).collection::<Document>("people");
+    let ada = bson::oid::ObjectId::new();
+    let grace = bson::oid::ObjectId::new();
+    people
+        .insert_many(vec![
+            doc! { "_id": ada, "name": "Ada", "seats": 2i32 },
+            doc! { "_id": grace, "name": "Grace", "seats": 3i32 },
+        ])
+        .await
+        .expect("seeding people");
+
+    let staged: dbconn::RowEdits = serde_json::from_str(&format!(
+        r#"{{"schema": "{db}", "relation": "people",
+            "updates": [{{"key": [{{"column": "_id", "value": "{ada}"}}],
+                          "set": [{{"column": "name", "value": "Ada L"}},
+                                  {{"column": "seats", "value": "5"}}]}}],
+            "inserts": [{{"set": [{{"column": "name", "value": "Kay"}},
+                                  {{"column": "seats", "value": "9"}}]}}],
+            "deletes": [{{"key": [{{"column": "_id", "value": "{grace}"}}]}}]}}"#,
+        ada = ada.to_hex(),
+        grace = grace.to_hex(),
+    ))
+    .expect("the edits should parse");
+
+    let statements = dbconn::Driver::write_rows(&src, &staged)
+        .await
+        .expect("the driver should write these");
+    assert_eq!(statements.len(), 3, "one each: {statements:?}");
+    for statement in &statements {
+        let mut stream = src
+            .query(statement, 10)
+            .await
+            .expect("the server accepts it");
+        while stream.next_batch().await.expect("reply").is_some() {}
+    }
+
+    let changed = people
+        .find_one(doc! { "_id": ada })
+        .await
+        .expect("read back")
+        .expect("Ada is still there");
+    assert_eq!(changed.get_str("name").expect("name"), "Ada L");
+    assert_eq!(
+        changed.get("seats"),
+        Some(&Bson::Int32(5)),
+        "an int32 field is still int32 after an edit"
+    );
+    assert!(
+        people
+            .find_one(doc! { "name": "Kay" })
+            .await
+            .expect("read back")
+            .is_some(),
+        "the inserted document is there, under an id the server chose"
+    );
+    assert!(
+        people
+            .find_one(doc! { "_id": grace })
+            .await
+            .expect("read back")
+            .is_none(),
+        "the deleted document is gone"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a MongoDB server"]
+async fn an_id_is_read_as_an_id_and_written_back_as_one() {
+    // The round trip the whole of `edits.rs` turns on: the grid shows 24 hex
+    // digits, the column says those digits are an ObjectId, and the update
+    // written from them reaches the document rather than matching nothing.
+    let (src, db) = fixture("an_id_is_read_as_an_id_and_written_back_as_one").await;
+    let client = Client::with_uri_str(URI).await.expect("a second client");
+    let notes = client.database(&db).collection::<Document>("notes");
+    let id = bson::oid::ObjectId::new();
+    notes
+        .insert_one(doc! { "_id": id, "body": "before" })
+        .await
+        .expect("seeding notes");
+
+    let key = src.columns(&db, "notes").await.expect("columns");
+    assert_eq!(
+        key.iter().find(|c| c.name == "_id").expect("_id").data_type,
+        "objectid",
+        "the column says what the digits are"
+    );
+
+    let staged: dbconn::RowEdits = serde_json::from_str(&format!(
+        r#"{{"schema": "{db}", "relation": "notes",
+            "updates": [{{"key": [{{"column": "_id", "value": "{}"}}],
+                          "set": [{{"column": "body", "value": "after"}}]}}],
+            "inserts": [], "deletes": []}}"#,
+        id.to_hex()
+    ))
+    .expect("the edits should parse");
+    let statements = dbconn::Driver::write_rows(&src, &staged)
+        .await
+        .expect("written");
+    let mut stream = src.query(&statements[0], 10).await.expect("accepted");
+    while stream.next_batch().await.expect("reply").is_some() {}
+
+    let after = notes
+        .find_one(doc! { "_id": id })
+        .await
+        .expect("read back")
+        .expect("still there");
+    assert_eq!(after.get_str("body").expect("body"), "after");
+}
+
+#[tokio::test]
+#[ignore = "requires a MongoDB server"]
+async fn a_change_this_database_cannot_express_is_refused_before_anything_is_sent() {
+    let (src, db) =
+        fixture("a_change_this_database_cannot_express_is_refused_before_anything_is_sent").await;
+    let staged: dbconn::RowEdits = serde_json::from_str(&format!(
+        r#"{{"schema": "{db}", "relation": "kinds",
+            "updates": [{{"key": [{{"column": "text", "value": "hello"}}],
+                          "set": [{{"column": "blob", "value": "<3 bytes>"}}]}}],
+            "inserts": [], "deletes": []}}"#
+    ))
+    .expect("the edits should parse");
+    let why = dbconn::Driver::write_rows(&src, &staged)
+        .await
+        .expect_err("a binary field cannot be written back")
+        .to_string();
+    assert!(why.contains("how many bytes"), "{why}");
+}
