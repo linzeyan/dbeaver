@@ -74,6 +74,7 @@
 //! everything that is not blocking. What that costs is at `Reach::stop`.
 
 mod driver;
+mod edits;
 mod metadata;
 mod shape;
 

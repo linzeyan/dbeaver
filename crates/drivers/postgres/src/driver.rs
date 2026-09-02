@@ -177,6 +177,9 @@ impl Driver for PgSource {
             reports_sequences: true,
             server_processes: ServerProcesses::Interruptible,
             reports_variables: true,
+            // Its edits are SQL, composed above this driver from the dialect
+            // this build carries for it.
+            writes_rows: false,
         }
     }
 

@@ -291,6 +291,10 @@ test-mongodb: db-check-mongo ## Integration tests behind MongoDB
 test-redis: db-check-redis ## Integration tests behind Redis
 	cargo test -p driver-redis -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact redis_satisfies_the_contract
+	# The FFI's only connection without a dialect, which is the one that shows
+	# db_edit_sql_json taking its other branch.
+	cargo test -p dbffi --test conformance -- --ignored --exact \
+	  a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them
 
 # Slowest container of the lot to become ready — a minute or so before it will
 # answer — which is why it is its own job rather than a passenger on another.

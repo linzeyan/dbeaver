@@ -212,6 +212,9 @@ impl Driver for DatabricksSource {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // Its edits are SQL, composed above this driver from the dialect
+            // this build carries for it.
+            writes_rows: false,
         }
     }
 

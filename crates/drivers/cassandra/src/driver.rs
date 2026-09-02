@@ -212,6 +212,14 @@ impl Driver for CassandraSource {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // Neither a dialect in this build nor a writer of its own, which is
+            // why the two are one field: CQL says INSERT and UPDATE like SQL,
+            // so a writer here would be a second dialect kept beside `dbsql`'s
+            // — the same grammar, maintained twice, to reach the one engine
+            // nobody has written a dialect for. A grid over Cassandra says the
+            // rows cannot be edited, and that is the honest answer until it has
+            // one.
+            writes_rows: false,
         }
     }
 

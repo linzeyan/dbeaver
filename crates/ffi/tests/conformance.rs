@@ -44,17 +44,17 @@ use std::time::Duration;
 use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
-    db_cancel, db_column_change_sql, db_columns_json, db_complete_json, db_connect,
-    db_constraints_json, db_create_table_sql, db_cursor, db_cursor_cancel, db_cursor_close,
-    db_cursor_free, db_cursor_next, db_cursor_schema, db_database_change_sql, db_databases_json,
-    db_ddl_text, db_definition_json, db_edit_sql_json, db_end_process, db_export, db_export_sql,
-    db_file_columns_json, db_foreign_keys_json, db_free, db_import_cancel, db_import_free,
-    db_import_start, db_import_step, db_index_change_sql, db_indexes_json, db_names_forget,
-    db_new_table_sql, db_processes_json, db_query, db_query_free, db_query_next,
-    db_query_rows_affected, db_query_schema, db_referenced_by_json, db_relations_json,
-    db_routine_definition_json, db_routines_json, db_row_identity_json, db_schemas_json,
-    db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json, db_string_free,
-    db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
+    db_cancel, db_capabilities_json, db_column_change_sql, db_columns_json, db_complete_json,
+    db_connect, db_constraints_json, db_create_table_sql, db_cursor, db_cursor_cancel,
+    db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema, db_database_change_sql,
+    db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_end_process,
+    db_export, db_export_sql, db_file_columns_json, db_foreign_keys_json, db_free,
+    db_import_cancel, db_import_free, db_import_start, db_import_step, db_index_change_sql,
+    db_indexes_json, db_names_forget, db_new_table_sql, db_processes_json, db_query, db_query_free,
+    db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
+    db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
+    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
+    db_string_free, db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
     db_transfer_start, db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit,
     db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
     db_variables_json,
@@ -2682,6 +2682,124 @@ fn a_column_change_is_composed_and_runs_or_is_refused_by_name() {
 
     unsafe { db_free(handle) };
     let _ = std::fs::remove_file(&path);
+}
+
+/// What a connection says it can do carries both editing flags, and they are two
+/// questions rather than one.
+///
+/// `writes_statements` is whether this build has a SQL grammar for the
+/// connection; `edits_rows` is whether a grid's staged changes can be turned into
+/// statements at all, which is wider — MongoDB and Redis have no dialect and
+/// write their own. SQLite answers yes to both, which is what makes this a check
+/// of the wire form rather than of the routing: the field has to be *there*, and
+/// a front end keyed on a name the core does not write reads false and refuses to
+/// edit a database that would have answered.
+#[test]
+fn a_connection_reports_both_of_the_two_questions_about_editing() {
+    let path = std::env::temp_dir().join("dbffi-capabilities.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let raw = unsafe { db_capabilities_json(handle, &mut err) };
+    assert!(!raw.is_null(), "capabilities should be answerable");
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    let said: serde_json::Value = serde_json::from_str(&text).expect("capabilities are JSON");
+
+    assert_eq!(
+        said["writes_statements"],
+        serde_json::json!(true),
+        "this build carries SQLite's dialect"
+    );
+    assert_eq!(
+        said["edits_rows"],
+        serde_json::json!(true),
+        "so a grid over it can be edited, through that dialect"
+    );
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The other side of that pair, which SQLite cannot show: a connection with no
+/// dialect that edits rows anyway.
+///
+/// Redis, because it is the cheapest server of the fifteen to stand up. What is
+/// under test is the routing rather than the commands — `db_edit_sql_json` sends
+/// a change to `dbedit` where there is a dialect and to the driver where there is
+/// not, and SQLite only ever takes the first branch. A build that lost the second
+/// would answer every Redis edit with the trait's own refusal, and every check
+/// above would still pass.
+///
+/// Nothing is read from or written to the server: the database in the URL only
+/// decides which `SELECT` line the statement carries, so this test shares db11
+/// with the driver's own suite without either being able to disturb the other.
+#[test]
+#[ignore = "requires a Redis server"]
+fn a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them() {
+    let conn = CString::new("redis://127.0.0.1:56379/11").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    // Retried rather than attempted once, for the reason `driver-redis`'s own
+    // fixture retries: the client gives up after two seconds, and the first
+    // connection a freshly built test binary makes can take longer than that to
+    // answer on a machine that checks a new binary's signature before letting it
+    // near a socket. Every connection after it is instant.
+    let mut handle = ptr::null_mut();
+    for _ in 0..30 {
+        handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+        if !handle.is_null() {
+            break;
+        }
+        unsafe { db_string_free(err) };
+        err = ptr::null_mut();
+    }
+    assert!(
+        !handle.is_null(),
+        "Redis unreachable; run `make db-up-redis`"
+    );
+
+    let raw = unsafe { db_capabilities_json(handle, &mut err) };
+    assert!(!raw.is_null(), "capabilities should be answerable");
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    let said: serde_json::Value = serde_json::from_str(&text).expect("capabilities are JSON");
+    assert_eq!(
+        said["writes_statements"],
+        serde_json::json!(false),
+        "this build carries no dialect for Redis"
+    );
+    assert_eq!(
+        said["edits_rows"],
+        serde_json::json!(true),
+        "and the grid is editable all the same, because the driver writes its own"
+    );
+
+    let staged = CString::new(
+        r#"{"schema": "db11", "relation": "string",
+            "updates": [{"key": [{"column": "key", "value": "conformance:one"}],
+                         "set": [{"column": "value", "value": "written"}]}],
+            "inserts": [], "deletes": []}"#,
+    )
+    .unwrap();
+    let raw = unsafe { db_edit_sql_json(handle, staged.as_ptr(), &mut err) };
+    assert!(
+        !raw.is_null(),
+        "a Redis edit should be written, not refused: {}",
+        unsafe { CStr::from_ptr(err) }.to_string_lossy()
+    );
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    let written: Vec<String> = serde_json::from_str(&text).expect("statements are a JSON array");
+    assert_eq!(
+        written,
+        vec!["SELECT 11\nSET \"conformance:one\" \"written\"".to_string()],
+        "the driver's own command, on the database the row was read from"
+    );
+
+    unsafe { db_free(handle) };
 }
 
 /// An index is made and dropped, and the server is asked each time.

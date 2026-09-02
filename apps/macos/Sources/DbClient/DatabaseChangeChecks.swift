@@ -228,7 +228,8 @@ enum DatabaseChangeChecks {
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
             // True throughout, so that every case above turns on the narrower
             // flag rather than on this one.
-            writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
+            writesStatements: true, editsRows: true, schemaIsTheDatabase: false,
+            reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: changesRelations, changesColumns: false, altersColumns: false,
             changesIndexes: false, indexMethods: [],

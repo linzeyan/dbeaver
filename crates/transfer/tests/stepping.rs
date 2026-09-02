@@ -262,6 +262,9 @@ impl Driver for Deaf {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // A transfer writes its own INSERTs; the grid's editing path is not
+            // one of its ends.
+            writes_rows: false,
         }
     }
     async fn server_info(&self) -> DbResult<ServerInfo> {

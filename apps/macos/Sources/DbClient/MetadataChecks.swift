@@ -131,7 +131,8 @@ enum MetadataChecks {
         let both: Capabilities? = decode(
             #"""
             {"transactional":true,"cancel_stops_the_statement":true,"switches_database":true,
-             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
+             "writes_statements":true,"edits_rows":true,"schema_is_the_database":false,
+             "reports_routines":true,
              "reports_sequences":true,"server_processes":"interruptible",
              "reports_variables":true,"changes_relations":true,"changes_columns":true,
              "alters_columns":true,"changes_indexes":true,
@@ -141,6 +142,7 @@ enum MetadataChecks {
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
         expect(both?.switchesDatabase, true, "and that a database in the tree is somewhere to go")
         expect(both?.writesStatements, true, "and that the core can write a statement for it")
+        expect(both?.editsRows, true, "and the statements a grid's staged changes need")
         expect(
             both?.schemaIsTheDatabase, false,
             "and that its schemas are schemas, since it has a level of databases above them")
@@ -182,7 +184,8 @@ enum MetadataChecks {
         let neither: Capabilities? = decode(
             #"""
             {"transactional":false,"cancel_stops_the_statement":false,"switches_database":false,
-             "writes_statements":false,"schema_is_the_database":true,"reports_routines":false,
+             "writes_statements":false,"edits_rows":true,"schema_is_the_database":true,
+             "reports_routines":false,
              "reports_sequences":false,"server_processes":"unreported",
              "reports_variables":false,"changes_relations":false,"changes_columns":false,
              "alters_columns":false,"changes_indexes":false,
@@ -192,6 +195,13 @@ enum MetadataChecks {
         expect(
             neither?.writesStatements, false,
             "and a database this build has no grammar to write for")
+        // The two apart, on the one connection where they differ. Redis has no
+        // dialect and its rows are still editable, because the driver writes
+        // the SET and the DEL itself — a grid keyed on the flag above would go
+        // on refusing to edit a database that answers.
+        expect(
+            neither?.editsRows, true,
+            "and yet a grid over it can be edited, its own driver writing the commands")
         expect(
             neither?.schemaIsTheDatabase, true,
             "while its one level of containers is what Redis itself calls databases")
@@ -232,7 +242,8 @@ enum MetadataChecks {
         let renamed: Capabilities? = decode(
             #"""
             {"transactional":true,"cancel_stops_statement":true,"switches_database":false,
-             "writes_statements":true,"schema_is_the_database":false,"reports_routines":true,
+             "writes_statements":true,"edits_rows":true,"schema_is_the_database":false,
+             "reports_routines":true,
              "reports_sequences":true,"server_processes":"unreported",
              "reports_variables":false,"changes_relations":false,"changes_columns":false,
              "alters_columns":false,"changes_indexes":false,

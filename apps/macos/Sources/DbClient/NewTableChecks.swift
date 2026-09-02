@@ -306,12 +306,15 @@ enum NewTableChecks {
         return object
     }
 
-    private static func capabilities(writesStatements: Bool, changesRelations: Bool = false)
+    private static func capabilities(
+        writesStatements: Bool, changesRelations: Bool = false
+    )
         -> Capabilities
     {
         Capabilities(
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
-            writesStatements: writesStatements, schemaIsTheDatabase: false, reportsRoutines: false,
+            writesStatements: writesStatements, editsRows: writesStatements,
+            schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: changesRelations, changesColumns: false, altersColumns: false,
             changesIndexes: false, indexMethods: [],

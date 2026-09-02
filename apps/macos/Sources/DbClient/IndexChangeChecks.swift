@@ -298,7 +298,8 @@ enum IndexChangeChecks {
     ) -> Capabilities {
         Capabilities(
             transactional: true, cancelStopsTheStatement: true, switchesDatabase: false,
-            writesStatements: true, schemaIsTheDatabase: false, reportsRoutines: false,
+            writesStatements: true, editsRows: true, schemaIsTheDatabase: false,
+            reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: false, changesColumns: changesColumns, altersColumns: false,
             changesIndexes: changesIndexes, indexMethods: indexMethods, changesDatabases: false)

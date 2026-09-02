@@ -468,6 +468,7 @@ pub unsafe extern "C" fn db_capabilities_json(
         &Surface {
             driver: h.driver.capabilities(),
             writes_statements: h.dialect.is_some(),
+            edits_rows: h.dialect.is_some() || h.driver.capabilities().writes_rows,
             changes_relations: h.dialect.is_some_and(dbddl::changes_relations),
             changes_columns: h.dialect.is_some_and(dbddl::changes_columns),
             alters_columns: h.dialect.is_some_and(dbddl::alters_columns),
@@ -503,6 +504,20 @@ struct Surface {
     /// would be reading a table on the other side of the crate graph and
     /// guessing whether it still says the same thing.
     writes_statements: bool,
+
+    /// Whether `db_edit_sql_json` writes anything for this database.
+    ///
+    /// Wider than `writes_statements` and the reason that one is no longer the
+    /// grid's question: an edit needs a grammar to say "set this field of that
+    /// row", and a dialect is one way to have one but not the only way. MongoDB
+    /// says it in a command document and Redis in a command, and both are
+    /// written by the driver — see `Capabilities::writes_rows`, which is the
+    /// half of this that no dialect table can answer.
+    ///
+    /// Still narrower than "this connection can be written to". A filter clause
+    /// and a `SELECT` need SQL and nothing else, which is what
+    /// `writes_statements` stays the answer for.
+    edits_rows: bool,
 
     /// Whether `db_table_change_sql` writes anything at all for this database.
     ///
@@ -2263,7 +2278,7 @@ pub unsafe extern "C" fn db_edit_sql_json(
             return ptr::null_mut();
         }
     };
-    let requested: dbedit::Edits = match serde_json::from_str(text) {
+    let requested: dbconn::RowEdits = match serde_json::from_str(text) {
         Ok(requested) => requested,
         Err(e) => {
             unsafe { set_err(err, e) };
@@ -2273,16 +2288,18 @@ pub unsafe extern "C" fn db_edit_sql_json(
     // The connection's own dialect and not the editor's guess, for the reason
     // `DbHandle::dialect` gives: an UPDATE written in PostgreSQL's quoting for a
     // database that is not PostgreSQL is a statement somebody's data goes into.
-    let Some(dialect) = h.dialect else {
-        unsafe {
-            set_err(
-                err,
-                "this build does not write statements for this database",
-            )
-        };
-        return ptr::null_mut();
+    //
+    // And where there is no dialect, the driver's own writer rather than a
+    // refusal. Two of the fifteen have a statement language that is not SQL and
+    // can say "change this row" in it; the rest fall through to the default in
+    // `Driver::write_rows`, which is the refusal this used to write here.
+    let written = match h.dialect {
+        Some(dialect) => {
+            runtime().block_on(dbedit::statements(h.driver.as_ref(), dialect, &requested))
+        }
+        None => runtime().block_on(h.driver.write_rows(&requested)),
     };
-    match runtime().block_on(dbedit::statements(h.driver.as_ref(), dialect, &requested)) {
+    match written {
         Ok(statements) => json_result(&statements, err),
         Err(e) => {
             unsafe { set_err(err, e) };

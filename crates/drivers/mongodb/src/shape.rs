@@ -83,10 +83,23 @@ pub enum ColumnType {
     /// A field holding a document in one record and a string in another unifies
     /// to `Text`, where no such promise is made.
     Document,
-    /// The catch-all, and the honest one. An ObjectId is its 24 hex digits, a
-    /// `Decimal128` is its digits, a field that held two irreconcilable types is
-    /// whichever text each value renders as — see `type_of` for why each ended
-    /// up here.
+    /// MongoDB's own identifier, as the 24 hex digits it is written with.
+    ///
+    /// Utf8 like `Text`, and separate for the same reason `Document` is: the
+    /// digits alone cannot say whether the field holds an id or a string of
+    /// digits, and something downstream has to know. Writing a row back is that
+    /// something — an update naming a document has to send `{"$oid": …}` where
+    /// the collection holds an id and a bare string where it holds a string, and
+    /// the two match different documents. Guessing from the text would mean
+    /// deciding a 24-character string is an id, which for a column of hashes is
+    /// wrong every time.
+    ///
+    /// A field holding an id in one document and something else in another
+    /// unifies to `Text`, where no such promise is made.
+    ObjectId,
+    /// The catch-all, and the honest one. A `Decimal128` is its digits, a field
+    /// that held two irreconcilable types is whichever text each value renders
+    /// as — see `type_of` for why each ended up here.
     Text,
 }
 
@@ -99,7 +112,7 @@ impl ColumnType {
             ColumnType::Float64 => DataType::Float64,
             ColumnType::DateTime => DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             ColumnType::Binary => DataType::Binary,
-            ColumnType::Document | ColumnType::Text => DataType::Utf8,
+            ColumnType::Document | ColumnType::ObjectId | ColumnType::Text => DataType::Utf8,
         }
     }
 
@@ -127,8 +140,6 @@ impl ColumnType {
 ///
 /// The cases that landed on `Text` are decisions rather than omissions:
 ///
-/// - **ObjectId** is 12 bytes that everyone, including MongoDB's own shell,
-///   reads and writes as 24 hex digits. `Binary` would be correct and unusable.
 /// - **Decimal128** is IEEE 754-2008 decimal: 34 significant digits with an
 ///   exponent that moves per value. Arrow's `Decimal128` fixes precision and
 ///   scale for the whole column, so mapping onto it means choosing a scale on
@@ -152,6 +163,7 @@ fn type_of(value: &Bson) -> Option<ColumnType> {
         Bson::DateTime(_) => Some(ColumnType::DateTime),
         Bson::Binary(_) => Some(ColumnType::Binary),
         Bson::Document(_) | Bson::Array(_) => Some(ColumnType::Document),
+        Bson::ObjectId(_) => Some(ColumnType::ObjectId),
         _ => Some(ColumnType::Text),
     }
 }
@@ -241,6 +253,9 @@ fn fits(value: &Bson, ty: ColumnType) -> bool {
         // goes to `_extra` instead — where a value that did not fit its column
         // has always gone.
         (ColumnType::Document, Bson::Document(_) | Bson::Array(_)) => true,
+        // Narrower than `Text` for the same reason: a string here would be
+        // indistinguishable from an id once it is 24 hex digits in a cell.
+        (ColumnType::ObjectId, Bson::ObjectId(_)) => true,
         // Text takes anything, which is why `unify` falls back to it.
         (ColumnType::Text, _) => true,
         _ => false,
@@ -446,6 +461,19 @@ impl Shape {
                         Some(nested @ (Bson::Document(_) | Bson::Array(_))) => {
                             b.append_value(text_of(nested))
                         }
+                        _ => b.append_null(),
+                    }
+                }
+                Arc::new(b.finish())
+            }
+            ColumnType::ObjectId => {
+                let mut b = StringBuilder::new();
+                for v in values {
+                    match v {
+                        // The one value `fits` names: a string that reached this
+                        // column is a string, and putting its characters here
+                        // would make the column's type a lie.
+                        Some(id @ Bson::ObjectId(_)) => b.append_value(text_of(id)),
                         _ => b.append_null(),
                     }
                 }
@@ -686,6 +714,36 @@ mod tests {
             .downcast_ref::<StringArray>()
             .expect("text");
         assert_eq!(ids.value(0), "65a1b2c3d4e5f60718293a4b");
+        // The column still says what those digits are, which is what an update
+        // naming this document reads to decide between {"$oid": …} and the bare
+        // string.
+        assert_eq!(shape_of(&docs).columns()[0].1, ColumnType::ObjectId);
+        // And the id is only in its own column. `_extra` holds what a column
+        // could not take, so an id showing up there would mean the schema is
+        // claiming a type its own builder does not honour — which is the pair
+        // this file's `fits` exists to keep in step.
+        let extra = batch.column_by_name(EXTRA).expect("the escape hatch");
+        assert!(extra.is_null(0), "nothing was left over");
+    }
+
+    #[test]
+    fn a_field_holding_an_id_and_a_string_stops_claiming_to_hold_ids() {
+        let id = ObjectId::parse_str("65a1b2c3d4e5f60718293a4b").expect("a valid id");
+        let docs = vec![
+            doc! { "ref": id },
+            doc! { "ref": "65a1b2c3d4e5f60718293a4b" },
+        ];
+        let shape = shape_of(&docs);
+        assert_eq!(shape.columns()[0].1, ColumnType::Text);
+        // Both rows still read, which is the point of falling back rather than
+        // sending the string to `_extra`.
+        let batch = shape.batch(&docs).expect("batch");
+        let cells = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("text");
+        assert_eq!(cells.value(0), cells.value(1));
     }
 
     #[test]

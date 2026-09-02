@@ -308,6 +308,9 @@ impl Driver for Fixture {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // DDL is rendered from metadata; this double is never asked to
+            // write a row.
+            writes_rows: false,
         }
     }
 

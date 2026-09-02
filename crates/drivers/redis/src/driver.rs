@@ -13,8 +13,8 @@ use async_trait::async_trait;
 use dbconn::{
     Browse, Capabilities, ColumnInfo, ConstraintInfo, Cursor as CursorApi,
     CursorCancel as CursorCancelApi, DatabaseInfo, DbError, DbResult, Driver, IndexInfo,
-    RelationInfo, RelationshipInfo, ResultStream, SchemaInfo, ServerInfo, ServerProcesses,
-    TriggerInfo, TxStep, UniqueKeyInfo,
+    RelationInfo, RelationshipInfo, ResultStream, RowEdits, SchemaInfo, ServerInfo,
+    ServerProcesses, TriggerInfo, TxStep, UniqueKeyInfo,
 };
 
 use crate::{ArrowStream, Cursor, CursorCancel, RedisError, RedisSource};
@@ -140,6 +140,14 @@ impl Driver for RedisSource {
         format!("SELECT {}\n{scan}", database_of(what.schema))
     }
 
+    /// The commands a grid's staged changes would take; see `edits.rs`.
+    ///
+    /// No I/O, exactly as `browse` does none: everything needed is in the
+    /// request, so a caller can build the commands and decide not to send them.
+    async fn write_rows(&self, edits: &RowEdits) -> DbResult<Vec<String>> {
+        Ok(crate::edits::statements(edits)?)
+    }
+
     async fn cursor(&self, statement: &str, batch_rows: usize) -> DbResult<Box<dyn CursorApi>> {
         Ok(Box::new(
             RedisSource::cursor(self, statement, batch_rows).await?,
@@ -198,6 +206,11 @@ impl Driver for RedisSource {
             reports_sequences: false,
             server_processes: ServerProcesses::Unreported,
             reports_variables: false,
+            // Commands, written by `write_rows` below: SET, DEL and EXPIRE.
+            // Which is the whole of what a key-value store can be told about a
+            // row, and it is written here because there is no grammar above the
+            // driver that knows how to say it.
+            writes_rows: true,
         }
     }
 

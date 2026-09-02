@@ -28,6 +28,7 @@
 //! rule rejecting the user's insert.
 
 mod driver;
+mod edits;
 mod metadata;
 mod shape;
 
