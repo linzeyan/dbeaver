@@ -173,6 +173,17 @@ struct SettingsView: View {
 
     /// What the application keeps between launches, and where it keeps it.
     @ViewBuilder private var general: some View {
+        SettingsToggle(
+            title: "Reopen the last window's tabs",
+            explanation:
+                "A launch puts back the tabs you had open, with the SQL you had typed in "
+                + "each. None of them is connected — every one is its connection's form, "
+                + "filled in, waiting for Return — because this application never opens a "
+                + "database you did not ask for this time. The tabs are written to "
+                + "~/.config/dbclient/session.json when you quit, and turning this off "
+                + "deletes that file.",
+            isOn: $preferences.restoresSession)
+
         SettingsChoice(
             title: "Keep connections",
             explanation:
