@@ -832,6 +832,14 @@ let dropConnection = CommandLine.arguments.contains("--drop-connection")
 /// nothing on a screenshot run opens one.
 let transferPicker = CommandLine.arguments.contains("--transfer-picker")
 
+/// `--second-window` opens a second window, the way File ▸ New Window does.
+///
+/// The one state a capture cannot reach on its own: ⌘N is a menu item, and a
+/// screenshot run cannot open a menu. It also prints every visible window's title
+/// and frame, which is what says the second one is cascaded rather than exactly
+/// on top of the first — a fact no single-window screenshot can show.
+let secondWindow = CommandLine.arguments.contains("--second-window")
+
 /// `--collapse-sidebar` opens the window with the objects as a rail.
 ///
 /// Exists for the reason `--rename-buffer` does: the rail is reached through a
@@ -3960,48 +3968,34 @@ func reconnectWhenReady(model: AppModel, to connString: String) {
 /// Ends the process when the last window goes, and asks first when ending it
 /// would lose work.
 ///
-/// This application has exactly one window and no command that makes another:
-/// no New Window, no document to reopen, and nothing that answers a click on the
-/// Dock icon. Closing it therefore left a process running with a menu bar, no
-/// window, and no way back to one — every item greyed out, ⌘Q the only thing
-/// that still did anything. A single-window application quits when its window
-/// closes, which is what Calculator and System Settings have always done and
-/// what the close button on a window with nothing behind it promises.
+/// A window that closes with nothing behind it ends the process, which is what
+/// Calculator and System Settings have always done and what the close button on a
+/// last window promises. Before this application had a New Window item that was
+/// the only shape it had: closing the one window left a process running with a
+/// menu bar, no window and no way back to one.
 ///
-/// Which makes both ⌘W and ⌘Q ways to end the process, and neither of them asked
-/// anything: a grid holding twenty rows marked for deletion and a connection
-/// holding an open transaction went the same way as an empty window. Not a new
-/// defect — ⌘Q has always quit on the spot — but giving the window a working ⌘W
-/// put a second one right next to it, one key away from Close in every muscle
-/// memory on the platform.
+/// Which makes both ⌘W and ⌘Q ways to end the process, and neither of them used
+/// to ask anything: a grid holding twenty rows marked for deletion and a
+/// connection holding an open transaction went the same way as an empty window.
+/// Both paths are guarded, with one decision and one dialog behind them:
+/// `WindowController.windowShouldClose` for ⌘W and the close button, and
+/// `applicationShouldTerminate` here for ⌘Q, the Quit item, and a logout that asks
+/// the application first. Not a setting — this is the last thing between a person
+/// and work that cannot be got back, and a preference to turn it off is a
+/// preference to lose it silently.
 ///
-/// Both paths are guarded here, with one decision and one dialog behind them:
-/// `windowShouldClose` for ⌘W and the close button, `applicationShouldTerminate`
-/// for ⌘Q, the Quit item, and a logout that asks the application first. Not a
-/// setting — this is the last thing between a person and work that cannot be got
-/// back, and a preference to turn it off is a preference to lose it silently.
-///
-/// Declared here rather than beside the menu targets because it is about the
-/// process rather than about a command. `NSApplication.delegate` and
-/// `NSWindow.delegate` are both weak references, so the top-level `let` below is
+/// Thin, because with more than one window the decisions belong to the list of
+/// them: see `WindowList`. What is left here is the two application-wide events.
+/// `NSApplication.delegate` is a weak reference, so the top-level `let` below is
 /// what keeps this alive.
-final class AppLifecycle: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    /// The session, once there is one to ask about. `--bench` builds a window
-    /// with no model behind it, and there is nothing in that one to lose.
-    var model: AppModel?
-
-    /// Whether the window has already put the question for the gesture that is
-    /// ending the process.
-    ///
-    /// ⌘W arrives here twice: once as the window closing, and again as the
-    /// termination that closing the last window causes. Without this the person
-    /// who has just said "Discard and Quit" is asked the same thing a second time,
-    /// over a window that has already gone.
-    private var askedOnClose = false
+final class AppLifecycle: NSObject, NSApplicationDelegate {
+    /// The windows, once there are any. `--bench` builds a window with no model
+    /// behind it, and there is nothing in that one to lose.
+    var windows: WindowList?
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
-    /// Coming back to the front is the moment to find out whether the connection
+    /// Coming back to the front is the moment to find out whether the connections
     /// survived being left alone.
     ///
     /// This delegate method rather than a timer, because a timer would ask over
@@ -4009,14 +4003,8 @@ final class AppLifecycle: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// open connection for an answer nobody had asked for. It also fires once at
     /// launch, which is harmless: there is nothing open yet to ask about.
     func applicationDidBecomeActive(_ notification: Notification) {
-        MainActor.assumeIsolated { model?.probeOpenConnections() }
-    }
-
-    func windowShouldClose(_ sender: NSWindow) -> Bool {
         MainActor.assumeIsolated {
-            guard mayDiscardUnsavedWork() else { return false }
-            askedOnClose = true
-            return true
+            for window in windows?.windows ?? [] { window.model.probeOpenConnections() }
         }
     }
 
@@ -4026,40 +4014,9 @@ final class AppLifecycle: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Save's job and not a quit's, and losing them.
     func applicationShouldTerminate(_ app: NSApplication) -> NSApplication.TerminateReply {
         MainActor.assumeIsolated {
-            if askedOnClose {
-                model?.rememberSessions()
-                return .terminateNow
-            }
-            guard mayDiscardUnsavedWork() else { return .terminateCancel }
-            // After the question and only on the way out, so a quit somebody
-            // cancelled leaves the last window's tabs as they were rather than
-            // overwriting them with the ones they decided not to leave.
-            model?.rememberSessions()
-            return .terminateNow
+            guard let windows else { return .terminateNow }
+            return windows.mayTerminate() ? .terminateNow : .terminateCancel
         }
-    }
-
-    /// Puts the question, and answers whether the process may end.
-    ///
-    /// One dialog for both ways out, worded by `UnsavedWork` so that what it says
-    /// can be checked without anybody at the keyboard — see `--verify-quitting`.
-    /// A modal alert rather than the window's own error banner for the reason
-    /// `AppModel.confirmDeletion` gives: a strip that can be ignored is not a
-    /// question, and this one has to be answered before the process goes.
-    @MainActor
-    private func mayDiscardUnsavedWork() -> Bool {
-        guard let work = model?.unsavedWork else { return true }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = work.question
-        alert.informativeText = work.detail
-        // Quitting leads because it is what the keystroke asked for, and it says
-        // what it costs rather than only where it goes. Cancel takes the escape
-        // key, so dismissing the dialog without reading it keeps the work.
-        alert.addButton(withTitle: "Discard and Quit")
-        let cancel = alert.addButton(withTitle: "Cancel")
-        cancel.keyEquivalent = "\u{1b}"
-        return alert.runModal() == .alertFirstButtonReturn
     }
 }
 
@@ -4073,13 +4030,16 @@ guard let device = MTLCreateSystemDefaultDevice() else {
     exit(1)
 }
 
-let window = NSWindow(
-    contentRect: NSRect(x: 0, y: 0, width: 1600, height: 1000),
-    styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
-    backing: .buffered,
-    defer: false)
-
 if benchMode {
+    // The bench builds its own window and puts a Metal view straight into it:
+    // there is no model, no `MainView` and nothing to close, so none of what
+    // `WindowController` does applies.
+    let window = NSWindow(
+        contentRect: NSRect(x: 0, y: 0, width: 1600, height: 1000),
+        styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView],
+        backing: .buffered,
+        defer: false)
+
     // The bench has no window to ask in and no business guessing. A default
     // connection string would measure whatever was listening on that port and
     // report the number as if it meant something.
@@ -4134,28 +4094,8 @@ if benchMode {
     // appearance and flashes on the first frame.
     Theme.apply(to: app)
 
-    // Transparent, so the unified titlebar and toolbar take the background set
-    // on the line below rather than the system's own material. Opaque, that
-    // strip is a neutral near-black running the full width of the window —
-    // above the sidebar and the detail column alike — while every other
-    // surface under it is the palette's blue-tinted background, and the seam
-    // reads as two applications stacked. `.fullSizeContentView` is already in
-    // the style mask and the toolbar still lays out beneath it, so nothing
-    // moves; what changes is the fill.
-    window.titlebarAppearsTransparent = true
-    window.toolbarStyle = .unified
-    window.backgroundColor = NSColor(Theme.background.color)
-    // Below this the grid shows one column and the filter bar wraps; there is
-    // no useful layout smaller, so the window is not allowed to reach it.
-    window.minSize = NSSize(width: 940, height: 580)
-
     // Top-level code runs on the main thread but is not statically isolated in
     // Swift 5 mode; assert the isolation the model requires rather than hop.
-    // Until a connection lands the window has no relation to name, and
-    // `navigationTitle` has not run. A titleless window reads as one that failed
-    // to finish launching.
-    window.title = "DbClient"
-
     MainActor.assumeIsolated {
         let history: QueryHistory
         if let historyStore {
@@ -4194,41 +4134,51 @@ if benchMode {
         } else {
             preferences = Preferences()
         }
+        // Only a window somebody opened themselves. A capture restores whatever
+        // the developer last had open — which would put their windows in a
+        // screenshot — and would then write its own single window over it on the
+        // way out, so every `make screenshot` would cost them their session. The
+        // scratch defaults suite above cannot prevent that: the file is in the
+        // config directory, not in the defaults.
+        let restoreStore: SessionRestoreStore? =
+            capturePane == nil && mcpProbePort == nil ? .system : nil
+        let restored =
+            restoreStore?.windowsToRestore(restoring: preferences.restoresSession) ?? []
+        // One list, one history and one settings object for every window: they
+        // are the person's rather than the window's, and two objects over one
+        // defaults domain would each write over what the other had just
+        // recorded.
+        let favorites = QueryFavorites()
         let model = AppModel(
-            history: history, favorites: QueryFavorites(), preferences: preferences,
+            history: history, favorites: favorites, preferences: preferences,
             initialTab: initialTab, initialSQL: initialSQL,
             initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation,
-            initialFilter: initialFilter,
-            // Only a window somebody opened themselves. A capture restores
-            // whatever the developer last had open — which would put their tabs
-            // in a screenshot — and would then write its own single tab over it
-            // on the way out, so every `make screenshot` would cost them their
-            // session. The scratch defaults suite above cannot prevent that: the
-            // file is in the config directory, not in the defaults.
-            restore: capturePane == nil && mcpProbePort == nil ? .system : nil)
-        // Installed here rather than before the window is built, because the
-        // File menu sends to the model and there is no model until now.
-        AppMenu.install(into: app, model: model)
-        // The quit guard needs the model for the same reason and gets it here
-        // too. Only this window is given the delegate: the Settings panel closes
-        // with ⌘W and loses nothing, and a question in front of that would be a
-        // question about nothing.
-        lifecycle.model = model
-        window.delegate = lifecycle
-        // Here rather than in the model's own init, because only a window that
-        // is about to run a run loop has any business owning a repeating
-        // timer: the `--verify-*` suites build models by the dozen and exit.
-        model.startKeepAliveTimer()
-        // Beside the timer for the timer's reason: a server belongs to the
-        // process that will run a run loop, not to every model a check builds.
+            initialFilter: initialFilter, restoring: restored.first)
+        let windows = WindowList(
+            first: model, history: history, favorites: favorites,
+            preferences: preferences, restore: restoreStore)
+        // Every window after the first, in the order they were made. The launch
+        // flags belong to the first one alone: they name a relation, a statement
+        // and a caret, and there is one of each.
+        for tabs in restored.dropFirst() { windows.openWindow(restoring: tabs) }
+        // Installed here rather than before the windows are built, because the
+        // File menu sends to whichever is in front and there is none until now.
+        AppMenu.install(into: app, front: windows.front, windows: windows)
+        // The quit guard is the list's, and only these windows have a delegate:
+        // the Settings panel closes with ⌘W and loses nothing, and a question in
+        // front of that would be a question about nothing.
+        lifecycle.windows = windows
+        // Beside the keep-alive timer `WindowController` starts, for the timer's
+        // reason: a server belongs to the process that will run a run loop, not
+        // to every model a check builds.
         MCPCoordinator.shared.follow(
             preferences: model.preferences,
             connections: { [weak model] in model?.connections.connections ?? [] })
-        window.contentView = NSHostingView(rootView: MainView(model: model))
-        window.center()
-        window.makeKeyAndOrderFront(nil)
+        // The first window is in front when the process opens, whatever order
+        // the rest were cascaded in.
+        windows.windows.first?.window.makeKeyAndOrderFront(nil)
         app.activate(ignoringOtherApps: true)
 
         // Nothing here opens the form: it is what the window shows until a
@@ -4311,6 +4261,15 @@ if benchMode {
             openIndexChangeSheet(model: model, argument: changeIndexArgument)
         }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
+        if secondWindow {
+            windows.openWindow()
+            // Said out loud for the reason the settings capture says it: the
+            // capture runs unattended, and two windows at one origin would look
+            // in a screenshot exactly like one window.
+            for w in NSApp.windows where w.isVisible {
+                fputs("capture: window \"\(w.title)\" \(w.frame)\n", stderr)
+            }
+        }
     }
 }
 

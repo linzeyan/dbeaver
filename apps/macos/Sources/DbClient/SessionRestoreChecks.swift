@@ -39,6 +39,7 @@ enum SessionRestoreChecks {
         checkTurningItOffKeepsNothing()
         checkAFileThisBuildDoesNotKnowIsIgnored()
         checkAWindowOpensOnTheTabItLeftOff()
+        checkEveryWindowIsPutBackInOrder()
         if failures == 0 {
             fputs("session-restore: all checks passed\n", stderr)
         } else {
@@ -57,11 +58,12 @@ enum SessionRestoreChecks {
     private static func checkNothingIsConnectedOnTheWayBackIn() {
         MainActor.assumeIsolated {
             let store = store(named: "connected")
-            store.save(
+            store.save([
                 RestoredWindow(
                     tabs: [tab(named: "sales", on: salesID), tab(named: "archive", on: archiveID)],
-                    activeTab: 1))
-            let model = makeModel(restore: store)
+                    activeTab: 1)
+            ])
+            let model = makeModel(restoring: store.load().first)
             expect(model.sessions.count, 2, "both tabs come back")
             expect(
                 model.sessions.allSatisfy { $0.db == nil }, true,
@@ -86,8 +88,8 @@ enum SessionRestoreChecks {
                 RestoredBuffer(name: "migration", text: "alter table orders add column note text")
             ]
             first.activeBuffer = 1
-            store.save(RestoredWindow(tabs: [first], activeTab: 0))
-            let model = makeModel(restore: store)
+            store.save([RestoredWindow(tabs: [first], activeTab: 0)])
+            let model = makeModel(restoring: store.load().first)
             expect(model.connectionLabel, "sales", "the tab is called what it was called")
             expect(model.queryBuffers.count, 2, "both buffers come back")
             expect(model.queryBuffers.map(\.name), ["query 1", "migration"], "under their names")
@@ -103,11 +105,12 @@ enum SessionRestoreChecks {
     private static func checkTheFormFollowsTheTabInFront() {
         MainActor.assumeIsolated {
             let store = store(named: "following")
-            store.save(
+            store.save([
                 RestoredWindow(
                     tabs: [tab(named: "sales", on: salesID), tab(named: "archive", on: archiveID)],
-                    activeTab: 0))
-            let model = makeModel(restore: store)
+                    activeTab: 0)
+            ])
+            let model = makeModel(restoring: store.load().first)
             model.connections = ConnectionList([
                 saved(salesID, "sales"), saved(archiveID, "archive")
             ])
@@ -127,8 +130,8 @@ enum SessionRestoreChecks {
     private static func checkADeletedConnectionRestoresAnEmptyForm() {
         MainActor.assumeIsolated {
             let store = store(named: "deleted")
-            store.save(RestoredWindow(tabs: [tab(named: "sales", on: salesID)], activeTab: 0))
-            let model = makeModel(restore: store)
+            store.save([RestoredWindow(tabs: [tab(named: "sales", on: salesID)], activeTab: 0)])
+            let model = makeModel(restoring: store.load().first)
             // The list it comes back to has everything but that row.
             model.connections = ConnectionList([saved(archiveID, "archive")])
             model.selectSession(0)
@@ -151,7 +154,7 @@ enum SessionRestoreChecks {
     /// plain text next to the connections.
     private static func checkATabDialledByHandKeepsItsFieldsAndNoPassword() {
         MainActor.assumeIsolated {
-            let model = makeModel(restore: nil)
+            let model = makeModel(restoring: nil)
             model.sessions[0].connString = "postgres://ana:hunter2@db.example:5432/sales"
             model.sessions[0].connectionLabel = "db.example/sales"
             let remembered = model.rememberedWindow
@@ -192,12 +195,13 @@ enum SessionRestoreChecks {
                     user: "ana"),
                 label: "db.example/sales", buffers: [], activeBuffer: 0)
             byHand.buffers = [RestoredBuffer(name: "query 1", text: "select 1")]
-            store.save(
-                RestoredWindow(tabs: [tab(named: "sales", on: salesID), byHand], activeTab: 0))
+            store.save([
+                RestoredWindow(tabs: [tab(named: "sales", on: salesID), byHand], activeTab: 0)
+            ])
 
-            let first = makeModel(restore: store)
-            first.rememberSessions()
-            let second = makeModel(restore: store)
+            let first = makeModel(restoring: store.load().first)
+            store.remember([first.rememberedWindow], restoring: true)
+            let second = makeModel(restoring: store.load().first)
             expect(second.sessions.count, 2, "the second launch has the same two tabs")
             expect(second.sessions[1].connectionLabel, "db.example/sales", "under the same names")
             expect(
@@ -218,17 +222,19 @@ enum SessionRestoreChecks {
     private static func checkTurningItOffKeepsNothing() {
         MainActor.assumeIsolated {
             let store = store(named: "off")
-            store.save(RestoredWindow(tabs: [tab(named: "sales", on: salesID)], activeTab: 0))
+            store.save([RestoredWindow(tabs: [tab(named: "sales", on: salesID)], activeTab: 0)])
             let defaults = ScratchDefaults.store("verify-session-restore-off")
             let preferences = Preferences(store: defaults)
             expect(preferences.restoresSession, true, "restoring is what a fresh install does")
             preferences.restoresSession = false
 
-            let model = makeModel(restore: store, preferences: preferences)
+            let model = makeModel(
+                restoring: store.windowsToRestore(restoring: preferences.restoresSession)
+                    .first, preferences: preferences)
             expect(model.sessions.count, 1, "a window with it off opens on one tab")
             expect(model.connectionLabel, "New Connection", "and puts nothing back")
-            model.rememberSessions()
-            expect(store.load(), nil, "and quitting deletes what was kept")
+            store.remember([model.rememberedWindow], restoring: false)
+            expect(store.load().isEmpty, true, "and quitting deletes what was kept")
         }
     }
 
@@ -238,26 +244,31 @@ enum SessionRestoreChecks {
     private static func checkAFileThisBuildDoesNotKnowIsIgnored() {
         MainActor.assumeIsolated {
             let store = store(named: "shapes")
-            store.save(
-                RestoredWindow(
-                    version: RestoredWindow.currentVersion + 1,
-                    tabs: [tab(named: "sales", on: salesID)], activeTab: 0))
-            expect(store.load(), nil, "a later version is not read")
+            // Written past this store rather than through it, because `save`
+            // always writes the version this build reads — a document from the
+            // future is the one thing the store cannot be asked to produce.
+            let ahead = RestoredWindows(
+                version: RestoredWindows.currentVersion + 1,
+                windows: [RestoredWindow(tabs: [tab(named: "sales", on: salesID)], activeTab: 0)])
+            try? JSONEncoder().encode(ahead).write(to: store.file)
+            expect(store.load().isEmpty, true, "a later version is not read")
             expect(
-                makeModel(restore: store).connectionLabel, "New Connection",
+                makeModel(restoring: store.load().first).connectionLabel, "New Connection",
                 "so the window opens as a fresh one")
 
             // A window is a list of tabs and a pointer into it, so a document
             // holding no tabs describes no window: read literally it would leave
             // the pointer aimed past the end of an empty list.
-            store.save(RestoredWindow(tabs: [], activeTab: 0))
-            expect(store.load(), nil, "a document with no tabs in it is not a window")
-            expect(makeModel(restore: store).sessions.count, 1, "and does not empty the strip")
+            store.save([RestoredWindow(tabs: [], activeTab: 0)])
+            expect(store.load().isEmpty, true, "a document with no tabs in it is not a window")
+            expect(
+                makeModel(restoring: store.load().first).sessions.count, 1,
+                "and does not empty the strip")
 
             var edited = tab(named: "sales", on: salesID)
             edited.activeBuffer = 9
-            store.save(RestoredWindow(tabs: [edited], activeTab: 7))
-            let model = makeModel(restore: store)
+            store.save([RestoredWindow(tabs: [edited], activeTab: 7)])
+            let model = makeModel(restoring: store.load().first)
             expect(
                 model.activeQueryBufferIndex, 0, "a buffer index past the end folds to the first")
             expect(model.sessions.count, 1, "and a tab index past the end folds to the front tab")
@@ -291,9 +302,10 @@ enum SessionRestoreChecks {
                 in: ConnectionDirectories(local: config, cloud: nil))
 
             let store = store(named: "launch")
-            store.save(
-                RestoredWindow(tabs: [tab(named: "archive", on: archiveID)], activeTab: 0))
-            let onARow = makeModel(restore: store)
+            store.save([
+                RestoredWindow(tabs: [tab(named: "archive", on: archiveID)], activeTab: 0)
+            ])
+            let onARow = makeModel(restoring: store.load().first)
             expect(onARow.connections.connections.count, 2, "the saved connections are read")
             // `sales` is the first row and the guess a window with nothing to
             // restore opens on, which is what makes `archive` the answer only a
@@ -307,8 +319,8 @@ enum SessionRestoreChecks {
             byHand.settings = ConnectionSettings(
                 scheme: "postgres", host: "db.example", port: "5432", database: "sales",
                 user: "ana")
-            store.save(RestoredWindow(tabs: [byHand], activeTab: 0))
-            let dialled = makeModel(restore: store)
+            store.save([RestoredWindow(tabs: [byHand], activeTab: 0)])
+            let dialled = makeModel(restoring: store.load().first)
             expect(
                 dialled.selectedConnectionID, nil,
                 "a tab dialled by hand opens on Quick connect rather than on a saved row")
@@ -316,6 +328,43 @@ enum SessionRestoreChecks {
                 dialled.connectionDraft.settings.host, "db.example",
                 "with the fields it was dialled with in the form")
             expect(dialled.connectionDraft.settings.user, "ana", "including the user")
+        }
+    }
+
+    /// Every window comes back, in the order they were made.
+    ///
+    /// The order is the whole of it: the windows cascade down the screen in the
+    /// order the list holds them, so a launch that put them back in another one
+    /// would move somebody's windows around for no reason they could see. What is
+    /// checked here is the document — which window's tabs are where — because the
+    /// half that opens `NSWindow`s cannot be driven with nothing on screen.
+    private static func checkEveryWindowIsPutBackInOrder() {
+        MainActor.assumeIsolated {
+            let store = store(named: "several")
+            let first = RestoredWindow(tabs: [tab(named: "sales", on: salesID)], activeTab: 0)
+            let second = RestoredWindow(
+                tabs: [tab(named: "archive", on: archiveID), tab(named: "sales", on: salesID)],
+                activeTab: 1)
+            store.remember([first, second], restoring: true)
+
+            let back = store.load()
+            expect(back.count, 2, "both windows come back")
+            expect(back.first?.tabs.count, 1, "the first with its one tab")
+            expect(back.last?.tabs.count, 2, "the second with its two")
+            expect(back.last?.activeTab, 1, "each opening on the tab it was left on")
+            expect(back.first?.tabs.first?.label, "sales", "and in the order they were written")
+
+            // A window with no tabs is not a window, so it is dropped rather than
+            // restored as a pointer into an empty list — and dropping it must not
+            // take the windows on either side of it with it.
+            store.remember(
+                [first, RestoredWindow(tabs: [], activeTab: 0), second], restoring: true)
+            expect(store.load().count, 2, "an empty window is dropped and the others are not")
+            expect(store.load().last?.activeTab, 1, "and the ones that are kept are unchanged")
+
+            expect(
+                store.windowsToRestore(restoring: false).isEmpty, true,
+                "and with the setting off there is nothing to put back")
         }
     }
 
@@ -368,7 +417,7 @@ enum SessionRestoreChecks {
     }
 
     @MainActor private static func makeModel(
-        restore: SessionRestoreStore?, preferences: Preferences? = nil
+        restoring tabs: RestoredWindow?, preferences: Preferences? = nil
     ) -> AppModel {
         AppModel(
             history: QueryHistory(defaults: ScratchDefaults.store("verify-session-restore")),
@@ -376,7 +425,7 @@ enum SessionRestoreChecks {
             preferences: preferences
                 ?? Preferences(
                     store: ScratchDefaults.store("verify-session-restore")),
-            restore: restore)
+            restoring: tabs)
     }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {

@@ -11,6 +11,11 @@ import SwiftUI
 /// typing whichever database is open; the label in the chrome is the
 /// connection's, because it is a claim about which server answered.
 ///
+/// The draft has one clause added to it since — it follows the tab in front when
+/// that tab names a connection and has none open, so that a window restored with
+/// three tabs does not draw one form under all three. Still the window's, and
+/// still one; see `AppModel.pointConnectionForm`.
+///
 /// `@Observable` in its own right. `AppModel` reaches these through forwarding
 /// properties of the same names, and a view that reads one still updates,
 /// because observation registers whatever was actually read while a body was

@@ -31,6 +31,15 @@ enum QuittingChecks {
     private static var failures = 0
 
     static func run() -> Bool {
+        // The one case below that builds a real `AppModel` reads the saved
+        // connections, and asks the Keychain about the first — which blocks for
+        // ever in a process with no GUI session. `BrowseRestoreChecks` says the
+        // same thing at more length.
+        guard let scratch = scratchDirectory() else { return false }
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        setenv("XDG_CONFIG_HOME", scratch.path, 1)
+        defer { ScratchDefaults.release() }
+
         failures = 0
         checkAWindowWithNothingInItIsNotAskedAbout()
         checkEveryKindOfStagedRowIsWorthAsking()
@@ -39,6 +48,10 @@ enum QuittingChecks {
         checkARowMarkedForDeletionIsNotCountedTwice()
         checkTheQuestionCarriesTheNumberBesideSave()
         checkTheDetailNamesWhatIsThereAndNothingElse()
+        checkClosingOneOfSeveralWindowsIsNotCalledQuitting()
+        checkEveryTabOfAWindowIsCounted()
+        checkTheWindowsAreAddedUpAndNamed()
+        checkAWindowAnswersForTheTabsBehindTheOneInFront()
         if failures == 0 {
             fputs("quitting: all checks passed\n", stderr)
         } else {
@@ -100,7 +113,8 @@ enum QuittingChecks {
         expect(open?.transactionOpen, true, "an open transaction is work that would be lost")
         expect(open?.changes, 0, "with nothing staged beside it")
         expect(
-            open?.question, "Quit with an open transaction?", "and is what the question is about")
+            open?.question(.quitting), "Quit with an open transaction?",
+            "and is what the question is about")
 
         expect(
             StagedChanges().lostOnQuitting(withOpenTransaction: false) == nil, true,
@@ -151,13 +165,13 @@ enum QuittingChecks {
         staged.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
         expect(work(staged)?.changes, staged.count, "the dialog counts what the strip counts")
         expect(
-            work(staged)?.question, "Quit without sending 5 changes?",
+            work(staged)?.question(.quitting), "Quit without sending 5 changes?",
             "and puts the number in the question")
 
         var one = StagedChanges()
         one.deletes.insert(0)
         expect(
-            work(one)?.question, "Quit without sending 1 change?",
+            work(one)?.question(.quitting), "Quit without sending 1 change?",
             "one change is not asked about in the plural")
     }
 
@@ -197,7 +211,163 @@ enum QuittingChecks {
             "and a transaction on its own says only that")
     }
 
+    /// ⌘W over one of several windows says Close, and ⌘Q says Quit.
+    ///
+    /// The two used to be one sentence because they were one event: a window
+    /// closing with nothing behind it ends the process. With a second window open
+    /// they come apart — closing the front one leaves the other where it is — and
+    /// a dialog headed "Quit" over a key that closes a window is a dialog telling
+    /// somebody the wrong thing about what they are about to lose.
+    private static func checkClosingOneOfSeveralWindowsIsNotCalledQuitting() {
+        var staged = StagedChanges()
+        staged.deletes.insert(0)
+        expect(
+            work(staged)?.question(.closing), "Close without sending 1 change?",
+            "closing a window names closing")
+        expect(
+            work(staged)?.question(.quitting), "Quit without sending 1 change?",
+            "and quitting names quitting")
+        expect(
+            StagedChanges().lostOnQuitting(withOpenTransaction: true)?.question(.closing),
+            "Close with an open transaction?",
+            "both wordings, for the transaction sentence too")
+
+        expect(
+            UnsavedWork.Departure.closing.confirmation, "Discard and Close",
+            "and the button says which of the two it does")
+        expect(
+            UnsavedWork.Departure.quitting.confirmation, "Discard and Quit",
+            "in both directions")
+    }
+
+    /// Every tab of a window is counted, not the one in front.
+    ///
+    /// A window is a list of connections, each with its own staged changes and
+    /// its own transaction. A guard that read only the tab on screen would let ⌘W
+    /// throw away the work in the tab beside it without a word — the same loss
+    /// this whole file exists to prevent, in the place hardest to notice.
+    private static func checkEveryTabOfAWindowIsCounted() {
+        var front = StagedChanges()
+        front.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "a")
+        var behind = StagedChanges()
+        behind.deletes.insert(3)
+        behind.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
+
+        let both = UnsavedWork.inOneWindow(
+            [front, behind].compactMap { $0.lostOnQuitting(withOpenTransaction: false) })
+        expect(both?.editedRows, 1, "the tab in front contributes its edited row")
+        expect(both?.deletedRows, 1, "the tab behind it contributes its deletion")
+        expect(both?.newRows, 1, "and its new row")
+        expect(both?.changes, 3, "and the count is every tab's work")
+        expect(both?.windows, 1, "all of it in one window")
+
+        expect(
+            UnsavedWork.inOneWindow([]), nil,
+            "a window whose tabs are all clean is closed without a word")
+    }
+
+    /// ⌘Q asks once, about every window, and says how many there are.
+    ///
+    /// One dialog rather than one per window: a question somebody has to answer
+    /// twice is a question they stop reading. And the count has to be in it —
+    /// "5 changes" with nothing saying where they are is a number nobody can act
+    /// on, because the windows holding them are behind the dialog.
+    private static func checkTheWindowsAreAddedUpAndNamed() {
+        // Both windows hold a row of every kind the other holds, so every total
+        // below differs from either window's own number. A fixture where one
+        // window's count happened to equal the sum would pass against a guard
+        // that read only the first.
+        var here = StagedChanges()
+        here.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "a")
+        here.deletes.insert(3)
+        here.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
+        var there = StagedChanges()
+        there.updates[GridCell(row: 7, column: 2)] = PendingValue(text: "b")
+        there.deletes.insert(9)
+        there.drafts = [DraftRow(values: [1: PendingValue(text: "another")])]
+
+        let one = here.lostOnQuitting(withOpenTransaction: true)
+        let two = there.lostOnQuitting(withOpenTransaction: true)
+        let both = UnsavedWork.acrossWindows([one, two].compactMap { $0 })
+        expect(both?.editedRows, 2, "the edited rows of both windows")
+        expect(both?.deletedRows, 2, "and the deleted rows of both")
+        expect(both?.newRows, 2, "and the new rows of both")
+        expect(both?.changes, 6, "and the changes of both")
+        expect(both?.windows, 2, "counted as two windows")
+        expect(both?.openTransactions, 2, "and both open transactions")
+        expect(
+            both?.detail,
+            "2 edited rows, 2 deleted rows and 2 new rows are staged in 2 windows and will "
+                + "not be sent. The 2 open transactions will be rolled back. "
+                + "This cannot be undone.",
+            "and the sentence says where the work is and how much is open")
+
+        // One window is spoken about as it always was: "here", and "the
+        // transaction", because there is one of each and naming a count would be
+        // arithmetic nobody needs.
+        expect(
+            UnsavedWork.acrossWindows([one].compactMap { $0 })?.detail,
+            "1 edited row, 1 deleted row and 1 new row are staged here and will not be sent. "
+                + "The transaction open on this connection will be rolled back. "
+                + "This cannot be undone.",
+            "one window still reads as one window")
+        expect(
+            UnsavedWork.acrossWindows([]), nil,
+            "and an application whose windows are all clean is quit without a word")
+    }
+
+    /// The rule above, through a real window rather than through the fold.
+    ///
+    /// `UnsavedWork.inOneWindow` can be handed anything; what this pins is that
+    /// `AppModel` hands it every session. The defect it guards against shipped for
+    /// as long as a window had one tab that mattered: the guard read the forwarding
+    /// properties, which resolve to the tab in front, so ⌘Q discarded the staged
+    /// edits in every other tab of the window in silence.
+    ///
+    /// Restore is how a model gets a second tab with no database to connect to.
+    private static func checkAWindowAnswersForTheTabsBehindTheOneInFront() {
+        let model = twoTabbedModel()
+        expect(model.sessions.count, 2, "the fixture really has two tabs")
+        expect(model.unsavedWork == nil, true, "and neither of them is holding anything")
+
+        model.sessions[1].staged.deletes.insert(4)
+        expect(
+            model.unsavedWork?.deletedRows, 1,
+            "a row marked in the tab behind is work this window would lose")
+        expect(model.activeSession, 0, "with that tab not the one in front")
+
+        model.sessions[0].staged.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "a")
+        expect(model.unsavedWork?.editedRows, 1, "and the tab in front contributes too")
+        expect(model.unsavedWork?.changes, 2, "both counted once")
+        expect(model.unsavedWork?.windows, 1, "as the one window they are in")
+    }
+
     // MARK: - Harness
+
+    /// A model with two tabs and no connection on either.
+    private static func twoTabbedModel() -> AppModel {
+        let tab = RestoredTab(
+            connection: nil, settings: nil, label: "New Connection",
+            buffers: [], activeBuffer: 0)
+        return AppModel(
+            history: QueryHistory(defaults: ScratchDefaults.store("verify-quitting")),
+            favorites: QueryFavorites(defaults: ScratchDefaults.store("verify-quitting")),
+            preferences: Preferences(store: ScratchDefaults.store("verify-quitting")),
+            restoring: RestoredWindow(tabs: [tab, tab], activeTab: 0))
+    }
+
+    /// A directory of its own for the config these checks must not read.
+    private static func scratchDirectory() -> URL? {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "dbclient-verify-quitting-\(UUID().uuidString)")
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        } catch {
+            fputs("quitting FAIL: a scratch directory could not be made: \(error)\n", stderr)
+            return nil
+        }
+        return root
+    }
 
     /// What quitting would lose, with the transaction closed unless a case says
     /// otherwise — which is the state nearly every window is in.

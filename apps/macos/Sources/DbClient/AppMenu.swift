@@ -46,53 +46,60 @@ enum AppMenu {
     private static var explainCommand: ExplainCommand?
     /// Target of the Database menu's items, held for the same reason.
     private static var serverCommands: ServerCommands?
+    /// Target of the File menu's New Window item, held for the same reason.
+    private static var windowCommand: WindowCommand?
 
     @MainActor
-    static func install(into app: NSApplication, model: AppModel) {
+    static func install(into app: NSApplication, front: FrontWindow, windows: WindowList) {
         // `CFBundleName` when running as a bundle, which is what the menu should
         // say; the process name is the fallback for the unbundled dev binary.
         let name =
             Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
             ?? ProcessInfo.processInfo.processName
-        let commands = ExportCommands(model: model)
+        let commands = ExportCommands(front: front)
         exportCommands = commands
-        let connection = ConnectionCommand(model: model)
+        let connection = ConnectionCommand(front: front)
         connectionCommand = connection
-        let settings = SettingsCommand(preferences: model.preferences)
+        let settings = SettingsCommand(preferences: front.model.preferences)
         settingsCommand = settings
-        let refresh = RefreshCommand(model: model)
+        let refresh = RefreshCommand(front: front)
         refreshCommand = refresh
-        let valueViewer = ValueViewerCommand(model: model)
+        let valueViewer = ValueViewerCommand(front: front)
         valueViewerCommand = valueViewer
-        let navigator = NavigatorCommand(model: model)
+        let navigator = NavigatorCommand(front: front)
         navigatorCommand = navigator
-        let goTo = GoToCommand(model: model)
+        let goTo = GoToCommand(front: front)
         goToCommand = goTo
-        let record = RecordCommand(model: model)
+        let record = RecordCommand(front: front)
         recordCommand = record
-        let historyNav = HistoryCommand(model: model)
+        let historyNav = HistoryCommand(front: front)
         historyNavCommand = historyNav
-        let tabs = TabCommand(model: model)
+        let tabs = TabCommand(front: front)
         tabCommand = tabs
-        let queryTabs = QueryTabCommand(model: model)
+        let queryTabs = QueryTabCommand(front: front)
         queryTabCommand = queryTabs
-        let query = QueryCommands(model: model)
+        let query = QueryCommands(front: front)
         queryCommands = query
-        let stop = StopCommand(model: model)
+        let stop = StopCommand(front: front)
         stopCommand = stop
-        let queryHistory = QueryHistoryCommand(model: model)
+        let queryHistory = QueryHistoryCommand(front: front)
         historyCommand = queryHistory
-        let transactions = TransactionCommands(model: model)
+        let transactions = TransactionCommands(front: front)
         transactionCommands = transactions
-        let formatting = FormatCommand(model: model)
+        let formatting = FormatCommand(front: front)
         formatCommand = formatting
-        let explain = ExplainCommand(model: model)
+        let explain = ExplainCommand(front: front)
         explainCommand = explain
-        let server = ServerCommands(model: model)
+        let server = ServerCommands(front: front)
+        let newWindow = WindowCommand(windows: windows)
+        windowCommand = newWindow
         serverCommands = server
         let main = NSMenu()
         main.addItem(appMenu(named: name, settings: settings))
-        main.addItem(fileMenu(connection: connection, export: commands, queryTabs: queryTabs))
+        main.addItem(
+            fileMenu(
+                connection: connection, export: commands, queryTabs: queryTabs,
+                windows: newWindow))
         main.addItem(editMenu())
         main.addItem(
             viewMenu(
@@ -170,10 +177,21 @@ enum AppMenu {
     /// — how much of the result to write — and only when there is more of it
     /// than the window is showing.
     private static func fileMenu(
-        connection: ConnectionCommand, export: ExportCommands, queryTabs: QueryTabCommand
+        connection: ConnectionCommand, export: ExportCommands, queryTabs: QueryTabCommand,
+        windows: WindowCommand
     ) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "File")
+
+        // ⌘N and first, which is where every application on the platform keeps
+        // the thing that makes another one of its main window. It opens on
+        // nothing: a second window is a second place to work, and copying this
+        // one's tabs into it would open connections nobody asked for.
+        let newWindow = menu.addItem(
+            withTitle: "New Window",
+            action: #selector(WindowCommand.newWindow(_:)), keyEquivalent: "n")
+        newWindow.keyEquivalentModifierMask = .command
+        newWindow.target = windows
 
         // ⌘T, and above a rule of its own: everything below it is about which
         // database this window is pointed at, and this is about how many places
@@ -715,10 +733,13 @@ enum AppMenu {
 /// targets it, and this item is available in states where an export is not.
 @MainActor
 final class ConnectionCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -787,10 +808,13 @@ final class SettingsCommand: NSObject {
 /// menu is what keeps that answer a sentence instead of a switch over selectors.
 @MainActor
 final class RefreshCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -809,10 +833,13 @@ final class RefreshCommand: NSObject, NSMenuItemValidation {
 /// targets it, and these two answer differently.
 @MainActor
 final class ValueViewerCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -834,10 +861,13 @@ final class ValueViewerCommand: NSObject, NSMenuItemValidation {
 /// answers for every item pointed at it, and these answer differently.
 @MainActor
 final class NavigatorCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -878,10 +908,13 @@ final class NavigatorCommand: NSObject, NSMenuItemValidation {
 /// "tab" got written down as the same thing.
 @MainActor
 final class QueryTabCommand: NSObject {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -919,10 +952,13 @@ final class QueryTabCommand: NSObject {
 /// `DetailTab` adds it here without touching this class.
 @MainActor
 final class TabCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -953,10 +989,13 @@ final class TabCommand: NSObject, NSMenuItemValidation {
 /// pointed at it, and one target per menu keeps that answer a sentence.
 @MainActor
 final class QueryCommands: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -977,10 +1016,13 @@ final class QueryCommands: NSObject, NSMenuItemValidation {
 /// and so can one on a connection that is busy.
 @MainActor
 final class FormatCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -996,10 +1038,13 @@ final class FormatCommand: NSObject, NSMenuItemValidation {
 /// the rest would be a class per menu item for a uniformity nothing reads.
 @MainActor
 final class HistoryCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1021,10 +1066,13 @@ final class HistoryCommand: NSObject, NSMenuItemValidation {
 /// been read.
 @MainActor
 final class GoToCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1042,10 +1090,13 @@ final class GoToCommand: NSObject, NSMenuItemValidation {
 /// alone.
 @MainActor
 final class ExplainCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1062,10 +1113,13 @@ final class ExplainCommand: NSObject, NSMenuItemValidation {
 /// command that exists to interrupt the other is not a subtlety.
 @MainActor
 final class StopCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1082,10 +1136,13 @@ final class StopCommand: NSObject, NSMenuItemValidation {
 /// and has no bearing at all on reading what already ran.
 @MainActor
 final class QueryHistoryCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1107,10 +1164,13 @@ final class QueryHistoryCommand: NSObject, NSMenuItemValidation {
 /// would be the refusal.
 @MainActor
 final class ServerCommands: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1151,10 +1211,13 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
 /// the pair that must never be enabled together could be.
 @MainActor
 final class TransactionCommands: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1191,10 +1254,13 @@ final class TransactionCommands: NSObject, NSMenuItemValidation {
 /// cannot be.
 @MainActor
 final class RecordCommand: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1217,10 +1283,13 @@ final class RecordCommand: NSObject, NSMenuItemValidation {
 /// learns which result it is exporting.
 @MainActor
 final class ExportCommands: NSObject, NSMenuItemValidation {
-    private let model: AppModel
+    private let front: FrontWindow
+    /// The window this item acts on, resolved when it fires rather than
+    /// when the menu was built. See `FrontWindow`.
+    private var model: AppModel { front.model }
 
-    init(model: AppModel) {
-        self.model = model
+    init(front: FrontWindow) {
+        self.front = front
         super.init()
     }
 
@@ -1461,4 +1530,22 @@ final class ExportCommands: NSObject, NSMenuItemValidation {
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
         return stack
     }
+}
+
+/// The File menu's New Window item.
+///
+/// Its own object rather than an action on `ConnectionCommand`, for the reason
+/// `RefreshCommand` gives: `validateMenuItem` answers for every item that targets
+/// it. It is also the one command here that does not act on a window — it makes
+/// one — so it holds the list rather than reading `FrontWindow`.
+@MainActor
+final class WindowCommand: NSObject {
+    private let windows: WindowList
+
+    init(windows: WindowList) {
+        self.windows = windows
+        super.init()
+    }
+
+    @objc func newWindow(_ sender: Any?) { windows.openWindow() }
 }
