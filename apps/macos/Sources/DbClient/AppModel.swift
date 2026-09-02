@@ -5848,21 +5848,47 @@ final class AppModel {
 
     // MARK: - Transfer
 
-    /// The connections in this window a transfer could send rows to.
+    /// The connections a transfer could send rows to: this window's, and then
+    /// the other windows'.
     ///
     /// Open ones, other than this tab, that are not doing something else. A
-    /// transfer needs a live connection at both ends, so the list is the window's
-    /// own tabs and not the saved-connection file: opening one is Connect…, and
-    /// a picker that offered to open a connection *and* move a table would be
-    /// two decisions behind one button.
+    /// transfer needs a live connection at both ends, so the list is made of
+    /// tabs somebody has opened and not of the saved-connection file: opening
+    /// one is Connect…, and a picker that offered to open a connection *and*
+    /// move a table would be two decisions behind one button.
+    ///
+    /// Across the windows because a window is a place to work rather than a
+    /// boundary between databases — the same reason the go-to palette reaches
+    /// every tab. A result in one window and the connection it belongs in in
+    /// another used to mean exporting to a file and importing it back, through
+    /// a connection that was open the whole time.
     ///
     /// A tab transferring into itself is excluded rather than refused later. It
     /// is not a nonsense — a table copied within one database is a real thing to
     /// want — but the core writes through a second connection, and this session's
     /// is the one the source cursor is reading on.
-    var transferTargets: [Session] {
-        sessions.filter { $0 !== session && $0.db != nil && !$0.isBusy && !$0.isTransferring }
+    var transferTargets: [TransferTarget] {
+        receivableSessions.filter { $0 !== session }.map(TransferTarget.inThisWindow)
+            + otherWindowTargets()
     }
+
+    /// The tabs of this window that could take a transfer, whoever is asking.
+    ///
+    /// `transferTargets` is this without the tab doing the asking; `WindowList`
+    /// calls it on the *other* windows, where that tab is not among these and
+    /// there is nothing to leave out.
+    var receivableSessions: [Session] {
+        sessions.filter { $0.db != nil && !$0.isBusy && !$0.isTransferring }
+    }
+
+    /// What the other windows can take, already named for being elsewhere.
+    ///
+    /// Injected by `WindowList` and answering nothing by default, which is the
+    /// answer for a model with no window layer over it — every model a
+    /// `--verify-*` suite builds. A closure rather than a list because the
+    /// windows behind this one open, close and become busy while it is on
+    /// screen, and the picker reads this each time it draws.
+    var otherWindowTargets: () -> [TransferTarget] = { [] }
 
     /// Whether there is a result to send and somewhere to send it.
     ///
