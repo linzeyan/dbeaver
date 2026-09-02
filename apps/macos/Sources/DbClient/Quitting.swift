@@ -3,10 +3,11 @@ import Foundation
 /// What ending the process would throw away, and the question that has to be put
 /// before it does.
 ///
-/// One value for both ways out. ⌘W closes the only window this application has
-/// and a closed window ends the process, so closing and quitting lose exactly the
-/// same work — two questions worded differently would be two chances to word one
-/// of them wrongly.
+/// One value for both ways out and for however many windows are open. Closing a
+/// window and quitting lose the same *kind* of thing, so they are counted once
+/// here and worded once — see `Departure`, which is the only place the two come
+/// apart. Two values would be two chances to get the arithmetic wrong, and the
+/// arithmetic is what the dialog is believed for.
 ///
 /// Rows rather than cells, because rows are what the person looking at the grid
 /// can see: three cells typed into one row are one row that will lose what was
@@ -117,7 +118,6 @@ struct UnsavedWork: Equatable {
     }
 
     private static func summed(_ work: [UnsavedWork], windows: Int) -> UnsavedWork? {
-        guard !work.isEmpty else { return nil }
         let combined = UnsavedWork(
             editedRows: work.reduce(0) { $0 + $1.editedRows },
             deletedRows: work.reduce(0) { $0 + $1.deletedRows },
@@ -125,9 +125,10 @@ struct UnsavedWork: Equatable {
             changes: work.reduce(0) { $0 + $1.changes },
             openTransactions: work.reduce(0) { $0 + $1.openTransactions },
             windows: windows)
-        // A fold of things that each had something to lose can still have
-        // nothing: `lostOnQuitting` never hands back an empty one, but this is
-        // also the place a caller could pass an empty list of tabs.
+        // An empty list folds to a value with nothing in it, which `isEmpty`
+        // already answers for — so there is no guard above this line. A window
+        // whose tabs are all clean and an application with no windows reach the
+        // same answer by the same route.
         return combined.isEmpty ? nil : combined
     }
 
