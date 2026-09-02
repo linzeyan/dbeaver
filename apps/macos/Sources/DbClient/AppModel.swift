@@ -2562,8 +2562,13 @@ final class AppModel {
     /// Not applied to `schemas` itself. What is stored is what the driver said,
     /// so turning the setting on shows them at once instead of waiting for a
     /// reconnect to fetch what was already fetched.
-    var visibleSchemas: [SchemaInfo] {
-        preferences.showsSystemSchemas ? schemas : schemas.filter { !$0.isSystem }
+    var visibleSchemas: [SchemaInfo] { visibleSchemas(of: session) }
+
+    /// The same list for a tab that is not the one in front, which is what the
+    /// go-to palette walks: it offers every connection this window has open, and
+    /// the setting is the person's rather than the tab's.
+    func visibleSchemas(of session: Session) -> [SchemaInfo] {
+        preferences.showsSystemSchemas ? session.schemas : session.schemas.filter { !$0.isSystem }
     }
 
     /// Sequences in `schema` matching the filter. The rules `visibleRoutines`
@@ -2899,38 +2904,81 @@ final class AppModel {
     /// Asks whether any schema holds something rather than whether any schema
     /// was found: a database of empty schemas reads as answered here but opens a
     /// palette with nothing in it.
+    ///
+    /// A second tab is enough on its own, whether or not anything has been read
+    /// in either: the other connection is somewhere to go. Which is also why the
+    /// first clause asks only the tab in front — a window with a tab behind it
+    /// has already answered yes on the second.
     var canGoTo: Bool {
-        relations.values.contains { !$0.isEmpty } || !offeredFavorites.isEmpty
+        relations.values.contains { !$0.isEmpty } || sessions.count > 1
+            || !offeredFavorites.isEmpty
     }
 
-    /// Every relation this window has read, as the palette's targets.
+    /// Every relation this window has read, in every tab, as the palette's
+    /// targets — with the other connections themselves among them.
     ///
     /// Built from the inventory already here rather than asked of the server:
     /// the palette is typed into at speed, and anything else would be a round
     /// trip per keystroke.
     ///
+    /// Across the tabs and not only the one in front, which is the whole of what
+    /// a second connection changed here. A window is a place to work and it
+    /// holds several databases; a palette that could only reach the one on top
+    /// would make ⇧⌘O the second step of an operation whose first step is
+    /// remembering which tab a table was in.
+    ///
     /// The saved queries join them, unqualified: a favorite belongs to the
     /// person rather than to a schema, so there is nothing to put in front of
     /// its name — and the ones this connection is not offered are left out
-    /// here for the same reason the panel leaves them out.
+    /// here for the same reason the panel leaves them out. Offered against the
+    /// tab in front alone, because that is the connection a statement inserted
+    /// from here would be run on.
     var goToTargets: [GoToTarget] {
-        // Over the visible schemas, so ⇧⌘O offers what the tree offers. Reading
-        // the dictionary would put `pg_catalog`'s few thousand tables into a
-        // palette that ranks by how well a name matched — where a list that long
-        // is the same as no list.
-        visibleSchemas.flatMap { relations[$0.name] ?? [] }
-            .map { GoToTarget(schema: $0.schema, name: $0.name) }
+        sessions.indices.flatMap(goToTargets(inTab:))
             + offeredFavorites.map {
                 GoToTarget(schema: "", name: $0.name, kind: .favorite, sql: $0.sql)
             }
     }
 
-    /// Opens the relation the palette chose and shows its rows.
+    /// One tab's rows: what it has read, and — where it is not the tab in front —
+    /// the connection itself.
+    private func goToTargets(inTab index: Int) -> [GoToTarget] {
+        let session = sessions[index]
+        // Named only where naming it says something. A row in the tab somebody
+        // is looking at is in the database they are looking at, and the label
+        // would be on every row of a window that has only ever had one
+        // connection in it. `GoToTarget.connection` says the same thing about
+        // the ordering that reads this.
+        let label = index == activeSession ? "" : session.connectionLabel
+        // Over the visible schemas, so ⇧⌘O offers what the tree offers. Reading
+        // the dictionary would put `pg_catalog`'s few thousand tables into a
+        // palette that ranks by how well a name matched — where a list that long
+        // is the same as no list.
+        let relations = visibleSchemas(of: session).flatMap { session.relations[$0.name] ?? [] }
+            .map {
+                GoToTarget(
+                    schema: $0.schema, name: $0.name, tab: index, connection: label,
+                    scheme: session.scheme)
+            }
+        // The tab in front is left out of the connections for the reason `GoTo`
+        // leaves schemas out: it is already open, so Return on it would be a row
+        // that does nothing. Which also means a window with one tab offers no
+        // connections at all, without that having to be said twice.
+        guard index != activeSession else { return relations }
+        return relations + [
+            GoToTarget(
+                schema: "", name: session.connectionLabel, kind: .connection, tab: index,
+                scheme: session.scheme)
+        ]
+    }
+
+    /// Goes where the palette chose: another connection, or a relation in one —
+    /// which may be in a tab that is not the one in front.
     ///
     /// Looked up here rather than carried by the target, because `GoToTarget` is
-    /// deliberately two strings: the matching rule is checked without a database,
-    /// and a `RelationInfo` inside it would drag the metadata layer into a rule
-    /// that has no business knowing about one.
+    /// deliberately a handful of strings: the matching rule is checked without a
+    /// database, and a `RelationInfo` inside it would drag the metadata layer
+    /// into a rule that has no business knowing about one.
     ///
     /// The palette closes even where the lookup fails. It was opened over a list
     /// this window had already read, so a name in it that no longer resolves
@@ -2938,18 +2986,34 @@ final class AppModel {
     /// offering the same stale row again.
     func goTo(_ target: GoToTarget) {
         isGoToOpen = false
+        // A switch rather than a chain of guards, so that a fourth kind added to
+        // the palette has to say here what Return does with it rather than
+        // quietly falling through to whichever arm was written last.
+        switch target.kind {
         // Through the one insertion path, which is what the history list and
         // the favorites tab already use: appended to the buffer and selected,
         // ready for the ⌘R after it. A second way in would be a second answer
-        // to where the caret ends up.
-        guard target.kind == .relation else {
+        // to where the caret ends up. Into the tab in front, which is the
+        // connection the statement was offered against.
+        case .favorite:
             insertIntoEditor(target.sql)
-            return
+        // Which is the whole of what a connection row does: the tab strip's own
+        // click, reached by typing a name instead of finding it.
+        case .connection:
+            selectSession(target.tab)
+        case .relation:
+            // The tab first, because every line under it reads whichever tab is
+            // in front. A row naming a tab this window no longer has opens
+            // nothing at all rather than being looked up in the tab that is
+            // there instead — two connections both have a `public`, and landing
+            // on the wrong server is a mistake nothing on screen would show.
+            guard sessions.indices.contains(target.tab) else { return }
+            selectSession(target.tab)
+            guard let relation = relations[target.schema]?.first(where: { $0.name == target.name })
+            else { return }
+            activeTab = .content
+            selected = relation
         }
-        guard let relation = relations[target.schema]?.first(where: { $0.name == target.name })
-        else { return }
-        activeTab = .content
-        selected = relation
     }
 
     // MARK: - Cell inspection
