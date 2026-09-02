@@ -898,39 +898,27 @@ final class AppModel {
     /// wiring rather than only of the model behind it.
     private let initialSQLIsScript: Bool
 
-    /// Where the tabs this window had open are read from and written back to, or
-    /// nil for a window that keeps none.
-    ///
-    /// Injected rather than reached for, the way `history` and `preferences` are,
-    /// and nil is the default for the reason those are injectable at all: a check
-    /// or a capture that restored the developer's own last session would draw
-    /// somebody else's tabs, and one that wrote its own over theirs would lose
-    /// them. Only main.swift's real window passes a store.
-    @ObservationIgnored private let restoreStore: SessionRestoreStore?
-
     init(
         history: QueryHistory, favorites: QueryFavorites, preferences: Preferences,
         initialTab: DetailTab = .content, initialSQL: String? = nil,
         initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
-        initialFilter: String? = nil, restore: SessionRestoreStore? = nil
+        initialFilter: String? = nil, restoring: RestoredWindow? = nil
     ) {
         self.history = history
         self.favorites = favorites
         self.preferences = preferences
-        self.restoreStore = restore
         self.initialSQLIsScript = initialSQLIsScript
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
         self.initialSQL = initialSQL
         self.initialFilters = (initialWhere, initialOrder)
         // Before the two lines below, which write into the session this replaces.
-        // Reading the file costs nothing when the setting is off, but it is asked
-        // in that order so that a window with restore turned off never opens one
-        // — the point of turning it off is that nothing is kept, and a build that
-        // read the file anyway would be keeping it.
-        if preferences.restoresSession, let window = restore?.load() { restoreTabs(window) }
+        // A window's tabs and not the file: which windows to put back, and
+        // whether to put any back at all, are the list's questions rather than
+        // one window's — see `SessionRestoreStore.windowsToRestore`.
+        if let restoring { restoreTabs(restoring) }
         // Onto the session directly, not through the forwarding properties, and
         // down here rather than at the top. Two reasons, and the second is the
         // one that would have been a defect rather than a compile error:
@@ -2220,23 +2208,6 @@ final class AppModel {
             label: session.connectionLabel,
             buffers: buffers,
             activeBuffer: session.activeQueryBufferIndex)
-    }
-
-    /// Writes down what this window has open, for the next launch.
-    ///
-    /// Called on the way out rather than as things change, because the half worth
-    /// keeping is the editor text and that changes on every keystroke — a
-    /// document rewritten per keystroke would be a hundred kilobytes to disk per
-    /// character typed. What that costs is a window lost to a crash rather than
-    /// to a quit, which is a trade this file can make because everything else it
-    /// holds is already somewhere else.
-    ///
-    /// Clears the file when the setting is off rather than only declining to
-    /// write one; see `SessionRestoreStore.clear`.
-    func rememberSessions() {
-        guard let restoreStore else { return }
-        guard preferences.restoresSession else { return restoreStore.clear() }
-        restoreStore.save(rememberedWindow)
     }
 
     /// Closes a connection and takes its tab with it.
@@ -7688,7 +7659,10 @@ final class AppModel {
     /// changes and the transaction already answer, and the day the two disagreed
     /// the wrong one would be the one nobody was asked about.
     var unsavedWork: UnsavedWork? {
-        staged.lostOnQuitting(withOpenTransaction: hasUncommittedWork)
+        UnsavedWork.inOneWindow(
+            sessions.compactMap {
+                $0.staged.lostOnQuitting(withOpenTransaction: $0.transaction.open)
+            })
     }
 
     /// Enters or leaves manual-commit mode.

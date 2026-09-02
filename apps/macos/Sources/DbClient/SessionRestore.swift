@@ -50,7 +50,7 @@ struct RestoredTab: Codable, Equatable {
     var activeBuffer: Int
 }
 
-/// What a window had open, and the whole of what a launch puts back.
+/// What one window had open.
 ///
 /// Every restored tab is unconnected. Nothing here dials anything, because a
 /// client that opens five connections because it was launched is a client that
@@ -59,16 +59,25 @@ struct RestoredTab: Codable, Equatable {
 /// saves is the retyping: the form is filled in, the password is in the Keychain,
 /// and Enter connects.
 struct RestoredWindow: Codable, Equatable {
-    /// The shape the tabs are in. A file numbered anything else is ignored
-    /// rather than migrated, which is `NavigatorCache`'s rule and is right here
-    /// for the same reason: the cost of ignoring it is one window that opens
-    /// empty, and the code that would migrate it is code that has to be right
-    /// about a format nobody can see.
-    static let currentVersion = 1
-
-    var version = RestoredWindow.currentVersion
     var tabs: [RestoredTab]
     var activeTab: Int
+}
+
+/// The file: every window that was open, in the order they were made.
+///
+/// A wrapper around the list rather than a bare list, for the reason
+/// `SavedConnections` gives: the document needs somewhere to say which shape it
+/// is in.
+struct RestoredWindows: Codable, Equatable {
+    /// The shape this build writes and will read back. A file numbered anything
+    /// else is ignored rather than migrated, which is `NavigatorCache`'s rule and
+    /// is right here for the same reason: the cost of ignoring it is one launch
+    /// that opens empty, and the code that would migrate it is code that has to
+    /// be right about a format nobody can see.
+    static let currentVersion = 2
+
+    var version = RestoredWindows.currentVersion
+    var windows: [RestoredWindow]
 }
 
 /// Where the restored window is kept.
@@ -95,33 +104,57 @@ struct SessionRestoreStore {
             ).appending(path: "dbclient/session.json"))
     }
 
-    /// What the last window had open, or nil where there is nothing to put back
-    /// — no file, an unreadable one, or one written in a shape this build does
-    /// not know.
-    func load() -> RestoredWindow? {
+    /// What was open last time, or nothing where there is nothing to put back —
+    /// no file, an unreadable one, or one written in a shape this build does not
+    /// know.
+    ///
+    /// A window with no tabs in it is dropped rather than restored. A window is a
+    /// list of tabs and a pointer into it, so a list of none describes no window,
+    /// and read literally it would leave the pointer aimed past the end.
+    func load() -> [RestoredWindow] {
         guard let data = try? Data(contentsOf: file),
-            let window = try? JSONDecoder().decode(RestoredWindow.self, from: data),
-            window.version == RestoredWindow.currentVersion,
-            !window.tabs.isEmpty
-        else { return nil }
-        return window
+            let document = try? JSONDecoder().decode(RestoredWindows.self, from: data),
+            document.version == RestoredWindows.currentVersion
+        else { return [] }
+        return document.windows.filter { !$0.tabs.isEmpty }
     }
 
     /// Failures are silent, for the reason `NavigatorCache.save` gives: this runs
     /// while the process is ending, and there is no window left to report into.
-    func save(_ window: RestoredWindow) {
-        guard let data = try? JSONEncoder().encode(window) else { return }
+    func save(_ windows: [RestoredWindow]) {
+        guard let data = try? JSONEncoder().encode(RestoredWindows(windows: windows)) else {
+            return
+        }
         try? FileManager.default.createDirectory(
             at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: file, options: [.atomic])
     }
 
-    /// Forgets the last window, for somebody who has turned restore off.
+    /// Forgets what was open, for somebody who has turned restore off.
     ///
     /// Deleting rather than merely not writing. Turning the setting off is asking
-    /// for the last window's SQL not to be kept, and a file left behind from
+    /// for the last session's SQL not to be kept, and a file left behind from
     /// before would go on keeping it.
     func clear() {
         try? FileManager.default.removeItem(at: file)
+    }
+
+    /// The windows a launch should put back, which is none when the setting says
+    /// so.
+    ///
+    /// The setting is answered here rather than at the call site because that
+    /// call site builds `NSWindow`s: this is the half of the decision that can be
+    /// checked with nothing on screen, and it is the half that can be wrong.
+    func windowsToRestore(restoring: Bool) -> [RestoredWindow] {
+        restoring ? load() : []
+    }
+
+    /// Writes down what was open, or clears the file where nothing is to be kept.
+    ///
+    /// Both answers in one place for the reason above, and clearing rather than
+    /// merely declining to write for the reason `clear` gives.
+    func remember(_ windows: [RestoredWindow], restoring: Bool) {
+        guard restoring else { return clear() }
+        save(windows)
     }
 }

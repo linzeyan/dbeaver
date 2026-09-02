@@ -39,6 +39,9 @@ enum QuittingChecks {
         checkARowMarkedForDeletionIsNotCountedTwice()
         checkTheQuestionCarriesTheNumberBesideSave()
         checkTheDetailNamesWhatIsThereAndNothingElse()
+        checkClosingOneOfSeveralWindowsIsNotCalledQuitting()
+        checkEveryTabOfAWindowIsCounted()
+        checkTheWindowsAreAddedUpAndNamed()
         if failures == 0 {
             fputs("quitting: all checks passed\n", stderr)
         } else {
@@ -100,7 +103,8 @@ enum QuittingChecks {
         expect(open?.transactionOpen, true, "an open transaction is work that would be lost")
         expect(open?.changes, 0, "with nothing staged beside it")
         expect(
-            open?.question, "Quit with an open transaction?", "and is what the question is about")
+            open?.question(.quitting), "Quit with an open transaction?",
+            "and is what the question is about")
 
         expect(
             StagedChanges().lostOnQuitting(withOpenTransaction: false) == nil, true,
@@ -151,13 +155,13 @@ enum QuittingChecks {
         staged.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
         expect(work(staged)?.changes, staged.count, "the dialog counts what the strip counts")
         expect(
-            work(staged)?.question, "Quit without sending 5 changes?",
+            work(staged)?.question(.quitting), "Quit without sending 5 changes?",
             "and puts the number in the question")
 
         var one = StagedChanges()
         one.deletes.insert(0)
         expect(
-            work(one)?.question, "Quit without sending 1 change?",
+            work(one)?.question(.quitting), "Quit without sending 1 change?",
             "one change is not asked about in the plural")
     }
 
@@ -195,6 +199,99 @@ enum QuittingChecks {
             StagedChanges().lostOnQuitting(withOpenTransaction: true)?.detail,
             "The transaction open on this connection will be rolled back. This cannot be undone.",
             "and a transaction on its own says only that")
+    }
+
+    /// ⌘W over one of several windows says Close, and ⌘Q says Quit.
+    ///
+    /// The two used to be one sentence because they were one event: a window
+    /// closing with nothing behind it ends the process. With a second window open
+    /// they come apart — closing the front one leaves the other where it is — and
+    /// a dialog headed "Quit" over a key that closes a window is a dialog telling
+    /// somebody the wrong thing about what they are about to lose.
+    private static func checkClosingOneOfSeveralWindowsIsNotCalledQuitting() {
+        var staged = StagedChanges()
+        staged.deletes.insert(0)
+        expect(
+            work(staged)?.question(.closing), "Close without sending 1 change?",
+            "closing a window names closing")
+        expect(
+            work(staged)?.question(.quitting), "Quit without sending 1 change?",
+            "and quitting names quitting")
+        expect(
+            StagedChanges().lostOnQuitting(withOpenTransaction: true)?.question(.closing),
+            "Close with an open transaction?",
+            "both wordings, for the transaction sentence too")
+
+        expect(
+            UnsavedWork.Departure.closing.confirmation, "Discard and Close",
+            "and the button says which of the two it does")
+        expect(
+            UnsavedWork.Departure.quitting.confirmation, "Discard and Quit",
+            "in both directions")
+    }
+
+    /// Every tab of a window is counted, not the one in front.
+    ///
+    /// A window is a list of connections, each with its own staged changes and
+    /// its own transaction. A guard that read only the tab on screen would let ⌘W
+    /// throw away the work in the tab beside it without a word — the same loss
+    /// this whole file exists to prevent, in the place hardest to notice.
+    private static func checkEveryTabOfAWindowIsCounted() {
+        var front = StagedChanges()
+        front.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "a")
+        var behind = StagedChanges()
+        behind.deletes.insert(3)
+        behind.drafts = [DraftRow(values: [1: PendingValue(text: "new")])]
+
+        let both = UnsavedWork.inOneWindow(
+            [front, behind].compactMap { $0.lostOnQuitting(withOpenTransaction: false) })
+        expect(both?.editedRows, 1, "the tab in front contributes its edited row")
+        expect(both?.deletedRows, 1, "the tab behind it contributes its deletion")
+        expect(both?.newRows, 1, "and its new row")
+        expect(both?.changes, 3, "and the count is every tab's work")
+        expect(both?.windows, 1, "all of it in one window")
+
+        expect(
+            UnsavedWork.inOneWindow([]), nil,
+            "a window whose tabs are all clean is closed without a word")
+    }
+
+    /// ⌘Q asks once, about every window, and says how many there are.
+    ///
+    /// One dialog rather than one per window: a question somebody has to answer
+    /// twice is a question they stop reading. And the count has to be in it —
+    /// "5 changes" with nothing saying where they are is a number nobody can act
+    /// on, because the windows holding them are behind the dialog.
+    private static func checkTheWindowsAreAddedUpAndNamed() {
+        var here = StagedChanges()
+        here.updates[GridCell(row: 0, column: 1)] = PendingValue(text: "a")
+        var there = StagedChanges()
+        there.deletes.insert(3)
+
+        let one = here.lostOnQuitting(withOpenTransaction: true)
+        let two = there.lostOnQuitting(withOpenTransaction: true)
+        let both = UnsavedWork.acrossWindows([one, two].compactMap { $0 })
+        expect(both?.changes, 2, "the changes of both windows")
+        expect(both?.windows, 2, "counted as two windows")
+        expect(both?.openTransactions, 2, "and both open transactions")
+        expect(
+            both?.detail,
+            "1 edited row and 1 deleted row are staged in 2 windows and will not be sent. "
+                + "The 2 open transactions will be rolled back. This cannot be undone.",
+            "and the sentence says where the work is and how much is open")
+
+        // One window is spoken about as it always was: "here", and "the
+        // transaction", because there is one of each and naming a count would be
+        // arithmetic nobody needs.
+        expect(
+            UnsavedWork.acrossWindows([one].compactMap { $0 })?.detail,
+            "1 edited row is staged here and will not be sent. "
+                + "The transaction open on this connection will be rolled back. "
+                + "This cannot be undone.",
+            "one window still reads as one window")
+        expect(
+            UnsavedWork.acrossWindows([]), nil,
+            "and an application whose windows are all clean is quit without a word")
     }
 
     // MARK: - Harness
