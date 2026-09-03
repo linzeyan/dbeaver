@@ -34,18 +34,24 @@ struct EditorTheme: Equatable {
     /// tones' hex and resolves untouched slots back to these very values, so
     /// "Default" is not a copy that can drift from the palette but the palette
     /// itself.
-    static let defaults = EditorTheme(
-        background: Theme.Surface.canvas,
-        text: Theme.Editor.text,
-        keyword: Theme.Editor.keyword,
-        string: Theme.Editor.string,
-        dollarQuoted: Theme.Editor.dollarQuoted,
-        number: Theme.Editor.number,
-        quotedIdentifier: Theme.Editor.quotedIdentifier,
-        comment: Theme.Editor.comment,
-        caret: Theme.Editor.caret,
-        selection: Theme.Editor.selection,
-        statement: Theme.Editor.statement)
+    ///
+    /// Computed rather than stored, because the palette has two sets of values
+    /// now: read under a light appearance it is the light defaults, and a stored
+    /// `let` would have frozen whichever set the process launched in.
+    static var defaults: EditorTheme {
+        EditorTheme(
+            background: Theme.Surface.canvas,
+            text: Theme.Editor.text,
+            keyword: Theme.Editor.keyword,
+            string: Theme.Editor.string,
+            dollarQuoted: Theme.Editor.dollarQuoted,
+            number: Theme.Editor.number,
+            quotedIdentifier: Theme.Editor.quotedIdentifier,
+            comment: Theme.Editor.comment,
+            caret: Theme.Editor.caret,
+            selection: Theme.Editor.selection,
+            statement: Theme.Editor.statement)
+    }
 }
 
 /// Tones compare exactly, not perceptually. Only two things ever produce one —

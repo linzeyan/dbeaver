@@ -217,6 +217,11 @@ struct MetalGridView: NSViewRepresentable {
         renderer.pending = pending
         renderer.deleted = deleted
         renderer.drafts = drafts
+        // The one colour on this surface that is not read at draw time. Set on
+        // every update rather than only when it changes: reading the token is
+        // also how this view comes to be updated at all when the appearance
+        // flips, and an equality check would cost the redraw it saves.
+        view.clearColor = Theme.Grid.background.mtlClear
 
         if context.coordinator.lastGeneration != generation {
             context.coordinator.lastGeneration = generation

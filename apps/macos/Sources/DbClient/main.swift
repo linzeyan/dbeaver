@@ -200,6 +200,9 @@ if CommandLine.arguments.contains("--verify-keep-alive") {
 if CommandLine.arguments.contains("--verify-editor-theme") {
     exit(MainActor.assumeIsolated { EditorThemeChecks.run() } ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-theme") {
+    exit(MainActor.assumeIsolated { ThemeChecks.run() } ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-mcp") {
     exit(MCPChecks.run() ? 0 : 1)
 }
@@ -243,6 +246,11 @@ let initialTab =
     imageStatement != nil
     ? DetailTab.query
     : (argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized) } ?? .content)
+
+/// `--appearance light|dark` opens in that appearance. Exists for the reason
+/// `--tab` does: the setting is in a Settings pane a screenshot cannot click,
+/// and a palette with two sets of values needs both of them captured.
+let initialAppearance = argument("--appearance").flatMap(Appearance.Setting.init(rawValue:))
 
 /// `--sql "SELECT …"` opens on the Query tab with that statement already run.
 let initialSQL = imageStatement ?? argument("--sql")
@@ -4090,10 +4098,6 @@ if benchMode {
         controller.startBench(view: view)
     }
 } else {
-    // Pinned before the window is shown, so nothing lays out in the wrong
-    // appearance and flashes on the first frame.
-    Theme.apply(to: app)
-
     // Top-level code runs on the main thread but is not statically isolated in
     // Swift 5 mode; assert the isolation the model requires rather than hop.
     MainActor.assumeIsolated {
@@ -4134,6 +4138,11 @@ if benchMode {
         } else {
             preferences = Preferences()
         }
+        // Before any window is built, so nothing lays out in the wrong
+        // appearance and flashes on the first frame — and it stays following,
+        // because `system` is a preference whose answer changes on its own.
+        AppearanceController.shared.follow(
+            preferences: preferences, app: app, overriding: initialAppearance)
         // Only a window somebody opened themselves. A capture restores whatever
         // the developer last had open — which would put their windows in a
         // screenshot — and would then write its own single window over it on the

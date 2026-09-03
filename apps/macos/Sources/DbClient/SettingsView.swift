@@ -174,6 +174,17 @@ struct SettingsView: View {
 
     /// What the application keeps between launches, and where it keeps it.
     @ViewBuilder private var general: some View {
+        SettingsChoice(
+            title: "Appearance",
+            explanation:
+                "Match the system follows the menu bar, including when it changes at "
+                + "sunset. Light and Dark hold this window where you put it, which is "
+                + "what a bright room or a projector wants and what the system's clock "
+                + "knows nothing about. The grid changes with the rest of the window: "
+                + "every colour it draws is read at the moment it is drawn.",
+            caveat: nil,
+            selection: $preferences.appearance)
+
         SettingsToggle(
             title: "Reopen the last window's tabs",
             explanation:
@@ -431,6 +442,7 @@ private protocol SettingsOption: CaseIterable, Identifiable, Hashable {
     var label: String { get }
 }
 
+extension Appearance.Setting: SettingsOption {}
 extension ConnectionStorage: SettingsOption {}
 extension PasswordStorage: SettingsOption {}
 extension EditorTabWidth: SettingsOption {}
