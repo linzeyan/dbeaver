@@ -27,9 +27,148 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Which of the jobs below this push actually needs.
+  #
+  # Twelve runners, a dozen containers and about twenty minutes was the price of
+  # every push, including a push that edited one Swift file. So each job is asked
+  # for by name: the Linux job by anything under `crates/`, the macOS job by the
+  # front end and the FFI it links, and each database by its own driver — plus,
+  # for all of them, the shared crates and the files that decide how any of this
+  # is built.
+  #
+  # The list of changed files comes from the compare API rather than from a
+  # checkout: this tree carries twenty years of the upstream Java history, and
+  # cloning 216 MB of it to run `git diff` would cost more than the jobs this
+  # saves. Anything that makes the answer unknowable — a force push, a new
+  # branch, a run somebody started by hand, more files than one page of the API
+  # holds — runs everything. A CI that guesses narrow is a CI that goes green
+  # without having looked.
+  changes:
+    name: What changed
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.decide.outputs.core }}
+      app: ${{ steps.decide.outputs.app }}
+      servers: ${{ steps.decide.outputs.servers }}
+    steps:
+      - name: Decide
+        id: decide
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          python3 <<'PY'
+          import json, os, urllib.error, urllib.request
+
+          # The integration matrix, and what asks for each row. `up` and `test`
+          # are Makefile targets a developer runs by hand; `driver` is the crate
+          # under `crates/drivers/` whose change is a reason to start these
+          # containers.
+          SERVERS = [
+              # The same containers and the same seed script a developer runs,
+              # unedited. `make db-seed` takes a minute or so for the million
+              # rows the estimate test checks for, which is the cost of testing
+              # against real PostgreSQL rather than a stub that agrees with us.
+              #
+              # `db-up-pgtls` is a second PostgreSQL, refusing plaintext and
+              # serving a certificate that names a host nothing connects to.
+              # Both halves are load bearing — without the first, "it connected"
+              # says nothing about TLS, and without the second `verify-ca` and
+              # `verify-full` cannot be told apart — which is why it cannot be
+              # the container above. `db-up-compatible` is CockroachDB and
+              # GreptimeDB, both read through this same driver.
+              {"name": "PostgreSQL", "up": "db-seed db-up-compatible db-up-pgtls",
+               "test": "test-postgres", "driver": "postgres"},
+              # TiDB and StarRocks ride along for the same reason: one driver.
+              {"name": "MySQL", "up": "db-up-mysql db-up-tidb db-up-starrocks",
+               "test": "test-mysql", "driver": "mysql"},
+              {"name": "SQL Server", "up": "db-up-mssql",
+               "test": "test-mssql", "driver": "mssql"},
+              {"name": "ClickHouse", "up": "db-up-clickhouse",
+               "test": "test-clickhouse", "driver": "clickhouse"},
+              {"name": "MongoDB", "up": "db-up-mongo",
+               "test": "test-mongodb", "driver": "mongodb"},
+              {"name": "Redis", "up": "db-up-redis",
+               "test": "test-redis", "driver": "redis"},
+              {"name": "Cassandra", "up": "db-up-cassandra",
+               "test": "test-cassandra", "driver": "cassandra"},
+              {"name": "Trino", "up": "db-up-trino",
+               "test": "test-trino", "driver": "trino"},
+              {"name": "Arrow Flight SQL", "up": "db-up-flightsql",
+               "test": "test-flightsql", "driver": "flightsql"},
+              # Not a database family: an SSH bastion, and the PostgreSQL above
+              # it reached through one. `test-tunnel` declares both containers
+              # itself, and they are named here anyway so this row reads like the
+              # others. It has no driver of its own — the dialling is in `dbffi`,
+              # which is shared — so it runs whenever the shared crates move.
+              #
+              # Worth a runner because a tunnel is the one thing in this tree
+              # that cannot be tested without a second machine's worth of moving
+              # parts, and it has already been broken by one of sshd's opinions
+              # rather than by our code.
+              {"name": "SSH tunnel", "up": "db-up-ssh db-up",
+               "test": "test-tunnel", "driver": None},
+          ]
+
+          def emit(core, app, servers, why):
+              print(f"::notice::{why}")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+                  out.write(f"core={'true' if core else 'false'}\n")
+                  out.write(f"app={'true' if app else 'false'}\n")
+                  out.write("servers=" + json.dumps(
+                      [{k: v for k, v in s.items() if k != "driver"} for s in servers]) + "\n")
+              raise SystemExit(0)
+
+          base, head = os.environ.get("BASE", ""), os.environ.get("HEAD", "")
+          empty = "0" * 40
+          if not base or base == empty or not head:
+              emit(True, True, SERVERS, "no commit to compare against — running everything")
+
+          request = urllib.request.Request(
+              f"https://api.github.com/repos/{os.environ['REPO']}/compare/{base}...{head}",
+              headers={"Authorization": f"Bearer {os.environ['TOKEN']}",
+                       "Accept": "application/vnd.github+json"})
+          try:
+              answer = json.load(urllib.request.urlopen(request, timeout=30))
+          except (urllib.error.URLError, OSError, ValueError) as e:
+              emit(True, True, SERVERS, f"the compare API said {e} — running everything")
+
+          files = [f["filename"] for f in answer.get("files", [])]
+          if not files or len(files) >= 300:
+              emit(True, True, SERVERS,
+                   f"{len(files)} files changed — too many to attribute, running everything")
+
+          def infra(path):
+              # Everything that decides how any of this is built or brought up.
+              return (path in {"Cargo.toml", "Cargo.lock", "Makefile", "docker-compose.yml",
+                               ".github/workflows/ci.yml"}
+                      or path.startswith("tools/"))
+
+          def shared_rust(path):
+              # Any crate that is not a driver: conn, ffi, transfer, ddl, sql,
+              # catalog, edit. Written as "not a driver" rather than as a list so
+              # that a crate added later is shared until somebody says otherwise.
+              return path.startswith("crates/") and not path.startswith("crates/drivers/")
+
+          rebuild = any(infra(f) or shared_rust(f) for f in files)
+          core = rebuild or any(f.startswith("crates/") for f in files)
+          app = rebuild or any(
+              f.startswith("apps/macos/") or f.startswith("crates/ffi/") for f in files)
+          servers = [s for s in SERVERS
+                     if rebuild or (s["driver"] and any(
+                         f.startswith(f"crates/drivers/{s['driver']}/") for f in files))]
+          emit(core, app, servers,
+               f"{len(files)} files changed: core={core}, app={app}, "
+               + f"servers={[s['name'] for s in servers] or 'none'}")
+          PY
+
   core:
     name: Core (Linux)
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -51,65 +190,23 @@ jobs:
   # a runner has neither the memory for StarRocks beside SQL Server nor the disk
   # for every image — so the suite is split the way the Makefile splits it, one
   # container set per job, and a failure names the database it belongs to.
+  #
+  # The rows themselves are in the `changes` job above, because a matrix cannot
+  # be filtered where it is written: `jobs.<id>.if` cannot see `matrix`, so the
+  # only way to not start ten sets of containers for a one-driver change is to
+  # hand this job the rows it should run.
   integration:
     name: Integration (${{ matrix.server.name }})
     runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.servers != '[]'
     strategy:
       # These jobs are a partition of one suite, not attempts at the same thing.
       # Cancelling the rest because MySQL failed would hide whatever ClickHouse
       # was about to say.
       fail-fast: false
       matrix:
-        server:
-          # The same containers and the same seed script a developer runs,
-          # unedited. `make db-seed` takes a minute or so for the million rows
-          # the estimate test checks for, which is the cost of testing against
-          # real PostgreSQL rather than a stub that agrees with us.
-          #
-          # `db-up-pgtls` is a second PostgreSQL, refusing plaintext and serving
-          # a certificate that names a host nothing connects to. Both halves are
-          # load bearing — without the first, "it connected" says nothing about
-          # TLS, and without the second `verify-ca` and `verify-full` cannot be
-          # told apart — which is why it cannot be the container above.
-          - name: PostgreSQL
-            up: db-seed db-up-compatible db-up-pgtls
-            test: test-postgres
-          - name: MySQL
-            up: db-up-mysql db-up-tidb db-up-starrocks
-            test: test-mysql
-          - name: SQL Server
-            up: db-up-mssql
-            test: test-mssql
-          - name: ClickHouse
-            up: db-up-clickhouse
-            test: test-clickhouse
-          - name: MongoDB
-            up: db-up-mongo
-            test: test-mongodb
-          - name: Redis
-            up: db-up-redis
-            test: test-redis
-          - name: Cassandra
-            up: db-up-cassandra
-            test: test-cassandra
-          - name: Trino
-            up: db-up-trino
-            test: test-trino
-          - name: Arrow Flight SQL
-            up: db-up-flightsql
-            test: test-flightsql
-          # Not a database family: an SSH bastion, and the PostgreSQL above it
-          # reached through one. `test-tunnel` declares both containers itself,
-          # and they are named here anyway so this row reads like the others.
-          #
-          # Worth a runner because a tunnel is the one thing in this tree that
-          # cannot be tested without a second machine's worth of moving parts —
-          # a listener, a forward, and an sshd with its own opinions about how
-          # often it will answer. It has already been broken by one of those
-          # opinions rather than by our code.
-          - name: SSH tunnel
-            up: db-up-ssh db-up
-            test: test-tunnel
+        server: ${{ fromJSON(needs.changes.outputs.servers) }}
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
@@ -122,6 +219,8 @@ jobs:
 
   app:
     name: App (macOS)
+    needs: changes
+    if: needs.changes.outputs.app == 'true'
     # Pinned rather than `macos-latest`: the package's deployment target is
     # macOS 15, so the binary this job builds will not launch on an older
     # runner, and `macos-latest` is whatever GitHub currently points it at.
