@@ -24,15 +24,15 @@ struct NewTableSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             columns
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             preview
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 680)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it. Nothing has run, so closing needs no question — and
         // unlike the change sheets there is nothing here that cannot be typed
         // again.
@@ -45,7 +45,7 @@ struct NewTableSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Text(model.containerNoun.capitalized)
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
             Picker("", selection: schemaBinding) {
                 ForEach(model.schemas, id: \.name) { schema in
                     Text(schema.name).tag(schema.name)
@@ -57,7 +57,7 @@ struct NewTableSheet: View {
 
             Text("Name")
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
             TextField("table_name", text: nameBinding)
                 .textFieldStyle(.roundedBorder)
                 .font(Theme.Typography.mono)
@@ -116,7 +116,7 @@ struct NewTableSheet: View {
             Color.clear.frame(width: 20)
         }
         .font(Theme.Typography.caption)
-        .foregroundStyle(Theme.textTertiary.color)
+        .foregroundStyle(Theme.Text.tertiary.color)
         .padding(.horizontal, Theme.Space.md)
         .padding(.bottom, Theme.Space.xs)
     }
@@ -190,7 +190,7 @@ struct NewTableSheet: View {
                     Image(systemName: "minus.circle")
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .frame(width: 20)
                 .accessibilityLabel("Remove column \(index + 1)")
             } else {
@@ -229,7 +229,7 @@ struct NewTableSheet: View {
                     .font(Theme.Typography.caption)
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.accent.color)
+            .foregroundStyle(Theme.Accent.selection.color)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Theme.Space.md)
@@ -278,7 +278,7 @@ struct NewTableSheet: View {
         ScrollView {
             Text(plan?.preview ?? "")
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.Space.md)
@@ -293,7 +293,8 @@ struct NewTableSheet: View {
             Text(model.newTableObstacle ?? "Nothing has run yet.")
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
-                    model.newTableObstacle == nil ? Theme.textTertiary.color : Theme.warning.color
+                    model.newTableObstacle == nil
+                        ? Theme.Text.tertiary.color : Theme.Semantic.warning.color
                 )
                 .lineLimit(2)
             Spacer(minLength: Theme.Space.sm)

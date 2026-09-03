@@ -21,16 +21,16 @@ struct ColumnChangeSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             preview
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         // Width fixed, height from the content: the add case is three controls
         // taller than the other two, and a fixed height would be black space
         // under a one-line `DROP COLUMN`.
         .frame(width: 560)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it. Nothing has run yet, so closing needs no question.
         .onExitCommand { model.columnPlan = nil }
     }
@@ -42,7 +42,7 @@ struct ColumnChangeSheet: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(plan?.qualified ?? "")
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
@@ -52,22 +52,22 @@ struct ColumnChangeSheet: View {
             case .alter(let alteration):
                 Text(standing(alteration))
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 alterFields(alteration)
             case .drop(let name):
                 Text(name)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
             case .rename(let name, _):
                 HStack(spacing: Theme.Space.sm) {
                     Text(name)
                         .font(Theme.Typography.mono)
-                        .foregroundStyle(Theme.text.color)
+                        .foregroundStyle(Theme.Text.primary.color)
                     Text("to")
                         .font(Theme.Typography.body)
-                        .foregroundStyle(Theme.textSecondary.color)
+                        .foregroundStyle(Theme.Text.secondary.color)
                     TextField("New name", text: newNameBinding)
                         .textFieldStyle(.roundedBorder)
                         .font(Theme.Typography.mono)
@@ -77,7 +77,7 @@ struct ColumnChangeSheet: View {
             Text(consequence)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(
-                    change.isDestructive ? Theme.warning.color : Theme.textSecondary.color
+                    change.isDestructive ? Theme.Semantic.warning.color : Theme.Text.secondary.color
                 )
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -221,7 +221,7 @@ struct ColumnChangeSheet: View {
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
             .font(Theme.Typography.body)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .frame(width: 56, alignment: .leading)
     }
 
@@ -402,7 +402,7 @@ struct ColumnChangeSheet: View {
         ScrollView {
             Text(plan?.preview ?? "")
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.Space.md)
@@ -419,7 +419,7 @@ struct ColumnChangeSheet: View {
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
                     model.columnChangeObstacle == nil
-                        ? Theme.textTertiary.color : Theme.warning.color
+                        ? Theme.Text.tertiary.color : Theme.Semantic.warning.color
                 )
                 .lineLimit(2)
             Spacer(minLength: Theme.Space.sm)

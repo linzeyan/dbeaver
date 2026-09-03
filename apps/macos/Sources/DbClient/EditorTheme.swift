@@ -35,7 +35,7 @@ struct EditorTheme: Equatable {
     /// "Default" is not a copy that can drift from the palette but the palette
     /// itself.
     static let defaults = EditorTheme(
-        background: Theme.background,
+        background: Theme.Surface.canvas,
         text: Theme.Editor.text,
         keyword: Theme.Editor.keyword,
         string: Theme.Editor.string,

@@ -596,7 +596,7 @@ struct CellValueViewer: View {
         // is enough to see the shape of a document and short enough to leave the
         // grid usable at the window's minimum height.
         .frame(height: Self.height)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .accessibilityLabel("Cell value")
     }
 
@@ -630,7 +630,7 @@ struct CellValueViewer: View {
         let text = Text(rendered.text)
             .font(Theme.Typography.mono)
             .foregroundStyle(
-                rendered.isPlaceholder ? Theme.textTertiary.color : Theme.text.color
+                rendered.isPlaceholder ? Theme.Text.tertiary.color : Theme.Text.primary.color
             )
             // Selectable because the other half of what a reader wants is a
             // fragment of the value, not all of it.
@@ -685,7 +685,7 @@ struct CellValueEditor: View {
     private var box: some View {
         TextEditor(text: $typed)
             .font(Theme.Typography.mono)
-            .foregroundStyle(Theme.text.color)
+            .foregroundStyle(Theme.Text.primary.color)
             // `TextEditor` draws its own opaque background, which on this theme
             // would be the one light rectangle in the window.
             .scrollContentBackground(.hidden)
@@ -694,12 +694,12 @@ struct CellValueEditor: View {
             .padding(.vertical, Theme.Space.xs)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
-                    .fill(Theme.background.opacity(0.6).color)
+                    .fill(Theme.Surface.canvas.opacity(0.6).color)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
                     .strokeBorder(
-                        focused ? Theme.accent.color : Theme.separator.color,
+                        focused ? Theme.Accent.selection.color : Theme.Border.hairline.color,
                         lineWidth: 1)
             )
             .padding(.horizontal, Theme.Space.md)
@@ -707,7 +707,7 @@ struct CellValueEditor: View {
             // Applied after the padding, so the box and its inset together are
             // the height, rather than the height plus the inset.
             .frame(height: CellValueViewer.height - Self.footerHeight)
-            .background(Theme.background.color)
+            .background(Theme.Surface.canvas.color)
             .accessibilityLabel("Edit cell value")
     }
 
@@ -736,7 +736,7 @@ struct CellValueEditor: View {
             // against a column's limit is looking for.
             Text(AppModel.pluralized(typed.count, "character"))
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Spacer()
             Button("Cancel") { model.isEditingValue = false }
                 .help("Leave the value as it was (⎋)")
@@ -758,11 +758,11 @@ struct CellValueEditor: View {
             // accent for the reason `Theme` gives about the sidebar: a colour
             // nobody chose is the one thing this palette does not allow.
             .buttonStyle(.borderedProminent)
-            .tint(Theme.accent.color)
+            .tint(Theme.Accent.selection.color)
             .help("Hold this value for the cell (⌘↩); nothing is sent until Save")
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: Self.footerHeight)
-        .background(Theme.surfaceRaised.color)
+        .background(Theme.Surface.overlay.color)
     }
 }

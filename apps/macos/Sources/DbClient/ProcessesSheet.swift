@@ -22,13 +22,13 @@ struct ProcessesSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             table
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 720, height: 420)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         .onExitCommand { model.closeProcesses() }
         .onAppear { typing = true }
         // One timer, restarted whenever the interval changes and cancelled with
@@ -50,7 +50,7 @@ struct ProcessesSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: "magnifyingglass")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             TextField("Filter", text: $model.processFilter)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
@@ -65,7 +65,7 @@ struct ProcessesSheet: View {
             // to read twice.
             Text("Auto-refresh")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Picker("", selection: $model.processRefresh) {
                 Text("Off").tag(Optional<Int>.none)
                 Text("5s").tag(Optional(5))
@@ -78,7 +78,7 @@ struct ProcessesSheet: View {
             Button("Refresh") { model.loadProcesses() }
                 .buttonStyle(.plain)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.accent.color)
+                .foregroundStyle(Theme.Accent.selection.color)
                 .disabled(model.isReadingProcesses)
         }
         .padding(Theme.Space.md)
@@ -95,13 +95,13 @@ struct ProcessesSheet: View {
                     : "No process matches \(model.processFilter)."
             )
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .padding(Theme.Space.md)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
             VStack(spacing: 0) {
                 columnHeadings
-                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(rows) { process in
@@ -122,7 +122,7 @@ struct ProcessesSheet: View {
             heading("Time", width: 70)
             Text("Statement")
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, Theme.Space.md)
@@ -133,7 +133,7 @@ struct ProcessesSheet: View {
     private func heading(_ text: String, width: CGFloat) -> some View {
         Text(text)
             .font(Theme.Typography.micro)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .frame(width: width, alignment: .leading)
     }
 
@@ -153,7 +153,7 @@ struct ProcessesSheet: View {
                     .monospacedDigit()
                 Text(process.statement)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -163,7 +163,7 @@ struct ProcessesSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 process.id == model.selectedProcess
-                    ? Theme.accent.opacity(0.35).color : Color.clear
+                    ? Theme.Accent.selection.opacity(0.35).color : Color.clear
             )
             .contentShape(Rectangle())
         }
@@ -175,7 +175,7 @@ struct ProcessesSheet: View {
     private func cell(_ text: String, width: CGFloat) -> some View {
         Text(text)
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.text.color)
+            .foregroundStyle(Theme.Text.primary.color)
             .lineLimit(1)
             .frame(width: width, alignment: .leading)
     }
@@ -190,11 +190,11 @@ struct ProcessesSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Text(AppModel.pluralized(rows.count, "process", "processes"))
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             if !model.processReport.isEmpty {
                 Text(model.processReport)
                     .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             }
             Spacer(minLength: Theme.Space.sm)
@@ -208,20 +208,24 @@ struct ProcessesSheet: View {
                 Button("Cancel Statement") { model.endChosenProcess(.statement) }
                     .buttonStyle(.plain)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(armed ? Theme.accent.color : Theme.textTertiary.color)
+                    .foregroundStyle(
+                        armed ? Theme.Accent.selection.color : Theme.Text.tertiary.color
+                    )
                     .disabled(!armed)
             }
             if model.serverProcesses.closesSessions {
                 Button("Close Session") { model.endChosenProcess(.session) }
                     .buttonStyle(.plain)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(armed ? Theme.dangerText.color : Theme.textTertiary.color)
+                    .foregroundStyle(
+                        armed ? Theme.Semantic.dangerText.color : Theme.Text.tertiary.color
+                    )
                     .disabled(!armed)
             }
             Button("Done") { model.closeProcesses() }
                 .buttonStyle(.plain)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 30)
