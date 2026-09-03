@@ -248,10 +248,15 @@ test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests 
 # Of the two ways this can go wrong, the silent one is worse: a fourth SSH test
 # added here fails this job loudly and gets added to the list, and a test that
 # stops running says nothing at all.
+#
+# The fourth skip is the same sweep catching a different server: the conformance
+# test for a connection with no dialect needs Redis, which this job has no reason
+# to start. `test-redis` runs it by name, which is where it belongs.
 	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored \
 		--skip a_connection_opened_through_a_bastion_still_answers \
 		--skip a_driver_opens_on_a_host_only_the_bastion_can_reach \
-		--skip a_bastion_with_no_secret_at_all_asks_the_agent
+		--skip a_bastion_with_no_secret_at_all_asks_the_agent \
+		--skip a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them
 	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		postgres_satisfies_the_contract \
