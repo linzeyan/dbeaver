@@ -61,6 +61,22 @@ final class Preferences {
         didSet { store.set(insertsRowOfDefaults, forKey: Key.insertsRowOfDefaults) }
     }
 
+    /// Which of the palette's two sets of values every window draws with.
+    ///
+    /// System, which is the platform's own answer and the one that keeps a Mac
+    /// looking like itself when the menu bar flips at sunset. The other two are
+    /// here because an appearance is also a working condition — a bright room, a
+    /// dark one, a projector — and those do not change when the system's clock
+    /// says they should.
+    ///
+    /// Resolved to a palette by `AppearanceController`, which asks AppKit what
+    /// the app is actually drawing in rather than reading this: under `system`
+    /// only AppKit knows, and it is also what changes without anything here
+    /// being told.
+    var appearance: Appearance.Setting {
+        didSet { store.set(appearance.rawValue, forKey: Key.appearance) }
+    }
+
     /// Whether the sidebar keeps the system's translucency.
     ///
     /// Off, which is the opaque sidebar. `NavigationSplitView` lets the detail
@@ -360,6 +376,7 @@ final class Preferences {
         Key.usesTranslucentSidebar: false,
         Key.showsSystemSchemas: false,
         Key.connectionStorage: ConnectionStorage.thisMac.rawValue,
+        Key.appearance: Appearance.Setting.system.rawValue,
         Key.shutConnectionFolders: [String](),
         Key.editorFontSize: 13,
         Key.editorTabWidth: EditorTabWidth.four.rawValue,
@@ -399,6 +416,7 @@ final class Preferences {
         static let usesTranslucentSidebar = "dev.dbclient.usesTranslucentSidebar"
         static let showsSystemSchemas = "dev.dbclient.showsSystemSchemas"
         static let connectionStorage = "dev.dbclient.connectionStorage"
+        static let appearance = "dev.dbclient.appearance"
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let keepAliveSeconds = "dev.dbclient.keepAliveSeconds"
         static let notifiesOnDisconnect = "dev.dbclient.notifiesOnDisconnect"
@@ -486,6 +504,41 @@ final class Preferences {
     /// colours — a kept "Custom" flag would be a twelfth value to reset.
     var editorThemeIsCustom: Bool { editorTheme != EditorTheme.defaults }
 
+    /// Moves every editor slot that is still the palette's onto the palette the
+    /// appearance now in force resolves to, and leaves a colour somebody chose
+    /// alone.
+    ///
+    /// Per slot rather than all-or-nothing, because the two cases have to be
+    /// told apart: a keyword colour the user picked is theirs in both
+    /// appearances, and the eight slots they never touched would otherwise stay
+    /// at values chosen to be read on a near-black canvas. Called with the
+    /// palette as it stood a moment ago, which is the only way to know which of
+    /// those a stored spelling was.
+    func followEditorPalette(from previous: EditorTheme) {
+        let next = EditorTheme.defaults
+        if editorBackgroundColor == previous.background.hex {
+            editorBackgroundColor = next.background.hex
+        }
+        if editorTextColor == previous.text.hex { editorTextColor = next.text.hex }
+        if editorKeywordColor == previous.keyword.hex { editorKeywordColor = next.keyword.hex }
+        if editorStringColor == previous.string.hex { editorStringColor = next.string.hex }
+        if editorDollarQuotedColor == previous.dollarQuoted.hex {
+            editorDollarQuotedColor = next.dollarQuoted.hex
+        }
+        if editorNumberColor == previous.number.hex { editorNumberColor = next.number.hex }
+        if editorQuotedIdentifierColor == previous.quotedIdentifier.hex {
+            editorQuotedIdentifierColor = next.quotedIdentifier.hex
+        }
+        if editorCommentColor == previous.comment.hex { editorCommentColor = next.comment.hex }
+        if editorCaretColor == previous.caret.hex { editorCaretColor = next.caret.hex }
+        if editorSelectionColor == previous.selection.hex {
+            editorSelectionColor = next.selection.hex
+        }
+        if editorStatementColor == previous.statement.hex {
+            editorStatementColor = next.statement.hex
+        }
+    }
+
     /// Every editor colour back to the palette: the Reset control, and what
     /// choosing Default in the Theme menu means.
     func resetEditorTheme() {
@@ -535,6 +588,10 @@ final class Preferences {
         passwordStorage =
             PasswordStorage(rawValue: store.string(forKey: Key.passwordStorage) ?? "") ?? .never
         connectionStorage = Self.connectionStorage(in: store)
+        // An unrecognised appearance is the system's, for the reason
+        // `passwordStorage` gives.
+        appearance =
+            Appearance.Setting(rawValue: store.string(forKey: Key.appearance) ?? "") ?? .system
         // A negative number in a hand-edited plist is read as the default
         // rather than as an interval: there is no pinging backwards in time.
         let pinging = store.integer(forKey: Key.keepAliveSeconds)
