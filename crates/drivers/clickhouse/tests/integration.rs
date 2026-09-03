@@ -776,15 +776,42 @@ async fn cancelling_nothing_is_not_a_failure() {
 // Metadata
 // ---------------------------------------------------------------------------
 
+/// The catalog is reported and marked rather than left out.
+///
+/// This test used to assert the opposite, and it was right when it was written:
+/// the driver kept the system databases out of its answer entirely. That became
+/// wrong when the marking went in — a name missing from the answer is one no
+/// setting can put back, so "show me `system`" was a thing this client could not
+/// do at all. What the driver owes now is the mark and the order.
 #[tokio::test]
 #[ignore = "requires a ClickHouse server"]
-async fn the_navigator_root_hides_the_catalog() {
+async fn the_navigator_root_marks_the_catalog_without_hiding_it() {
     let source = source().await;
     let schemas = source.schemas().await.expect("schemas failed");
     let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&"bench"));
-    assert!(!names.contains(&"system"), "the catalog is not data");
-    assert!(!names.contains(&"INFORMATION_SCHEMA"));
+    let system = |name: &str| {
+        schemas
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} should be listed, got {names:?}"))
+            .is_system
+    };
+    for own in ["system", "INFORMATION_SCHEMA", "information_schema"] {
+        assert!(system(own), "{own} is the engine's own");
+    }
+    assert!(!system("bench"), "and the seeded database is not");
+
+    // And the engine's own sort last, so a tree that opens on a fresh server
+    // does not open on `INFORMATION_SCHEMA`. The ordering is the half of this a
+    // marking driver can still get wrong.
+    let first_system = schemas
+        .iter()
+        .position(|s| s.is_system)
+        .expect("the engine's own are in the list");
+    assert!(
+        schemas[first_system..].iter().all(|s| s.is_system),
+        "the engine's own belong after everybody else's, got {names:?}"
+    );
 }
 
 /// A materialized view holds data and a plain view does not, and upstream's

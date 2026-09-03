@@ -954,6 +954,14 @@ pub async fn triggers(
 /// tuple of eight would fail to decode there while the first eight columns are
 /// the same eight everywhere.
 ///
+/// "Everywhere" is not every server that speaks this protocol, which is why the
+/// reads below go through `get_opt` rather than `get`. StarRocks answers this
+/// statement with a shape of its own — a `ServerName` where the id goes, and
+/// four more columns after `Info` — and `get` on a value it cannot convert
+/// panics, which in a driver means taking the application down over a server
+/// that answered the question differently. The failure it reports instead names
+/// the column, which is the sentence somebody can act on.
+///
 /// The duration is formatted here rather than by the server, which is the one
 /// place this file departs from the rule `table_info` follows. `SHOW` takes no
 /// expressions, so `SEC_TO_TIME` is not available — and seconds into hours,
@@ -961,38 +969,66 @@ pub async fn triggers(
 /// disagree about, which is what made the rule worth following elsewhere.
 pub async fn processes(conn: &mut Conn) -> Result<Vec<ProcessInfo>, MySqlError> {
     let rows: Vec<Row> = conn.query("SHOW FULL PROCESSLIST").await?;
-    Ok(rows
-        .iter()
-        .map(|row| {
-            let text = |index: usize| row.get::<Option<String>, usize>(index).flatten();
-            ProcessInfo {
-                id: row
-                    .get::<Option<u64>, usize>(0)
-                    .flatten()
-                    .map(|id| id.to_string())
-                    .unwrap_or_default(),
-                user: text(1).unwrap_or_default(),
-                database: text(3).unwrap_or_default(),
-                // Two columns, because MySQL splits what one question means.
-                // `Command` is what the connection is doing at all — `Sleep`,
-                // `Query`, `Binlog Dump` — and `State` is where inside a
-                // statement it has got to: `Sending data`, `Waiting for table
-                // metadata lock`. The second is the one that says why a query
-                // is not finishing, and dropping it would leave every busy
-                // connection reading `Query`.
-                state: match text(6).filter(|state| !state.is_empty()) {
-                    Some(detail) => format!("{} · {detail}", text(4).unwrap_or_default()),
-                    None => text(4).unwrap_or_default(),
-                },
-                duration: row
-                    .get::<Option<i64>, usize>(5)
-                    .flatten()
-                    .map(clock)
-                    .unwrap_or_default(),
-                statement: text(7).unwrap_or_default(),
-            }
-        })
-        .collect())
+    rows.iter().map(one_process).collect()
+}
+
+/// One row of `SHOW FULL PROCESSLIST`, in the shape MySQL answers it.
+fn one_process(row: &Row) -> Result<ProcessInfo, MySqlError> {
+    let text = |index: usize| -> Result<Option<String>, MySqlError> {
+        Ok(column::<String>(row, index, "a string")?.flatten())
+    };
+    Ok(ProcessInfo {
+        id: column::<u64>(row, 0, "a thread id")?
+            .flatten()
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
+        user: text(1)?.unwrap_or_default(),
+        database: text(3)?.unwrap_or_default(),
+        // Two columns, because MySQL splits what one question means. `Command`
+        // is what the connection is doing at all — `Sleep`, `Query`, `Binlog
+        // Dump` — and `State` is where inside a statement it has got to:
+        // `Sending data`, `Waiting for table metadata lock`. The second is the
+        // one that says why a query is not finishing, and dropping it would
+        // leave every busy connection reading `Query`.
+        state: match text(6)?.filter(|state| !state.is_empty()) {
+            Some(detail) => format!("{} · {detail}", text(4)?.unwrap_or_default()),
+            None => text(4)?.unwrap_or_default(),
+        },
+        duration: column::<i64>(row, 5, "a number of seconds")?
+            .flatten()
+            .map(clock)
+            .unwrap_or_default(),
+        statement: text(7)?.unwrap_or_default(),
+    })
+}
+
+/// One column of one row, or the reason it is not what was asked for.
+///
+/// The outer `Option` is "there is no such column", which the callers above read
+/// as an empty field: a server with fewer columns has told us what it has. The
+/// inner one is SQL NULL. A value of the wrong type is neither, and is the
+/// failure this exists to return instead of panicking.
+fn column<T>(
+    row: &Row,
+    index: usize,
+    expected: &'static str,
+) -> Result<Option<Option<T>>, MySqlError>
+where
+    T: mysql_async::prelude::FromValue,
+{
+    match row.get_opt::<Option<T>, usize>(index) {
+        None => Ok(None),
+        Some(Ok(value)) => Ok(Some(value)),
+        Some(Err(e)) => Err(MySqlError::Decode {
+            column: row
+                .columns_ref()
+                .get(index)
+                .map(|c| c.name_str().to_string())
+                .unwrap_or_else(|| index.to_string()),
+            expected,
+            value: format!("{:?}", e.0),
+        }),
+    }
 }
 
 /// Seconds as `H:MM:SS`, the shape `SEC_TO_TIME` would have returned.

@@ -1918,10 +1918,24 @@ fn a_refresh_the_user_asked_for_is_answered_from_the_server_again() {
 // ---------------------------------------------------------------------------
 
 /// Opens the benchmark database, insisting it is there.
+///
+/// Retried for the reason the Redis test below retries: the first connection a
+/// freshly built test binary makes can take half a minute to answer on a machine
+/// that checks a new binary's signature before letting it near a socket, and
+/// every one after it is instant. Whichever test happens to run first pays it,
+/// which made this suite fail one test per run with a message about a server
+/// that was up the whole time.
 fn connected() -> *mut dbffi::DbHandle {
     let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
     let mut err: *mut c_char = ptr::null_mut();
-    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    let mut handle = ptr::null_mut();
+    for _ in 0..4 {
+        handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+        if !handle.is_null() {
+            break;
+        }
+        complaint(&mut err);
+    }
     // The server's own words rather than "unreachable". Every ignored test in
     // this file goes through here, so this message is the first thing anybody
     // debugging them reads, and a refused password and an exhausted connection
