@@ -906,6 +906,13 @@ pub(crate) async fn end_process(
 /// the server, and dropping the row would make a filter for it come back empty
 /// as though the setting did not exist.
 ///
+/// `source` is coalesced for a different reason. PostgreSQL always fills it in;
+/// CockroachDB, which this driver also reaches, serves `pg_settings` for
+/// compatibility and leaves the column null for every row — and a null read as
+/// `&str` panics inside the client rather than failing the call. `scope_of`
+/// answers `Server` for a source it does not recognise, which is the right
+/// answer for a server that does not say.
+///
 /// Sorted here and not by the server, which is the one thing this does not ask
 /// PostgreSQL for. `ORDER BY name` sorts in the database's collation, and
 /// `en_US.UTF-8` ignores the underscores — which puts `logging_collector` in the
@@ -916,7 +923,8 @@ pub(crate) async fn end_process(
 pub(crate) async fn variables(client: &Client) -> Result<Vec<VariableInfo>, PgError> {
     let rows = client
         .query(
-            "SELECT name, coalesce(setting, ''), source FROM pg_catalog.pg_settings",
+            "SELECT name, coalesce(setting, ''), coalesce(source, '') \
+             FROM pg_catalog.pg_settings",
             &[],
         )
         .await?;

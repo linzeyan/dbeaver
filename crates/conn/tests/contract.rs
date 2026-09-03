@@ -319,9 +319,20 @@ const CLICKHOUSE_URL: &str = "http://default:test@127.0.0.1:58123/bench";
 /// the driver's own test suite (`make db-up-clickhouse`), under the same table
 /// name the PostgreSQL benchmark uses.
 async fn clickhouse() -> Subject {
-    let driver = driver_clickhouse::ChSource::connect(CLICKHOUSE_URL)
-        .await
-        .expect("ClickHouse unreachable; run `make db-up-clickhouse`");
+    // Retried rather than attempted once, for the reason `redis()` below
+    // retries: the first connection a freshly built test binary makes can take
+    // half a minute to answer on a machine that checks a new binary's signature
+    // before letting it near a socket, and every one after it is instant. Over
+    // HTTP the wait arrives as "connection closed before message completed",
+    // which reads like a server that is not there.
+    let mut opened = driver_clickhouse::ChSource::connect(CLICKHOUSE_URL).await;
+    for _ in 0..30 {
+        if opened.is_ok() {
+            break;
+        }
+        opened = driver_clickhouse::ChSource::connect(CLICKHOUSE_URL).await;
+    }
+    let driver = opened.expect("ClickHouse unreachable; run `make db-up-clickhouse`");
     Subject {
         driver: Box::new(driver),
         schema: "bench".to_string(),
@@ -1100,7 +1111,11 @@ async fn mysql_compatible(
         broken: format!("SELECT {key} FROM {relation} WHERE ORDER BY {key}"),
         missing: "SELECT * FROM no_such_relation_anywhere".to_string(),
         missing_is_a_failure: true,
-        absent_process: "",
+        // The same well-formed id no server has reached that `mysql()` uses, and
+        // for the same reason. Not left empty: the driver refuses an id that is
+        // not a number before it reaches the server, which is right, and would
+        // make this clause assert the refusal instead of the race it is about.
+        absent_process: "18446744073709551615",
         cursors,
         positions,
         // Per server rather than per driver, which is the one place these two
@@ -2252,10 +2267,37 @@ async fn flightsql_satisfies_the_contract() {
 // Databases that are reached by a driver written for a different database
 // ---------------------------------------------------------------------------
 
-/// CockroachDB, through the PostgreSQL driver and no other code.
+/// CockroachDB, through the PostgreSQL driver — and exactly how far that goes.
+///
+/// Everything about running statements works, with no code written for it: it
+/// connects, streams batches, pages a cursor, controls a transaction with
+/// savepoints, and walks the navigator down to a relation's columns and keys.
+/// This test used to be `every_check`, and it stopped being one when two clauses
+/// that arrived later found the places where the compatibility stops. Both are
+/// the same shape: a `pg_catalog` name that exists on PostgreSQL and does not
+/// exist here.
+///
+/// **The server's own work.** `pg_stat_activity` is served and is empty —
+/// CockroachDB keeps its view of running statements in
+/// `crdb_internal.cluster_queries`, which is not a `pg_catalog` name and not
+/// something a PostgreSQL driver goes looking for. Neither `pg_cancel_backend`
+/// nor `pg_terminate_backend` exists, so there is no verb to stop one with
+/// either. The driver reports the capability because it is the PostgreSQL one,
+/// and on this server the Processes sheet is empty and its Stop button would
+/// fail.
+///
+/// **A relation's description.** `table_info` asks for a size, and CockroachDB
+/// has neither `pg_size_pretty` nor `pg_total_relation_size` nor
+/// `pg_relation_size`. The statement is one query, so the missing function takes
+/// the owner, the persistence and the comment down with it and the Info section
+/// is empty.
+///
+/// Named checks rather than `every_check`, so that the day either of those is
+/// answered this test starts passing more of the contract instead of silently
+/// continuing to assert less. Both gaps are in limitations.md.
 #[tokio::test]
 #[ignore = "requires a CockroachDB server"]
-async fn cockroachdb_satisfies_the_contract_through_the_postgres_driver() {
+async fn cockroachdb_reads_and_writes_through_the_postgres_driver() {
     let subject = pg_compatible(
         COCKROACH,
         vec![
@@ -2283,7 +2325,27 @@ async fn cockroachdb_satisfies_the_contract_through_the_postgres_driver() {
         Some(Scratch::sql("contract_tx")),
     )
     .await;
-    every_check(&subject).await;
+
+    // `every_check` without its two, listed rather than filtered so that adding
+    // a clause up there makes somebody decide about this server rather than
+    // quietly running it or quietly not.
+    reads_a_result_in_batches(&subject).await;
+    browses_a_relation(&subject).await;
+    pages_a_cursor(&subject).await;
+    cancels_an_idle_cursor_without_complaining(&subject).await;
+    reports_where_a_statement_is_wrong(&subject).await;
+    names_what_answered(&subject).await;
+    walks_the_navigator(&subject).await;
+    states_a_unique_key_in_columns(&subject).await;
+    answers_for_a_relation_that_is_not_there(&subject).await;
+    moves_between_databases_only_where_it_says_it_can(&subject).await;
+    draws_its_databases_at_one_level_or_the_other(&subject).await;
+    reports_its_routines_only_where_it_says_it_does(&subject).await;
+    lists_the_settings_it_runs_under_only_where_it_says_it_does(&subject).await;
+    reports_its_sequences_only_where_it_says_it_does(&subject).await;
+    writes_its_own_row_changes_only_where_it_says_it_does(&subject).await;
+    marks_the_engines_own_schemas_without_hiding_them(&subject).await;
+    controls_a_transaction(&subject).await;
 }
 
 /// GreptimeDB, through the PostgreSQL driver — and exactly how far that goes.
@@ -2369,19 +2431,33 @@ async fn greptimedb_reads_data_through_the_postgres_driver() {
     );
 }
 
-/// TiDB, through the MySQL driver and no other code.
+/// TiDB, through the MySQL driver — and exactly how far that goes.
 ///
-/// Every check passes. Two differences in its catalog are worth stating anyway,
-/// because both are invisible from here and neither is a fault the contract can
-/// see.
+/// Every check but one passes. Two further differences in its catalog are worth
+/// stating anyway, because both are invisible from here and neither is a fault
+/// the contract can see.
+///
+/// **Stopping a process.** MySQL's `KILL` fails with `ER_NO_SUCH_THREAD` for an
+/// id nothing is using, and the driver turns that into "nothing was stopped" —
+/// which is the ordinary race a front end has to survive, a process ending
+/// between the list being drawn and a row being chosen. TiDB's `KILL` reports
+/// success either way, so the driver answers "stopped" about a connection that
+/// was never there. Nothing on this side can tell the two apart. Named checks
+/// rather than `every_check`, so the day TiDB starts reporting this the test
+/// starts passing more of the contract instead of silently asserting less; the
+/// gap is in limitations.md.
 ///
 /// TiDB names its system schemas in upper case — `INFORMATION_SCHEMA`,
-/// `PERFORMANCE_SCHEMA`, and a `METRICS_SCHEMA` of its own — so the driver's
-/// list of schemas to hide, which is written the way MySQL spells them, hides
-/// none of them. A navigator against TiDB shows three schemas a navigator
-/// against MySQL does not. Upper-casing the comparison would fix that and would
-/// also newly hide a MySQL database genuinely named `MYSQL` or `Sys`, which on a
-/// case-sensitive filesystem is a database somebody may have made on purpose.
+/// `PERFORMANCE_SCHEMA`, and a `METRICS_SCHEMA` of its own — and compares
+/// `SCHEMA_NAME` case-sensitively, so the driver's list of the four the server
+/// keeps for itself, written the way MySQL spells them, matches none of them. A
+/// navigator against TiDB draws three schemas as ordinary user schemas, sorted
+/// among them, that a navigator against MySQL marks as the engine's own.
+/// Upper-casing the comparison would fix that and would also newly mark a MySQL
+/// database genuinely named `MYSQL` or `Sys`, which on a case-sensitive
+/// filesystem is a database somebody may have made on purpose. The clause above
+/// does not catch it: it asks that a marked schema can be listed, not that a
+/// particular name is marked, because the names are the driver's business.
 ///
 /// And `information_schema.TABLES` compares `TABLE_SCHEMA` case-sensitively
 /// while `information_schema.COLUMNS` does not, which is TiDB disagreeing with
@@ -2392,7 +2468,7 @@ async fn greptimedb_reads_data_through_the_postgres_driver() {
 /// question it is asking.
 #[tokio::test]
 #[ignore = "requires a TiDB server"]
-async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
+async fn tidb_reads_and_writes_through_the_mysql_driver() {
     let subject = mysql_compatible(
         TIDB,
         vec![
@@ -2416,19 +2492,58 @@ async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
         Some(Scratch::sql("contract_tx")),
     )
     .await;
-    every_check(&subject).await;
+
+    // `every_check` without its one, listed rather than filtered so that adding
+    // a clause up there makes somebody decide about this server rather than
+    // quietly running it or quietly not.
+    reads_a_result_in_batches(&subject).await;
+    browses_a_relation(&subject).await;
+    pages_a_cursor(&subject).await;
+    cancels_an_idle_cursor_without_complaining(&subject).await;
+    reports_where_a_statement_is_wrong(&subject).await;
+    names_what_answered(&subject).await;
+    walks_the_navigator(&subject).await;
+    states_a_unique_key_in_columns(&subject).await;
+    answers_for_a_relation_that_is_not_there(&subject).await;
+    moves_between_databases_only_where_it_says_it_can(&subject).await;
+    draws_its_databases_at_one_level_or_the_other(&subject).await;
+    reports_its_routines_only_where_it_says_it_does(&subject).await;
+    lists_the_settings_it_runs_under_only_where_it_says_it_does(&subject).await;
+    reports_its_sequences_only_where_it_says_it_does(&subject).await;
+    writes_its_own_row_changes_only_where_it_says_it_does(&subject).await;
+    marks_the_engines_own_schemas_without_hiding_them(&subject).await;
+    describes_a_relation_without_saying_anything_twice(&subject).await;
+    controls_a_transaction(&subject).await;
 }
 
-/// StarRocks, through the MySQL driver and no other code.
+/// StarRocks, through the MySQL driver — and exactly how far that goes.
 ///
-/// Every check passes, which is further than its shape suggests it would: it is
-/// a distributed column store, its tables declare how they are spread and how
-/// many copies to keep, and none of that reaches the driver. Its
+/// Nearly every check passes, which is further than its shape suggests it would:
+/// it is a distributed column store, its tables declare how they are spread and
+/// how many copies to keep, and none of that reaches the driver. Its
 /// `information_schema` carries every table the nine metadata calls read except
-/// `CHECK_CONSTRAINTS`, and that one is already asked about rather than assumed,
-/// so unique constraints come back and checks are simply not claimed. The
-/// capability probe was written for MariaDB and old MySQL and it turns out to
-/// have been the right shape for this too, which is the useful result.
+/// `CHECK_CONSTRAINTS` and `PARAMETERS`. The first is already asked about rather
+/// than assumed, so unique constraints come back and checks are simply not
+/// claimed. The capability probe was written for MariaDB and old MySQL and it
+/// turns out to have been the right shape for this too, which is the useful
+/// result.
+///
+/// **Routines.** The second missing table is the one that costs a check.
+/// `routines` reads `ROUTINES` for the names and `PARAMETERS` for the
+/// signatures, and StarRocks has the first and not the second, so the call
+/// fails rather than answering — while the driver reports `reports_routines`,
+/// because it is the MySQL one. Named checks rather than `every_check`, so that
+/// the day StarRocks grows `PARAMETERS` this test starts passing more of the
+/// contract instead of silently continuing to assert less. The gap is in
+/// limitations.md.
+///
+/// **Running work.** `SHOW FULL PROCESSLIST` answers here, but not with MySQL's
+/// columns: StarRocks puts the frontend's `ServerName` where MySQL puts the
+/// numeric `Id`, so the id column reads as text and the driver reports a decode
+/// error rather than a list. Reading it would mean recognising the product and
+/// picking a column layout, which is a different design from the one the MySQL
+/// driver has; until then the check is omitted rather than weakened. Also in
+/// limitations.md.
 ///
 /// Transactions are where the shape finally shows through, and the driver has to
 /// probe for them to find out. `BEGIN` and `COMMIT` work; `SAVEPOINT` is a
@@ -2438,7 +2553,7 @@ async fn tidb_satisfies_the_contract_through_the_mysql_driver() {
 /// subject carries no transaction fixture and the check asserts the refusal.
 #[tokio::test]
 #[ignore = "requires a StarRocks server"]
-async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
+async fn starrocks_reads_and_writes_through_the_mysql_driver() {
     let subject = mysql_compatible(
         STARROCKS,
         vec![
@@ -2473,5 +2588,25 @@ async fn starrocks_satisfies_the_contract_through_the_mysql_driver() {
         None,
     )
     .await;
-    every_check(&subject).await;
+
+    // `every_check` without its one, listed rather than filtered so that adding
+    // a clause up there makes somebody decide about this server rather than
+    // quietly running it or quietly not.
+    reads_a_result_in_batches(&subject).await;
+    browses_a_relation(&subject).await;
+    pages_a_cursor(&subject).await;
+    cancels_an_idle_cursor_without_complaining(&subject).await;
+    reports_where_a_statement_is_wrong(&subject).await;
+    names_what_answered(&subject).await;
+    walks_the_navigator(&subject).await;
+    states_a_unique_key_in_columns(&subject).await;
+    answers_for_a_relation_that_is_not_there(&subject).await;
+    moves_between_databases_only_where_it_says_it_can(&subject).await;
+    draws_its_databases_at_one_level_or_the_other(&subject).await;
+    lists_the_settings_it_runs_under_only_where_it_says_it_does(&subject).await;
+    reports_its_sequences_only_where_it_says_it_does(&subject).await;
+    writes_its_own_row_changes_only_where_it_says_it_does(&subject).await;
+    marks_the_engines_own_schemas_without_hiding_them(&subject).await;
+    describes_a_relation_without_saying_anything_twice(&subject).await;
+    controls_a_transaction(&subject).await;
 }

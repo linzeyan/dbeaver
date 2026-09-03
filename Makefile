@@ -255,7 +255,7 @@ test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests 
 	cargo test -p dbddl --test postgres -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		postgres_satisfies_the_contract \
-		cockroachdb_satisfies_the_contract_through_the_postgres_driver \
+		cockroachdb_reads_and_writes_through_the_postgres_driver \
 		greptimedb_reads_data_through_the_postgres_driver
 
 .PHONY: test-mysql
@@ -264,8 +264,8 @@ test-mysql: db-check-mysql db-check-tidb db-check-starrocks ## Integration tests
 	cargo test -p dbddl --test mysql -- --ignored
 	cargo test -p dbconn --test contract -- --ignored --exact \
 		mysql_satisfies_the_contract \
-		tidb_satisfies_the_contract_through_the_mysql_driver \
-		starrocks_satisfies_the_contract_through_the_mysql_driver
+		tidb_reads_and_writes_through_the_mysql_driver \
+		starrocks_reads_and_writes_through_the_mysql_driver
 
 .PHONY: test-mssql
 test-mssql: db-check-mssql ## Integration tests behind SQL Server

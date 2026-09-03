@@ -993,26 +993,49 @@ async fn a_statement_that_writes_reports_the_rows_it_changed() {
     );
 }
 
+/// Every schema, including an empty one and the server's own.
+///
+/// The last part of this used to assert the opposite: `db_owner`, `sys` and
+/// `INFORMATION_SCHEMA` were kept out of the answer entirely, on the grounds
+/// that the twelve fixed database-role schemas are noise in a navigator. They
+/// are, and they are now marked as the server's and left in — a name missing
+/// from the answer is one no setting can put back, and whoever draws the tree
+/// decides what to draw.
 #[tokio::test]
 #[ignore = "requires a SQL Server"]
-async fn lists_every_schema_including_an_empty_one() {
+async fn lists_every_schema_marking_the_servers_own() {
     let driver = source().await;
-    let names: Vec<String> = driver
-        .schemas()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    assert!(names.contains(&"sales".to_string()));
+    let schemas = driver.schemas().await.unwrap();
+    let names: Vec<&str> = schemas.iter().map(|s| s.name.as_str()).collect();
+    let system = |name: &str| {
+        schemas
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} should be listed, got {names:?}"))
+            .is_system
+    };
+    assert!(!system("sales"));
     // A schema somebody created a moment ago and has not put anything in yet.
     // Upstream hides this one, by listing only schemas that contain something.
-    assert!(names.contains(&"archive".to_string()));
-    assert!(names.contains(&"dbo".to_string()));
-    // The fixed database-role schemas are noise in a navigator.
-    assert!(!names.contains(&"db_owner".to_string()));
-    assert!(!names.contains(&"sys".to_string()));
-    assert!(!names.contains(&"INFORMATION_SCHEMA".to_string()));
+    assert!(!system("archive"));
+    assert!(
+        !system("dbo"),
+        "the default schema is where a user's tables go"
+    );
+    for own in ["db_owner", "db_datareader", "sys", "INFORMATION_SCHEMA"] {
+        assert!(system(own), "{own} is the server's own");
+    }
+
+    // And the server's own sort last, so a fresh connection does not open the
+    // tree on `db_accessadmin`.
+    let first_system = schemas
+        .iter()
+        .position(|s| s.is_system)
+        .expect("the server's own are in the list");
+    assert!(
+        schemas[first_system..].iter().all(|s| s.is_system),
+        "the server's own belong after everybody else's, got {names:?}"
+    );
 }
 
 #[tokio::test]
