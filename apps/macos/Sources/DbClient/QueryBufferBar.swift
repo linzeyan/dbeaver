@@ -47,7 +47,7 @@ struct QueryBufferBar: View {
                     } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Theme.textSecondary.color)
+                            .foregroundStyle(Theme.Text.secondary.color)
                             .frame(width: 24, height: 26)
                             .contentShape(Rectangle())
                     }
@@ -58,9 +58,9 @@ struct QueryBufferBar: View {
             }
         }
         .frame(height: 26)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
         }
     }
 }
@@ -99,7 +99,7 @@ private struct QueryBufferItem: View {
                 TextField("", text: $draft)
                     .textFieldStyle(.plain)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .focused($isEditing)
                     .frame(minWidth: 44)
                     .fixedSize()
@@ -114,10 +114,10 @@ private struct QueryBufferItem: View {
                     .padding(.vertical, 1)
                     .background(
                         RoundedRectangle(cornerRadius: Theme.Radius.control)
-                            .fill(Theme.surface.color)
+                            .fill(Theme.Surface.raised.color)
                             .overlay(
                                 RoundedRectangle(cornerRadius: Theme.Radius.control)
-                                    .strokeBorder(Theme.accent.color, lineWidth: 1))
+                                    .strokeBorder(Theme.Accent.selection.color, lineWidth: 1))
                     )
                     .onSubmit { commitRename(draft) }
                     .onExitCommand {
@@ -143,14 +143,16 @@ private struct QueryBufferItem: View {
             } else {
                 Text(title)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(isActive ? Theme.text.color : Theme.textSecondary.color)
+                    .foregroundStyle(
+                        isActive ? Theme.Text.primary.color : Theme.Text.secondary.color
+                    )
                     .lineLimit(1)
             }
             if isHovering && canClose && !isRenaming {
                 Button(action: close) {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close \(title)")
@@ -161,7 +163,7 @@ private struct QueryBufferItem: View {
         .contentShape(Rectangle())
         .overlay(alignment: .bottom) {
             if isActive {
-                Rectangle().fill(Theme.accent.color).frame(height: 2)
+                Rectangle().fill(Theme.Accent.selection.color).frame(height: 2)
             }
         }
         .onTapGesture(perform: select)

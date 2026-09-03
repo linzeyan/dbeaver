@@ -37,7 +37,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         // moves; what changes is the fill.
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
-        window.backgroundColor = NSColor(Theme.background.color)
+        window.backgroundColor = NSColor(Theme.Surface.canvas.color)
         // Below this the grid shows one column and the filter bar wraps; there is
         // no useful layout smaller, so the window is not allowed to reach it.
         window.minSize = NSSize(width: 940, height: 580)

@@ -21,13 +21,13 @@ struct ImportSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             list
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 540, height: 420)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it, as it does the transfer picker. Closing is the safe
         // move here — nothing has been read yet — so it needs no confirmation.
         .onExitCommand { model.importPlan = nil }
@@ -42,15 +42,15 @@ struct ImportSheet: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(plan?.url.lastPathComponent ?? "")
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Image(systemName: "arrow.right")
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                 Text(plan?.table ?? "")
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
@@ -59,7 +59,7 @@ struct ImportSheet: View {
                     + "part way leaves behind the rows it had already written."
             )
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .fixedSize(horizontal: false, vertical: true)
         }
         .padding(Theme.Space.md)
@@ -88,16 +88,18 @@ struct ImportSheet: View {
             // and there is nothing wrong with it. What is being marked is that
             // this column has nowhere to go, which is a property of the row.
             Circle()
-                .fill(target == nil ? Theme.warning.color : Color.clear)
+                .fill(target == nil ? Theme.Semantic.warning.color : Color.clear)
                 .frame(width: 5, height: 5)
             Text(plan.fileColumns[index])
                 .font(Theme.Typography.mono)
-                .foregroundStyle(target == nil ? Theme.textTertiary.color : Theme.text.color)
+                .foregroundStyle(
+                    target == nil ? Theme.Text.tertiary.color : Theme.Text.primary.color
+                )
                 .lineLimit(1)
                 .frame(width: 170, alignment: .leading)
             Image(systemName: "arrow.right")
                 .font(.system(size: 9))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Picker("", selection: binding(at: index)) {
                 Text("Skip").tag(String?.none)
                 Divider()
@@ -128,7 +130,7 @@ struct ImportSheet: View {
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
                     model.importPlanObstacle == nil
-                        ? Theme.textTertiary.color : Theme.warning.color
+                        ? Theme.Text.tertiary.color : Theme.Semantic.warning.color
                 )
                 .lineLimit(1)
             Spacer(minLength: Theme.Space.sm)

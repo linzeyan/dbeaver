@@ -21,9 +21,9 @@ struct RelationChangeSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             preview
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         // Width fixed, height from the content. Unlike the create sheet, whose
@@ -31,7 +31,7 @@ struct RelationChangeSheet: View {
         // writes is a single statement — so a fixed height was three hundred
         // points of black under four words.
         .frame(width: 540)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it. Nothing has run yet, so closing needs no question.
         .onExitCommand { model.changePlan = nil }
     }
@@ -42,19 +42,19 @@ struct RelationChangeSheet: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(plan?.qualified ?? "")
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(kindLabel)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                 Spacer(minLength: 0)
             }
             if change == .rename {
                 HStack(spacing: Theme.Space.sm) {
                     Text("To")
                         .font(Theme.Typography.body)
-                        .foregroundStyle(Theme.textSecondary.color)
+                        .foregroundStyle(Theme.Text.secondary.color)
                     TextField("New name", text: nameBinding)
                         .textFieldStyle(.roundedBorder)
                         .font(Theme.Typography.mono)
@@ -86,7 +86,7 @@ struct RelationChangeSheet: View {
     /// The warning tone for the two that destroy something, and the ordinary one
     /// for the rename. The only colour that separates the three sheets.
     private var consequenceTone: Color {
-        change.isDestructive ? Theme.warning.color : Theme.textSecondary.color
+        change.isDestructive ? Theme.Semantic.warning.color : Theme.Text.secondary.color
     }
 
     /// The sentence under the name, which is the one thing here that is not a
@@ -110,7 +110,7 @@ struct RelationChangeSheet: View {
         ScrollView {
             Text(plan?.preview ?? "")
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.Space.md)
@@ -128,7 +128,7 @@ struct RelationChangeSheet: View {
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
                     model.relationChangeObstacle == nil
-                        ? Theme.textTertiary.color : Theme.warning.color
+                        ? Theme.Text.tertiary.color : Theme.Semantic.warning.color
                 )
                 .lineLimit(2)
             Spacer(minLength: Theme.Space.sm)

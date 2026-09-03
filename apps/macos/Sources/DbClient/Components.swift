@@ -35,7 +35,7 @@ struct TabBar: View {
         }
         .padding(.horizontal, Theme.Space.sm)
         .padding(.vertical, Theme.Space.xs + 1)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
     }
 }
 
@@ -78,15 +78,15 @@ private struct TabButton: View {
     }
 
     private var foreground: Color {
-        if isSelected { return Theme.text.color }
-        return isHovering ? Theme.text.color : Theme.textSecondary.color
+        if isSelected { return Theme.Text.primary.color }
+        return isHovering ? Theme.Text.primary.color : Theme.Text.secondary.color
     }
 
     /// The hover fill is deliberately weaker than the selected fill: hovering
     /// must never be mistakable for "this is the tab I am on".
     private var background: Color {
-        if isSelected { return Theme.accent.opacity(0.30).color }
-        return isHovering ? Theme.surfaceRaised.color : .clear
+        if isSelected { return Theme.Accent.selection.opacity(0.30).color }
+        return isHovering ? Theme.Surface.overlay.color : .clear
     }
 }
 
@@ -105,14 +105,14 @@ struct InlineBanner: View {
         HStack(alignment: .top, spacing: Theme.Space.sm) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.dangerText.color)
+                .foregroundStyle(Theme.Semantic.dangerText.color)
                 .padding(.top, 1)
 
             // Monospaced because the content is a database error, which quotes
             // SQL and points at column positions.
             Text(message)
                 .font(Theme.Typography.monoSmall)
-                .foregroundStyle(Theme.dangerText.color)
+                .foregroundStyle(Theme.Semantic.dangerText.color)
                 .textSelection(.enabled)
                 .lineLimit(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -130,7 +130,7 @@ struct InlineBanner: View {
             Button(action: onDismiss) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Theme.dangerText.color)
+                    .foregroundStyle(Theme.Semantic.dangerText.color)
                     .frame(width: 18, height: 18)
                     .contentShape(Rectangle())
             }
@@ -140,10 +140,10 @@ struct InlineBanner: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
-        .background(Theme.danger.opacity(0.14).color)
+        .background(Theme.Semantic.danger.opacity(0.14).color)
         .overlay(alignment: .leading) {
             Rectangle()
-                .fill(Theme.danger.color)
+                .fill(Theme.Semantic.danger.color)
                 .frame(width: 2)
         }
         .accessibilityElement(children: .contain)
@@ -167,20 +167,20 @@ struct EmptyState: View {
         VStack(spacing: Theme.Space.md) {
             Image(systemName: symbol)
                 .font(.system(size: 26, weight: .light))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             VStack(spacing: Theme.Space.xs) {
                 Text(title)
                     .font(Theme.Typography.title)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                 Text(hint)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .multilineTextAlignment(.center)
             }
         }
         .padding(Theme.Space.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .accessibilityElement(children: .combine)
     }
 }
@@ -195,9 +195,9 @@ struct StatusDot: View {
 
         var tone: Theme.Tone {
             switch self {
-            case .connecting: return Theme.warning
-            case .connected: return Theme.run
-            case .failed: return Theme.danger
+            case .connecting: return Theme.Semantic.warning
+            case .connected: return Theme.Accent.execute
+            case .failed: return Theme.Semantic.danger
             }
         }
 
@@ -247,7 +247,7 @@ struct SidebarFilterField: View {
         HStack(spacing: Theme.Space.xs + 2) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
 
             // Named for what it matches. "Filter" alone, over a tree of two
             // levels, leaves the user to discover by experiment that the schema
@@ -258,7 +258,7 @@ struct SidebarFilterField: View {
             TextField("Filter objects and \(noun)s", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .focused($focus, equals: .navigatorFilter)
 
             if !text.isEmpty {
@@ -267,7 +267,7 @@ struct SidebarFilterField: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
                 .buttonStyle(.plain)
                 .help("Clear filter (⎋)")
@@ -278,13 +278,13 @@ struct SidebarFilterField: View {
         .frame(height: 22)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
-                .fill(Theme.background.opacity(0.6).color)
+                .fill(Theme.Surface.canvas.opacity(0.6).color)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
                 .strokeBorder(
                     focus == .navigatorFilter
-                        ? Theme.accent.color : Theme.separator.color,
+                        ? Theme.Accent.selection.color : Theme.Border.hairline.color,
                     lineWidth: 1)
         )
         // Escape empties the field, which is the reflex every macOS search
@@ -305,7 +305,7 @@ struct FieldLabel: View {
     var body: some View {
         Text(text)
             .font(Theme.Typography.micro.weight(.semibold))
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .textCase(.uppercase)
             .accessibilityHidden(true)
     }
@@ -329,19 +329,19 @@ struct CompactField: View {
         entry
             .textFieldStyle(.plain)
             .font(Theme.Typography.monoSmall)
-            .foregroundStyle(Theme.text.color)
+            .foregroundStyle(Theme.Text.primary.color)
             .focused($focus, equals: area)
             .onSubmit(onSubmit)
             .padding(.horizontal, Theme.Space.sm)
             .frame(height: 22)
             .background(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
-                    .fill(Theme.background.opacity(0.6).color)
+                    .fill(Theme.Surface.canvas.opacity(0.6).color)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: Theme.Radius.control)
                     .strokeBorder(
-                        focus == area ? Theme.accent.color : Theme.separator.color,
+                        focus == area ? Theme.Accent.selection.color : Theme.Border.hairline.color,
                         lineWidth: 1))
     }
 

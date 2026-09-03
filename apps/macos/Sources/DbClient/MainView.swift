@@ -298,7 +298,7 @@ private struct TransactionControl: View {
             .menuStyle(.borderlessButton)
             .fixedSize()
             .foregroundStyle(
-                (model.hasUncommittedWork ? Theme.warning : Theme.textSecondary).color
+                (model.hasUncommittedWork ? Theme.Semantic.warning : Theme.Text.secondary).color
             )
             .help(help)
 
@@ -379,7 +379,7 @@ struct NavigatorView: View {
                             // only layer there is.
                             .listRowBackground(
                                 model.navigatorSelection == .relation(relation)
-                                    ? Theme.accent.opacity(0.22).color
+                                    ? Theme.Accent.selection.opacity(0.22).color
                                     : Color.clear)
                     }
                     // The tables stay where they were, at the schema's own
@@ -396,7 +396,7 @@ struct NavigatorView: View {
                                     .tag(NavigatorNode.routine(routine))
                                     .listRowBackground(
                                         model.navigatorSelection == .routine(routine)
-                                            ? Theme.accent.opacity(0.22).color
+                                            ? Theme.Accent.selection.opacity(0.22).color
                                             : Color.clear)
                             }
                         } label: {
@@ -411,7 +411,7 @@ struct NavigatorView: View {
                                     .tag(NavigatorNode.sequence(sequence))
                                     .listRowBackground(
                                         model.navigatorSelection == .sequence(sequence)
-                                            ? Theme.accent.opacity(0.22).color
+                                            ? Theme.Accent.selection.opacity(0.22).color
                                             : Color.clear)
                             }
                         } label: {
@@ -625,7 +625,7 @@ struct NavigatorView: View {
         // are one expression: what changes is whether anything is drawn over the
         // material, and that reads better than a conditional modifier.
         .background(
-            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.background.color
+            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.Surface.canvas.color
         )
         .safeAreaInset(edge: .bottom) {
             // Object count belongs where the objects are, not in the main status
@@ -633,7 +633,7 @@ struct NavigatorView: View {
             HStack {
                 Text(countLabel)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                 Spacer()
                 // The pair every navigator has at the bottom left, and until
                 // there was a `CREATE TABLE` to put behind the first of them
@@ -651,7 +651,7 @@ struct NavigatorView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(
-                    model.makesTables ? Theme.textSecondary.color : Theme.textTertiary.color
+                    model.makesTables ? Theme.Text.secondary.color : Theme.Text.tertiary.color
                 )
                 .disabled(!model.makesTables)
                 .help("Make a table in this \(model.containerNoun)")
@@ -669,7 +669,7 @@ struct NavigatorView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(
-                    model.canDropSelected ? Theme.textSecondary.color : Theme.textTertiary.color
+                    model.canDropSelected ? Theme.Text.secondary.color : Theme.Text.tertiary.color
                 )
                 .disabled(!model.canDropSelected)
                 .help(
@@ -696,7 +696,7 @@ struct NavigatorView: View {
                 // Coloured rather than left to the button style's dimming, so
                 // the disabled state reads at 10pt on a dark background.
                 .foregroundStyle(
-                    model.canRefresh ? Theme.textSecondary.color : Theme.textTertiary.color
+                    model.canRefresh ? Theme.Text.secondary.color : Theme.Text.tertiary.color
                 )
                 .disabled(!model.canRefresh)
                 .help("Reload \(model.containerNoun)s and objects from the database (⇧⌘R)")
@@ -704,9 +704,9 @@ struct NavigatorView: View {
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 2)
-            .background(Theme.surface.color)
+            .background(Theme.Surface.raised.color)
             .overlay(alignment: .top) {
-                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             }
         }
     }
@@ -839,10 +839,11 @@ private struct DatabaseLabel: View {
         HStack(spacing: Theme.Space.xs + 2) {
             Image(systemName: isCurrent ? "cylinder.fill" : "cylinder")
                 .font(.system(size: 10))
-                .foregroundStyle(isCurrent ? Theme.accent.color : Theme.textTertiary.color)
+                .foregroundStyle(
+                    isCurrent ? Theme.Accent.selection.color : Theme.Text.tertiary.color)
             Text(name)
                 .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(isCurrent ? Theme.text.color : Theme.textSecondary.color)
+                .foregroundStyle(isCurrent ? Theme.Text.primary.color : Theme.Text.secondary.color)
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
@@ -873,13 +874,13 @@ private struct SchemaLabel: View {
         HStack(spacing: Theme.Space.xs + 2) {
             Image(systemName: isDatabase ? "cylinder" : "square.stack.3d.up")
                 .font(.system(size: 10))
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
             Text(name)
                 .font(Theme.Typography.bodyEmphasis)
             Spacer(minLength: Theme.Space.xs)
             Text("\(count)")
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
@@ -895,7 +896,8 @@ struct NavigatorRow: View {
             Image(systemName: relation.kind.symbol)
                 .font(.system(size: 11))
                 .foregroundStyle(
-                    relation.kind == .table ? Theme.accent.color : Theme.textSecondary.color
+                    relation.kind == .table
+                        ? Theme.Accent.selection.color : Theme.Text.secondary.color
                 )
                 .frame(width: 14)
 
@@ -914,7 +916,7 @@ struct NavigatorRow: View {
                 // navigator as the one place claiming an exact count.
                 Text(rows)
                     .font(Theme.Typography.digits)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
             }
         }
         .padding(.vertical, 1)
@@ -941,14 +943,14 @@ private struct GroupLabel: View {
         HStack(spacing: Theme.Space.xs + 2) {
             Image(systemName: symbol)
                 .font(.system(size: 10))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Text(title)
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
             Spacer(minLength: Theme.Space.xs)
             Text("\(count)")
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(title), \(count)")
@@ -967,7 +969,7 @@ struct RoutineRow: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: routine.kind.symbol)
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .frame(width: 14)
 
             Text(routine.signature)
@@ -1009,18 +1011,18 @@ struct RoutineStructureView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             body_
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
     }
 
     private var header: some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text(routine.signature)
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .lineLimit(2)
             HStack(spacing: Theme.Space.md) {
@@ -1040,7 +1042,7 @@ struct RoutineStructureView: View {
     private func fact(_ text: String) -> some View {
         Text(text)
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
     }
 
     /// Named with the underscore because `body` is taken by the protocol.
@@ -1049,7 +1051,7 @@ struct RoutineStructureView: View {
             ScrollView([.vertical, .horizontal]) {
                 Text(source)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .textSelection(.enabled)
                     .fixedSize()
                     .padding(.horizontal, Theme.Space.md)
@@ -1085,7 +1087,7 @@ struct SequenceRow: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: "number")
                 .font(.system(size: 11))
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .frame(width: 14)
 
             Text(sequence.name)
@@ -1100,7 +1102,7 @@ struct SequenceRow: View {
             if let last = sequence.lastValue {
                 Text(last)
                     .font(Theme.Typography.digits)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
             }
         }
         .padding(.vertical, 1)
@@ -1133,11 +1135,11 @@ struct SequenceStructureView: View {
         VStack(alignment: .leading, spacing: 0) {
             Text(sequence.name)
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .padding(.horizontal, Theme.Space.md)
                 .padding(.vertical, Theme.Space.sm)
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 // First, because it is the one that changes and the one anybody
@@ -1165,20 +1167,20 @@ struct SequenceStructureView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
     }
 
     private func row(_ label: String, _ value: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Space.md) {
             Text(label)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 // A fixed column so the values line up; a sequence's fields are
                 // read down the numbers, not across the labels.
                 .frame(width: 110, alignment: .leading)
             Text(value)
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
         }
         .accessibilityElement(children: .combine)
@@ -1196,7 +1198,7 @@ struct DetailPane: View {
     var body: some View {
         VStack(spacing: 0) {
             TabBar(selection: $model.activeTab)
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
 
             if let error = model.errorMessage {
                 InlineBanner(message: error) { model.errorMessage = nil }
@@ -1213,14 +1215,14 @@ struct DetailPane: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             if model.isFindingInGrid {
-                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                 GridFindBar(model: model, focus: $focus)
             }
 
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             StatusBar(model: model)
         }
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .animation(Theme.Motion.ease(reduceMotion), value: model.errorMessage)
         // Focus follows the tab. Without this, switching to Query leaves the
         // caret wherever it was and the editor needs a click before it accepts
@@ -1275,7 +1277,7 @@ extension View {
     /// The scroll view's own background hidden, for the reason `ValueViewer`
     /// gives about `TextEditor`: an AppKit control left alone draws the
     /// system's control colour, a neutral near-black, while every other
-    /// surface in this window is the palette's blue-tinted `background`. A
+    /// surface in this window is the palette's blue-tinted `Surface.canvas`. A
     /// table in it reads as a panel borrowed from another application and
     /// dropped into the pane.
     ///
@@ -1290,7 +1292,7 @@ extension View {
         self
             .tableStyle(.inset(alternatesRowBackgrounds: false))
             .scrollContentBackground(.hidden)
-            .background(Theme.background.color)
+            .background(Theme.Surface.canvas.color)
     }
 }
 
@@ -1422,7 +1424,7 @@ struct StructurePane: View {
     private func emptyLine(_ text: String) -> some View {
         Text(text)
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -1439,7 +1441,7 @@ struct StructurePane: View {
         ScrollView([.vertical, .horizontal]) {
             Text(sql)
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .fixedSize()
                 .padding(.horizontal, Theme.Space.md)
@@ -1462,7 +1464,7 @@ struct StructurePane: View {
                 if column.isPrimaryKey {
                     Image(systemName: "key.fill")
                         .font(.system(size: 9))
-                        .foregroundStyle(Theme.warning.color)
+                        .foregroundStyle(Theme.Semantic.warning.color)
                         .help("Primary key")
                         .accessibilityLabel("Primary key")
                 }
@@ -1472,13 +1474,13 @@ struct StructurePane: View {
             TableColumn("Column") { column in
                 Text(column.name)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
             }
 
             TableColumn("Type") { column in
                 Text(column.dataType)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
             }
 
             TableColumn("Null") { column in
@@ -1489,14 +1491,14 @@ struct StructurePane: View {
                     .font(Theme.Typography.monoSmall)
                     .foregroundStyle(
                         column.nullable
-                            ? Theme.textTertiary.color : Theme.text.color)
+                            ? Theme.Text.tertiary.color : Theme.Text.primary.color)
             }
             .width(48)
 
             TableColumn("Default") { column in
                 Text(column.defaultValue ?? "—")
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
             }
         }
@@ -1570,7 +1572,7 @@ struct StructurePane: View {
             TableColumn("Field") { field in
                 Text(field.label)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
             }
             // Fixed, unlike the other sections' columns. Two columns share the
             // pane's whole width, so a flexible label column takes half of it
@@ -1582,7 +1584,7 @@ struct StructurePane: View {
             TableColumn("Value") { field in
                 Text(field.value)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .textSelection(.enabled)
             }
         }
@@ -1595,7 +1597,7 @@ struct StructurePane: View {
                 if index.isPrimary {
                     Image(systemName: "key.fill")
                         .font(.system(size: 9))
-                        .foregroundStyle(Theme.warning.color)
+                        .foregroundStyle(Theme.Semantic.warning.color)
                         .help("Primary key")
                         .accessibilityLabel("Primary key")
                 }
@@ -1607,7 +1609,7 @@ struct StructurePane: View {
                 // tooltip is what makes a truncated one recoverable.
                 Text(index.name)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                     .help(index.name)
             }
@@ -1618,7 +1620,7 @@ struct StructurePane: View {
                 // shown as a plain one claims coverage it lacks.
                 Text(Self.keyLabel(index))
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                     .help(Self.keyLabel(index))
             }
@@ -1626,7 +1628,7 @@ struct StructurePane: View {
             TableColumn("Kind") { index in
                 Text(index.kindLabel)
                     .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
             }
             .width(min: 70, ideal: 96)
@@ -1669,21 +1671,21 @@ struct StructurePane: View {
             TableColumn("Columns") { key in
                 Text(key.localColumns.joined(separator: ", "))
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
             }
 
             TableColumn("References") { key in
                 Text(key.otherLabel(sameSchemaAs: model.selected?.schema ?? ""))
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             }
 
             TableColumn("On") { key in
                 Text(key.actionLabel.isEmpty ? "—" : key.actionLabel)
                     .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
             }
             .width(min: 80, ideal: 150)
@@ -1699,14 +1701,14 @@ struct StructurePane: View {
             TableColumn("From") { key in
                 Text(key.otherLabel(sameSchemaAs: model.selected?.schema ?? ""))
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
             }
 
             TableColumn("To columns") { key in
                 Text(key.localColumns.joined(separator: ", "))
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             }
 
@@ -1717,7 +1719,7 @@ struct StructurePane: View {
                     .font(Theme.Typography.monoSmall)
                     .foregroundStyle(
                         key.onDelete == "CASCADE"
-                            ? Theme.warning.color : Theme.textTertiary.color
+                            ? Theme.Semantic.warning.color : Theme.Text.tertiary.color
                     )
                     .lineLimit(1)
             }
@@ -1731,14 +1733,14 @@ struct StructurePane: View {
             TableColumn("Kind") { constraint in
                 Text(constraint.kind.label)
                     .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
             }
             .width(min: 56, ideal: 66)
 
             TableColumn("Name") { constraint in
                 Text(constraint.name)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                     .help(constraint.name)
             }
@@ -1746,7 +1748,7 @@ struct StructurePane: View {
             TableColumn("Definition") { constraint in
                 Text(constraint.definition)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                     .help(constraint.definition)
             }
@@ -1763,7 +1765,7 @@ struct StructurePane: View {
                 if !trigger.enabled {
                     Image(systemName: "pause.circle")
                         .font(.system(size: 10))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                         .help("Disabled")
                         .accessibilityLabel("Disabled")
                 }
@@ -1774,7 +1776,7 @@ struct StructurePane: View {
                 Text(trigger.name)
                     .font(Theme.Typography.mono)
                     .foregroundStyle(
-                        trigger.enabled ? Theme.text.color : Theme.textTertiary.color
+                        trigger.enabled ? Theme.Text.primary.color : Theme.Text.tertiary.color
                     )
                     .lineLimit(1)
                     .help(trigger.name)
@@ -1783,14 +1785,14 @@ struct StructurePane: View {
             TableColumn("When") { trigger in
                 Text(trigger.whenLabel)
                     .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             }
 
             TableColumn("Runs") { trigger in
                 Text(trigger.runsLabel)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
                     .help(trigger.definition ?? trigger.runsLabel)
             }
@@ -1824,7 +1826,7 @@ private struct StructureDetailStrip: View {
                                 .font(Theme.Typography.digits)
                                 .foregroundStyle(
                                     selected == section
-                                        ? Theme.textSecondary.color : Theme.textTertiary.color)
+                                        ? Theme.Text.secondary.color : Theme.Text.tertiary.color)
                         }
                     }
                     .padding(.horizontal, Theme.Space.sm)
@@ -1833,10 +1835,10 @@ private struct StructureDetailStrip: View {
                         RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
                             .fill(
                                 selected == section
-                                    ? Theme.surfaceRaised.color : Color.clear)
+                                    ? Theme.Surface.overlay.color : Color.clear)
                     )
                     .foregroundStyle(
-                        selected == section ? Theme.text.color : Theme.textSecondary.color)
+                        selected == section ? Theme.Text.primary.color : Theme.Text.secondary.color)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(count.map { "\(section.rawValue), \($0)" } ?? section.rawValue)
@@ -1850,9 +1852,9 @@ private struct StructureDetailStrip: View {
         }
         .padding(.horizontal, Theme.Space.sm)
         .frame(height: 26)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         .overlay(alignment: .top) {
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
         }
     }
 }
@@ -1923,7 +1925,7 @@ struct ContentPane: View {
                 CellInspector(cell: model.inspectedCell(in: model.browseResult), editing: model)
             }
 
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             FilterBar(model: model, focus: $focus)
         }
     }
@@ -1954,7 +1956,7 @@ struct RecordPane: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(model.recordFields) { field in
@@ -1969,7 +1971,7 @@ struct RecordPane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .overlay { LoadingVeil(isVisible: model.browseResult.isVeiled) }
         // The arrow keys move between rows, which is what the grid they replaced
         // did with them. `focusable` is what makes them arrive at all: without it
@@ -1993,7 +1995,7 @@ struct RecordPane: View {
         HStack(spacing: Theme.Space.sm) {
             Text("Record")
                 .font(Theme.Typography.captionEmphasis)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
 
             if let position = model.recordPosition {
                 // Counted from one and against the total, because the question
@@ -2003,7 +2005,7 @@ struct RecordPane: View {
                     "\(AppModel.formatted(position.row)) of \(AppModel.formatted(position.of))"
                 )
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             }
 
             Spacer(minLength: Theme.Space.sm)
@@ -2017,7 +2019,7 @@ struct RecordPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .help("Previous row (↑)")
             .accessibilityLabel("Previous row")
 
@@ -2030,7 +2032,7 @@ struct RecordPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .help("Next row (↓)")
             .accessibilityLabel("Next row")
 
@@ -2043,13 +2045,13 @@ struct RecordPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .help("Back to the grid (⌃⌘R)")
             .accessibilityLabel("Back to the grid")
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 26)
-        .background(Theme.surfaceRaised.color)
+        .background(Theme.Surface.overlay.color)
     }
 
     private func row(_ field: RecordField) -> some View {
@@ -2058,13 +2060,13 @@ struct RecordPane: View {
             VStack(alignment: .leading, spacing: 0) {
                 Text(field.name)
                     .font(Theme.Typography.captionEmphasis)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 if !field.type.isEmpty {
                     Text(field.type)
                         .font(Theme.Typography.micro)
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                         .lineLimit(1)
                 }
             }
@@ -2074,7 +2076,9 @@ struct RecordPane: View {
             // visibly not a value somebody typed.
             Text(field.value)
                 .font(Theme.Typography.monoSmall)
-                .foregroundStyle(field.isNull ? Theme.textTertiary.color : Theme.text.color)
+                .foregroundStyle(
+                    field.isNull ? Theme.Text.tertiary.color : Theme.Text.primary.color
+                )
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .textSelection(.enabled)
@@ -2082,12 +2086,12 @@ struct RecordPane: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(minHeight: Self.rowHeight, alignment: .leading)
-        .background(focused ? Theme.surfaceRaised.color : Color.clear)
+        .background(focused ? Theme.Surface.overlay.color : Color.clear)
         .overlay(alignment: .leading) {
             // The same 2pt rule the grid draws down a selected row, so which
             // field the strip below is describing is answerable at a glance.
             Rectangle()
-                .fill(focused ? Theme.accent.color : Color.clear)
+                .fill(focused ? Theme.Accent.selection.color : Color.clear)
                 .frame(width: 2)
         }
         .contentShape(Rectangle())
@@ -2138,7 +2142,7 @@ private struct CellEditorRow: View {
                 // at — and tertiary does not clear 4.5:1 on this bar.
                 Text(obstacle)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             } else {
                 if let cell {
@@ -2151,7 +2155,7 @@ private struct CellEditorRow: View {
                     // that may not exist.
                     Text(cell.column)
                         .font(Theme.Typography.micro.weight(.semibold))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                         .accessibilityHidden(true)
                     // The window's own field rather than a bare `TextField`.
                     // This is the one control in the application that writes to
@@ -2196,7 +2200,7 @@ private struct CellEditorRow: View {
             if model.hasPendingEdits {
                 Text(AppModel.pluralized(model.staged.count, "change"))
                     .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.warning.color)
+                    .foregroundStyle(Theme.Semantic.warning.color)
                 Button("Revert") { model.revertEdits() }
                     .help("Throw the pending changes away; the rows on screen are unchanged")
                 Button("Save") { model.applyEdits() }
@@ -2207,7 +2211,7 @@ private struct CellEditorRow: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.xs)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Seeded from whichever cell is selected, and re-seeded when that moves:
         // a field still holding the last cell's text is one keystroke away from
         // writing it into this one.
@@ -2290,7 +2294,7 @@ struct FilterBar: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.sm)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
     }
 
     /// What the Custom field shows while the rows own it.
@@ -2328,16 +2332,16 @@ struct FilterRowsToggle: View {
                 if !model.filterRules.isEmpty {
                     Text("\(model.filterRules.count)")
                         .font(Theme.Typography.micro.weight(.semibold))
-                        .foregroundStyle(Theme.surface.color)
+                        .foregroundStyle(Theme.Surface.raised.color)
                         .padding(.horizontal, 5)
                         .padding(.vertical, 1)
-                        .background(Capsule().fill(Theme.accent.color))
+                        .background(Capsule().fill(Theme.Accent.selection.color))
                 }
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(Theme.textTertiary.color)
+        .foregroundStyle(Theme.Text.tertiary.color)
         .help("Build the filter out of this table's columns")
         .accessibilityLabel(
             model.filterRules.isEmpty ? "Filters" : "Filters, \(model.filterRules.count) active")
@@ -2430,7 +2434,7 @@ struct FilterRuleRow: View {
                 Image(systemName: "minus.circle")
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .help("Remove this row")
             .accessibilityLabel("Remove filter row")
 
@@ -2524,7 +2528,7 @@ struct QueryPane: View {
                         // guess is a statement the user did not mean to execute.
                         Text(model.runTarget?.hint ?? "nothing to run")
                             .font(Theme.Typography.micro)
-                            .foregroundStyle(Theme.textTertiary.color)
+                            .foregroundStyle(Theme.Text.tertiary.color)
                             .accessibilityHidden(true)
 
                         // The corner of the editor is where this belongs: it is
@@ -2543,7 +2547,8 @@ struct QueryPane: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundStyle(
-                            model.isHistoryOpen ? Theme.accent.color : Theme.textSecondary.color
+                            model.isHistoryOpen
+                                ? Theme.Accent.selection.color : Theme.Text.secondary.color
                         )
                         .help("Statements this window has run, and the ones you kept (⇧⌘H)")
                         .accessibilityLabel("Query panel")
@@ -2560,7 +2565,7 @@ struct QueryPane: View {
                     // list, which describes the run rather than the buffer.
                     if model.isHistoryOpen {
                         QueryPanel(model: model)
-                        Rectangle().fill(Theme.separator.color).frame(height: 1)
+                        Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                     }
 
                     // Only for a run of several. A ⌘R over one statement has one
@@ -2569,7 +2574,7 @@ struct QueryPane: View {
                     // rare one.
                     if model.scriptSteps.count > 1 {
                         ScriptOutcomeList(model: model)
-                        Rectangle().fill(Theme.separator.color).frame(height: 1)
+                        Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                     }
 
                     // Until this pane has run something there is nothing to show.
@@ -2652,7 +2657,7 @@ private struct QueryPanel: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             switch model.queryPanelTab {
             case .history:
                 if model.history.entries.isEmpty {
@@ -2681,16 +2686,16 @@ private struct QueryPanel: View {
                 }
             }
         }
-        // `background`, not `surface`, and that is the seam rather than a
-        // preference. `Grid.header` is also `surface`, so the panel's last row
-        // and the result's column headers met as one continuous field: the 1pt
-        // `separator` between them is white at 0.08 alpha over two identical mid
-        // tones, which at that size is below anything an eye resolves. Nothing
-        // said where the list of statements ended and the rows began. Taking the
-        // body down a step also puts the panel behind its own `surfaceRaised`
-        // header, which is the direction that pair is drawn everywhere else in
-        // this window.
-        .background(Theme.background.color)
+        // `Surface.canvas`, not `Surface.raised`, and that is the seam rather
+        // than a preference. `Grid.header` is also the raised tone, so the
+        // panel's last row and the result's column headers met as one continuous
+        // field: the 1pt `Border.hairline` between them is white at 0.08 alpha
+        // over two identical mid tones, which at that size is below anything an
+        // eye resolves. Nothing said where the list of statements ended and the
+        // rows began. Taking the body down a step also puts the panel behind its
+        // own `Surface.overlay` header, which is the direction that pair is drawn
+        // everywhere else in this window.
+        .background(Theme.Surface.canvas.color)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(
             model.queryPanelTab == .history ? "Query history" : "Saved queries")
@@ -2701,7 +2706,7 @@ private struct QueryPanel: View {
     private func note(_ text: String) -> some View {
         Text(text)
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .frame(maxWidth: .infinity)
             .frame(height: Self.rowHeight * 2)
     }
@@ -2711,13 +2716,13 @@ private struct QueryPanel: View {
             if confirmingClear {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.dangerText.color)
+                    .foregroundStyle(Theme.Semantic.dangerText.color)
                 Text(
                     "Delete all \(AppModel.pluralized(model.history.entries.count, "statement"))? "
                         + "This cannot be undone."
                 )
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
 
                 Spacer(minLength: Theme.Space.sm)
 
@@ -2729,11 +2734,11 @@ private struct QueryPanel: View {
                 }
                 .controlSize(.small)
                 .buttonStyle(.borderedProminent)
-                .tint(Theme.danger.color)
+                .tint(Theme.Semantic.danger.color)
             } else if naming {
                 Text("Save as")
                     .font(Theme.Typography.captionEmphasis)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
 
                 TextField("", text: $typedName)
                     .textFieldStyle(.roundedBorder)
@@ -2747,7 +2752,7 @@ private struct QueryPanel: View {
                 // asking you to label something you have to remember.
                 Text(model.savedQuery ?? "")
                     .font(Theme.Typography.monoSmall)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2764,7 +2769,7 @@ private struct QueryPanel: View {
                     // whatever the person picked in System Settings and is not
                     // in this palette. The Stage button in the value editor
                     // carries the same pair.
-                    .tint(Theme.accent.color)
+                    .tint(Theme.Accent.selection.color)
                     .disabled(typedName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             } else {
                 // A segmented control rather than two buttons: these are two
@@ -2789,7 +2794,7 @@ private struct QueryPanel: View {
                         : AppModel.pluralized(model.offeredFavorites.count, "query")
                 )
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
 
                 if model.queryPanelTab == .history {
                     // The plain field the Save-as row above uses, rather than
@@ -2842,14 +2847,14 @@ private struct QueryPanel: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .help("Hide the history (⇧⌘H)")
                 .accessibilityLabel("Hide query history")
             }
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 26)
-        .background(Theme.surfaceRaised.color)
+        .background(Theme.Surface.overlay.color)
     }
 
     private var list: some View {
@@ -2911,7 +2916,7 @@ private struct QueryPanel: View {
                                     .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
-                            .foregroundStyle(Theme.textSecondary.color)
+                            .foregroundStyle(Theme.Text.secondary.color)
                             .help("Forget this query")
                             .accessibilityLabel("Forget \(favorite.name)")
                             .padding(.trailing, Theme.Space.md)
@@ -2930,7 +2935,7 @@ private struct QueryPanel: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: "star.fill")
                 .font(.system(size: 9))
-                .foregroundStyle(Theme.accent.color)
+                .foregroundStyle(Theme.Accent.selection.color)
                 .frame(width: 12)
 
             // The name leads, because it is what this list is searched by. The
@@ -2938,12 +2943,12 @@ private struct QueryPanel: View {
             // they meant before pressing ⌘R on it.
             Text(favorite.name)
                 .font(Theme.Typography.captionEmphasis)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .lineLimit(1)
 
             Text(favorite.sql.split(whereSeparator: \.isWhitespace).joined(separator: " "))
                 .font(Theme.Typography.monoSmall)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -2954,7 +2959,7 @@ private struct QueryPanel: View {
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: Self.rowHeight)
-        .background(hovered == favorite.id ? Theme.surfaceRaised.color : Color.clear)
+        .background(hovered == favorite.id ? Theme.Surface.overlay.color : Color.clear)
         .contentShape(Rectangle())
         // Every row is one line of a statement that may be twenty; the tooltip
         // is what makes the rest of it reachable without recalling it first.
@@ -2993,7 +2998,9 @@ private struct QueryPanel: View {
             // the row still reads as a failure without colour vision.
             Image(systemName: failed ? "exclamationmark.triangle.fill" : "checkmark.circle")
                 .font(.system(size: 9))
-                .foregroundStyle(failed ? Theme.dangerText.color : Theme.run.color)
+                .foregroundStyle(
+                    failed ? Theme.Semantic.dangerText.color : Theme.Accent.execute.color
+                )
                 .frame(width: 12)
 
             // The statement keeps the content tone whatever happened to it. It
@@ -3001,7 +3008,7 @@ private struct QueryPanel: View {
             // as the text itself being the problem.
             Text(entry.preview)
                 .font(Theme.Typography.monoSmall)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3012,34 +3019,36 @@ private struct QueryPanel: View {
             if model.showsAllStatements {
                 Text(entry.origin.rawValue)
                     .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .frame(width: 44, alignment: .leading)
             }
 
             Text(entry.outcome.label)
                 .font(Theme.Typography.digits)
-                .foregroundStyle(failed ? Theme.dangerText.color : Theme.textSecondary.color)
+                .foregroundStyle(
+                    failed ? Theme.Semantic.dangerText.color : Theme.Text.secondary.color
+                )
                 .lineLimit(1)
 
             Text(Self.took(entry))
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .frame(width: 52, alignment: .trailing)
 
             Text(Self.age(of: entry))
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .frame(width: 62, alignment: .trailing)
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: Self.rowHeight)
-        .background(hovered == entry.id ? Theme.surfaceRaised.color : Color.clear)
+        .background(hovered == entry.id ? Theme.Surface.overlay.color : Color.clear)
         .overlay(alignment: .leading) {
             // The same 2pt rule `InlineBanner` wears, so a failure is findable
             // by running an eye down the edge rather than by reading four
             // columns of every row.
             Rectangle()
-                .fill(failed ? Theme.danger.color : Color.clear)
+                .fill(failed ? Theme.Semantic.danger.color : Color.clear)
                 .frame(width: 2)
         }
         .contentShape(Rectangle())
@@ -3096,7 +3105,7 @@ private struct ScriptOutcomeList: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(Array(model.scriptSteps.enumerated()), id: \.element.id) {
@@ -3115,7 +3124,7 @@ private struct ScriptOutcomeList: View {
                     * CGFloat(min(model.scriptSteps.count, Self.maxRows))
             )
         }
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Statement outcomes")
     }
@@ -3133,15 +3142,15 @@ private struct ScriptOutcomeList: View {
         HStack(spacing: Theme.Space.sm) {
             Text("This run")
                 .font(Theme.Typography.captionEmphasis)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
             Text(AppModel.pluralized(model.scriptSteps.count, "statement"))
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Spacer(minLength: Theme.Space.sm)
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 26)
-        .background(Theme.surfaceRaised.color)
+        .background(Theme.Surface.overlay.color)
     }
 
     private func row(_ step: ScriptStep, isSelected: Bool) -> some View {
@@ -3150,7 +3159,7 @@ private struct ScriptOutcomeList: View {
             // count statements and this is the same numbering.
             Text("\(step.id)")
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .frame(width: 18, alignment: .trailing)
 
             Text(step.preview)
@@ -3171,13 +3180,13 @@ private struct ScriptOutcomeList: View {
         // `Grid.selectedRow` reads through the sidebar's vibrancy as a blue band
         // across the navigator at the same height, which is the data surface's
         // vocabulary leaking into a place it was never mixed for.
-        .background(isSelected ? Theme.surfaceRaised.color : Color.clear)
+        .background(isSelected ? Theme.Surface.overlay.color : Color.clear)
         .overlay(alignment: .leading) {
             // The accent bar carries the selection where the fill is subtle by
             // design, and puts it at the edge the eye runs down when scanning a
             // list of ordinals.
             Rectangle()
-                .fill(isSelected ? Theme.accent.color : Color.clear)
+                .fill(isSelected ? Theme.Accent.selection.color : Color.clear)
                 .frame(width: 2)
         }
         .contentShape(Rectangle())
@@ -3191,19 +3200,19 @@ private struct ScriptOutcomeList: View {
     /// than content, because that is what it has become: text describing
     /// something that did not happen.
     private func tone(_ step: ScriptStep, isSelected: Bool) -> Color {
-        if case .notRun = step.outcome { return Theme.textTertiary.color }
-        return isSelected ? Theme.text.color : Theme.textSecondary.color
+        if case .notRun = step.outcome { return Theme.Text.tertiary.color }
+        return isSelected ? Theme.Text.primary.color : Theme.Text.secondary.color
     }
 
     private func outcomeTone(_ outcome: StatementOutcome) -> Color {
         switch outcome {
-        case .failed: return Theme.dangerText.color
+        case .failed: return Theme.Semantic.dangerText.color
         // Neither red nor dimmed. A cancelled statement is not a fault and did
         // not fail to happen — it was stopped, and the row should read as a
         // statement of fact rather than as a warning or as absence.
-        case .cancelled: return Theme.textSecondary.color
-        case .notRun: return Theme.textTertiary.color
-        case .rows, .completed: return Theme.textSecondary.color
+        case .cancelled: return Theme.Text.secondary.color
+        case .notRun: return Theme.Text.tertiary.color
+        case .rows, .completed: return Theme.Text.secondary.color
         }
     }
 }
@@ -3222,13 +3231,13 @@ private struct StatementNote: View {
                 .foregroundStyle(tint)
             Text(step.note)
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 420)
                 .textSelection(.enabled)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .accessibilityElement(children: .combine)
     }
 
@@ -3243,10 +3252,10 @@ private struct StatementNote: View {
 
     private var tint: Color {
         switch step.outcome {
-        case .failed: return Theme.dangerText.color
-        case .cancelled: return Theme.textSecondary.color
-        case .notRun: return Theme.textTertiary.color
-        case .rows, .completed: return Theme.run.color
+        case .failed: return Theme.Semantic.dangerText.color
+        case .cancelled: return Theme.Text.secondary.color
+        case .notRun: return Theme.Text.tertiary.color
+        case .rows, .completed: return Theme.Accent.execute.color
         }
     }
 }
@@ -3285,7 +3294,7 @@ struct CellInspector: View {
         VStack(spacing: 0) {
             strip(rendered, offer: offer)
             if let rendered {
-                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                 if let editing, editing.isEditingValue, case .editable(let seed)? = offer {
                     CellValueEditor(model: editing, seed: seed)
                 } else {
@@ -3293,7 +3302,7 @@ struct CellInspector: View {
                 }
             }
             if let editing {
-                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                 // Without a cell as well, because a table with no rows in it is
                 // where Add Row is worth most and there is nothing to select.
                 CellEditorRow(model: editing, cell: cell)
@@ -3331,31 +3340,31 @@ struct CellInspector: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .help(cell.isExpanded ? "Hide the value (⌥⌘V)" : "Show the value in full (⌥⌘V)")
                 .accessibilityLabel(cell.isExpanded ? "Hide value" : "Show value in full")
 
                 Text(cell.column)
                     .font(Theme.Typography.captionEmphasis)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
 
                 if !cell.type.isEmpty {
                     Text(cell.type)
                         .font(Theme.Typography.micro)
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
 
                 if let rendered {
                     Text(rendered.descriptor)
                         .font(Theme.Typography.micro)
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                         .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Text(cell.value)
                         .font(Theme.Typography.monoSmall)
                         .foregroundStyle(
-                            cell.isNull ? Theme.textTertiary.color : Theme.text.color
+                            cell.isNull ? Theme.Text.tertiary.color : Theme.Text.primary.color
                         )
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -3385,7 +3394,7 @@ struct CellInspector: View {
                     // "hex dump · 200 bytes", "first 131,072 of 400,000
                     // characters".
                     .foregroundStyle(
-                        offer.isEditable ? Theme.textSecondary.color : Theme.textTertiary.color
+                        offer.isEditable ? Theme.Text.secondary.color : Theme.Text.tertiary.color
                     )
                     .disabled(!offer.isEditable)
                     .help(offer.refusal ?? "Edit this value in a box")
@@ -3402,25 +3411,25 @@ struct CellInspector: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .help("Copy value (⌘C)")
                 .accessibilityLabel("Copy cell value")
             } else {
                 // Secondary rather than tertiary: this strip is the only thing
                 // telling a reader what the row under the grid is for, and it
-                // sits on `surfaceRaised`, the lightest surface in the window
+                // sits on `Surface.overlay`, the lightest surface in the window
                 // and the one tertiary has the least contrast against.
                 Text("Select a cell to inspect its value")
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 26)
-        .background(Theme.surfaceRaised.color)
+        .background(Theme.Surface.overlay.color)
         .overlay(alignment: .top) {
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
         }
         .accessibilityElement(children: .contain)
     }
@@ -3457,7 +3466,7 @@ struct RunningPane: View {
     var body: some View {
         LoadingVeil(isVisible: true)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.background.color)
+            .background(Theme.Surface.canvas.color)
     }
 }
 
@@ -3473,12 +3482,12 @@ struct LoadingVeil: View {
     var body: some View {
         ZStack {
             if isVisible {
-                Theme.background.opacity(0.55).color
+                Theme.Surface.canvas.opacity(0.55).color
                 VStack(spacing: Theme.Space.sm) {
                     ProgressView().controlSize(.small)
                     Text("Running…")
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.textSecondary.color)
+                        .foregroundStyle(Theme.Text.secondary.color)
                 }
             }
         }
@@ -3511,7 +3520,7 @@ struct GridFindBar: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
 
             CompactField(
                 placeholder: "Find in fetched rows", text: $model.gridFindText,
@@ -3549,7 +3558,7 @@ struct GridFindBar: View {
             if !model.gridFindReport.isEmpty {
                 Text(model.gridFindReport)
                     .font(Theme.Typography.digits)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             }
 
@@ -3560,7 +3569,7 @@ struct GridFindBar: View {
             // is what the filter rows are for, and they run on the server.
             Text("searches fetched rows only")
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .help("Use the filter rows above to search the whole table on the server")
 
             Button {
@@ -3572,13 +3581,13 @@ struct GridFindBar: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .help("Close the find bar (⎋)")
             .accessibilityLabel("Close find bar")
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 30)
-        .background(Theme.surfaceRaised.color)
+        .background(Theme.Surface.overlay.color)
         // Opened by a menu command from a grid that has the keyboard, so the
         // field has to take focus itself — otherwise ⌘F draws a bar and the next
         // thing typed goes to the grid underneath it.
@@ -3623,10 +3632,10 @@ struct StatusBar: View {
             // it is has left the most expensive mistake unmarked.
             Text(model.connectionLabel)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .lineLimit(1)
             Rectangle()
-                .fill(Theme.separator.color)
+                .fill(Theme.Border.hairline.color)
                 .frame(width: 1, height: 10)
 
             // A truncated result is worth catching out of the corner of an eye,
@@ -3634,7 +3643,7 @@ struct StatusBar: View {
             if model.current.capped && model.activeTab != .structure {
                 Image(systemName: "rectangle.compress.vertical")
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.warning.color)
+                    .foregroundStyle(Theme.Semantic.warning.color)
                     .help(truncationHelp)
                     .accessibilityLabel("Result truncated")
             }
@@ -3644,7 +3653,7 @@ struct StatusBar: View {
             // always on becomes wallpaper.
             Text(model.statusLine)
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .lineLimit(1)
 
             // Attached to the sentence it acts on, like Stop and Load more
@@ -3697,7 +3706,7 @@ struct StatusBar: View {
                 // anyone looks to find out why nothing is there.
                 Text("· \(obstacle.label)")
                     .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .help(obstacle.detail)
             }
 
@@ -3707,19 +3716,19 @@ struct StatusBar: View {
                 if let cell = model.inspectedCell(in: model.current) {
                     Text(cell.address)
                         .font(Theme.Typography.digits)
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
 
                 if !model.current.table.columns.isEmpty {
                     Text(AppModel.pluralized(model.current.table.columns.count, "col"))
                         .font(Theme.Typography.digits)
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
             }
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 24)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         .accessibilityElement(children: .contain)
     }
 

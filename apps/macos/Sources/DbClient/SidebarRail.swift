@@ -48,7 +48,7 @@ struct SidebarRail: View {
         // the same thing — at 250pt the same curve is a detail, and at 44pt it
         // is most of the outline. Both are the platform's, not this file's.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // `surface` rather than the `background` the tree wears, which is the
+        // `Surface.raised` rather than the canvas the tree wears, which is the
         // one place this column deliberately differs from the one it replaces.
         // The tree is content and takes the canvas tone; a rail is chrome, and
         // on the canvas tone it disappeared — 44pt of exactly the colour of the
@@ -61,7 +61,7 @@ struct SidebarRail: View {
         // bands are sampled through this column too, and a rail is narrow enough
         // that one stripe is most of what is on it.
         .background(
-            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.surface.color
+            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.Surface.raised.color
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Objects, collapsed")
@@ -74,7 +74,7 @@ struct SidebarRail: View {
         VStack(spacing: 2) {
             Text(AppModel.formatted(model.matchedObjectCount))
                 .font(Theme.Typography.digits)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .lineLimit(1)
                 // A five-figure table count is wider than this column. Shrinking
                 // is the right failure: the alternative is "12,3…", which is not
@@ -95,7 +95,7 @@ struct SidebarRail: View {
         // No fill of its own: the rail is already the tone the sidebar footer
         // has, so the rule is the whole of what marks this off as the footer.
         .overlay(alignment: .top) {
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
         }
     }
 
@@ -137,7 +137,7 @@ private struct RailButton: View {
         // is a filled rounded rectangle that, at this size, reads as a control
         // stuck in its pressed state. The first capture of this stage was one.
         .focusEffectDisabled()
-        .foregroundStyle(isEnabled ? Theme.textSecondary.color : Theme.textTertiary.color)
+        .foregroundStyle(isEnabled ? Theme.Text.secondary.color : Theme.Text.tertiary.color)
         .disabled(!isEnabled)
         .help(help)
         .accessibilityLabel(label)

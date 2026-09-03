@@ -35,7 +35,7 @@ final class SettingsWindow {
             defer: false)
         panel.title = "Settings"
         panel.isReleasedWhenClosed = false
-        panel.backgroundColor = NSColor(Theme.background.color)
+        panel.backgroundColor = NSColor(Theme.Surface.canvas.color)
         // Asked here, once per window rather than once per draw: finding out
         // whether this build may sync means looking for iCloud Drive and writing a
         // throwaway Keychain item, and neither answer changes while the panel is
@@ -100,7 +100,7 @@ struct SettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             switcher
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             if scrolls {
                 // The switcher stays above the scroll rather than inside it:
                 // the way to another pane is not something to scroll up for.
@@ -115,7 +115,7 @@ struct SettingsView: View {
             }
         }
         .frame(width: 460, height: scrolls ? 560 : nil)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
     }
 
     /// One pane's rows, as a column. Its own property because the body puts it
@@ -156,7 +156,8 @@ struct SettingsView: View {
                             .font(Theme.Typography.caption)
                     }
                     .foregroundStyle(
-                        candidate == pane ? Theme.accent.color : Theme.textSecondary.color
+                        candidate == pane
+                            ? Theme.Accent.selection.color : Theme.Text.secondary.color
                     )
                     .frame(width: 72)
                     .padding(.vertical, Theme.Space.sm)
@@ -445,10 +446,10 @@ where Option.AllCases: RandomAccessCollection {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text(title)
                 .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
             Text(explanation)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             Picker("", selection: $selection) {
                 ForEach(Option.allCases) { place in
@@ -469,11 +470,11 @@ where Option.AllCases: RandomAccessCollection {
                 HStack(alignment: .top, spacing: Theme.Space.xs) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(Theme.warning.color)
+                        .foregroundStyle(Theme.Semantic.warning.color)
                         .padding(.top, 1)
                     Text(caveat)
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.warning.color)
+                        .foregroundStyle(Theme.Semantic.warning.color)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
@@ -499,10 +500,10 @@ private struct SettingsStepper: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text(title)
                 .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
             Text(explanation)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: Theme.Space.sm) {
                 // The label, value and hint ride on the control itself, so
@@ -516,7 +517,7 @@ private struct SettingsStepper: View {
                     .accessibilityHint(explanation)
                 Text("\(value) \(unit)")
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .accessibilityHidden(true)
             }
         }
@@ -544,10 +545,10 @@ private struct SettingsNumber: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text(title)
                 .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
             Text(explanation)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: Theme.Space.sm) {
                 TextField("", text: digits)
@@ -557,7 +558,7 @@ private struct SettingsNumber: View {
                     .accessibilityHint(explanation)
                 Text(unit)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .accessibilityHidden(true)
             }
         }
@@ -603,10 +604,10 @@ private struct SettingsEditorColours: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text("Colours")
                 .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
             Text(Self.explanation)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             controls
             wells
@@ -689,7 +690,7 @@ private struct SettingsEditorColours: View {
                 .accessibilityLabel("\(label) colour")
             Text(label)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .accessibilityHidden(true)
         }
     }
@@ -736,14 +737,14 @@ private struct MCPStatus: View {
                 HStack(alignment: .top, spacing: Theme.Space.xs) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(Theme.warning.color)
+                        .foregroundStyle(Theme.Semantic.warning.color)
                         .padding(.top, 1)
                     Text(
                         "Not running. Usually the port: something else already "
                             + "listens there, or the number is out of range."
                     )
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.warning.color)
+                    .foregroundStyle(Theme.Semantic.warning.color)
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 .accessibilityElement(children: .combine)
@@ -755,11 +756,11 @@ private struct MCPStatus: View {
         HStack(spacing: Theme.Space.sm) {
             Text(name)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .frame(width: 64, alignment: .leading)
             Text(value)
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .lineLimit(1)
                 .truncationMode(.middle)
             Button("Copy") {
@@ -783,10 +784,10 @@ private struct SettingsToggle: View {
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
                 Text(title)
                     .font(Theme.Typography.bodyEmphasis)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                 Text(explanation)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

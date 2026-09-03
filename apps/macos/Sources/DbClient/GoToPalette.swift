@@ -31,13 +31,13 @@ struct GoToPalette: View {
     var body: some View {
         VStack(spacing: 0) {
             field
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             list
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 460, height: 320)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it. A sheet has no title bar to close and this one has
         // no Cancel button, so without this the only way out is to pick
         // something — which is a palette that punishes opening it by accident.
@@ -56,11 +56,11 @@ struct GoToPalette: View {
             // "matchs" is not a word.
             Text(AppModel.pluralized(matches.count, "match", "matches"))
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Spacer(minLength: Theme.Space.sm)
             Text("↑↓ move · ↩ open · ⎋ close")
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 22)
@@ -102,7 +102,7 @@ struct GoToPalette: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(matches[index].name)
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                 // The schema, or the statement a saved query would type,
                 // quietly. Two schemas can hold a table of the same name and
@@ -112,21 +112,23 @@ struct GoToPalette: View {
                 // as long as somebody wrote it.
                 Text(matches[index].detail)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 0)
                 if let label = matches[index].kind.label {
                     Text(label)
                         .font(Theme.Typography.micro)
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
                 connection(matches[index])
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 1)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(index == highlighted ? Theme.accent.opacity(0.35).color : Color.clear)
+            .background(
+                index == highlighted ? Theme.Accent.selection.opacity(0.35).color : Color.clear
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -150,12 +152,12 @@ struct GoToPalette: View {
         if DriverBadge.isMapped(scheme: target.scheme) {
             Image(systemName: DriverBadge.familySymbol(forScheme: target.scheme))
                 .font(.system(size: 10))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
         }
         if !target.connection.isEmpty {
             Text(target.connection)
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .lineLimit(1)
         }
     }

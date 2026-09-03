@@ -38,7 +38,7 @@ struct ConnectionTabBar: View {
                     } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(Theme.textSecondary.color)
+                            .foregroundStyle(Theme.Text.secondary.color)
                             .frame(width: 28, height: 32)
                             .contentShape(Rectangle())
                     }
@@ -50,9 +50,9 @@ struct ConnectionTabBar: View {
             }
         }
         .frame(height: 32)
-        .background(Theme.background.color)
+        .background(Theme.Surface.canvas.color)
         .overlay(alignment: .bottom) {
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
         }
     }
 }
@@ -87,12 +87,12 @@ private struct ConnectionTabItem: View {
             if session.hasBeenAsked {
                 Image(systemName: DriverBadge.familySymbol(forScheme: session.scheme))
                     .font(.system(size: 10))
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                 StatusDot(state: session.connectionState)
             }
             Text(session.connectionLabel)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(isActive ? Theme.text.color : Theme.textSecondary.color)
+                .foregroundStyle(isActive ? Theme.Text.primary.color : Theme.Text.secondary.color)
                 .lineLimit(1)
             // After the name rather than before it, and in the saved row's two
             // glyphs rather than marks of their own: the same fact about the same
@@ -103,20 +103,20 @@ private struct ConnectionTabItem: View {
             if session.safety.isReadOnly {
                 Image(systemName: "lock")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .accessibilityHidden(true)
             }
             if session.safety.isProduction {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.danger.color)
+                    .foregroundStyle(Theme.Semantic.danger.color)
                     .accessibilityHidden(true)
             }
             if isHovering && canClose {
                 Button(action: close) {
                     Image(systemName: "xmark")
                         .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close \(session.connectionLabel)")
@@ -128,11 +128,12 @@ private struct ConnectionTabItem: View {
         // the titlebar — so an active tab's raised surface fills the band above
         // it as well, which is the defect the query buffer strip records.
         .background(
-            isActive ? Theme.surface.color : Theme.background.color, ignoresSafeAreaEdges: []
+            isActive ? Theme.Surface.raised.color : Theme.Surface.canvas.color,
+            ignoresSafeAreaEdges: []
         )
         .overlay(alignment: .top) {
             if isActive {
-                Rectangle().fill(Theme.accent.color).frame(height: 2)
+                Rectangle().fill(Theme.Accent.selection.color).frame(height: 2)
             }
         }
         // A production tab is outlined as well as marked, because the glyph is
@@ -142,7 +143,7 @@ private struct ConnectionTabItem: View {
         // a tab can be both, and the two claims must not be the same edge.
         .overlay(alignment: .bottom) {
             if session.safety.isProduction {
-                Rectangle().fill(Theme.danger.color).frame(height: 2)
+                Rectangle().fill(Theme.Semantic.danger.color).frame(height: 2)
             }
         }
         .contentShape(Rectangle())

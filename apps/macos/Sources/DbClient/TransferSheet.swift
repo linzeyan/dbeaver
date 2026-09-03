@@ -74,15 +74,15 @@ struct TransferSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             field
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             list
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 460, height: 360)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it, as it does the go-to palette: a sheet has no title
         // bar, and this one has no Cancel button.
         .onExitCommand { model.isTransferPickerOpen = false }
@@ -99,12 +99,12 @@ struct TransferSheet: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             Text(model.transferMessage)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: Theme.Space.sm) {
                 Text("Into")
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                 Picker("", selection: $chosen) {
                     ForEach(targets) { target in
                         Text(target.label).tag(Optional(target.id))
@@ -128,11 +128,11 @@ struct TransferSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Text(AppModel.pluralized(matches.count, "table"))
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             Spacer(minLength: Theme.Space.sm)
             Text("↑↓ move · ↩ send · ⎋ close")
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 22)
@@ -161,7 +161,7 @@ struct TransferSheet: View {
             // read, the other is a needle that matches none of them.
             Text(emptyReason)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .padding(Theme.Space.md)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
@@ -195,18 +195,20 @@ struct TransferSheet: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(matches[index].name)
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                 Text(matches[index].detail)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, Theme.Space.md)
             .padding(.vertical, Theme.Space.xs + 1)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(index == highlighted ? Theme.accent.opacity(0.35).color : Color.clear)
+            .background(
+                index == highlighted ? Theme.Accent.selection.opacity(0.35).color : Color.clear
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

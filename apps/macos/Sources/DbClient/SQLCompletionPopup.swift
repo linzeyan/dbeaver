@@ -86,10 +86,10 @@ final class CompletionPopup: NSObject {
 
         let container = NSView()
         container.wantsLayer = true
-        container.layer?.backgroundColor = Theme.surface.nsColor.cgColor
+        container.layer?.backgroundColor = Theme.Surface.raised.nsColor.cgColor
         container.layer?.cornerRadius = Theme.Radius.card
         container.layer?.borderWidth = 1
-        container.layer?.borderColor = Theme.border.opacity(0.5).nsColor.cgColor
+        container.layer?.borderColor = Theme.Border.control.opacity(0.5).nsColor.cgColor
         container.layer?.masksToBounds = true
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("offer"))
@@ -251,9 +251,9 @@ private final class CompletionRow: NSView {
     init() {
         super.init(frame: .zero)
         glyph.imageScaling = .scaleProportionallyDown
-        glyph.contentTintColor = Theme.textTertiary.nsColor
-        label.textColor = Theme.text.nsColor
-        detail.textColor = Theme.textTertiary.nsColor
+        glyph.contentTintColor = Theme.Text.tertiary.nsColor
+        label.textColor = Theme.Text.primary.nsColor
+        detail.textColor = Theme.Text.tertiary.nsColor
         detail.alignment = .right
         detail.lineBreakMode = .byTruncatingTail
         label.lineBreakMode = .byTruncatingMiddle
@@ -303,7 +303,7 @@ private final class CompletionRow: NSView {
 private final class SelectionRow: NSTableRowView {
     override func drawSelection(in dirtyRect: NSRect) {
         guard selectionHighlightStyle != .none else { return }
-        Theme.accent.opacity(0.35).nsColor.setFill()
+        Theme.Accent.selection.opacity(0.35).nsColor.setFill()
         bounds.fill()
     }
 }

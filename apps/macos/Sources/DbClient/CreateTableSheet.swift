@@ -22,13 +22,13 @@ struct CreateTableSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             preview
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 540, height: 420)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it. Nothing has run yet, so closing needs no question.
         .onExitCommand { model.createPlan = nil }
     }
@@ -39,7 +39,7 @@ struct CreateTableSheet: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(plan?.url.lastPathComponent ?? "")
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
@@ -60,7 +60,7 @@ struct CreateTableSheet: View {
                 // name in it already.
                 Text("Table")
                     .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                 TextField("Table", text: nameBinding)
                     .textFieldStyle(.roundedBorder)
                     .font(Theme.Typography.mono)
@@ -71,7 +71,7 @@ struct CreateTableSheet: View {
                     + "Create is pressed; the file is offered to the table straight afterwards."
             )
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .fixedSize(horizontal: false, vertical: true)
         }
         .padding(Theme.Space.md)
@@ -96,7 +96,7 @@ struct CreateTableSheet: View {
         ScrollView {
             Text(plan?.preview ?? "")
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.Space.md)
@@ -110,7 +110,7 @@ struct CreateTableSheet: View {
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
                     model.createPlanObstacle == nil
-                        ? Theme.textTertiary.color : Theme.warning.color
+                        ? Theme.Text.tertiary.color : Theme.Semantic.warning.color
                 )
                 .lineLimit(1)
             Spacer(minLength: Theme.Space.sm)

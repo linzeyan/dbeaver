@@ -21,13 +21,13 @@ struct VariablesSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             table
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 720, height: 420)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         .onExitCommand { model.closeVariables() }
         .onAppear { typing = true }
     }
@@ -37,7 +37,7 @@ struct VariablesSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: "magnifyingglass")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             TextField("Filter", text: $model.variableFilter)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
@@ -50,7 +50,7 @@ struct VariablesSheet: View {
             Button("Refresh") { model.loadVariables() }
                 .buttonStyle(.plain)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.accent.color)
+                .foregroundStyle(Theme.Accent.selection.color)
                 .disabled(model.isReadingVariables)
         }
         .padding(Theme.Space.md)
@@ -68,13 +68,13 @@ struct VariablesSheet: View {
                     : "No setting matches \(model.variableFilter)."
             )
             .font(Theme.Typography.caption)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .padding(Theme.Space.md)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         } else {
             VStack(spacing: 0) {
                 columnHeadings
-                Rectangle().fill(Theme.separator.color).frame(height: 1)
+                Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(rows) { variable in
@@ -92,7 +92,7 @@ struct VariablesSheet: View {
             heading("Scope", width: 70)
             Text("Value")
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, Theme.Space.md)
@@ -103,7 +103,7 @@ struct VariablesSheet: View {
     private func heading(_ text: String, width: CGFloat) -> some View {
         Text(text)
             .font(Theme.Typography.micro)
-            .foregroundStyle(Theme.textTertiary.color)
+            .foregroundStyle(Theme.Text.tertiary.color)
             .frame(width: width, alignment: .leading)
     }
 
@@ -112,7 +112,7 @@ struct VariablesSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Text(variable.name)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(width: 260, alignment: .leading)
@@ -123,7 +123,8 @@ struct VariablesSheet: View {
             Text(variable.scope.label)
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
-                    variable.scope == .session ? Theme.accent.color : Theme.textTertiary.color
+                    variable.scope == .session
+                        ? Theme.Accent.selection.color : Theme.Text.tertiary.color
                 )
                 .frame(width: 70, alignment: .leading)
             // Two lines, not one. A value here is a path, a list of flags or a
@@ -132,7 +133,7 @@ struct VariablesSheet: View {
             // exactly what somebody opened this to read.
             Text(variable.value)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .lineLimit(2)
                 .truncationMode(.tail)
                 .textSelection(.enabled)
@@ -150,11 +151,11 @@ struct VariablesSheet: View {
         HStack(spacing: Theme.Space.sm) {
             Text(AppModel.pluralized(rows.count, "setting", "settings"))
                 .font(Theme.Typography.micro)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
             if !model.variableReport.isEmpty {
                 Text(model.variableReport)
                     .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
             }
             Spacer(minLength: Theme.Space.sm)
@@ -165,12 +166,14 @@ struct VariablesSheet: View {
             Button("Copy") { model.copyVisibleVariables() }
                 .buttonStyle(.plain)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(rows.isEmpty ? Theme.textTertiary.color : Theme.accent.color)
+                .foregroundStyle(
+                    rows.isEmpty ? Theme.Text.tertiary.color : Theme.Accent.selection.color
+                )
                 .disabled(rows.isEmpty)
             Button("Done") { model.closeVariables() }
                 .buttonStyle(.plain)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
         }
         .padding(.horizontal, Theme.Space.md)
         .frame(height: 30)

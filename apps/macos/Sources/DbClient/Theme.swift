@@ -52,54 +52,81 @@ enum Theme {
     }
 
     // MARK: - Surfaces
+    //
+    // Named for the depth each one is at rather than for what it happens to be
+    // used for, which is what makes a second set of values possible: a light
+    // theme changes what `canvas` *is* and changes nothing about which views ask
+    // for it. A flat `background` / `surface` / `surfaceRaised` could not say
+    // that — the first of those names a role, the other two name an order, and a
+    // reader had to know the file to tell which was on top.
 
-    static let background = Tone(0x0F17_2A)
-    static let surface = Tone(0x1E29_3B)
-    static let surfaceRaised = Tone(0x2733_4A)
-    static let separator = Tone(0xFFFF_FF, alpha: 0.08)
-    static let border = Tone(0x4755_69)
+    enum Surface {
+        /// The window's floor: the grid, and the space behind everything.
+        static let canvas = Tone(0x0F17_2A)
+        /// Panels, header bands, cards, the active tab.
+        static let raised = Tone(0x1E29_3B)
+        /// One step further forward: the inspector strip, popovers.
+        static let overlay = Tone(0x2733_4A)
+    }
+
+    enum Border {
+        /// Divider lines, which are light on dark rather than a colour of their
+        /// own — so they follow the surface under them instead of fighting it.
+        static let hairline = Tone(0xFFFF_FF, alpha: 0.08)
+        /// The edge of a control, which has to hold its own against both.
+        static let control = Tone(0x4755_69)
+    }
 
     // MARK: - Text
     //
     // Contrast is checked rather than assumed, and against the *lightest*
-    // surface each tone is drawn on rather than against `background`. That
+    // surface each tone is drawn on rather than against `Surface.canvas`. That
     // distinction is not pedantry: it is where the previous tertiary went wrong.
-    // Measured against `background` alone it read 3.8:1 and was documented as
-    // clearing the 3:1 bar — but the chrome draws it on `surface` (the status
-    // bar, the filter bar, the sidebar footer) and on `surfaceRaised` (the cell
-    // inspector strip, the history and outcome headers), where the same tone
-    // fell to 3.1:1 and 2.7:1. A number measured against the one surface a tone
-    // is rarely used on is not a check.
+    // Measured against the canvas alone it read 3.8:1 and was documented as
+    // clearing the 3:1 bar — but the chrome draws it on `Surface.raised` (the
+    // status bar, the filter bar, the sidebar footer) and on `Surface.overlay`
+    // (the cell inspector strip, the history and outcome headers), where the
+    // same tone fell to 3.1:1 and 2.7:1. A number measured against the one
+    // surface a tone is rarely used on is not a check.
     //
-    // So, against `surfaceRaised`: primary 12.1:1, secondary 4.9:1, tertiary
+    // So, against `Surface.overlay`: primary 12.1:1, secondary 4.9:1, tertiary
     // 3.3:1. Tertiary is still for non-essential labels only — it clears 3:1
-    // everywhere it appears and 4.5:1 nowhere but `background` — and anything a
+    // everywhere it appears and 4.5:1 nowhere but the canvas — and anything a
     // user has to read rather than glance at belongs on secondary.
 
-    static let text = Tone(0xF8FA_FC)
-    static let textSecondary = Tone(0x94A3_B8)
-    static let textTertiary = Tone(0x7483_9A)
-    /// Muted text on the data surface: the type line under a column header,
-    /// the word NULL in a cell. Content someone reads, not chrome — it holds
-    /// 4.2:1 on the header band and 4.6:1 on the grid background, where the
-    /// tertiary label tone would fall to 3.1:1. (spec token: text.dataMuted)
-    static let textDataMuted = Tone(0x7C8A_A0)
-    /// Dimmer than NULL: the word DEFAULT in a draft row — what the table
-    /// will decide, not what the row holds. (spec token: text.dataFaint)
-    static let textDataFaint = Tone(0x6475_8B)
+    enum Text {
+        static let primary = Tone(0xF8FA_FC)
+        static let secondary = Tone(0x94A3_B8)
+        static let tertiary = Tone(0x7483_9A)
+        /// Muted text on the data surface: the type line under a column header,
+        /// the word NULL in a cell. Content someone reads, not chrome — it holds
+        /// 4.2:1 on the header band and 4.6:1 on the grid background, where the
+        /// tertiary label tone would fall to 3.1:1.
+        static let dataMuted = Tone(0x7C8A_A0)
+        /// Dimmer than NULL: the word DEFAULT in a draft row — what the table
+        /// will decide, not what the row holds.
+        static let dataFaint = Tone(0x6475_8B)
+    }
 
     // MARK: - Semantics
     //
     // Two accents carrying two meanings, rather than one accent overloaded:
-    // indigo is "this is selected / focused", green is "this executes".
+    // indigo is "this is selected / focused", green is "this executes". They are
+    // apart from `Semantic` because they answer a different question — where you
+    // are and what will run, rather than how a thing is going.
 
-    static let accent = Tone(0x6366_F1)
-    static let run = Tone(0x22C5_5E)
-    static let warning = Tone(0xFBBF_24)
-    /// Fills and stripes. Too dark for text on `background` at 4.3:1 — use
-    /// `dangerText` there instead.
-    static let danger = Tone(0xEF44_44)
-    static let dangerText = Tone(0xF871_71)
+    enum Accent {
+        static let selection = Tone(0x6366_F1)
+        static let execute = Tone(0x22C5_5E)
+    }
+
+    enum Semantic {
+        static let warning = Tone(0xFBBF_24)
+        /// Fills and stripes. Too dark for text on `Surface.canvas` at 4.3:1 —
+        /// use `dangerText` there instead.
+        static let danger = Tone(0xEF44_44)
+        static let dangerText = Tone(0xF871_71)
+    }
 
     /// The colours a saved connection can be marked with.
     ///
@@ -110,7 +137,8 @@ enum Theme {
     /// as in name, and none of them is the indigo this window already spends on
     /// "this is the one you are on".
     ///
-    /// Measured against `background`, which is what a sidebar row is drawn on:
+    /// Measured against `Surface.canvas`, which is what a sidebar row is drawn
+    /// on:
     /// 6.4:1 for the tightest of them and better for the rest — well past the 3:1 a
     /// mark that is not text needs, and deliberately so, because a 3pt stripe is
     /// small enough that a ratio which passes on paper can still be hard to see.
@@ -131,17 +159,17 @@ enum Theme {
     /// Colours used by the Metal grid. Separate namespace because the data
     /// surface has its own vocabulary, not because it has its own palette.
     enum Grid {
-        static let background = Theme.background
-        static let header = Theme.surface
-        static let headerText = Theme.textSecondary
+        static let background = Theme.Surface.canvas
+        static let header = Theme.Surface.raised
+        static let headerText = Theme.Text.secondary
         /// Brighter than the other headers, so the sorted column is identifiable
         /// without having to resolve the direction marker beside it.
-        static let sortedHeaderText = Theme.text
+        static let sortedHeaderText = Theme.Text.primary
         /// The type line under each header name. Subordinate to the name — 4.2:1
         /// on the header band where the name holds 5.7:1 — but deliberately not
         /// the tertiary label tone, which would fall to 3.1:1 there. A type is
         /// something the user came to read, not chrome.
-        static let headerType = Theme.textDataMuted
+        static let headerType = Theme.Text.dataMuted
         static let banding = Tone(0xFFFF_FF, alpha: 0.022)
         static let separator = Tone(0xFFFF_FF, alpha: 0.06)
         static let text = Tone(0xE2E8_F0)
@@ -149,28 +177,28 @@ enum Theme {
         /// 4.6:1 against the background rather than the 3.4:1 that incidental
         /// text gets away with. It is also drawn as the literal word, so the
         /// colour is a second signal rather than the only one.
-        static let nullText = Theme.textDataMuted
-        static let selectedRow = Theme.accent.opacity(0.18)
-        static let selectedCell = Theme.accent.opacity(0.38)
+        static let nullText = Theme.Text.dataMuted
+        static let selectedRow = Theme.Accent.selection.opacity(0.18)
+        static let selectedCell = Theme.Accent.selection.opacity(0.38)
         /// A cell holding a change that has not been sent. Amber rather than the
         /// accent: it means the same thing as the amber in the toolbar, which is
         /// that the database does not know about this yet.
-        static let pendingCell = Theme.warning.opacity(0.30)
+        static let pendingCell = Theme.Semantic.warning.opacity(0.30)
         /// A row marked to be deleted. Red rather than the amber a changed cell
         /// gets: both are unsent, but one of them takes the row away, and that
         /// is worth being able to tell apart at a glance across a long result.
-        static let deletedRow = Theme.danger.opacity(0.26)
+        static let deletedRow = Theme.Semantic.danger.opacity(0.26)
         /// A row that is not in the database yet. Green, the third of the three
         /// signals a grid full of unsent work needs — added, changed, going —
         /// and the same green the Run button uses for the thing that has not
         /// happened yet.
-        static let draftRow = Theme.run.opacity(0.20)
+        static let draftRow = Theme.Accent.execute.opacity(0.20)
         /// A draft column nobody has typed into, drawn as the word DEFAULT.
         /// Dimmer than a value and dimmer than NULL, because unlike either of
         /// them it is not what the row will hold — it is what the table will
         /// decide.
-        static let defaultText = Theme.textDataFaint
-        static let cursor = Theme.accent
+        static let defaultText = Theme.Text.dataFaint
+        static let cursor = Theme.Accent.selection
         /// The scrollbar sits over the data rather than beside it, so the track
         /// is barely there and the thumb carries the whole signal.
         static let scrollTrack = Tone(0xFFFF_FF, alpha: 0.035)
@@ -182,7 +210,7 @@ enum Theme {
     /// reason `Grid` has one: a surface with a vocabulary of its own, drawn from
     /// the same palette.
     ///
-    /// Contrast is against `Theme.background`, measured rather than assumed, and
+    /// Contrast is against `Theme.Surface.canvas`, measured rather than assumed, and
     /// the numbers below are the ratios. All of them clear 4.5:1, because every
     /// one of these is text somebody is reading rather than a label beside it.
     ///
@@ -218,17 +246,17 @@ enum Theme {
         /// The caret and the selection band, which `pointAtSyntaxError` uses to
         /// put the offending token on screen. Indigo is already "this is where
         /// you are" everywhere else in the window.
-        static let caret = Theme.accent
-        static let selection = Theme.accent.opacity(0.32)
+        static let caret = Theme.Accent.selection
+        static let selection = Theme.Accent.selection.opacity(0.32)
         /// The band behind a matched pair of parentheses. The palette's "lifted off
         /// the page" tone rather than a colour of its own: this mark says where the
         /// partner is, and a hue would compete with the token colours it sits under.
-        static let bracketMatch = Theme.surfaceRaised
+        static let bracketMatch = Theme.Surface.overlay
         /// The band behind the statement ⌘R would run, when the buffer holds
         /// several. The same "lifted off the page" family as `bracketMatch`,
         /// one step below it: this mark covers whole lines of tokens, and at
-        /// `surfaceRaised`'s strength it would read as a selection.
-        static let statement = Theme.surface
+        /// `Surface.overlay`'s strength it would read as a selection.
+        static let statement = Theme.Surface.raised
     }
 
     // MARK: - Spacing

@@ -25,13 +25,13 @@ struct IndexChangeSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             preview
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
         .frame(width: 560)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         // Escape closes it. Nothing has run yet, so closing needs no question.
         .onExitCommand { model.indexPlan = nil }
     }
@@ -43,7 +43,7 @@ struct IndexChangeSheet: View {
             HStack(spacing: Theme.Space.sm) {
                 Text(plan?.qualified ?? "")
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 0)
@@ -53,12 +53,12 @@ struct IndexChangeSheet: View {
             case .drop(let name):
                 Text(name)
                     .font(Theme.Typography.mono)
-                    .foregroundStyle(Theme.text.color)
+                    .foregroundStyle(Theme.Text.primary.color)
             }
             Text(consequence)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(
-                    change.isDestructive ? Theme.warning.color : Theme.textSecondary.color
+                    change.isDestructive ? Theme.Semantic.warning.color : Theme.Text.secondary.color
                 )
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -126,13 +126,13 @@ struct IndexChangeSheet: View {
                 .accessibilityLabel("Key column \(position + 1) of the new index")
                 Text(position == 0 ? "sorted first" : "then")
                     .font(Theme.Typography.micro)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                 Spacer(minLength: 0)
                 Button {
                     edit { $0.columns.remove(at: position) }
                 } label: {
                     Image(systemName: "minus.circle")
-                        .foregroundStyle(Theme.textSecondary.color)
+                        .foregroundStyle(Theme.Text.secondary.color)
                 }
                 .buttonStyle(.plain)
                 .frame(width: 20)
@@ -157,7 +157,7 @@ struct IndexChangeSheet: View {
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
             .font(Theme.Typography.body)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .frame(width: 62, alignment: .leading)
     }
 
@@ -225,7 +225,7 @@ struct IndexChangeSheet: View {
         ScrollView {
             Text(plan?.preview ?? "")
                 .font(Theme.Typography.mono)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(Theme.Space.md)
@@ -242,7 +242,7 @@ struct IndexChangeSheet: View {
                 .font(Theme.Typography.micro)
                 .foregroundStyle(
                     model.indexChangeObstacle == nil
-                        ? Theme.textTertiary.color : Theme.warning.color
+                        ? Theme.Text.tertiary.color : Theme.Semantic.warning.color
                 )
                 .lineLimit(2)
             Spacer(minLength: Theme.Space.sm)

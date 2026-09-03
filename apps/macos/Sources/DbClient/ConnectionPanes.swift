@@ -40,7 +40,7 @@ struct ConnectionListPane: View {
             .padding(.horizontal, Theme.Space.xs)
 
             Rectangle()
-                .fill(Theme.separator.color)
+                .fill(Theme.Border.hairline.color)
                 .frame(height: 1)
                 .padding(.horizontal, Theme.Space.sm)
                 .padding(.vertical, Theme.Space.xs)
@@ -53,7 +53,7 @@ struct ConnectionListPane: View {
         // that applied to one of this application's two sidebars and not the other
         // would read as a defect in whichever one was noticed second.
         .background(
-            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.background.color
+            model.preferences.usesTranslucentSidebar ? Color.clear : Theme.Surface.canvas.color
         )
         .safeAreaInset(edge: .bottom) { footer }
     }
@@ -141,7 +141,7 @@ struct ConnectionListPane: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Theme.textSecondary.color)
+            .foregroundStyle(Theme.Text.secondary.color)
             .help("Empty the Quick connect form")
             .accessibilityLabel("New connection")
 
@@ -155,7 +155,7 @@ struct ConnectionListPane: View {
             // Coloured rather than left to the button style's dimming, which does
             // not read at 10pt on a dark background.
             .foregroundStyle(
-                model.canDeleteConnection ? Theme.textSecondary.color : Theme.textTertiary.color
+                model.canDeleteConnection ? Theme.Text.secondary.color : Theme.Text.tertiary.color
             )
             .disabled(!model.canDeleteConnection)
             .help("Delete the selected connection")
@@ -165,13 +165,13 @@ struct ConnectionListPane: View {
 
             Text(countLabel)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
         }
         .padding(.horizontal, Theme.Space.md)
         .padding(.vertical, Theme.Space.xs + 2)
-        .background(Theme.surface.color)
+        .background(Theme.Surface.raised.color)
         .overlay(alignment: .top) {
-            Rectangle().fill(Theme.separator.color).frame(height: 1)
+            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
         }
     }
 
@@ -196,7 +196,7 @@ struct ConnectionFormPane: View {
     var body: some View {
         form
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.background.color)
+            .background(Theme.Surface.canvas.color)
             .task {
                 // Where reading starts, and never the password field — which is
                 // what the form used to do when the other fields were already
@@ -328,11 +328,11 @@ struct ConnectionFormPane: View {
         .frame(width: 420)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                .fill(Theme.surface.color)
+                .fill(Theme.Surface.raised.color)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                .strokeBorder(Theme.separator.color, lineWidth: 1)
+                .strokeBorder(Theme.Border.hairline.color, lineWidth: 1)
         )
     }
 
@@ -340,7 +340,7 @@ struct ConnectionFormPane: View {
         HStack(spacing: Theme.Space.sm) {
             Image(systemName: "cylinder.split.1x2")
                 .font(.system(size: 18, weight: .light))
-                .foregroundStyle(Theme.accent.color)
+                .foregroundStyle(Theme.Accent.selection.color)
             // No subtitle. It used to name the one dialect the core spoke, then
             // counted them — and "15 databases", sitting directly above a form
             // whose next row asks which database to open, reads as fifteen
@@ -349,7 +349,7 @@ struct ConnectionFormPane: View {
             // rather than a boast.
             Text("Connect to a database")
                 .font(Theme.Typography.title)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
         }
         .accessibilityElement(children: .combine)
     }
@@ -382,7 +382,7 @@ struct ConnectionFormPane: View {
     private var buttons: some View {
         VStack(spacing: 0) {
             Rectangle()
-                .fill(Theme.separator.color)
+                .fill(Theme.Border.hairline.color)
                 .frame(height: 1)
                 .padding(.top, Theme.Space.xl)
                 .padding(.bottom, Theme.Space.md)
@@ -429,7 +429,7 @@ struct ConnectionFormPane: View {
                     // The window's own accent rather than the system's, which is
                     // whatever the user picked in Settings and need not belong
                     // beside this palette.
-                    .tint(Theme.accent.color)
+                    .tint(Theme.Accent.selection.color)
                     .disabled(!model.canConnect)
             }
         }
@@ -487,14 +487,14 @@ struct ConnectionFormPane: View {
             switch test {
             case .running:
                 StatusDot(state: .connecting)
-                Text("Testing…").foregroundStyle(Theme.textSecondary.color)
+                Text("Testing…").foregroundStyle(Theme.Text.secondary.color)
             case .reached(let info):
                 StatusDot(state: .connected)
-                Text(info.label).foregroundStyle(Theme.text.color)
+                Text(info.label).foregroundStyle(Theme.Text.primary.color)
             case .failed(let message):
                 StatusDot(state: .failed)
                 Text(message)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(2)
             }
             Spacer(minLength: 0)
@@ -527,12 +527,12 @@ struct ConnectionFormPane: View {
             .frame(width: 120)
             Text(model.connectionDraft.settings.sslMode.summary)
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textSecondary.color)
+                .foregroundStyle(Theme.Text.secondary.color)
                 .lineLimit(1)
             Spacer(minLength: 0)
         }
         .font(Theme.Typography.body)
-        .foregroundStyle(Theme.text.color)
+        .foregroundStyle(Theme.Text.primary.color)
     }
 
     /// The SSH bastion, if there is one.
@@ -620,7 +620,7 @@ struct ConnectionFormPane: View {
             }
         }
         .font(Theme.Typography.body)
-        .foregroundStyle(Theme.text.color)
+        .foregroundStyle(Theme.Text.primary.color)
     }
 
     /// Whether this password may be written down at all.
@@ -640,7 +640,7 @@ struct ConnectionFormPane: View {
             Spacer(minLength: 0)
         }
         .font(Theme.Typography.body)
-        .foregroundStyle(Theme.text.color)
+        .foregroundStyle(Theme.Text.primary.color)
     }
 
     /// What this connection is allowed to be.
@@ -670,7 +670,7 @@ struct ConnectionFormPane: View {
             Spacer(minLength: 0)
         }
         .font(Theme.Typography.body)
-        .foregroundStyle(Theme.text.color)
+        .foregroundStyle(Theme.Text.primary.color)
     }
 
     /// The mark that tells one server from another at a glance.
@@ -733,7 +733,7 @@ struct ConnectionFormPane: View {
                 .frame(width: 56)
             Text("seconds · 0 = the driver's own limit")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .lineLimit(1)
                 .accessibilityHidden(true)
             Spacer(minLength: 0)
@@ -769,7 +769,7 @@ struct ConnectionFormPane: View {
             .frame(width: 56)
             Text("seconds between pings while idle · 0 = off")
                 .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 .lineLimit(1)
                 .accessibilityHidden(true)
             Spacer(minLength: 0)
@@ -846,16 +846,16 @@ private struct FolderHeader: View {
             HStack(spacing: Theme.Space.xs) {
                 Image(systemName: isShut ? "chevron.right" : "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .frame(width: 10)
                 Text(name)
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textSecondary.color)
+                    .foregroundStyle(Theme.Text.secondary.color)
                     .lineLimit(1)
                 Spacer(minLength: Theme.Space.xs)
                 Text("\(count)")
                     .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .monospacedDigit()
             }
             .padding(.horizontal, Theme.Space.sm)
@@ -894,11 +894,11 @@ private struct ConnectionRow: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(connection.title)
                         .font(Theme.Typography.bodyEmphasis)
-                        .foregroundStyle(Theme.text.color)
+                        .foregroundStyle(Theme.Text.primary.color)
                         .lineLimit(1)
                     Text(connection.subtitle)
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.textSecondary.color)
+                        .foregroundStyle(Theme.Text.secondary.color)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -912,7 +912,7 @@ private struct ConnectionRow: View {
                         forServer: connection.server, scheme: connection.settings.scheme)
                 )
                 .font(Theme.Typography.monoSmall)
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
                 marker
             }
             .padding(.horizontal, Theme.Space.sm)
@@ -941,7 +941,7 @@ private struct ConnectionRow: View {
             // name and nothing else.
             Text(connection.title)
                 .font(Theme.Typography.bodyEmphasis)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
         }
         .dropDestination(for: String.self) { items, _ in
             // Anything else arriving here is somebody dragging text out of the
@@ -958,7 +958,7 @@ private struct ConnectionRow: View {
             // there is no into — every drop is between two rows.
             if isDropTarget {
                 Rectangle()
-                    .fill(Theme.accent.color)
+                    .fill(Theme.Accent.selection.color)
                     .frame(height: 2)
             }
         }
@@ -986,20 +986,20 @@ private struct ConnectionRow: View {
         if hasUnsavedEdits {
             Image(systemName: "pencil")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(Theme.warning.color)
+                .foregroundStyle(Theme.Semantic.warning.color)
                 .accessibilityHidden(true)
         } else {
             HStack(spacing: Theme.Space.xs) {
                 if connection.isReadOnly {
                     Image(systemName: "lock")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                         .accessibilityHidden(true)
                 }
                 if connection.isProduction {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(Theme.danger.color)
+                        .foregroundStyle(Theme.Semantic.danger.color)
                         .accessibilityHidden(true)
                 }
                 if isOpen {
@@ -1027,8 +1027,8 @@ private struct ConnectionRow: View {
     /// never be mistakable for "this is the connection I am on". The same rule
     /// `TabButton` states, in the same two tones.
     private var fill: Color {
-        if isSelected { return Theme.accent.opacity(0.30).color }
-        return isHovering ? Theme.surfaceRaised.color : .clear
+        if isSelected { return Theme.Accent.selection.opacity(0.30).color }
+        return isHovering ? Theme.Surface.overlay.color : .clear
     }
 }
 
@@ -1057,10 +1057,10 @@ private struct QuickConnectRow: View {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Quick connect")
                         .font(Theme.Typography.bodyEmphasis)
-                        .foregroundStyle(Theme.text.color)
+                        .foregroundStyle(Theme.Text.primary.color)
                     Text(subtitle)
                         .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.textSecondary.color)
+                        .foregroundStyle(Theme.Text.secondary.color)
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
@@ -1071,7 +1071,7 @@ private struct QuickConnectRow: View {
                 // this row.
                 Image(systemName: "bolt.horizontal.circle")
                     .font(.system(size: 11))
-                    .foregroundStyle(Theme.textTertiary.color)
+                    .foregroundStyle(Theme.Text.tertiary.color)
                     .accessibilityHidden(true)
             }
             .padding(.horizontal, Theme.Space.sm)
@@ -1090,8 +1090,8 @@ private struct QuickConnectRow: View {
     }
 
     private var fill: Color {
-        if isSelected { return Theme.accent.opacity(0.30).color }
-        return isHovering ? Theme.surfaceRaised.color : .clear
+        if isSelected { return Theme.Accent.selection.opacity(0.30).color }
+        return isHovering ? Theme.Surface.overlay.color : .clear
     }
 }
 
@@ -1113,7 +1113,9 @@ private struct ColourSwatch: View {
                 .frame(width: 14, height: 14)
                 .overlay(
                     Circle()
-                        .strokeBorder(isSelected ? Theme.accent.color : .clear, lineWidth: 2)
+                        .strokeBorder(
+                            isSelected ? Theme.Accent.selection.color : .clear, lineWidth: 2
+                        )
                         .padding(-3)
                 )
                 .contentShape(Circle())
@@ -1133,11 +1135,11 @@ private struct ColourSwatch: View {
             // that failed to load, and this is the one somebody reaches for to take
             // a colour back off.
             Circle()
-                .strokeBorder(Theme.border.color, lineWidth: 1)
+                .strokeBorder(Theme.Border.control.color, lineWidth: 1)
                 .overlay(
                     Image(systemName: "xmark")
                         .font(.system(size: 7, weight: .bold))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 )
         }
     }
@@ -1157,12 +1159,12 @@ private struct ConnectionFilterField: View {
         HStack(spacing: Theme.Space.xs + 2) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Theme.textTertiary.color)
+                .foregroundStyle(Theme.Text.tertiary.color)
 
             TextField("Filter connections", text: $text)
                 .textFieldStyle(.plain)
                 .font(Theme.Typography.body)
-                .foregroundStyle(Theme.text.color)
+                .foregroundStyle(Theme.Text.primary.color)
                 .focused($focus, equals: .connectionFilter)
 
             if !text.isEmpty {
@@ -1171,7 +1173,7 @@ private struct ConnectionFilterField: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 10))
-                        .foregroundStyle(Theme.textTertiary.color)
+                        .foregroundStyle(Theme.Text.tertiary.color)
                 }
                 .buttonStyle(.plain)
                 .help("Clear filter (⎋)")
@@ -1182,12 +1184,13 @@ private struct ConnectionFilterField: View {
         .frame(height: 22)
         .background(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
-                .fill(Theme.background.opacity(0.6).color)
+                .fill(Theme.Surface.canvas.opacity(0.6).color)
         )
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.control)
                 .strokeBorder(
-                    focus == .connectionFilter ? Theme.accent.color : Theme.separator.color,
+                    focus == .connectionFilter
+                        ? Theme.Accent.selection.color : Theme.Border.hairline.color,
                     lineWidth: 1)
         )
         // Escape empties the field, which is the reflex every macOS search field
