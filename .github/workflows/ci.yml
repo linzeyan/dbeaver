@@ -137,5 +137,17 @@ jobs:
 
       # Builds the core and links it into the app before running the splitter's
       # checks, so this also answers whether the front-end still compiles.
+      #
+      # The tail is repeated as an annotation because reading a job's log needs
+      # admin rights on the repository and reading its annotations does not —
+      # and this is the one job whose failures cannot be reproduced on the
+      # machine this is developed on, which runs a newer Xcode than the runner.
+      # Without it, a red job here says only "exit code 2".
       - name: Swift checks
-        run: make test-swift
+        run: |
+          set -o pipefail
+          make test-swift 2>&1 | tee /tmp/swift-checks.log && exit 0
+          python3 -c "import pathlib; \
+            print('::error::' + pathlib.Path('/tmp/swift-checks.log').read_text()[-3000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
