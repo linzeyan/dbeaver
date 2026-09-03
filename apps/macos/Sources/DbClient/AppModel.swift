@@ -2665,11 +2665,19 @@ final class AppModel {
         // keyed by every schema the driver reported. Reducing the dictionaries
         // would put "3 of 4,812" under a tree showing forty rows, because
         // `pg_catalog` is in them whether or not it is drawn.
-        visibleSchemas.reduce(0) { total, schema in
-            total + (relations[schema.name]?.count ?? 0)
-                + (routines[schema.name]?.count ?? 0)
-                + (sequences[schema.name]?.count ?? 0)
+        //
+        // A loop rather than a `reduce`, because the four-term sum of optional
+        // counts inside a closure is an expression the Xcode on the CI runner
+        // gives up type-checking — "unable to type-check this expression in
+        // reasonable time" — while the newer one this is written on accepts it.
+        var total = 0
+        for schema in visibleSchemas {
+            let name = schema.name
+            total += relations[name]?.count ?? 0
+            total += routines[name]?.count ?? 0
+            total += sequences[name]?.count ?? 0
         }
+        return total
     }
 
     /// Whether the filter is currently hiding the relation the detail panes are
