@@ -141,10 +141,15 @@ jobs:
                    f"{len(files)} files changed — too many to attribute, running everything")
 
           def infra(path):
-              # Everything that decides how any of this is built or brought up.
+              # Everything that decides how any of this is built or brought up,
+              # including the vendored crates: `third_party/tiberius` is compiled
+              # into the workspace and is not under `crates/`, so without this
+              # line a patch to it would ask for nothing at all.
               return (path in {"Cargo.toml", "Cargo.lock", "Makefile", "docker-compose.yml",
+                               ".env", "rust-toolchain.toml", ".cargo/config.toml",
                                ".github/workflows/ci.yml"}
-                      or path.startswith("tools/"))
+                      or path.startswith("tools/")
+                      or path.startswith("third_party/"))
 
           def shared_rust(path):
               # Any crate that is not a driver: conn, ffi, transfer, ddl, sql,
@@ -154,8 +159,12 @@ jobs:
 
           rebuild = any(infra(f) or shared_rust(f) for f in files)
           core = rebuild or any(f.startswith("crates/") for f in files)
+          # `.swift-format` asks for the macOS job alone: it is the one file in
+          # the tree that decides whether `make fmt-check` passes and means
+          # nothing to any of the Rust jobs.
           app = rebuild or any(
-              f.startswith("apps/macos/") or f.startswith("crates/ffi/") for f in files)
+              f.startswith("apps/macos/") or f.startswith("crates/ffi/")
+              or f == ".swift-format" for f in files)
           servers = [s for s in SERVERS
                      if rebuild or (s["driver"] and any(
                          f.startswith(f"crates/drivers/{s['driver']}/") for f in files))]
