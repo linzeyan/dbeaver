@@ -197,6 +197,28 @@ char* db_sql_format(const char* text, char** err);
 // guessing the word would produce a statement the server refuses.
 char* db_sql_explain_prefix(const char* scheme);
 
+// How this product is asked for a plan a tree can be drawn from, written in front
+// of a statement, or NULL where it has no such form. Released with
+// db_string_free.
+//
+// Keyed by the product a connection reported rather than by its scheme, which is
+// the whole difference between this and the prefix above. Prose EXPLAIN belongs to
+// a dialect and every product speaking that dialect takes it; the machine-readable
+// form belongs to a product, and CockroachDB arriving through the PostgreSQL
+// driver rejects it. NULL means send the prose one.
+char* db_sql_plan_prefix(const char* product);
+
+// The rows that prefix asked for, read as a tree: a JSON array of nodes, each with
+// label, detail, rows, cost, self_cost and children. Released with db_string_free.
+//
+// `rows` is what came back, as a JSON array of rows of cells written as strings —
+// one cell for the document PostgreSQL answers with, four a row for SQLite.
+//
+// NULL where there is no tree to draw: a product with no such form, rows that are
+// not the shape it answers in, an empty result. Not a failure — the rows are
+// already on screen — so what a front end does with NULL is go on showing them.
+char* db_sql_plan_json(const char* product, const char* rows);
+
 // What running this SQL would do: "safe", "modify", "dangerous" or "fatal".
 // Released with db_string_free. NULL where the text could not be read at all.
 //

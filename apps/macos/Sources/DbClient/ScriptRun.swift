@@ -70,10 +70,17 @@ final class ScriptStep: Identifiable {
     /// another step out of the list must not re-run anything, so each step goes
     /// on owning the Arrow batches it was handed.
     let result: ResultSet
+    /// The plan in those rows, where this step was a run that asked for one and
+    /// the core could read the answer.
+    ///
+    /// On the step rather than on the model, for the reason `result` is: a run of
+    /// several statements can hold a plan for one of them and rows for the rest,
+    /// and moving between them must not need anything re-read.
+    let plan: QueryPlan?
 
     init(
         id: Int, sql: String, range: Range<Int>, summary: String,
-        outcome: StatementOutcome, result: ResultSet
+        outcome: StatementOutcome, result: ResultSet, plan: QueryPlan? = nil
     ) {
         self.id = id
         self.sql = sql
@@ -81,6 +88,7 @@ final class ScriptStep: Identifiable {
         self.summary = summary
         self.outcome = outcome
         self.result = result
+        self.plan = plan
     }
 
     /// The statement on one line, for the list.

@@ -2581,7 +2581,18 @@ struct QueryPane: View {
                     // It used to fall back to the browse's grid, which put rows
                     // under a statement that had not produced them.
                     if let step = model.selectedScriptStep {
-                        if step.outcome.hasGrid {
+                        // A plan is drawn instead of the grid, not beside it. The
+                        // rows it was read from are one document in one cell or
+                        // four columns of ids — the switch is there for checking
+                        // the tree against them, which is a thing somebody does
+                        // once, not a second pane to keep on screen.
+                        if step.plan != nil {
+                            PlanSwitch(model: model)
+                            Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
+                        }
+                        if let plan = step.plan, model.showsPlanTree {
+                            PlanTree(plan: plan)
+                        } else if step.outcome.hasGrid {
                             MetalGridView(
                                 table: model.queryResult.table,
                                 generation: model.queryResult.generation,

@@ -892,16 +892,21 @@ final class AppModel {
         set { session.appliedInitialFilters = newValue }
     }
 
-    /// Set by `--run-script`: the opening `--sql` is a whole script, and nothing
-    /// here runs it. main.swift sends the Query menu's own item once the window
-    /// has settled, which is what makes the capture a check of that item's
-    /// wiring rather than only of the model behind it.
-    private let initialSQLIsScript: Bool
+    /// Set by `--run-script` and by `--explain`: the opening `--sql` is for a
+    /// command in the Query menu, and nothing here sends it. main.swift sends
+    /// that menu's own item once the window has settled, which is what makes the
+    /// capture a check of the item's wiring rather than only of the model behind
+    /// it.
+    ///
+    /// It also keeps ⌘R from going first. Explaining a statement must not run it,
+    /// and a window that ran it and then explained it would have made the change
+    /// the plan was asked about.
+    private let initialSQLIsForAMenuCommand: Bool
 
     init(
         history: QueryHistory, favorites: QueryFavorites, preferences: Preferences,
         initialTab: DetailTab = .content, initialSQL: String? = nil,
-        initialCaret: Int? = nil, initialSQLIsScript: Bool = false,
+        initialCaret: Int? = nil, initialSQLIsForAMenuCommand: Bool = false,
         initialWhere: String? = nil, initialOrder: String? = nil,
         initialStructureDetail: StructureDetail? = nil, initialRelation: String? = nil,
         initialFilter: String? = nil, restoring: RestoredWindow? = nil
@@ -909,7 +914,7 @@ final class AppModel {
         self.history = history
         self.favorites = favorites
         self.preferences = preferences
-        self.initialSQLIsScript = initialSQLIsScript
+        self.initialSQLIsForAMenuCommand = initialSQLIsForAMenuCommand
         self.initialStructureDetail = initialStructureDetail
         self.initialRelation = initialRelation
         self.initialSQL = initialSQL
@@ -2057,6 +2062,7 @@ final class AppModel {
         // the session carries it for the tab that is open now. Quick connect has
         // no entry, and `record` is a no-op there.
         session.server = inventory.server
+        session.serverProduct = inventory.product
         record(server: inventory.server)
         capabilities = inventory.capabilities
         connectionState = .connected
@@ -2088,9 +2094,11 @@ final class AppModel {
         // Runs after the selection above, so an explicit `--sql` replaces
         // the browse rather than racing it. Through the same path ⌘R takes,
         // so a multi-statement `--sql` runs the one `--caret` names rather
-        // than the whole buffer — unless `--run-script` says otherwise, and
-        // then the menu item is what runs it.
-        if !appliedLaunchOptions, initialSQL != nil, !initialSQLIsScript { runCurrentQuery() }
+        // than the whole buffer — unless `--run-script` or `--explain` says
+        // otherwise, and then the menu item is what sends it.
+        if !appliedLaunchOptions, initialSQL != nil, !initialSQLIsForAMenuCommand {
+            runCurrentQuery()
+        }
         appliedLaunchOptions = true
         // In front now, and not a moment sooner. Until this line the window went
         // on showing the connection that was already answering, which is the
@@ -2324,10 +2332,15 @@ final class AppModel {
         // database that will not say what it is is still a database somebody has
         // just opened, and refusing to show it over a version string would be
         // this application deciding the answer mattered more than the data.
+        // Asked once and read twice: the label goes on the list row, the product
+        // decides which questions this connection can be asked. Two calls would
+        // be two round trips for one answer.
+        let info = try? db.serverInfo()
         return Inventory(
             schemas: schemas, databases: databases, relations: relations, routines: routines,
             sequences: sequences,
-            server: (try? db.serverInfo())?.label ?? "",
+            server: info?.label ?? "",
+            product: info?.product ?? "",
             // Read here rather than on the main actor for the reason everything
             // else in this function is: it crosses the FFI boundary, and the
             // window is not the place to wait for anything that does. It costs no
@@ -2367,6 +2380,12 @@ final class AppModel {
         let sequences: [String: [SequenceInfo]]
         /// What answered, for the list row to keep. Empty where it would not say.
         let server: String
+        /// The product alone, where `server` is the sentence somebody reads.
+        ///
+        /// Carried separately rather than cut off the front of that string: "SQL
+        /// Server" is two words and "PostgreSQL 17.0" is two words, and the rule
+        /// that tells them apart is the core's, which already applied it.
+        let product: String
         /// What this connection can do, for the controls that would otherwise
         /// have to find out by being refused.
         let capabilities: Capabilities
@@ -5262,29 +5281,55 @@ final class AppModel {
     /// beside the menu validation it answers.
     private var explainPrefix: String? { Database.explainPrefix(for: scheme) }
 
+    /// How this connection is asked for a plan, and whether the answer can be
+    /// drawn as a tree.
+    ///
+    /// Two questions the core answers separately because they have different
+    /// keys. The machine-readable request belongs to the product on the other end
+    /// — CockroachDB arrives through the PostgreSQL driver and refuses it — and
+    /// the prose one belongs to the dialect, where every product speaking it takes
+    /// the word. So the tree is offered where it is really available, and
+    /// everywhere else ⌥⌘E sends exactly what it always sent.
+    var explainRequest: (prefix: String, drawable: Bool)? {
+        if let plan = Database.planPrefix(for: session.serverProduct) {
+            return (plan, true)
+        }
+        return explainPrefix.map { ($0, false) }
+    }
+
     /// Whether the database can be asked for a plan of what ⌘R would run.
     ///
     /// Refuses while a run is in flight for the reason `canRunScript` does — the
     /// core queue is serial, so a second statement would only queue behind the
     /// first and land looking like a command that did nothing — and refuses
-    /// outright where the database has no prefix, which is what the core
+    /// outright where the database has no request to make, which is what the core
     /// answering nil rather than guessing a word is for.
     var canExplainStatement: Bool {
-        activeTab == .query && !isBusy && runTarget != nil && explainPrefix != nil
+        activeTab == .query && !isBusy && runTarget != nil && explainRequest != nil
     }
 
     /// Asks the database how it would run the statement the caret is in.
     ///
     /// Explains what ⌘R would send rather than the whole buffer: a plan is read
     /// against one statement, and the caret already says which one. The single
-    /// space is joined here rather than kept in the dialect table, because the
-    /// table records how a database spells the request and not how a caller lays
-    /// it out.
+    /// space is joined here rather than kept in the core's tables, because those
+    /// record how a database spells the request and not how a caller lays it out.
     func explainCurrentStatement() {
-        guard canExplainStatement, let target = runTarget, let prefix = explainPrefix
+        guard canExplainStatement, let target = runTarget, let request = explainRequest
         else { return }
-        runStatements([target.range], labelled: ["explain"], prefixedWith: prefix + " ")
+        runStatements(
+            [target.range], labelled: ["explain"], prefixedWith: request.prefix + " ",
+            readAsPlan: request.drawable)
     }
+
+    /// Whether the plan pane shows the tree rather than the rows it was read
+    /// from.
+    ///
+    /// The tree is the point, so it opens on it. The switch back exists because
+    /// the tree is this application's reading of what the server said and the rows
+    /// are what it said — and when the two look like they disagree, the rows are
+    /// the ones to check.
+    var showsPlanTree = true
 
     /// What is about to be sent to a connection somebody marked production.
     struct ProductionRun {
@@ -5385,7 +5430,8 @@ final class AppModel {
     /// list and the history then show: a run that asked for a plan reports the
     /// statement it actually sent rather than the one it was made from.
     private func runStatements(
-        _ ranges: [Range<Int>], labelled labels: [String], prefixedWith prefix: String = ""
+        _ ranges: [Range<Int>], labelled labels: [String], prefixedWith prefix: String = "",
+        readAsPlan: Bool = false
     ) {
         // The buffer as it is now. An error arrives after a round trip, and the
         // caret may only be moved while the text it indexes still exists.
@@ -5442,14 +5488,14 @@ final class AppModel {
         } then: { [self] output in
             install(
                 output, ranges: ranges, statements: sql, labels: labels, script: script,
-                prefix: prefix)
+                prefix: prefix, readAsPlan: readAsPlan)
         }
     }
 
     /// Turns a finished run into the steps the pane shows.
     private func install(
         _ output: ScriptOutput, ranges: [Range<Int>], statements: [String], labels: [String],
-        script: String, prefix: String
+        script: String, prefix: String, readAsPlan: Bool = false
     ) {
         var steps: [ScriptStep] = []
         for (i, out) in output.completed.enumerated() {
@@ -5479,7 +5525,8 @@ final class AppModel {
             steps.append(
                 ScriptStep(
                     id: i + 1, sql: statements[i], range: ranges[i], summary: summary,
-                    outcome: outcome, result: result))
+                    outcome: outcome, result: result,
+                    plan: readAsPlan ? Self.plan(in: grid, from: session.serverProduct) : nil))
         }
 
         // A run stops at the first failure, so the failed statement is the one
@@ -5546,6 +5593,21 @@ final class AppModel {
                     sent: SentStatement(
                         script: script, range: ranges[stopped], prefix: prefix)))
         }
+    }
+
+    /// The tree in a step's rows, where the core can read one out of them.
+    ///
+    /// Read here, once, rather than in the pane that draws it: the pane redraws on
+    /// every hover and every resize, and this crosses the FFI boundary and parses
+    /// a document. Nil where the rows are not a plan after all — a server that
+    /// answered in a shape this build has not seen — and the pane then shows the
+    /// rows, which are still what the server said.
+    private static func plan(in grid: ArrowTable, from product: String) -> QueryPlan? {
+        guard grid.rowCount > 0, !grid.columns.isEmpty else { return nil }
+        let cells = (0..<grid.rowCount).map { row in
+            grid.columns.indices.map { grid.text(row: row, column: $0) }
+        }
+        return Database.plan(product: product, rows: cells).map(QueryPlan.init)
     }
 
     /// What the status bar reads for one step of a run.

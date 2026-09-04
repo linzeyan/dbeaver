@@ -16,6 +16,10 @@ mod format;
 mod keywords;
 mod lex;
 mod parse;
+/// A module rather than a name re-exported below, alone among these. Its two
+/// functions are `prefix` and `read`, which say what they mean under `plan::` and
+/// nothing at all at the root of a crate this size.
+pub mod plan;
 mod script;
 
 pub use complete::{Completion, Expect, complete};

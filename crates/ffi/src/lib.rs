@@ -813,6 +813,82 @@ pub unsafe extern "C" fn db_sql_explain_prefix(scheme: *const c_char) -> *mut c_
     CString::new(prefix).map_or(ptr::null_mut(), CString::into_raw)
 }
 
+/// How `product` is asked for a plan a tree can be drawn from, or NULL where it
+/// has no such form.
+///
+/// Keyed by the product a connection reported rather than by its scheme, which is
+/// the whole difference between this and `db_sql_explain_prefix` above. Prose
+/// `EXPLAIN` is a dialect's, and every product speaking that dialect takes it; the
+/// machine-readable form is a product's, and CockroachDB arriving through the
+/// PostgreSQL driver rejects it. `crates/sql/src/plan.rs` holds the table and the
+/// reasons.
+///
+/// NULL is an answer rather than a failure, as it is for the neighbour above, so
+/// this takes no `err` either. What a caller does with it is send the prose
+/// `EXPLAIN` it sent before there was a tree to draw.
+///
+/// # Safety
+/// `product` must be null or a valid NUL-terminated C string. The returned string
+/// is the caller's, released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_plan_prefix(product: *const c_char) -> *mut c_char {
+    if product.is_null() {
+        return ptr::null_mut();
+    }
+    let Ok(product) = (unsafe { CStr::from_ptr(product) }).to_str() else {
+        return ptr::null_mut();
+    };
+    let Some(prefix) = dbsql::plan::prefix(product) else {
+        return ptr::null_mut();
+    };
+    CString::new(prefix).map_or(ptr::null_mut(), CString::into_raw)
+}
+
+/// The rows `db_sql_plan_prefix` asked for, read as a tree: a JSON array of
+/// nodes, each with `label`, `detail`, `rows`, `cost`, `self_cost` and
+/// `children`. Release with `db_string_free`.
+///
+/// `rows` is what came back, as a JSON array of rows of cells written as strings
+/// — `[["…"]]` for the one document PostgreSQL answers with, four cells a row for
+/// SQLite. Strings rather than typed values because that is what a grid holds by
+/// the time this is asked, and because the two shapes have no types in common
+/// worth carrying across the boundary.
+///
+/// NULL where there is no tree to draw: a product with no machine-readable form,
+/// rows that are not the shape it answers in, an empty result. Not a failure —
+/// the rows themselves are already on screen — so this takes no `err`, and what a
+/// caller does with NULL is leave the grid showing them.
+///
+/// # Safety
+/// `product` and `rows` must be null or valid NUL-terminated C strings. The
+/// returned string is the caller's, released with `db_string_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_sql_plan_json(
+    product: *const c_char,
+    rows: *const c_char,
+) -> *mut c_char {
+    if product.is_null() || rows.is_null() {
+        return ptr::null_mut();
+    }
+    let (Ok(product), Ok(rows)) = (
+        unsafe { CStr::from_ptr(product) }.to_str(),
+        unsafe { CStr::from_ptr(rows) }.to_str(),
+    ) else {
+        return ptr::null_mut();
+    };
+    let Ok(rows) = serde_json::from_str::<Vec<Vec<String>>>(rows) else {
+        return ptr::null_mut();
+    };
+    let Some(plan) = dbsql::plan::read(product, &rows) else {
+        return ptr::null_mut();
+    };
+    // Through `json_result` with no `err` to write to: a serialisation failure
+    // here would be this side's bug rather than anything the user could act on,
+    // and it lands as the same NULL as "no tree", which is the same thing to a
+    // caller.
+    json_result(&plan, ptr::null_mut())
+}
+
 /// What running `text` would do: `safe`, `modify`, `dangerous` or `fatal`.
 /// Release with `db_string_free`.
 ///

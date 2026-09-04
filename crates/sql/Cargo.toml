@@ -8,3 +8,9 @@ license.workspace = true
 [dependencies]
 lax-sql.workspace = true
 dprint-core.workspace = true
+# For `plan`, which reads the document PostgreSQL answers `EXPLAIN (FORMAT JSON)`
+# with and hands the result to a front end as JSON of its own. Both are already
+# in this workspace's tree several times over, so the cost is a compilation unit
+# rather than a new dependency.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

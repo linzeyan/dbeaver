@@ -125,6 +125,17 @@ final class Session: Identifiable {
     /// the connections most likely to be pointed at something unfamiliar.
     var server = ""
 
+    /// The product alone — "PostgreSQL", "TiDB", "SQL Server" — where `server` is
+    /// the sentence beside it, and empty until a connection has been made.
+    ///
+    /// A field of its own rather than the first word of that one. Two of these
+    /// names are two words, and the rule for where the product ends and the
+    /// version begins is the core's; it has already applied it once, and a second
+    /// reading here would be a second chance to disagree. What reads it is the
+    /// question no scheme can answer — whether *this* server takes a request that
+    /// the driver that opened it does.
+    var serverProduct = ""
+
     /// How long this connection was given to answer, in seconds, and how long
     /// another database opened from this tab will be given. Zero is the driver's
     /// own patience; see `ConnectionSettings.timeoutSeconds`.
