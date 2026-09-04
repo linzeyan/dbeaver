@@ -53,11 +53,11 @@ use dbffi::{
     db_indexes_json, db_names_forget, db_new_table_sql, db_processes_json, db_query, db_query_free,
     db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
-    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_scan_json,
-    db_string_free, db_table_change_sql, db_table_info_json, db_transfer_cancel, db_transfer_free,
-    db_transfer_start, db_transfer_step, db_triggers_json, db_tx_autocommit, db_tx_commit,
-    db_tx_release, db_tx_rollback, db_tx_rollback_to, db_tx_savepoint, db_tx_state_json,
-    db_variables_json,
+    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_plan_json,
+    db_sql_plan_prefix, db_sql_scan_json, db_string_free, db_table_change_sql, db_table_info_json,
+    db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step, db_triggers_json,
+    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
+    db_tx_savepoint, db_tx_state_json, db_variables_json,
 };
 
 // Test db_connect with null connection string
@@ -959,6 +959,64 @@ fn formatting_says_why_it_could_not_read_its_argument() {
         assert!(raw.is_null());
         assert!(!err.is_null(), "db_sql_format must say why it failed");
         unsafe { db_string_free(err) };
+    }
+}
+
+/// The two calls a plan needs, across the boundary and back.
+///
+/// Both answer NULL for a product with no machine-readable form, and NULL is what
+/// keeps the front end sending the prose `EXPLAIN` there instead — so a build
+/// where these crossed the ABI wrongly would not fail loudly, it would quietly
+/// stop offering the tree.
+#[test]
+fn a_plan_crosses_the_abi_as_a_prefix_and_a_tree() {
+    let product = CString::new("PostgreSQL").unwrap();
+    let raw = unsafe { db_sql_plan_prefix(product.as_ptr()) };
+    assert!(!raw.is_null(), "PostgreSQL must be asked for a plan");
+    let prefix = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    assert_eq!(prefix, "EXPLAIN (FORMAT JSON)");
+
+    // What the front end holds by this point: the grid's cells, as strings.
+    let rows = CString::new(
+        r#"[["[{\"Plan\":{\"Node Type\":\"Seq Scan\",\"Total Cost\":100.0,\"Plan Rows\":42}}]"]]"#,
+    )
+    .unwrap();
+    let raw = unsafe { db_sql_plan_json(product.as_ptr(), rows.as_ptr()) };
+    assert!(!raw.is_null(), "db_sql_plan_json must answer");
+    let tree = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    assert_eq!(
+        tree,
+        r#"[{"label":"Seq Scan","detail":[],"rows":42.0,"cost":100.0,"self_cost":100.0,"children":[]}]"#
+    );
+}
+
+/// Nothing to draw is not a failure, and every way of arriving at it answers the
+/// same NULL — which the front end reads as "go on showing the rows".
+#[test]
+fn a_plan_that_cannot_be_drawn_is_null_rather_than_an_error() {
+    let postgres = CString::new("PostgreSQL").unwrap();
+    let cockroach = CString::new("CockroachDB").unwrap();
+    let rows = CString::new(r#"[["[]"]]"#).unwrap();
+    // Not the array of arrays this takes, which is a caller's bug and still must
+    // not be a crash.
+    let misshapen = CString::new("{}").unwrap();
+    let invalid = CString::new(vec![b'P', b'g', 0xff, 0xfe]).unwrap();
+
+    assert!(unsafe { db_sql_plan_prefix(cockroach.as_ptr()) }.is_null());
+    assert!(unsafe { db_sql_plan_prefix(ptr::null()) }.is_null());
+    assert!(unsafe { db_sql_plan_prefix(invalid.as_ptr()) }.is_null());
+
+    for (product, rows) in [
+        (cockroach.as_ptr(), rows.as_ptr()),
+        (postgres.as_ptr(), rows.as_ptr()),
+        (ptr::null(), rows.as_ptr()),
+        (postgres.as_ptr(), ptr::null()),
+        (invalid.as_ptr(), rows.as_ptr()),
+        (postgres.as_ptr(), misshapen.as_ptr()),
+    ] {
+        assert!(unsafe { db_sql_plan_json(product, rows) }.is_null());
     }
 }
 

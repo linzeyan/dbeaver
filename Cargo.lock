@@ -1415,6 +1415,8 @@ version = "0.1.0"
 dependencies = [
  "dprint-core",
  "lax-sql",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -203,6 +203,9 @@ if CommandLine.arguments.contains("--verify-editor-theme") {
 if CommandLine.arguments.contains("--verify-theme") {
     exit(MainActor.assumeIsolated { ThemeChecks.run() } ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-plan") {
+    exit(MainActor.assumeIsolated { PlanChecks.run() } ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-mcp") {
     exit(MCPChecks.run() ? 0 : 1)
 }
@@ -648,6 +651,15 @@ if CommandLine.arguments.contains("--transaction") {
 /// this one. The outcomes are printed as they land and the window is left up,
 /// because the thing being verified is what the screen says.
 let runScriptMode = CommandLine.arguments.contains("--run-script")
+
+/// `--explain` asks the database for a plan of `--sql` instead of running it, by
+/// sending the Query menu's own item.
+///
+/// Exists for the reason `--run-script` does, and for one more: the pane it fills
+/// is a tree drawn from what the server sent, and a tree is the one thing in this
+/// window that cannot be checked by reading a row count off stderr. A screenshot
+/// is the check, and a screenshot cannot press ⌥⌘E.
+let explainMode = CommandLine.arguments.contains("--explain")
 
 /// `--complete` opens the list of names under the caret once the connection is
 /// up, through the Edit menu's own Complete item. Use with `--tab query`,
@@ -3459,28 +3471,32 @@ func loadMoreWhenReady(model: AppModel, pages: Int) {
     }
 }
 
-/// Drives `--run-script`. Polls, and reports to stderr, for the reasons
-/// `exportWhenReady` does: the model's background pipeline has no completion
-/// hook, and a capture switch does not justify inventing one.
+/// Drives `--run-script` and `--explain`. Polls, and reports to stderr, for the
+/// reasons `exportWhenReady` does: the model's background pipeline has no
+/// completion hook, and a capture switch does not justify inventing one.
+///
+/// Takes the item's title rather than calling the model, which is the point of
+/// both switches: an item wired to nothing, or one whose validation never lets go
+/// of the command, would pass every check in `--verify-plan` and fail this one.
 @MainActor
-func runScriptWhenReady(model: AppModel) {
+func sendQueryCommandWhenReady(named title: String, tagged tag: String, model: AppModel) {
     let deadline = CFAbsoluteTimeGetCurrent() + 180
 
-    /// The Query menu's Run Script item, found the way a user finds it.
+    /// The item in the Query menu, found the way a user finds it.
     func menuItem() -> NSMenuItem? {
         NSApp.mainMenu?.items
             .compactMap(\.submenu)
             .first { $0.title == "Query" }?
-            .items.first { $0.title == "Run Script" }
+            .items.first { $0.title == title }
     }
 
     func poll() {
         if CFAbsoluteTimeGetCurrent() > deadline {
-            fputs("script probe timed out\n", stderr)
+            fputs("\(tag) probe timed out\n", stderr)
             exit(1)
         }
         guard let item = menuItem() else {
-            fputs("script probe found no Run Script item in the Query menu\n", stderr)
+            fputs("\(tag) probe found no \(title) item in the Query menu\n", stderr)
             exit(1)
         }
         // The item's own target is asked, which is what AppKit asks when the
@@ -3496,7 +3512,7 @@ func runScriptWhenReady(model: AppModel) {
             }
             return
         }
-        fputs("script item     \(item.title) · enabled\n", stderr)
+        fputs("\(tag) item     \(item.title) · enabled\n", stderr)
         NSApp.sendAction(action, to: item.target, from: item)
         report()
     }
@@ -3504,7 +3520,7 @@ func runScriptWhenReady(model: AppModel) {
     func report() {
         func settled() {
             if CFAbsoluteTimeGetCurrent() > deadline {
-                fputs("script probe timed out waiting for the run\n", stderr)
+                fputs("\(tag) probe timed out waiting for the run\n", stderr)
                 exit(1)
             }
             guard !model.isBusy, !model.scriptSteps.isEmpty else {
@@ -3514,11 +3530,19 @@ func runScriptWhenReady(model: AppModel) {
                 return
             }
             for step in model.scriptSteps {
-                fputs("script step \(step.id)   \(step.summary) · \(step.preview)\n", stderr)
+                fputs("\(tag) step \(step.id)   \(step.summary) · \(step.preview)\n", stderr)
             }
-            fputs("script showing  \(model.selectedStep + 1)\n", stderr)
-            fputs("script status   \(model.statusLine)\n", stderr)
-            fputs("script message  \(model.errorMessage ?? "(none)")\n", stderr)
+            fputs("\(tag) showing  \(model.selectedStep + 1)\n", stderr)
+            fputs("\(tag) status   \(model.statusLine)\n", stderr)
+            fputs("\(tag) message  \(model.errorMessage ?? "(none)")\n", stderr)
+            // Whether the pane is drawing a tree, which is the whole of what
+            // `--explain` is for and the one thing a screenshot cannot be
+            // compared against by a program.
+            let plan = model.selectedScriptStep?.plan
+            fputs(
+                "\(tag) plan     "
+                    + (plan.map { "\($0.rows.count) steps · \($0.rows[0].label)" } ?? "(none)")
+                    + "\n", stderr)
         }
         settled()
     }
@@ -4161,7 +4185,7 @@ if benchMode {
         let model = AppModel(
             history: history, favorites: favorites, preferences: preferences,
             initialTab: initialTab, initialSQL: initialSQL,
-            initialCaret: initialCaret, initialSQLIsScript: runScriptMode,
+            initialCaret: initialCaret, initialSQLIsForAMenuCommand: runScriptMode || explainMode,
             initialWhere: initialWhere, initialOrder: initialOrder,
             initialStructureDetail: initialSection, initialRelation: initialRelation,
             initialFilter: initialFilter, restoring: restored.first)
@@ -4202,7 +4226,12 @@ if benchMode {
         if let reconnectTo { reconnectWhenReady(model: model, to: reconnectTo) }
         if let stopAfter { stopWhenRunning(model: model, after: stopAfter) }
         if let loadMorePages { loadMoreWhenReady(model: model, pages: loadMorePages) }
-        if runScriptMode { runScriptWhenReady(model: model) }
+        if runScriptMode {
+            sendQueryCommandWhenReady(named: "Run Script", tagged: "script", model: model)
+        }
+        if explainMode {
+            sendQueryCommandWhenReady(named: "Explain Statement", tagged: "explain", model: model)
+        }
         if completeMode { completeWhenReady(model: model) }
         if showHistory || historyAll || historyPick != nil {
             driveHistory(

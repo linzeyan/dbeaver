@@ -388,6 +388,38 @@ final class Database: @unchecked Sendable {
         return String(cString: raw)
     }
 
+    /// The words this product writes in front of a statement to ask for a plan a
+    /// tree can be drawn from, or nothing where it has no such form.
+    ///
+    /// Takes the product rather than the scheme, which is the whole difference
+    /// between this and `explainPrefix` above: prose `EXPLAIN` belongs to a
+    /// dialect and every product speaking it takes the word, while the
+    /// machine-readable form belongs to a product — CockroachDB arrives through
+    /// the PostgreSQL driver and refuses it. The table and its reasons are in
+    /// `crates/sql/src/plan.rs`.
+    ///
+    /// Nil is an answer: send the prose one and show the rows.
+    static func planPrefix(for product: String) -> String? {
+        guard let raw = db_sql_plan_prefix(product) else { return nil }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
+    /// The rows `planPrefix` asked for, read as a tree.
+    ///
+    /// `rows` is the result as the grid is holding it, cell by cell as text —
+    /// one cell for the document PostgreSQL answers with, four a column for
+    /// SQLite. Nil where there is no tree in them, which is not a failure: the
+    /// rows are already on screen and the pane goes on showing them.
+    static func plan(product: String, rows: [[String]]) -> [PlanNode]? {
+        guard let encoded = try? JSONEncoder().encode(rows),
+            let text = String(data: encoded, encoding: .utf8),
+            let raw = db_sql_plan_json(product, text)
+        else { return nil }
+        defer { db_string_free(raw) }
+        return try? JSONDecoder().decode([PlanNode].self, from: Data(String(cString: raw).utf8))
+    }
+
     /// The statement that reads a relation's rows.
     ///
     /// Asked of the core rather than assembled here, because a statement is the
