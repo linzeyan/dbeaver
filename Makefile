@@ -382,6 +382,19 @@ test-swift: release ## Swift-side checks, run inside the app binary
 # PostgreSQL specifically, and not because that is the container that happens to
 # be up: a row of nothing but defaults needs a table whose primary key has a
 # default, and `serial` is how the fixture gets one.
+# The one claim about the plan that `--verify-plan` cannot make. That suite is
+# rules about a document already in hand; this is the path a run takes — ⌥⌘E
+# sends the menu's own item, the statement goes out with the words the product
+# was asked for, and the step the pane draws comes back carrying a tree. A build
+# that stopped attaching it would pass every check and quietly show the rows.
+#
+# `generate_series` rather than a fixture: the statement has to plan to more than
+# one step, and a join of two of those does without needing a table to exist.
+.PHONY: test-plan
+test-plan: release db-check ## Prove a run that asked for a plan comes back with a tree
+	./$(APP_BIN) --plan-probe --conn "$(PG_CONN)" --tab query \
+		--sql "SELECT g, h FROM generate_series(1, 10) g JOIN generate_series(1, 10) h ON g = h"
+
 .PHONY: test-preferences
 test-preferences: release db-check ## Drive each setting both ways through the window
 	./$(APP_BIN) --preferences --conn "$(PG_CONN)" --relation prefs_probe

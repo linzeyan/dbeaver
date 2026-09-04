@@ -659,7 +659,15 @@ let runScriptMode = CommandLine.arguments.contains("--run-script")
 /// is a tree drawn from what the server sent, and a tree is the one thing in this
 /// window that cannot be checked by reading a row count off stderr. A screenshot
 /// is the check, and a screenshot cannot press ⌥⌘E.
-let explainMode = CommandLine.arguments.contains("--explain")
+///
+/// `--plan-probe` does the same thing and exits on whether a tree came back,
+/// which is the one claim `--verify-plan` cannot make. Everything that suite
+/// checks is a rule about a document already in hand; whether a run that asked
+/// for a plan *attaches* one to the step the pane draws is a path through the
+/// model's background pipeline, and a build that stopped attaching it would pass
+/// every check and quietly go back to showing the rows.
+let planProbe = CommandLine.arguments.contains("--plan-probe")
+let explainMode = CommandLine.arguments.contains("--explain") || planProbe
 
 /// `--complete` opens the list of names under the caret once the connection is
 /// up, through the Edit menu's own Complete item. Use with `--tab query`,
@@ -3479,7 +3487,9 @@ func loadMoreWhenReady(model: AppModel, pages: Int) {
 /// both switches: an item wired to nothing, or one whose validation never lets go
 /// of the command, would pass every check in `--verify-plan` and fail this one.
 @MainActor
-func sendQueryCommandWhenReady(named title: String, tagged tag: String, model: AppModel) {
+func sendQueryCommandWhenReady(
+    named title: String, tagged tag: String, model: AppModel, then verdict: (() -> Void)? = nil
+) {
     let deadline = CFAbsoluteTimeGetCurrent() + 180
 
     /// The item in the Query menu, found the way a user finds it.
@@ -3543,11 +3553,39 @@ func sendQueryCommandWhenReady(named title: String, tagged tag: String, model: A
                 "\(tag) plan     "
                     + (plan.map { "\($0.rows.count) steps · \($0.rows[0].label)" } ?? "(none)")
                     + "\n", stderr)
+            // After the report, so that a probe that fails has already printed
+            // everything a reader needs to see why.
+            verdict?()
         }
         settled()
     }
 
     poll()
+}
+
+/// Decides `--plan-probe`: the step the pane is showing either carries a tree or
+/// it does not.
+///
+/// A tree of one step would not do. PostgreSQL answers a trivial statement with a
+/// single node, and so would a build that read the first line of anything —
+/// which is why the probe is run against a join, and why this asks for more than
+/// one step and prints the shape it got.
+///
+/// Nothing here names the request that was sent. It does not have to: the prose
+/// `EXPLAIN` this falls back to answers in text, and text is not a document the
+/// core can read a tree out of. A tree at all is the proof that the right words
+/// went out.
+@MainActor
+func probePlan(model: AppModel) {
+    guard let plan = model.selectedScriptStep?.plan, plan.rows.count > 1 else {
+        fputs("plan probe: the run came back without a tree\n", stderr)
+        exit(1)
+    }
+    for row in plan.rows {
+        let indent = String(repeating: "  ", count: row.depth)
+        fputs("plan     \(indent)\(row.label)\n", stderr)
+    }
+    exit(0)
 }
 
 /// Drives `--switch-database`: waits for the first database to be open, reports
@@ -4230,7 +4268,9 @@ if benchMode {
             sendQueryCommandWhenReady(named: "Run Script", tagged: "script", model: model)
         }
         if explainMode {
-            sendQueryCommandWhenReady(named: "Explain Statement", tagged: "explain", model: model)
+            sendQueryCommandWhenReady(
+                named: "Explain Statement", tagged: "explain", model: model,
+                then: planProbe ? { probePlan(model: model) } : nil)
         }
         if completeMode { completeWhenReady(model: model) }
         if showHistory || historyAll || historyPick != nil {
