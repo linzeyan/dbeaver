@@ -77,6 +77,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-metadata`,
 // `--verify-schema-metadata`, `--verify-nested`, `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
+// `--verify-login-info`,
 // `--verify-relation-change`, `--verify-database-change`, `--verify-new-table`,
 // `--verify-column-change`,
 // `--verify-session-restore`,
@@ -145,6 +146,9 @@ if CommandLine.arguments.contains("--verify-processes") {
 }
 if CommandLine.arguments.contains("--verify-variables") {
     exit(MainActor.assumeIsolated { VariablesChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-login-info") {
+    exit(MainActor.assumeIsolated { LoginInfoChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-relation-change") {
     exit(MainActor.assumeIsolated { RelationChangeChecks.run() } ? 0 : 1)
@@ -915,6 +919,15 @@ let schemaDiffPair = argument("--schema-diff")
 /// whose picture is the point rather than the evidence: a diagram is the single
 /// surface in this window that no check can look at.
 let schemaDiagramSchema = argument("--schema-diagram")
+
+/// `--login-info` opens the Connection Privileges sheet and leaves it up.
+///
+/// A capture flag for the reason above, narrowed to the half that still applies
+/// to six rows: `--verify-login-info` states which of them are kept and when
+/// they are dropped, and none of that can say whether a list of granted rights
+/// wraps legibly beside a fixed label column, or whether the sentence an engine
+/// with no login gets reads as an answer rather than as a failure.
+let loginInfoCapture = CommandLine.arguments.contains("--login-info")
 
 /// `--second-window` opens a second window, the way File ▸ New Window does.
 ///
@@ -4032,6 +4045,48 @@ func openSchemaDiff(model: AppModel, pair: String) {
     poll()
 }
 
+/// Drives `--login-info`: asks the connection who it is and leaves the sheet up.
+///
+/// Prints the count as well as the state, for the reason the diagram capture
+/// prints its boxes: a sheet that opened on an engine with no login and a sheet
+/// whose read never landed are the same photograph, and on twelve of the fifteen
+/// drivers the first of those is the expected result.
+@MainActor
+func openLoginInfoSheet(model: AppModel) {
+    guard connArgument != nil else {
+        fputs("--login-info needs --conn\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 120
+    var asked = false
+
+    func poll() {
+        guard let session = model.sessions.first, session.db != nil, !session.isBusy else {
+            return again()
+        }
+        guard asked else {
+            asked = true
+            model.openLoginInfo()
+            return again()
+        }
+        guard !model.isReadingLoginInfo else { return again() }
+        fputs(
+            "login info: open=\(model.isLoginInfoOpen) fields=\(model.loginInfo.count)\n", stderr)
+    }
+
+    /// No exit on the deadline, for the reason `openSchemaDiff` gives.
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("login info: the connection was not asked in time\n", stderr)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// Drives `--schema-diagram <schema>`: draws one schema's keys and leaves the
 /// canvas up.
 ///
@@ -4617,6 +4672,7 @@ if benchMode {
         if let schemaDiagramSchema {
             openSchemaDiagram(model: model, schema: schemaDiagramSchema)
         }
+        if loginInfoCapture { openLoginInfoSheet(model: model) }
         if collapseSidebar { model.wantsSidebarRail = true }
         if shortWindow, let first = windows.windows.first?.window {
             // The declared size rather than the window's own `minSize`, which by

@@ -357,6 +357,135 @@ pub(crate) async fn table_info(
     Ok(out)
 }
 
+/// Who this connection is, and what the server already decided it may do.
+///
+/// Two queries and not one, because the two halves are not equally portable.
+/// `current_user`, `session_user` and `current_database()` are SQL that every
+/// database serving this wire protocol answers; `pg_roles` is a `pg_catalog`
+/// view, and this file's header says what that distinction is worth here —
+/// CockroachDB and GreptimeDB reach this driver too, and a single query would
+/// make the name somebody actually came for depend on a catalog view they may
+/// not serve. A failure reading the attributes leaves the identity standing.
+///
+/// The privilege rows are asked of the server rather than derived from the role
+/// attributes, because `has_database_privilege` is the same question the server
+/// will answer when the statement is sent: a role inherits CREATE through a
+/// grant to a group it is a member of, and a client that read `rolsuper` and
+/// stopped would tell somebody they cannot create a table moments before they
+/// do.
+pub(crate) async fn login_info(client: &Client) -> Result<Vec<InfoField>, PgError> {
+    let rows = client
+        .query(
+            "SELECT current_user::text, session_user::text, current_database()",
+            &[],
+        )
+        .await?;
+    let Some(row) = rows.first() else {
+        return Ok(Vec::new());
+    };
+
+    let mut out = Vec::new();
+    let current: String = row.get(0);
+    let session: String = row.get(1);
+    // Only when they differ, which is only after a SET ROLE. Equal is the
+    // ordinary case, and a second row repeating the first would push the
+    // privileges below the fold to say nothing.
+    let assumed = session != current;
+    out.push(InfoField {
+        label: "Connected as".to_string(),
+        value: current,
+    });
+    if assumed {
+        out.push(InfoField {
+            label: "Logged in as".to_string(),
+            value: session,
+        });
+    }
+    // `current_database()` is NULL on a connection with no database, which is
+    // not something this client opens but is something a pooler can hand back.
+    let database: Option<String> = row.get(2);
+    if let Some(database) = database {
+        out.push(InfoField {
+            label: "Database".to_string(),
+            value: database,
+        });
+    }
+
+    let Ok(rows) = client
+        .query(
+            "SELECT r.rolsuper, r.rolcreatedb, r.rolcreaterole, r.rolreplication, \
+                    (SELECT string_agg(g.rolname, ', ' ORDER BY g.rolname) \
+                       FROM pg_catalog.pg_auth_members m \
+                       JOIN pg_catalog.pg_roles g ON g.oid = m.roleid \
+                      WHERE m.member = r.oid), \
+                    has_database_privilege(current_database(), 'CONNECT'), \
+                    has_database_privilege(current_database(), 'CREATE'), \
+                    has_database_privilege(current_database(), 'TEMPORARY') \
+             FROM pg_catalog.pg_roles r \
+             WHERE r.rolname = current_user",
+            &[],
+        )
+        .await
+    else {
+        return Ok(out);
+    };
+    let Some(row) = rows.first() else {
+        return Ok(out);
+    };
+
+    // Named in the order they widen what somebody can do, and joined into one
+    // row rather than four. Four rows of "no" is a wall of nothing; one row
+    // saying "none" is the same answer read at a glance.
+    let attributes = [
+        (row.get::<_, bool>(0), "superuser"),
+        (row.get::<_, bool>(1), "create database"),
+        (row.get::<_, bool>(2), "create role"),
+        (row.get::<_, bool>(3), "replication"),
+    ];
+    let held: Vec<&str> = attributes
+        .iter()
+        .filter(|(has, _)| *has)
+        .map(|(_, word)| *word)
+        .collect();
+    out.push(InfoField {
+        label: "Role attributes".to_string(),
+        value: if held.is_empty() {
+            "none".to_string()
+        } else {
+            held.join(", ")
+        },
+    });
+
+    let member_of: Option<String> = row.get(4);
+    if let Some(member_of) = member_of {
+        out.push(InfoField {
+            label: "Member of".to_string(),
+            value: member_of,
+        });
+    }
+
+    // CONNECT is included even though holding this connection proves it: it is
+    // revocable, and a session that outlived the revocation is exactly when
+    // somebody opens this sheet.
+    let on_database = [
+        (row.get::<_, Option<bool>>(5), "connect"),
+        (row.get::<_, Option<bool>>(6), "create"),
+        (row.get::<_, Option<bool>>(7), "temporary tables"),
+    ];
+    let granted: Vec<&str> = on_database
+        .iter()
+        .filter(|(has, _)| *has == Some(true))
+        .map(|(_, word)| *word)
+        .collect();
+    if !granted.is_empty() {
+        out.push(InfoField {
+            label: "On this database".to_string(),
+            value: granted.join(", "),
+        });
+    }
+    Ok(out)
+}
+
 /// `relpersistence`, or `None` for the permanent tables that are nearly all of
 /// them.
 fn persistence_word(code: &str) -> Option<&'static str> {

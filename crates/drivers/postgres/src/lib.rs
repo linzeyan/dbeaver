@@ -496,6 +496,22 @@ impl PgSource {
         result
     }
 
+    /// Who this connection is, and what the server already decided it may do.
+    ///
+    /// Answered on a connection out of the pool, which is what makes the
+    /// `SET ROLE` case narrower than it reads. A role assumed in the Query pane
+    /// is set on the one pooled connection that statement ran on, so this call
+    /// may land on a different one and report the login rather than the assumed
+    /// role. That is the same limitation `variables` has and is recorded in
+    /// `limitations.md` for the same reason: the alternative is pinning a
+    /// connection per tab, which costs a connection per tab.
+    pub async fn login_info(&self) -> Result<Vec<InfoField>, PgError> {
+        let conn = self.acquire_connection().await?;
+        let result = metadata::login_info(&conn).await;
+        // Connection is automatically returned to pool when conn goes out of scope
+        result
+    }
+
     /// What this engine has to say about one relation, beyond its shape.
     pub async fn table_info(
         &self,

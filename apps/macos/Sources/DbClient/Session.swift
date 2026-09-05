@@ -590,6 +590,29 @@ final class Session: Identifiable {
     /// nothing to report.
     var variableReport = ""
 
+    // MARK: - Who this connection is
+
+    /// Whether the Connection Privileges sheet is up. Per connection, for the
+    /// reason `isProcessesOpen` is, and more so: the answer is about one
+    /// connection and means nothing on the tab beside it.
+    var isLoginInfoOpen = false
+
+    /// What the server says this connection is and may do, identity first.
+    ///
+    /// Emptied when the sheet closes, which is the one thing here that differs
+    /// from `variables`. A setting is what it is until somebody changes it, so
+    /// that list is worth keeping; a privilege is revoked by an administrator
+    /// with no word to this window, and a kept copy would be the answer on
+    /// screen the next time somebody opened the sheet to find out why a
+    /// statement had just been refused — the exact moment it is wrong.
+    var loginInfo: [InfoField] = []
+
+    /// Set while the read is in flight.
+    var isReadingLoginInfo = false
+
+    /// Why the last read failed. Empty when there is nothing to report.
+    var loginReport = ""
+
     // MARK: - Transfers
 
     /// Set while a result is being written to a file. The write happens off the

@@ -686,6 +686,16 @@ enum AppMenu {
             action: #selector(ServerCommands.showServerVariables(_:)), keyEquivalent: "")
         variables.target = server
 
+        // Third rather than first, although "who am I" is the more basic
+        // question. The two above are about the server and this one is about
+        // this connection to it, so it reads as the narrowing it is; and unlike
+        // them it is always offered, because there is no capability that could
+        // say in advance whether the answer is empty.
+        let privileges = menu.addItem(
+            withTitle: "Connection Privileges…",
+            action: #selector(ServerCommands.showConnectionPrivileges(_:)), keyEquivalent: "")
+        privileges.target = server
+
         // With the two above rather than beside Transfer in File, although both
         // reach a second connection. Those write; this reads, and what it reads
         // is the shape of the server rather than anything in it — which is the
@@ -1197,6 +1207,8 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
 
     @objc func showServerVariables(_ sender: Any?) { model.openVariables() }
 
+    @objc func showConnectionPrivileges(_ sender: Any?) { model.openLoginInfo() }
+
     @objc func compareSchemas(_ sender: Any?) { model.presentSchemaDiff() }
 
     /// No schema in the item's name: the sheet opens on the one the tree opens
@@ -1229,6 +1241,11 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
         // answers the keys a diagram is drawn from. What it needs is a schema,
         // which a connection that has listed one has.
         case #selector(showSchemaDiagram(_:)): model.canDrawSchemaDiagram
+        // Nor behind this one, and here it is not half a reason but the whole
+        // of it: every driver answers the call, most answer it empty, and no
+        // flag could tell an engine with no users from a driver never taught to
+        // ask. What it needs is the connection it is about.
+        case #selector(showConnectionPrivileges(_:)): model.canReadLoginInfo
         case #selector(newDatabase(_:)): model.changesDatabases
         case #selector(newTable(_:)): model.makesTables
         default: false

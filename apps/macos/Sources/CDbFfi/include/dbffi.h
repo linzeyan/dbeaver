@@ -383,6 +383,18 @@ int db_end_process(DbHandle* handle, const char* id, const char* how, char** err
 // not meant to be.
 char* db_variables_json(DbHandle* handle, char** err);
 
+// Who this connection is on this server and what that identity may do: label
+// and value per row, identity before privilege, in the order the driver chose.
+//
+// Empty where the driver has not been taught to look, and no capability flag —
+// unlike the calls above, an empty array here is a true answer everywhere,
+// because an engine that opens a file has no user to be. An empty answer draws
+// no sheet, so there is no claim on screen for either reading to contradict.
+//
+// Read-only, and about this connection only. Creating a user or granting a
+// right is a statement the Query tab already runs.
+char* db_login_info_json(DbHandle* handle, char** err);
+
 // The statements that would recreate one relation, as plain text — released with
 // db_string_free like the JSON above, and unlike it in being the value itself.
 // Wrapping one string in a document would make a caller decode to reach the only

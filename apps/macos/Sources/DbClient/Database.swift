@@ -266,6 +266,17 @@ final class Database: @unchecked Sendable {
         try decodeJSON(db_variables_json(handle, &errOut), as: [ServerVariable].self)
     }
 
+    /// Who this connection is on this server, and what that identity may do.
+    ///
+    /// Empty is a real answer and not a failure — an engine that opens a file
+    /// has no user to be — which is what lets this be asked without a capability
+    /// flag to ask first. Nothing is held: a right revoked while the window is
+    /// open is the case a kept copy gets wrong, and this is asked when the sheet
+    /// opens and thrown away when it closes.
+    func loginInfo() throws -> [InfoField] {
+        try decodeJSON(db_login_info_json(handle, &errOut), as: [InfoField].self)
+    }
+
     /// Where this connection's `schema` and one on `other` disagree.
     ///
     /// Both handles cross in one call rather than each side being read here and

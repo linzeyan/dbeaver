@@ -4754,6 +4754,78 @@ final class AppModel {
         visibleVariables.map { "\($0.name)\t\($0.value)" }.joined(separator: "\n")
     }
 
+    // MARK: - Who this connection is
+
+    /// Whether there is a connection to ask about itself.
+    ///
+    /// No capability behind it, for the reason `canDrawSchemaDiagram` has none,
+    /// and one condition fewer than that one: a diagram needs a schema to be
+    /// about, and this is about the connection, which exists as soon as it is
+    /// open.
+    ///
+    /// `!isBusy` for the reason Refresh has it, and it is worth stating because
+    /// the temptation here runs the other way — the minute somebody wants to
+    /// know what they are allowed to do is the minute a statement is refusing to
+    /// finish. The core queue is serial, so the read would not answer then
+    /// anyway: it would sit behind that statement and land whenever it did,
+    /// which is a menu item that looks like it did nothing.
+    var canReadLoginInfo: Bool { db != nil && !isBusy }
+
+    var isLoginInfoOpen: Bool {
+        get { session.isLoginInfoOpen }
+        set { session.isLoginInfoOpen = newValue }
+    }
+
+    /// What the server said, identity first, in the order the driver chose.
+    var loginInfo: [InfoField] { session.loginInfo }
+
+    var isReadingLoginInfo: Bool { session.isReadingLoginInfo }
+
+    var loginReport: String { session.loginReport }
+
+    /// Opens the sheet and reads once.
+    ///
+    /// No capability to check first, unlike `openVariables`. Every driver
+    /// answers this call and most answer it empty, and an empty answer is a
+    /// sentence in the sheet rather than a menu item that was never offered:
+    /// there is no flag that could tell "this engine has no users" from "this
+    /// driver was never taught to ask", and inventing one would put a claim on
+    /// screen that neither reading supports.
+    func openLoginInfo() {
+        guard canReadLoginInfo else { return }
+        session.loginReport = ""
+        session.isLoginInfoOpen = true
+        loadLoginInfo()
+    }
+
+    /// Closes it and drops what it read.
+    ///
+    /// Dropped rather than kept for the next opening, which is where this parts
+    /// company with the settings sheet. A privilege is taken away by somebody
+    /// else without a word to this window, and the moment somebody opens this is
+    /// the moment after a statement was refused — so a kept copy would be
+    /// showing them the rights they had before the refusal, as an explanation of
+    /// it.
+    func closeLoginInfo() {
+        session.isLoginInfoOpen = false
+        session.isReadingLoginInfo = false
+        session.loginInfo = []
+    }
+
+    /// Reads it again, dropping a request made while one is in flight for the
+    /// reason `loadVariables` drops one.
+    func loadLoginInfo() {
+        guard db != nil, !session.isReadingLoginInfo else { return }
+        session.isReadingLoginInfo = true
+        session.loginReport = ""
+        run(
+            { db in try db.loginInfo() },
+            then: { [self] fields in
+                session.loginInfo = fields
+                session.isReadingLoginInfo = false
+            })
+    }
+
     // MARK: - Finding a value in the fetched rows
 
     /// Everything this searches is already in this window.
@@ -8447,6 +8519,7 @@ final class AppModel {
         // pressed to find out what went wrong.
         session.isReadingProcesses = false
         session.isReadingVariables = false
+        session.isReadingLoginInfo = false
         // Same reason, one table further in: a diagram is a table at a time, and
         // a schema left thinking it is still being read refuses the next attempt
         // — including the one made to find out what went wrong.

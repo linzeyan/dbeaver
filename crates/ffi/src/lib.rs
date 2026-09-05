@@ -1478,6 +1478,39 @@ pub unsafe extern "C" fn db_variables_json(
     }
 }
 
+/// Who this connection is on this server, and what that identity may do, as a
+/// JSON array of `{label, value}`. Release with `db_string_free`.
+///
+/// Empty rather than failing where a driver has not been taught to look, and no
+/// capability flag guards it — the reasoning `db_table_info_json` gives holds
+/// here for a stronger reason: an engine that opens a file has no user to name,
+/// so empty is a true answer everywhere rather than a driver that never looked.
+///
+/// Asked when the sheet opens and not kept. What it reports is what the server
+/// decided before it let this connection open, and a privilege revoked while the
+/// sheet is on screen is exactly the case a stored copy would get wrong.
+///
+/// # Safety
+/// `handle` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_login_info_json(
+    handle: *mut DbHandle,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() {
+        unsafe { set_err(err, "null handle") };
+        return ptr::null_mut();
+    }
+    let h = unsafe { &*handle };
+    match runtime().block_on(h.driver.login_info()) {
+        Ok(v) => json_result(&v, err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// Defines one `(handle, schema, name, err) -> JSON` entry point.
 ///
 /// The schema-and-one-name metadata calls differ only in which method they

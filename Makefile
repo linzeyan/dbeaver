@@ -435,6 +435,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-grid-find
 	./$(APP_BIN) --verify-processes
 	./$(APP_BIN) --verify-variables
+	./$(APP_BIN) --verify-login-info
 	./$(APP_BIN) --verify-relation-change
 	./$(APP_BIN) --verify-database-change
 	./$(APP_BIN) --verify-new-table

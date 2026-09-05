@@ -83,6 +83,10 @@ impl Driver for PgSource {
         Ok(PgSource::variables(self).await?)
     }
 
+    async fn login_info(&self) -> DbResult<Vec<InfoField>> {
+        Ok(PgSource::login_info(self).await?)
+    }
+
     async fn table_info(&self, schema: &str, relation: &str) -> DbResult<Vec<InfoField>> {
         Ok(PgSource::table_info(self, schema, relation).await?)
     }

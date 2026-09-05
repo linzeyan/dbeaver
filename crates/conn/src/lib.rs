@@ -680,6 +680,33 @@ pub trait Driver: Send + Sync {
         ))
     }
 
+    /// Who this connection is on this server, and what that identity may do.
+    ///
+    /// The question asked before a statement is refused rather than after: which
+    /// user am I connected as, which of my roles is in force, may I create a
+    /// table in this database. Not a user directory and not a privilege editor —
+    /// this is the one identity the connection is already carrying, and every
+    /// answer in it is one the server had to decide before it let the connection
+    /// open.
+    ///
+    /// Label-and-text for the reason [`InfoField`] gives, and with the same
+    /// consequence: no capability flag guards it. An engine with no accounts
+    /// answers empty and the sheet is not offered, which is a true answer rather
+    /// than a missing one — a file this process opened has no user to be, and a
+    /// flag would only let a front end draw an empty section and call it a
+    /// finding.
+    ///
+    /// A driver that can name the identity but cannot read the privileges says
+    /// the part it knows rather than failing: the half somebody usually wants is
+    /// the name, and reading privileges is itself a privilege on several of
+    /// these engines.
+    ///
+    /// Ordered by the driver, identity before privilege, because that is the
+    /// order the question is asked in.
+    async fn login_info(&self) -> DbResult<Vec<InfoField>> {
+        Ok(Vec::new())
+    }
+
     /// What this engine has to say about one relation, beyond its shape.
     ///
     /// The size on disk, who owns it, when the estimate the navigator prints was
