@@ -41,6 +41,16 @@ struct ConnectionChoice: Identifiable {
 /// exactly as long as there was only one window to be.
 @MainActor
 final class WindowController: NSObject, NSWindowDelegate {
+    /// Below this the grid shows one column and the filter bar wraps; there is no
+    /// useful layout smaller, so the window is not allowed to reach it.
+    ///
+    /// Named rather than written into `init`, because `--short-window` opens the
+    /// window at exactly this size and reading it back off the window does not
+    /// answer: `NSHostingView` writes the root view's own minimum into
+    /// `contentMinSize` once it is installed, and what `minSize` reports
+    /// afterwards is SwiftUI's number rather than this one.
+    static let minimumSize = NSSize(width: 940, height: 580)
+
     let window: NSWindow
     let model: AppModel
 
@@ -70,9 +80,7 @@ final class WindowController: NSObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.toolbarStyle = .unified
         window.backgroundColor = NSColor(Theme.Surface.canvas.color)
-        // Below this the grid shows one column and the filter bar wraps; there is
-        // no useful layout smaller, so the window is not allowed to reach it.
-        window.minSize = NSSize(width: 940, height: 580)
+        window.minSize = Self.minimumSize
         // Until a connection lands the window has no relation to name, and
         // `navigationTitle` has not run. A titleless window reads as one that
         // failed to finish launching.

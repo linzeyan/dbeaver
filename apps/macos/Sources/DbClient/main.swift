@@ -887,6 +887,18 @@ let secondWindow = CommandLine.arguments.contains("--second-window")
 /// two glyphs land where the field and the footer button they stand for were.
 let collapseSidebar = CommandLine.arguments.contains("--collapse-sidebar")
 
+/// `--short-window` opens the window at the smallest size this application
+/// declares — `WindowController.minimumSize`, not whatever a drag can reach.
+///
+/// A state a capture cannot arrange for itself: the frame is set in
+/// `WindowController.init` and resizing one is a drag on the corner, which is
+/// another synthetic event nothing here can send. It exists for the connection
+/// form, the one pane that can be taller than the column it sits in — 663pt of
+/// card against 516 of column once a bastion opens its four rows — and whether
+/// the scroll that answers that is really there is not a question the default
+/// 1600×1000 window can be asked.
+let shortWindow = CommandLine.arguments.contains("--short-window")
+
 /// `--filter-objects` runs the View menu's Filter Objects a beat after launch.
 ///
 /// Its own flag rather than part of the one above because the pair is the check:
@@ -4369,6 +4381,18 @@ if benchMode {
         if transferPicker { openTransferPicker(model: model) }
         if let schemaDiffPair { openSchemaDiff(model: model, pair: schemaDiffPair) }
         if collapseSidebar { model.wantsSidebarRail = true }
+        if shortWindow, let first = windows.windows.first?.window {
+            // The declared size rather than the window's own `minSize`, which by
+            // now is SwiftUI's answer and not this application's — see
+            // `WindowController.minimumSize`.
+            first.setFrame(
+                NSRect(origin: first.frame.origin, size: WindowController.minimumSize),
+                display: true)
+            // Said out loud for the reason the settings capture says it: the run
+            // is unattended, and a window that refused to shrink would look in a
+            // screenshot exactly like a form that fits.
+            fputs("capture: window \"\(first.title)\" \(first.frame)\n", stderr)
+        }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if showFindBar { showFindBarWhenReady(model: model) }
         if mcpProbePort != nil {
