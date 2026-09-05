@@ -82,6 +82,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-session-restore`,
 // `--verify-preferences`,
 // `--verify-keep-alive`,
+// `--verify-schema-diagram`,
 // `--verify-accessibility` and `--verify-quitting` run
 // the checks for the pieces of pure logic in the front-end and exit with their
 // verdict. None needs a window or a database, so they run before either exists.
@@ -217,6 +218,9 @@ if CommandLine.arguments.contains("--verify-plan") {
 }
 if CommandLine.arguments.contains("--verify-diff") {
     exit(MainActor.assumeIsolated { SchemaDiffChecks.run() } ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-schema-diagram") {
+    exit(MainActor.assumeIsolated { SchemaDiagramChecks.run() } ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-mcp") {
     exit(MCPChecks.run() ? 0 : 1)
@@ -903,6 +907,14 @@ let transferPicker = CommandLine.arguments.contains("--transfer-picker")
 /// finished, and what is worth photographing is the table of differences rather
 /// than the two pickers above it.
 let schemaDiffPair = argument("--schema-diff")
+
+/// `--schema-diagram <schema>` draws that schema's keys and leaves the canvas up.
+///
+/// The same kind of state as the one above — behind a menu item, and empty until
+/// a read that takes a round trip per table has finished — and the one flag here
+/// whose picture is the point rather than the evidence: a diagram is the single
+/// surface in this window that no check can look at.
+let schemaDiagramSchema = argument("--schema-diagram")
 
 /// `--second-window` opens a second window, the way File ▸ New Window does.
 ///
@@ -4008,6 +4020,67 @@ func openSchemaDiff(model: AppModel, pair: String) {
     poll()
 }
 
+/// Drives `--schema-diagram <schema>`: draws one schema's keys and leaves the
+/// canvas up.
+///
+/// A capture flag for the reason `--schema-diff` is one, and with more to
+/// photograph: `--verify-schema-diagram` asserts every rule the layout is decided
+/// by, and none of them can say whether a box of monospaced column names is
+/// legible at this size, whether the lines are visible against the canvas, or
+/// whether a diagram of a dozen tables needs scrolling in both directions to be
+/// read at all.
+@MainActor
+func openSchemaDiagram(model: AppModel, schema: String) {
+    guard connArgument != nil else {
+        fputs("--schema-diagram needs --conn\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 120
+    var refreshed = false
+    var asked = false
+
+    func poll() {
+        guard let session = model.sessions.first, session.db != nil, !session.isBusy else {
+            return again()
+        }
+        // The schema is seeded outside this process, as `--schema-diff`'s is, so
+        // the tree is re-read before the picker is asked to offer it. Without
+        // this the sheet falls back to the first schema the connection has and
+        // photographs the wrong one rather than failing.
+        guard refreshed else {
+            refreshed = true
+            model.refresh()
+            return again()
+        }
+        guard asked else {
+            asked = true
+            model.schemaDiagramSchema = schema
+            model.presentSchemaDiagram()
+            return again()
+        }
+        guard !model.isDrawingSchemaDiagram else { return again() }
+        // The counts as well as the sheet: a canvas with nothing on it and a
+        // sheet that never opened are the same photograph, and a schema whose
+        // tables declare no keys is the likeliest way to end up with one.
+        fputs(
+            "schema diagram: open=\(model.isSchemaDiagramOpen) schema=\(model.schemaDiagramSchema) "
+                + "boxes=\(model.schemaDiagram?.tables.count ?? -1) "
+                + "keys=\(model.schemaDiagram?.edges.count ?? -1)\n", stderr)
+    }
+
+    /// No exit on the deadline, for the reason `openSchemaDiff` gives.
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("schema diagram: the schema was not drawn in time\n", stderr)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// Drives `--rename-buffer`: puts the Query pane up and opens the name field on
 /// the buffer the editor is in.
 ///
@@ -4529,6 +4602,9 @@ if benchMode {
         if dropConnection { dropConnectionWhenReady(model: model) }
         if transferPicker { openTransferPicker(model: model) }
         if let schemaDiffPair { openSchemaDiff(model: model, pair: schemaDiffPair) }
+        if let schemaDiagramSchema {
+            openSchemaDiagram(model: model, schema: schemaDiagramSchema)
+        }
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if showFindBar { showFindBarWhenReady(model: model) }

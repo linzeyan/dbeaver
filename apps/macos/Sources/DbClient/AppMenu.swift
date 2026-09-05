@@ -695,6 +695,16 @@ enum AppMenu {
             action: #selector(ServerCommands.compareSchemas(_:)), keyEquivalent: "")
         compare.target = server
 
+        // Beside the comparison rather than in View, and for the same reason it
+        // is here: this reads the shape of a schema rather than anything in it,
+        // and it is opened deliberately about a schema rather than about the
+        // relation in front. A view tab would have to be a fourth one for every
+        // family, and the three are the same three everywhere (spec §5.1).
+        let diagram = menu.addItem(
+            withTitle: "Schema Diagram…",
+            action: #selector(ServerCommands.showSchemaDiagram(_:)), keyEquivalent: "")
+        diagram.target = server
+
         // Behind a separator, because these are the items here that change
         // something. The two above read. This is also the only place a database
         // can be *made* from: dropping one is a right-click on the row that is
@@ -1189,6 +1199,10 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
 
     @objc func compareSchemas(_ sender: Any?) { model.presentSchemaDiff() }
 
+    /// No schema in the item's name: the sheet opens on the one the tree opens
+    /// on and carries a picker, for the reason the comparison does.
+    @objc func showSchemaDiagram(_ sender: Any?) { model.presentSchemaDiagram() }
+
     /// The empty name is the starting point, and deliberately: there is nothing
     /// to suggest for a database that does not exist, and a name invented here
     /// would be one somebody had to notice before changing it.
@@ -1211,6 +1225,10 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
         // a comparison is made of, and what it needs instead is a connection to
         // compare with — which with one tab open is this one.
         case #selector(compareSchemas(_:)): model.canCompareSchemas
+        // Nor behind this one, and for the same half of that reason: every driver
+        // answers the keys a diagram is drawn from. What it needs is a schema,
+        // which a connection that has listed one has.
+        case #selector(showSchemaDiagram(_:)): model.canDrawSchemaDiagram
         case #selector(newDatabase(_:)): model.changesDatabases
         case #selector(newTable(_:)): model.makesTables
         default: false

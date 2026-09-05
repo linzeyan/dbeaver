@@ -112,6 +112,7 @@ struct MainView: View {
         .sheet(isPresented: $model.isProcessesOpen) { ProcessesSheet(model: model) }
         .sheet(isPresented: $model.isVariablesOpen) { VariablesSheet(model: model) }
         .sheet(isPresented: $model.isSchemaDiffOpen) { SchemaDiffSheet(model: model) }
+        .sheet(isPresented: $model.isSchemaDiagramOpen) { SchemaDiagramSheet(model: model) }
         .sheet(isPresented: $model.isRelationChangeSheetOpen) { RelationChangeSheet(model: model) }
         .sheet(isPresented: $model.isDatabaseChangeSheetOpen) { DatabaseChangeSheet(model: model) }
         .sheet(isPresented: $model.isNewTableSheetOpen) { NewTableSheet(model: model) }

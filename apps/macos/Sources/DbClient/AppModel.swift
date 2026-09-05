@@ -6360,6 +6360,117 @@ final class AppModel {
         schemaDiffHeld = nil
     }
 
+    // MARK: - Drawing a schema
+
+    /// Whether the diagram sheet is on screen. On the window rather than on the
+    /// session, for the reason `isSchemaDiffOpen` is.
+    var isSchemaDiagramOpen = false
+
+    /// Which schema is drawn. Its own property rather than the navigator's
+    /// selection: the sheet has a picker, and looking at another schema's shape
+    /// is not a reason to move the tree somebody was working in.
+    var schemaDiagramSchema = ""
+
+    /// The picture, or nil when there is not one yet.
+    ///
+    /// Dropped when the sheet closes rather than kept for the next time it is
+    /// opened, which is where this parts company with `schemaComparison`. A
+    /// diagram is a snapshot of metadata that a single migration makes wrong, and
+    /// one held per tab for the life of a window would be a stale picture that
+    /// nobody asked to see again — and, on a wide schema, sixty boxes of it.
+    var schemaDiagram: SchemaDiagram?
+    var isDrawingSchemaDiagram = false
+
+    /// Whether there is a schema in front to draw.
+    ///
+    /// No capability behind this one, for the reason `canCompareSchemas` has
+    /// none: every driver answers `foreign_keys`, and a schema whose tables
+    /// declare none is a diagram that says so rather than a call that fails. What
+    /// it needs is a connection that has listed a schema.
+    var canDrawSchemaDiagram: Bool {
+        db != nil && !isBusy && !isDrawingSchemaDiagram && !session.schemas.isEmpty
+    }
+
+    /// Opens the sheet on the schema the tree opens on, and starts reading.
+    ///
+    /// Reads straight away rather than behind a Draw button, unlike the
+    /// comparison sheet: there is one choice here and it has an obvious default,
+    /// and an arming step for a question already asked by the menu item is a
+    /// second click for nothing. The picker is how the answer is changed.
+    func presentSchemaDiagram() {
+        guard canDrawSchemaDiagram else { return }
+        if !session.schemas.contains(where: { $0.name == schemaDiagramSchema }) {
+            schemaDiagramSchema = Self.firstSchema(on: session)
+        }
+        isSchemaDiagramOpen = true
+        drawSchemaDiagram()
+    }
+
+    /// Closes the sheet and lets the picture go. See `schemaDiagram`.
+    func closeSchemaDiagram() {
+        isSchemaDiagramOpen = false
+        schemaDiagram = nil
+    }
+
+    /// Reads one schema's foreign keys and lays them out.
+    ///
+    /// One round trip per table, on this session's queue — which is what
+    /// serialises it against everything else this tab does, and why nothing else
+    /// has to be marked busy. The core is not asked to do this in one call the
+    /// way a comparison is: there is no `db_*` for it, and inventing one would be
+    /// a new FFI surface for an answer three existing calls already give.
+    ///
+    /// Views are not asked at all (`SchemaDiagram.asks`), which is what keeps a
+    /// schema of two hundred views from costing two hundred round trips to learn
+    /// that a view has no keys.
+    func drawSchemaDiagram() {
+        guard db != nil, !isDrawingSchemaDiagram, !schemaDiagramSchema.isEmpty else { return }
+        let schema = schemaDiagramSchema
+        isDrawingSchemaDiagram = true
+        errorMessage = nil
+        // The old picture goes now rather than when the new one lands: a diagram
+        // under a heading naming another schema is worse than an empty canvas.
+        schemaDiagram = nil
+        status = "Reading the keys in \(schema)…"
+        run(
+            { db -> SchemaDiagram in
+                var read: [SchemaDiagram.TableKeys] = []
+                for relation in SchemaDiagram.asks(try db.relations(schema: schema)) {
+                    read.append(
+                        SchemaDiagram.TableKeys(
+                            table: relation.name,
+                            keys: try db.foreignKeys(schema: schema, relation: relation.name)))
+                }
+                // Built here, on the queue that read it, so what crosses back is
+                // the picture rather than every key of every table.
+                return SchemaDiagram.of(schema: schema, read: read)
+            },
+            then: { [self] diagram in
+                isDrawingSchemaDiagram = false
+                landSchemaDiagram(diagram)
+            })
+    }
+
+    /// Puts a finished diagram on screen, if the sheet still wants it.
+    ///
+    /// Its own method rather than the tail of the block above so that both of its
+    /// refusals can be checked without a queue. Two things can have happened
+    /// while a schema was being read a table at a time:
+    ///
+    /// - the sheet was closed, and keeping the picture would be the snapshot
+    ///   outliving the question it was asked for — see `schemaDiagram`;
+    /// - the picker was moved to another schema, and a canvas of one schema's
+    ///   tables under a picker naming another is the failure `compareSchemas`
+    ///   clears its report to avoid.
+    ///
+    /// The sentence is kept either way: the reading did happen, and the status
+    /// bar is where a question answered after its sheet was closed goes.
+    func landSchemaDiagram(_ diagram: SchemaDiagram) {
+        status = diagram.summary
+        guard isSchemaDiagramOpen, diagram.schema == schemaDiagramSchema else { return }
+        schemaDiagram = diagram
+    }
+
     // MARK: - Import
 
     /// Whether a file has a table to go into.
@@ -8336,6 +8447,10 @@ final class AppModel {
         // pressed to find out what went wrong.
         session.isReadingProcesses = false
         session.isReadingVariables = false
+        // Same reason, one table further in: a diagram is a table at a time, and
+        // a schema left thinking it is still being read refuses the next attempt
+        // — including the one made to find out what went wrong.
+        isDrawingSchemaDiagram = false
         // Through `endImport` rather than by clearing the flag, so a failure
         // takes the handle down with it: a Stop button over an import that is no
         // longer running is a button that does nothing and says nothing.
