@@ -5452,25 +5452,52 @@ final class AppModel {
         errorMessage = nil
         let batchRows = self.batchRows
 
+        let statements = sql.count
+
         run { db -> ScriptOutput in
             var completed: [StatementOutput] = []
+            // What the run has kept so far, which is the whole of what decides
+            // whether the next statement's rows are kept. See `ScriptRetention`
+            // for why the ceiling is on the run and why a run of one has none.
+            var kept = 0
             for text in sql {
                 let started = CFAbsoluteTimeGetCurrent()
                 do {
                     let query = try db.query(text, batchRows: batchRows)
                     let schema = try query.schema()
+                    // Decided before the first batch arrives, so a statement the
+                    // run cannot afford lets its batches go one at a time
+                    // instead of gathering them all and dropping them after.
+                    let keeping = ScriptRetention.keepsRows(havingKept: kept, of: statements)
                     var batches: [UnsafeMutablePointer<ArrowArray>] = []
-                    // Pulled to exhaustion even when there is nothing to pull.
-                    // `query` returns once the server has acknowledged the bind,
-                    // which is before it executes anything — so a duplicate
-                    // relation or a violated constraint is still ahead of us,
-                    // and so is the count a statement without rows reports.
+                    var rows = 0
+                    // Pulled to exhaustion even when there is nothing to pull,
+                    // and even when nothing is being kept. `query` returns once
+                    // the server has acknowledged the bind, which is before it
+                    // executes anything — so a duplicate relation or a violated
+                    // constraint is still ahead of us, and so is the count a
+                    // statement without rows reports.
                     while let batch = try query.nextBatch() {
-                        batches.append(batch)
+                        rows += Int(batch.pointee.length)
+                        if keeping {
+                            batches.append(batch)
+                        } else {
+                            // The release the schema gets below, for the same
+                            // reason: dropping the pointer without it leaves the
+                            // Rust-side buffers allocated, which would make the
+                            // ceiling cost more memory than having none.
+                            if let release = batch.pointee.release { release(batch) }
+                            batch.deallocate()
+                        }
                     }
+                    if keeping { kept += rows }
                     completed.append(
                         StatementOutput(
                             schema: schema, batches: batches,
+                            // Zero rows released is nothing released: an UPDATE
+                            // past the budget is still an UPDATE, and a SELECT
+                            // that matched nothing lost nothing.
+                            released: keeping || rows == 0 ? nil : rows,
                             rowsAffected: query.rowsAffected ?? 0,
                             milliseconds: (CFAbsoluteTimeGetCurrent() - started) * 1000))
                 } catch {
@@ -5507,13 +5534,22 @@ final class AppModel {
             for batch in out.batches {
                 grid.append(batch: batch)
             }
-            // No columns at all is the server's own answer to "did this return
-            // rows", and it is not the same answer as a result set that happened
-            // to be empty. An UPDATE and a SELECT that matched nothing both show
-            // no rows, and only one of them changed the database.
-            let outcome: StatementOutcome =
-                grid.columns.isEmpty
-                ? .completed(affected: out.rowsAffected) : .rows(grid.rowCount)
+            let outcome: StatementOutcome
+            if let released = out.released {
+                // Asked first, because the grid cannot tell this apart from a
+                // statement that returned nothing: the columns are here and the
+                // rows are not, and only the run knows why.
+                outcome = .released(rows: released)
+            } else if grid.columns.isEmpty {
+                // No columns at all is the server's own answer to "did this
+                // return rows", and it is not the same answer as a result set
+                // that happened to be empty. An UPDATE and a SELECT that matched
+                // nothing both show no rows, and only one of them changed the
+                // database.
+                outcome = .completed(affected: out.rowsAffected)
+            } else {
+                outcome = .rows(grid.rowCount)
+            }
             let summary = Self.stepSummary(
                 label: labels[i], outcome: outcome, milliseconds: out.milliseconds)
             // Nothing in the Query pane imposes a LIMIT, so nothing it returns
@@ -5615,7 +5651,7 @@ final class AppModel {
         label: String, outcome: StatementOutcome, milliseconds: Double
     ) -> String {
         switch outcome {
-        case .rows, .completed:
+        case .rows, .completed, .released:
             let elapsed = String(format: "%.2f", milliseconds / 1000)
             return "\(label) · \(outcome.label) · \(elapsed) s"
         case .failed, .cancelled, .notRun:
@@ -8317,6 +8353,10 @@ private struct BrowsePage: @unchecked Sendable {
 private struct StatementOutput: @unchecked Sendable {
     let schema: UnsafeMutablePointer<ArrowSchema>
     let batches: [UnsafeMutablePointer<ArrowArray>]
+    /// Rows the run released as they arrived instead of keeping, or nil where it
+    /// kept everything the statement returned. Never zero: a statement that
+    /// returned nothing lost nothing, whatever the run had spent.
+    let released: Int?
     /// What the server said the statement affected. Meaningful only where the
     /// schema has no columns; a statement that returned rows is described by the
     /// rows it returned.

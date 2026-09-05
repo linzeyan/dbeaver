@@ -88,6 +88,9 @@ let reconnectTo = argument("--reconnect")
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-script-run") {
+    exit(ScriptRunChecks.run() ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-connection") {
     exit(ConnectionChecks.run() ? 0 : 1)
 }

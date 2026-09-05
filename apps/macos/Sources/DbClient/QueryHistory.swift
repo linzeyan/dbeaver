@@ -43,6 +43,10 @@ enum QueryHistoryOutcome: Codable, Equatable {
     init?(_ outcome: StatementOutcome) {
         switch outcome {
         case .rows(let n): self = .rows(n)
+        // The rows the server sent, not the ones this window kept. A history
+        // answers "what did this application run on my database", and how much
+        // of the answer the pane had room for is not a fact about the database.
+        case .released(let n): self = .rows(n)
         case .completed(let affected): self = .affected(affected)
         case .failed: self = .failed
         case .cancelled: self = .cancelled

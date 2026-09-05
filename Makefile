@@ -329,6 +329,7 @@ test-flightsql: db-check-flightsql ## Integration tests behind Arrow Flight SQL
 .PHONY: test-swift
 test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-splitter
+	./$(APP_BIN) --verify-script-run
 	./$(APP_BIN) --verify-connection
 	./$(APP_BIN) --verify-completion
 	./$(APP_BIN) --verify-transaction

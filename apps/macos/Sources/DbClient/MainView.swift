@@ -3224,7 +3224,9 @@ private struct ScriptOutcomeList: View {
         // statement of fact rather than as a warning or as absence.
         case .cancelled: return Theme.Text.secondary.color
         case .notRun: return Theme.Text.tertiary.color
-        case .rows, .completed: return Theme.Text.secondary.color
+        // Not dimmed. A statement whose rows were let go still ran and still
+        // answered, and the row saying so is a fact rather than an absence.
+        case .rows, .completed, .released: return Theme.Text.secondary.color
         }
     }
 }
@@ -3258,6 +3260,10 @@ private struct StatementNote: View {
         case .failed: return "exclamationmark.triangle"
         case .cancelled: return "stop.circle"
         case .notRun: return "minus.circle"
+        // An outline where a result would be. Not the checkmark — the rows are
+        // genuinely not here — and not the minus, which `notRun` owns and which
+        // would say the statement never happened.
+        case .released: return "circle.dashed"
         case .rows, .completed: return "checkmark.circle"
         }
     }
@@ -3267,6 +3273,9 @@ private struct StatementNote: View {
         case .failed: return Theme.Semantic.dangerText.color
         case .cancelled: return Theme.Text.secondary.color
         case .notRun: return Theme.Text.tertiary.color
+        // Neither the execute green nor a warning: the statement did what it was
+        // asked, and this window's ceiling is not something it did wrong.
+        case .released: return Theme.Text.secondary.color
         case .rows, .completed: return Theme.Accent.execute.color
         }
     }
