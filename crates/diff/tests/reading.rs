@@ -59,24 +59,24 @@ impl Fake {
 impl Driver for Fake {
     async fn relations(&self, _: &str) -> DbResult<Vec<RelationInfo>> {
         self.refusal("relations")?;
-        // Deliberately out of name order, and with the view first. Both halves
-        // matter: the report is read top to bottom, and two servers that list
-        // the same relations in different orders must not produce two
-        // different-looking reports of no differences.
-        Ok(vec![
-            RelationInfo {
+        // Three, and deliberately in an order that is neither sorted nor its
+        // reverse — with two, every wrong answer about ordering happens to look
+        // like the right one. The claim being set up is that the report reads
+        // the same whichever order a catalog answered in.
+        let relations: &[(&str, RelationKind)] = &[
+            ("invoice", RelationKind::Table),
+            ("paid", RelationKind::View),
+            ("audit", RelationKind::Table),
+        ];
+        Ok(relations
+            .iter()
+            .map(|(name, kind)| RelationInfo {
                 schema: "public".into(),
-                name: "paid".into(),
-                kind: RelationKind::View,
+                name: (*name).into(),
+                kind: *kind,
                 estimated_rows: None,
-            },
-            RelationInfo {
-                schema: "public".into(),
-                name: "invoice".into(),
-                kind: RelationKind::Table,
-                estimated_rows: None,
-            },
-        ])
+            })
+            .collect())
     }
 
     async fn columns(&self, _: &str, _: &str) -> DbResult<Vec<ColumnInfo>> {
@@ -176,14 +176,15 @@ async fn a_view_is_not_asked_what_it_has_no_way_of_having() {
     let side = dbdiff::read(fake.as_ref(), "public")
         .await
         .expect("the fake answers");
-    assert_eq!(side.tables.len(), 2);
+    assert_eq!(side.tables.len(), 3);
+    // Two tables and a view: twice, not three times.
     assert_eq!(
         fake.indexes.load(Ordering::SeqCst),
-        1,
-        "the table, not the view"
+        2,
+        "the tables, not the view"
     );
-    assert_eq!(fake.constraints.load(Ordering::SeqCst), 1);
-    assert_eq!(fake.foreign_keys.load(Ordering::SeqCst), 1);
+    assert_eq!(fake.constraints.load(Ordering::SeqCst), 2);
+    assert_eq!(fake.foreign_keys.load(Ordering::SeqCst), 2);
 
     // And the one that was asked is the one that could have answered.
     let table = side
@@ -215,7 +216,7 @@ async fn the_relations_come_back_in_name_order_whatever_order_they_arrived_in() 
             .iter()
             .map(|t| t.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["invoice", "paid"]
+        vec!["audit", "invoice", "paid"]
     );
 }
 
