@@ -222,7 +222,13 @@ enum SchemaDiffChecks {
         let other = model.sessions[1]
         other.db = there
         other.connectionLabel = "staging"
-        other.schemas = [SchemaInfo(name: "archive", isSystem: false)]
+        // No `public` on this one, so the fallback is what decides — and a
+        // system schema in front of the answer, so "skip the engine's own" is a
+        // rule with something to be wrong about.
+        other.schemas = [
+            SchemaInfo(name: "information_schema", isSystem: true),
+            SchemaInfo(name: "archive", isSystem: false)
+        ]
         model.selectSession(0)
 
         // Left over from a connection that is not this one.
