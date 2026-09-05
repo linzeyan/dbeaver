@@ -422,26 +422,59 @@ async fn live() -> MySqlSource {
 }
 
 async fn seed() {
+    // `cargo nextest` gives every test its own process, so `FIXTURE` holds
+    // nothing back across them: without this lock a process drops and rebuilds
+    // `dbclient_ddl` while the tests in the others are reading it.
+    let _turn = dbfixture::exclusive("mysql-ddl").await;
     let opts = Opts::from_url(ROOT_URL).expect("the fixture URL should parse");
     // Through the driver's opener, so the seed survives a connection the port
     // forwarder opened early and MySQL has since closed. See `open_conn`.
     let mut conn = driver_mysql::open_conn(&opts)
         .await
         .expect("MySQL unreachable; run 'make db-up-mysql'");
-    for statement in [
+    let statements = [
         "DROP DATABASE IF EXISTS dbclient_ddl",
         "CREATE DATABASE dbclient_ddl",
         "USE dbclient_ddl",
         CREATE_PARTS,
         CREATE_OPEN_PARTS,
-    ] {
-        conn.query_drop(statement)
-            .await
-            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    ];
+    let want = dbfixture::fingerprint(statements);
+    if stamp(&mut conn).await.as_deref() != Some(want.as_str()) {
+        for statement in statements {
+            conn.query_drop(statement)
+                .await
+                .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+        }
+        // Last, and inside the database the first statement above drops, so
+        // that a stamp exists only where every statement before it ran.
+        for statement in [
+            "CREATE TABLE dbclient_ddl.__fixture (stamp CHAR(16) NOT NULL)".to_string(),
+            format!("INSERT INTO dbclient_ddl.__fixture VALUES ('{want}')"),
+        ] {
+            conn.query_drop(&statement)
+                .await
+                .unwrap_or_else(|e| panic!("stamping the fixture failed on {statement}: {e}"));
+        }
     }
     conn.disconnect()
         .await
         .expect("closing the seed connection");
+}
+
+/// What the fixture on the server was built from, or `None` when there is
+/// nothing to read it from: no database, no stamp table, or a rebuild that
+/// stopped before it wrote one.
+///
+/// A stamp rather than "does `dbclient_ddl` exist", because the container
+/// outlives every run and the DDL above does not — a database built by an older
+/// version of this file answers yes, and a test added alongside a change to it
+/// then fails as if the renderer had lost something.
+async fn stamp(conn: &mut mysql_async::Conn) -> Option<String> {
+    conn.query_first::<String, _>("SELECT stamp FROM dbclient_ddl.__fixture")
+        .await
+        .ok()
+        .flatten()
 }
 
 async fn listed(source: &MySqlSource, name: &str) -> RelationInfo {

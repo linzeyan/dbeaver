@@ -32,4 +32,6 @@ url = "2"
 percent-encoding = "2"
 
 [dev-dependencies]
+# Cross-process fixture locking; see the crate for why a OnceCell is not enough.
+dbfixture = { path = "../../fixture" }
 tokio = { workspace = true, features = ["full"] }

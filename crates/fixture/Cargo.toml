@@ -1,0 +1,12 @@
+[package]
+name = "dbfixture"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

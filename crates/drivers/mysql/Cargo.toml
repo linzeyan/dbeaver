@@ -30,4 +30,6 @@ mysql_async = { version = "0.37", default-features = false, features = [
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+# Cross-process fixture locking; see the crate for why a OnceCell is not enough.
+dbfixture = { path = "../../fixture" }
 tokio = { workspace = true, features = ["full"] }

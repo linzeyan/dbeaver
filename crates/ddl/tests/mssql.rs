@@ -7,6 +7,7 @@
 //! metadata the fake claims it does. A change that breaks the second group means
 //! the fixture drifted; one that breaks the first means the renderer did.
 
+use arrow::array::{Array, StringArray};
 use dbconn::{
     Browse, Capabilities, ColumnInfo, Computed, ConstraintInfo, ConstraintKind, Cursor,
     DatabaseInfo, DbResult, Driver, IndexInfo, RelationInfo, RelationKind, RelationshipInfo,
@@ -378,6 +379,10 @@ async fn live() -> MsSqlSource {
 }
 
 async fn seed() {
+    // `cargo nextest` gives every test its own process, so `FIXTURE` holds
+    // nothing back across them: without this lock a process drops and rebuilds
+    // these objects while the tests in the others are reading them.
+    let _turn = dbfixture::exclusive("mssql-ddl").await;
     let master = MsSqlSource::connect(&format!("{HOST};Database=master"))
         .await
         .expect("SQL Server unreachable; run 'make db-up-mssql'");
@@ -390,7 +395,10 @@ async fn seed() {
     let db = MsSqlSource::connect(&format!("{HOST};Database={DATABASE}"))
         .await
         .expect("the fixture database should be reachable once created");
-    for statement in [
+    let statements = [
+        // Before anything is rebuilt, so that a run stopping partway leaves no
+        // stamp for a later one to trust.
+        "IF OBJECT_ID('dbo.__fixture') IS NOT NULL DROP TABLE dbo.__fixture",
         "IF OBJECT_ID('dbo.open_parts') IS NOT NULL DROP VIEW dbo.open_parts",
         "IF OBJECT_ID('dbo.parts') IS NOT NULL DROP TABLE dbo.parts",
         "IF OBJECT_ID('dbo.parts_parent') IS NOT NULL DROP TABLE dbo.parts_parent",
@@ -421,9 +429,32 @@ async fn seed() {
         "CREATE NONCLUSTERED INDEX parts_qty_idx ON dbo.parts (qty)",
         "CREATE VIEW dbo.open_parts AS
     SELECT id, sku FROM dbo.parts WHERE qty > 0",
-    ] {
+    ];
+    let want = dbfixture::fingerprint(statements);
+    if stamp(&db).await.as_deref() == Some(want.as_str()) {
+        return;
+    }
+    for statement in statements {
         run(&db, statement).await;
     }
+    // Last, so that it means "all of the above ran".
+    run(&db, "CREATE TABLE dbo.__fixture (stamp char(16) NOT NULL)").await;
+    run(&db, &format!("INSERT INTO dbo.__fixture VALUES ('{want}')")).await;
+}
+
+/// What the fixture on the server was built from, or `None` when there is
+/// nothing to read it from: no stamp table, or a rebuild that stopped before it
+/// wrote one.
+///
+/// A stamp rather than "does `dbo.parts` exist", because the container outlives
+/// every run and the DDL above does not — a table built by an older version of
+/// this file answers yes, and a test added alongside a change to it then fails
+/// as if the renderer had lost something.
+async fn stamp(db: &MsSqlSource) -> Option<String> {
+    let mut stream = db.query("SELECT stamp FROM dbo.__fixture", 1).await.ok()?;
+    let batch = stream.next_batch().await.ok()??;
+    let column = batch.column(0).as_any().downcast_ref::<StringArray>()?;
+    (!column.is_empty()).then(|| column.value(0).trim_end().to_string())
 }
 
 async fn run(source: &MsSqlSource, sql: &str) {

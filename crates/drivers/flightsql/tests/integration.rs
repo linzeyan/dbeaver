@@ -55,10 +55,11 @@ const SCHEMA: &str = "TPC-H-small.main";
 
 /// One statement at a time against this server; see the header.
 ///
-/// `tokio::sync::Mutex` rather than the standard one because the guard is held
-/// across every await in a test: the standard guard is not `Send`, and a poisoned
-/// standard mutex would turn one failing test into every test failing after it.
-static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// A cross-process lock rather than a `Mutex`, because `cargo nextest` runs each
+/// test in its own process: a mutex inside one of them holds nothing back, and
+/// the server answers concurrent readers with exactly the failure the header
+/// describes.
+const ONE_AT_A_TIME: &str = "flightsql";
 
 async fn source() -> FlightSqlSource {
     FlightSqlSource::connect(URL)
@@ -189,7 +190,7 @@ fn is_variable_width(data_type: &arrow::datatypes::DataType) -> bool {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_batch_reaches_the_caller_in_the_bytes_the_socket_read() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     // Far fewer rows per page than the server puts in a message, so a page is a
     // slice of one arrival rather than a concatenation of two — which is what
@@ -264,7 +265,7 @@ async fn a_batch_reaches_the_caller_in_the_bytes_the_socket_read() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn most_of_a_result_reaches_the_caller_without_being_touched() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut rows = source
         .query("SELECT * FROM lineitem", 2048)
@@ -317,7 +318,7 @@ async fn most_of_a_result_reaches_the_caller_without_being_touched() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_page_assembled_from_two_arrivals_points_at_neither() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut rows = source
         .query("SELECT l_orderkey FROM lineitem LIMIT 20000", 5000)
@@ -347,7 +348,7 @@ async fn a_page_assembled_from_two_arrivals_points_at_neither() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn the_reference_decoder_copies_every_body_it_reads() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     use arrow_flight::decode::{DecodedPayload, FlightDataDecoder};
 
     let mut client = reference().await;
@@ -400,7 +401,7 @@ async fn the_reference_decoder_copies_every_body_it_reads() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_result_arrives_in_batches_of_the_size_that_was_asked_for() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut stream = Driver::query(&source, "SELECT o_orderkey FROM orders", 300)
         .await
@@ -424,7 +425,7 @@ async fn a_result_arrives_in_batches_of_the_size_that_was_asked_for() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_row_count_arrives_only_when_the_result_has_been_read_to_the_end() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut stream = Driver::query(&source, "SELECT n_nationkey FROM nation", 10)
         .await
@@ -451,7 +452,7 @@ async fn a_row_count_arrives_only_when_the_result_has_been_read_to_the_end() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_cursor_pages_forward_without_repeating_or_skipping() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut cursor = Driver::cursor(
         &source,
@@ -497,7 +498,7 @@ async fn a_cursor_pages_forward_without_repeating_or_skipping() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_write_reports_the_engines_own_count_as_a_row() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let table = "flightsql_write";
     let mut client = scratch(table, 0).await;
     let source = source().await;
@@ -544,7 +545,7 @@ async fn a_write_reports_the_engines_own_count_as_a_row() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_statement_with_no_rows_still_names_its_columns() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let table = "flightsql_ddl";
     let mut client = reference().await;
     seed(&mut client, &format!("DROP TABLE IF EXISTS {table}")).await;
@@ -572,7 +573,7 @@ async fn a_statement_with_no_rows_still_names_its_columns() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_broken_statement_carries_the_servers_words_and_no_position() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let error = failure(
         &source,
@@ -596,7 +597,7 @@ async fn a_broken_statement_carries_the_servers_words_and_no_position() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn reading_a_relation_that_is_not_there_is_a_failure() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let error = failure(&source, "SELECT * FROM no_such_relation_anywhere").await;
     assert!(
@@ -618,7 +619,7 @@ async fn reading_a_relation_that_is_not_there_is_a_failure() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn neither_cancel_action_is_implemented_by_this_server() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let mut client = reference().await;
     let info = client
         .execute("SELECT * FROM lineitem".to_string(), None)
@@ -676,7 +677,7 @@ async fn neither_cancel_action_is_implemented_by_this_server() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn two_statements_at_once_are_more_than_this_server_can_do() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
 
     let mut readers = Vec::new();
     for _ in 0..4 {
@@ -720,7 +721,7 @@ async fn two_statements_at_once_are_more_than_this_server_can_do() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn the_action_list_advertises_more_than_this_server_implements() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let mut client = reference().await;
     let mut request = tonic::Request::new(Empty {});
     request.metadata_mut().insert(
@@ -761,7 +762,7 @@ async fn the_action_list_advertises_more_than_this_server_implements() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_cancel_between_two_pages_stops_the_next_one() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut stream = Driver::query(&source, "SELECT * FROM lineitem", 100)
         .await
@@ -793,7 +794,7 @@ async fn a_cancel_between_two_pages_stops_the_next_one() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_cancel_during_a_read_stops_it_where_it_is() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = Arc::new(source().await);
     let mut stream = Driver::query(source.as_ref(), "SELECT * FROM lineitem", 100)
         .await
@@ -829,7 +830,7 @@ async fn a_cancel_during_a_read_stops_it_where_it_is() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_session_cancel_and_a_cursor_do_not_reach_each_other() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let mut cursor = Driver::cursor(&source, "SELECT * FROM lineitem", 100)
         .await
@@ -860,7 +861,7 @@ async fn a_session_cancel_and_a_cursor_do_not_reach_each_other() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn cancelling_an_idle_cursor_is_not_a_failure() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let cursor = Driver::cursor(&source, "SELECT n_nationkey FROM nation", 10)
         .await
@@ -878,7 +879,7 @@ async fn cancelling_an_idle_cursor_is_not_a_failure() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn the_navigator_is_answered_by_the_protocols_own_commands() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
 
     let schemas = source.schemas().await.expect("schemas failed");
@@ -906,7 +907,7 @@ async fn the_navigator_is_answered_by_the_protocols_own_commands() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_view_is_told_apart_from_a_table() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let view = "flightsql_view";
     let mut client = reference().await;
     seed(&mut client, &format!("DROP VIEW IF EXISTS {view}")).await;
@@ -935,7 +936,7 @@ async fn a_view_is_told_apart_from_a_table() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_relations_columns_come_from_the_schema_the_protocol_carries() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let columns = source
         .columns(SCHEMA, "nation")
@@ -965,7 +966,7 @@ async fn a_relations_columns_come_from_the_schema_the_protocol_carries() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_primary_key_is_read_from_the_protocol_and_not_from_the_engine() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let table = "flightsql_keys";
     let mut client = reference().await;
     seed(&mut client, &format!("DROP TABLE IF EXISTS {table}")).await;
@@ -998,7 +999,7 @@ async fn a_primary_key_is_read_from_the_protocol_and_not_from_the_engine() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_foreign_key_is_reported_from_both_ends() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let parent = "flightsql_parent";
     let child = "flightsql_child";
     let mut client = reference().await;
@@ -1058,7 +1059,7 @@ async fn a_foreign_key_is_reported_from_both_ends() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn what_the_protocol_cannot_ask_is_answered_with_nothing() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     assert!(source.indexes(SCHEMA, "orders").await.unwrap().is_empty());
     assert!(
@@ -1080,7 +1081,7 @@ async fn what_the_protocol_cannot_ask_is_answered_with_nothing() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn the_type_information_command_is_not_implemented_by_this_server() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let mut client = reference().await;
     let error = client
         .get_xdbc_type_info(arrow_flight::sql::CommandGetXdbcTypeInfo { data_type: None })
@@ -1096,7 +1097,7 @@ async fn the_type_information_command_is_not_implemented_by_this_server() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn asking_about_a_relation_that_is_not_there_is_an_empty_answer() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let missing = "no_such_relation_anywhere";
     assert!(source.columns(SCHEMA, missing).await.unwrap().is_empty());
@@ -1122,7 +1123,7 @@ async fn asking_about_a_relation_that_is_not_there_is_an_empty_answer() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_schema_that_is_not_there_lists_nothing() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     assert!(
         source
@@ -1137,7 +1138,7 @@ async fn a_schema_that_is_not_there_lists_nothing() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_catalog_in_the_connection_string_restricts_the_navigator() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     // The one the tables are in, percent-encoded because the name has no
     // characters a URL objects to but the next server's might.
     let named = FlightSqlSource::connect(&format!("{URL}TPC-H-small"))
@@ -1173,7 +1174,7 @@ async fn a_catalog_in_the_connection_string_restricts_the_navigator() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_transaction_holds_without_a_connection_held_back() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let table = "flightsql_tx";
     let mut client = scratch(table, 0).await;
     let outside = source().await;
@@ -1223,7 +1224,7 @@ async fn a_transaction_holds_without_a_connection_held_back() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_savepoint_is_refused_rather_than_skipped() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     source
         .transaction(&TxStep::Begin)
@@ -1250,7 +1251,7 @@ async fn a_savepoint_is_refused_rather_than_skipped() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn ending_a_transaction_that_was_never_begun_is_refused() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let refused = source
         .transaction(&TxStep::Commit)
@@ -1271,7 +1272,7 @@ async fn ending_a_transaction_that_was_never_begun_is_refused() {
 #[tokio::test]
 #[ignore = "requires an Arrow Flight SQL server"]
 async fn a_browse_of_a_table_in_a_named_catalog_runs() {
-    let _turn = ONE_AT_A_TIME.lock().await;
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
     let source = source().await;
     let keys = ["n_nationkey".to_string()];
     let statement = source.browse(&Browse {

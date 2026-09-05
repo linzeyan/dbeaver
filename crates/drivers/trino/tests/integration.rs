@@ -69,13 +69,21 @@ async fn source() -> TrinoSource {
         .expect("Trino unreachable; see the header of this file")
 }
 
-/// Builds the fixture, through the driver, one statement at a time.
+/// Builds the fixture, through the driver, one statement at a time — unless the
+/// server already holds exactly it.
 async fn seed() {
+    // `cargo nextest` gives every test its own process, so `FIXTURE` holds
+    // nothing back across them: without this lock a process drops and rebuilds
+    // `nums` while the tests in the others are reading it.
+    let _turn = dbfixture::exclusive("trino").await;
     let admin = TrinoSource::connect("http://127.0.0.1:58080/memory")
         .await
         .expect("Trino unreachable; see the header of this file");
-    for statement in [
+    let statements = [
         format!("CREATE SCHEMA IF NOT EXISTS {SCHEMA}"),
+        // Before anything is rebuilt, so that a run stopping partway leaves no
+        // stamp for a later one to trust.
+        format!("DROP TABLE IF EXISTS {SCHEMA}.__fixture"),
         // The view first: it is the one that depends on the table.
         format!("DROP VIEW IF EXISTS {SCHEMA}.nums_view"),
         format!("DROP TABLE IF EXISTS {SCHEMA}.nums"),
@@ -85,9 +93,38 @@ async fn seed() {
              FROM UNNEST(sequence(1, {ROWS})) AS t(id)"
         ),
         format!("CREATE VIEW {SCHEMA}.nums_view AS SELECT id, label FROM {SCHEMA}.nums"),
-    ] {
-        run(&admin, &statement).await;
+    ];
+    let want = dbfixture::fingerprint(statements.iter().map(String::as_str));
+    if stamp(&admin).await.as_deref() == Some(want.as_str()) {
+        return;
     }
+    for statement in &statements {
+        run(&admin, statement).await;
+    }
+    // Last, so that it means "all of the above ran".
+    run(
+        &admin,
+        &format!("CREATE TABLE {SCHEMA}.__fixture AS SELECT '{want}' AS stamp"),
+    )
+    .await;
+}
+
+/// What the fixture on the server was built from, or `None` when there is
+/// nothing to read it from: no schema, no stamp table, or a rebuild that
+/// stopped before it wrote one.
+///
+/// A stamp rather than "does `nums` exist", because the server outlives every
+/// run and the statements above do not — a table built by an older version of
+/// this file answers yes, and a test added alongside a change to it then fails
+/// as if the driver were reading the fixture wrong.
+async fn stamp(admin: &TrinoSource) -> Option<String> {
+    let mut rows = admin
+        .query(&format!("SELECT stamp FROM {SCHEMA}.__fixture"), 1)
+        .await
+        .ok()?;
+    let batch = rows.next_page().await.ok()??;
+    let column = batch.column(0).as_any().downcast_ref::<StringArray>()?;
+    (!column.is_empty()).then(|| column.value(0).to_string())
 }
 
 /// Runs a statement for its effect, reading it to the end.

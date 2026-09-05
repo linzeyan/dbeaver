@@ -36,18 +36,50 @@ use std::time::Duration;
 const URL: &str = "http://default:test@127.0.0.1:58123/bench";
 const ADMIN_URL: &str = "http://default:test@127.0.0.1:58123/default";
 
-/// Applied once per test binary, however many tests want it.
+/// Applied once per test process; `seed` is what keeps that from meaning once
+/// per test.
 static FIXTURE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+/// The fixture as text: what applies it, and what recognises it on the server.
+const SEED: &str = include_str!("seed.sql");
 
 /// A connection to the seeded fixture database.
 async fn source() -> ChSource {
     FIXTURE.get_or_init(seed).await;
-    ChSource::connect(URL)
-        .await
-        .expect("ClickHouse unreachable; see the command at the top of this file")
+    connect(URL).await
 }
 
-/// Applies `seed.sql`, one statement per request.
+/// A connection to `url`, retried rather than attempted once.
+///
+/// The first network syscall a freshly built test binary makes takes most of a
+/// minute on a development Mac — long enough that ClickHouse closes the socket
+/// before the request finishes arriving, and the client reports
+/// `connection closed before message completed`. A fixture that gave up there
+/// would be reporting the laptop rather than the server. Every attempt after
+/// the first is milliseconds, and `cargo nextest` makes it matter more rather
+/// than less: each test is a process of its own, so each one arrives cold.
+async fn connect(url: &str) -> ChSource {
+    let mut last = None;
+    for _ in 0..30 {
+        match ChSource::connect(url).await {
+            Ok(source) => return source,
+            // Slept between attempts because this client fails a closed port in
+            // microseconds, and a bare loop would turn a server that is simply
+            // not running into a spin rather than into a message.
+            Err(e) => {
+                last = Some(e);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    panic!(
+        "ClickHouse unreachable; see the command at the top of this file: {}",
+        last.expect("at least one attempt")
+    )
+}
+
+/// Applies `SEED`, one statement per request, unless the server already holds
+/// exactly it.
 ///
 /// ClickHouse's HTTP interface takes one statement per request, so the file is
 /// split on a line of `;;` rather than on `;` — splitting on the semicolon would
@@ -65,19 +97,65 @@ async fn source() -> ChSource {
 const SEED_PAGE: usize = 65536;
 
 async fn seed() {
-    let admin = ChSource::connect(ADMIN_URL)
-        .await
-        .expect("ClickHouse unreachable; see the command at the top of this file");
-    for statement in include_str!("seed.sql").split("\n;;") {
+    // `cargo nextest` gives every test its own process, so `FIXTURE` holds
+    // nothing back across them: without this lock thirty-four processes apply
+    // `SEED` to the same database at once and knock each other over with
+    // `Table bench.types_all already exists`.
+    let _turn = dbfixture::exclusive("clickhouse").await;
+    let admin = connect(ADMIN_URL).await;
+
+    let want = dbfixture::fingerprint([SEED]);
+    if stamp(&admin).await.as_deref() == Some(want.as_str()) {
+        return;
+    }
+    // Dropped rather than applied over, which also takes the stamp with it: a
+    // run that stops partway leaves nothing that a later one would mistake for
+    // a finished fixture.
+    run(&admin, "DROP DATABASE IF EXISTS bench").await;
+    for statement in SEED.split("\n;;") {
         let statement = statement.trim();
         if statement.is_empty() {
             continue;
         }
-        admin
-            .query(statement, SEED_PAGE)
-            .await
-            .unwrap_or_else(|e| panic!("seeding failed on `{}`: {e}", head(statement)));
+        run(&admin, statement).await;
     }
+    // Last, so that it means "all of the above ran".
+    run(
+        &admin,
+        "CREATE TABLE bench.__fixture (stamp String) ENGINE = TinyLog",
+    )
+    .await;
+    run(
+        &admin,
+        &format!("INSERT INTO bench.__fixture VALUES ('{want}')"),
+    )
+    .await;
+}
+
+/// Runs one seed statement for its effect.
+async fn run(admin: &ChSource, statement: &str) {
+    admin
+        .query(statement, SEED_PAGE)
+        .await
+        .unwrap_or_else(|e| panic!("seeding failed on `{}`: {e}", head(statement)));
+}
+
+/// What the fixture on the server was built from, or `None` when there is
+/// nothing to read it from: no database, no stamp table, or a rebuild that
+/// stopped before it wrote one.
+///
+/// A stamp rather than "do the tables exist", because the container outlives
+/// every run and `SEED` does not — a table built by an older version of the file
+/// beside it answers yes, and the test added alongside a new column then fails
+/// naming the column, which reads exactly like the driver losing it.
+async fn stamp(admin: &ChSource) -> Option<String> {
+    let mut rows = admin
+        .query("SELECT stamp FROM bench.__fixture", 1)
+        .await
+        .ok()?;
+    let batch = rows.next_page().await.ok()??;
+    let column = batch.column(0).as_any().downcast_ref::<StringArray>()?;
+    (!column.is_empty()).then(|| column.value(0).to_string())
 }
 
 /// Enough of a statement to recognise it by, for the message when seeding

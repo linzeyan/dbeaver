@@ -29,4 +29,6 @@ percent-encoding = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# Cross-process fixture locking; see the crate for why a OnceCell is not enough.
+dbfixture = { path = "../../fixture" }
 tokio = { workspace = true, features = ["full"] }

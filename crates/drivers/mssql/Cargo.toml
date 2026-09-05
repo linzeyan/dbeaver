@@ -33,4 +33,6 @@ tiberius = { version = "0.12.3", default-features = false, features = [
 tokio-util = { version = "0.7", features = ["compat"] }
 
 [dev-dependencies]
+# Cross-process fixture locking; see the crate for why a OnceCell is not enough.
+dbfixture = { path = "../../fixture" }
 tokio = { workspace = true, features = ["full"] }

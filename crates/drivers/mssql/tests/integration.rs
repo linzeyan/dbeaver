@@ -96,20 +96,15 @@ async fn run(client: &mut Client<Compat<TcpStream>>, sql: &str) {
 /// exactly like the driver losing a column. Comparing what the database was built
 /// from is the only question whose answer cannot drift.
 fn fixture_fingerprint() -> String {
-    // FNV-1a rather than a hash crate: this is a cache key for a test fixture,
-    // so the only property required of it is that different DDL gives a
-    // different answer.
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for statement in DDL {
-        for byte in statement.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    format!("{hash:016x}")
+    dbfixture::fingerprint(DDL.iter().copied())
 }
 
 async fn build_fixture() {
+    // `cargo nextest` gives every test its own process, so `FIXTURE` holds
+    // nothing back across them: without this lock several processes reach the
+    // drop-and-rebuild below at once and the server answers
+    // `Database 'dbeaver_test' is in transition`.
+    let _turn = dbfixture::exclusive("mssql").await;
     let wanted = fixture_fingerprint();
     let mut master = raw("master").await;
 

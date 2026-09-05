@@ -69,6 +69,10 @@ async fn source() -> MySqlSource {
 /// default and turning it on for a test fixture would be turning on an injection
 /// surface to save a loop.
 async fn seed() {
+    // `cargo nextest` gives every test its own process, so `FIXTURE` holds
+    // nothing back across them: without this lock a process drops and rebuilds
+    // `bench` while the tests in the others are reading it.
+    let _turn = dbfixture::exclusive("mysql").await;
     let opts = Opts::from_url(ROOT_URL).expect("the fixture URL should parse");
     // Through the driver's opener rather than `Conn::new`, so the seed survives
     // a connection the port forwarder opened early and MySQL has since closed.
@@ -76,14 +80,43 @@ async fn seed() {
         .await
         .expect("MySQL unreachable; see the header of this file for the container");
 
-    for statement in statements() {
-        conn.query_drop(&statement)
-            .await
-            .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+    let statements = statements();
+    let want = dbfixture::fingerprint(statements.iter().map(String::as_str));
+    if stamp(&mut conn).await.as_deref() != Some(want.as_str()) {
+        for statement in &statements {
+            conn.query_drop(statement)
+                .await
+                .unwrap_or_else(|e| panic!("seeding failed on {statement}: {e}"));
+        }
+        // Last, and inside the database the first statement above drops, so
+        // that a stamp exists only where every statement before it ran.
+        for statement in [
+            "CREATE TABLE bench.__fixture (stamp CHAR(16) NOT NULL)".to_string(),
+            format!("INSERT INTO bench.__fixture VALUES ('{want}')"),
+        ] {
+            conn.query_drop(&statement)
+                .await
+                .unwrap_or_else(|e| panic!("stamping the fixture failed on {statement}: {e}"));
+        }
     }
     conn.disconnect()
         .await
         .expect("closing the seed connection");
+}
+
+/// What the fixture on the server was built from, or `None` when there is
+/// nothing to read it from: no database, no stamp table, or a rebuild that
+/// stopped before it wrote one.
+///
+/// A stamp rather than "does `bench` exist", because the container outlives
+/// every run and `statements` does not — a database built by an older version
+/// of this file answers yes, and the test added alongside a new column then
+/// fails naming the column, which reads exactly like the driver losing it.
+async fn stamp(conn: &mut mysql_async::Conn) -> Option<String> {
+    conn.query_first::<String, _>("SELECT stamp FROM bench.__fixture")
+        .await
+        .ok()
+        .flatten()
 }
 
 fn statements() -> Vec<String> {
