@@ -51,6 +51,8 @@ enum ValueViewerChecks {
             checkAColumnThatDeclaredNothingIsStillText()
             checkTheRelationsDeclaredTypeStillAnswersOnItsOwn()
             checkTheArrowKindIsAskedBeforeEitherDeclaration()
+            checkANestedColumnIsItsOwnRenderingAndNotTheDocumentOne()
+            checkTheNestedPaneSaysWhereItsJSONCameFrom()
         }
         if failures == 0 {
             fputs("value: all checks passed\n", stderr)
@@ -449,6 +451,54 @@ enum ValueViewerChecks {
             "a binary column is binary however its field is labelled")
     }
 
+    /// A nested column asks for its own rendering, ahead of both declarations.
+    ///
+    /// It has to be its own case rather than a second route to `.json`, and the
+    /// hazard is in the second assertion: the two look identical on screen and
+    /// answer differently about editing. Folding nesting into `.json` would put a
+    /// live pencil over a `STRUCT` and seed the box from this reader's rendering
+    /// of it — the same defect `.binary` already refuses, one type further out.
+    /// `NestedValueChecks` holds the other half, against a real Arrow batch.
+    @MainActor private static func checkANestedColumnIsItsOwnRenderingAndNotTheDocumentOne() {
+        let kind = ArrowTable.Kind.nested(
+            .structure([ArrowTable.Field(name: "qty", kind: .int32)]))
+        expect(
+            name(
+                of: AppModel.rendering(
+                    kind: kind, shape: ArrowTable.jsonShape, declared: "jsonb", bytes: { [] })),
+            "nested",
+            "what arrived beats a field that says json and a catalogue that says jsonb")
+
+        let stored = "{\"qty\":2}"
+        expect(
+            ValueEdit.offered(for: cell(value: stored, type: "", rendering: .json), obstacle: nil),
+            .editable(stored),
+            "a document the server sent is still offered to the box")
+        expect(
+            ValueEdit.offered(
+                for: cell(value: stored, type: "", rendering: .nested), obstacle: nil),
+            .refused("A nested value cannot be edited here."),
+            "and the identical characters read out of children are not")
+    }
+
+    /// The pane lays a nested value out and says where the JSON came from.
+    ///
+    /// The sentence is the difference from a document, and it is not decoration:
+    /// a `jsonb` descriptor counts the characters the server sent, and a nested
+    /// column sent none — what was counted would be this program's own rendering.
+    /// So it names what was done instead of measuring what was not there.
+    @MainActor private static func checkTheNestedPaneSaysWhereItsJSONCameFrom() {
+        let rendered = RenderedValue.make(
+            from: cell(value: "{\"qty\":2,\"unit\":\"kg\"}", type: "", rendering: .nested))
+        expect(
+            rendered.text, "{\n  \"qty\": 2,\n  \"unit\": \"kg\"\n}",
+            "laid out over lines, by the same walk a document gets")
+        expect(
+            rendered.descriptor, "read from the column's children",
+            "with no character count, because the column stores no characters")
+        expect(rendered.wraps, false, "and no soft wrap, which would break the indentation")
+    }
+
     // MARK: - Harness
 
     /// Which case a rendering is, for a comparison that also reads as a
@@ -458,6 +508,7 @@ enum ValueViewerChecks {
         switch rendering {
         case .text: return "text"
         case .json: return "json"
+        case .nested: return "nested"
         case .binary(let bytes): return "binary(\(bytes.count))"
         }
     }

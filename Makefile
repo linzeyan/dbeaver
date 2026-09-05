@@ -342,6 +342,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-browse-restore
 	./$(APP_BIN) --verify-metadata
 	./$(APP_BIN) --verify-schema-metadata
+	./$(APP_BIN) --verify-nested
 	./$(APP_BIN) --verify-import
 	./$(APP_BIN) --verify-fk-nav
 	./$(APP_BIN) --verify-grid-find

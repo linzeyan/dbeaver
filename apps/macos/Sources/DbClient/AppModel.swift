@@ -3739,6 +3739,7 @@ final class AppModel {
     ) -> ValueRendering {
         switch kind {
         case .binary: return .binary(bytes())
+        case .nested: return .nested
         case .utf8 where shape == ArrowTable.jsonShape: return .json
         case .utf8 where ValueRendering.isJSONType(declared): return .json
         default: return .text
@@ -3748,10 +3749,23 @@ final class AppModel {
     /// The strip's one-line form of a cell, which for a binary column is not
     /// what the grid draws: "12 B" is the most a column-width cell can say, and
     /// the strip has room for the bytes themselves.
-    private static func text(
+    ///
+    /// Not private, for the reason `rendering` above is not: building the
+    /// `ResultSet` that `cell(at:in:)` reads needs a server, and the two lines
+    /// where a nested cell diverges from the grid's own text are the ones that
+    /// decide whether the pane shows a value or a truncation of one.
+    /// `NestedValueChecks` calls it with a table it built itself.
+    static func text(
         of rendering: ValueRendering, in grid: ArrowTable, at s: GridSelection
     ) -> String {
         if case .binary(let bytes) = rendering { return ValueRendering.preview(bytes: bytes) }
+        // And for a nested column it is not what the grid draws either, for the
+        // mirror-image reason: the cell is a preview cut at the reader's cell
+        // budget, and the strip and the pane below it are where the whole
+        // document goes. Read here because here is where the batch is alive.
+        if case .nested = rendering, let document = grid.json(row: s.row, column: s.column) {
+            return document
+        }
         return grid.text(row: s.row, column: s.column)
     }
 

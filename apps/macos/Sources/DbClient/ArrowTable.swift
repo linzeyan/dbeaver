@@ -38,6 +38,9 @@ final class ArrowTable {
         case decimal128(precision: Int32, scale: Int32)
         case timestamp(tz: Bool)
         case date32, time64
+        /// A column whose values are not in its own buffers but in the children
+        /// beside them. Three drivers send one — see `Nested`.
+        indirect case nested(Nested)
         case unsupported(String)
 
         /// Whether values of this kind are compared by magnitude, and so should
@@ -47,9 +50,22 @@ final class ArrowTable {
             switch self {
             case .int16, .int32, .int64, .float32, .float64, .decimal128:
                 return true
-            case .bool, .utf8, .binary, .timestamp, .date32, .time64, .unsupported:
+            case .bool, .utf8, .binary, .timestamp, .date32, .time64, .nested, .unsupported:
                 return false
             }
+        }
+
+        /// The children this kind is read through, in Arrow's own order, and
+        /// empty for every kind whose values are in its own buffers.
+        ///
+        /// One list rather than a case analysis at each use, because the two
+        /// things that walk children — building the per-batch accessors and
+        /// rendering a value — have to agree about how many there are and what
+        /// order they come in. A batch whose children do not line up with this
+        /// is refused rather than read off by one.
+        var childFields: [Field] {
+            guard case .nested(let nested) = self else { return [] }
+            return nested.childFields
         }
 
         /// What to call this kind where no declared type is available.
@@ -79,7 +95,74 @@ final class ArrowTable {
             case .timestamp(let tz): return tz ? "timestamptz" : "timestamp"
             case .date32: return "date"
             case .time64: return "time"
+            case .nested(let nested): return nested.label
             case .unsupported(let f): return "<\(f)>"
+            }
+        }
+    }
+
+    /// One field of a nested column: what it is called and what it holds.
+    struct Field {
+        let name: String
+        let kind: Kind
+    }
+
+    /// The shape of a column whose values live in its children.
+    ///
+    /// Four, and they are exactly the four a server on this side of the FFI has
+    /// been seen to send. Three drivers hand the server's own Arrow schema
+    /// straight over without a type table — Flight SQL, BigQuery and Databricks
+    /// each decode an IPC stream and keep what it describes — and the project's
+    /// Flight SQL subject, which is DuckDB behind the protocol, answers
+    /// `list<l: int32>`, `struct<qty: int32, unit: string>`, `map<string, int32>`
+    /// and `fixed_size_list<: string>[2]` for the four DuckDB spellings. The
+    /// twelve drivers that build Arrow a value at a time flatten their nesting to
+    /// text before it gets here and are not affected either way.
+    ///
+    /// Not `LargeList`, not `Union`, not `RunEndEncoded`, not `Dictionary`:
+    /// nothing has sent one, and a reader for a type with no producer is a claim
+    /// about a column this build has never seen. Those keep reading as their
+    /// format string, which says truthfully that this reader cannot follow them.
+    ///
+    /// `map` keeps its entries struct rather than flattening to a key and a
+    /// value, because that is how Arrow lays the children out — a map *is* a list
+    /// of `struct<key, value>` — and a model that disagreed with the layout would
+    /// have to re-derive it at every step.
+    indirect enum Nested {
+        /// `+l`, one child holding the elements of every row's list.
+        case list(Field)
+        /// `+w:N`, the same with no offsets buffer: row *i* owns elements
+        /// `i * N ..< (i + 1) * N`.
+        case fixedList(Field, width: Int)
+        /// `+s`, one child per field, each indexed by the parent's own row.
+        case structure([Field])
+        /// `+m`, a list whose element is a two-field struct.
+        case map(entries: Field)
+
+        var childFields: [Field] {
+            switch self {
+            case .list(let element): return [element]
+            case .fixedList(let element, _): return [element]
+            case .structure(let fields): return fields
+            case .map(let entries): return [entries]
+            }
+        }
+
+        /// What to call this shape, in Arrow's spelling for the reason
+        /// `Kind.label` gives: nothing behind a nested column has a SQL
+        /// declaration to borrow, and DuckDB's `STRUCT(qty INTEGER)` and
+        /// ClickHouse's `Tuple(qty Int32)` are not the same words.
+        var label: String {
+            switch self {
+            case .list(let element): return "list<\(element.kind.label)>"
+            case .fixedList(let element, let width): return "list<\(element.kind.label)>[\(width)]"
+            case .structure(let fields):
+                let inner = fields.map { "\($0.name): \($0.kind.label)" }.joined(separator: ", ")
+                return "struct<\(inner)>"
+            case .map(let entries):
+                let pair = entries.kind.childFields
+                guard pair.count == 2 else { return "map" }
+                return "map<\(pair[0].kind.label), \(pair[1].kind.label)>"
             }
         }
     }
@@ -117,7 +200,7 @@ final class ArrowTable {
             let name = child.pointee.name.map { String(cString: $0) } ?? "col\(i)"
             let declared = Self.declarations(child.pointee.metadata)
             return Column(
-                name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)),
+                name: name, kind: Self.kind(of: child),
                 declaredNotNull: declared.notNull, valueShape: declared.valueShape)
         }
     }
@@ -261,6 +344,41 @@ final class ArrowTable {
         return columns[column].batches[batchIdx].bytes(at: localRow)
     }
 
+    /// How much of a nested value one grid cell spells out.
+    ///
+    /// `text(row:column:)` runs for every visible cell on every frame, and a
+    /// `LIST` column holding ten thousand elements would build a megabyte of
+    /// string per cell per frame to fill two hundred points of grid. So the cell
+    /// is a preview — enough to recognise the value by, not enough to read it —
+    /// and the pane under the grid is where the rest goes. The same trade the
+    /// binary columns already make with `0x… (12 B)`.
+    static let cellBudget = 256
+
+    /// And how much of one the value viewer builds.
+    ///
+    /// `RenderedValue` cuts its own rendering at this number, so a document
+    /// longer than it is one the pane would not draw anyway. Read from there
+    /// rather than written down again: two constants would be two chances to
+    /// raise one and leave the viewer laying out a value the reader had already
+    /// cut. Built once per selection change instead of once per frame, which is
+    /// what makes the larger number affordable at all.
+    fileprivate static var documentBudget: Int { RenderedValue.characterCap }
+
+    /// A nested cell as a whole JSON document, for the viewer.
+    ///
+    /// Nil where the column is not nested, so the caller keeps the single
+    /// rendering path it already had for everything else. Read here rather than
+    /// on demand for the reason `bytes(row:column:)` gives: the walk has to
+    /// happen while the batch is alive, and the pane is drawn after the model has
+    /// finished with it.
+    func json(row: Int, column: Int) -> String? {
+        guard column < columns.count, row < rowCount, case .nested = columns[column].kind,
+            let (batchIdx, localRow) = Self.locate(
+                row: row, batchStarts: batchStarts, columns: columns)
+        else { return nil }
+        return columns[column].batches[batchIdx].json(at: localRow, budget: Self.documentBudget)
+    }
+
     /// Which batch holds a global row index, and where inside it.
     ///
     /// Takes the state it searches rather than reading it off `self`, so a
@@ -365,6 +483,70 @@ final class ArrowTable {
         }
     }
 
+    /// How deep the reader will follow a schema into its children.
+    ///
+    /// The walk is recursive and the schema is another process's memory: a
+    /// server that described a thousand levels of list would take the stack down
+    /// with it before a single row arrived. Real nesting is two or three deep — a
+    /// list of structs holding a list — and past this the column reads as its
+    /// format string, which is what every nested column read as before this file
+    /// could follow one at all.
+    static let maxNesting = 16
+
+    /// One field's kind, following its children where it has any.
+    ///
+    /// Takes the schema node rather than its format string, because the format
+    /// string is only half of a nested type: `+s` says "struct" and says nothing
+    /// about which fields, and those are in `children`.
+    static func kind(of schema: UnsafePointer<ArrowSchema>, depth: Int = 0) -> Kind {
+        let format = String(cString: schema.pointee.format)
+        if let nested = nested(format, of: schema, depth: depth) { return .nested(nested) }
+        return kind(fromFormat: format)
+    }
+
+    /// The nested shape a node describes, or nil where it describes none.
+    ///
+    /// Nil is also the answer for a node that claims a nested format and does not
+    /// carry the children for it — a `+m` whose entries are not a pair, a `+l`
+    /// with two children. The caller then falls through to `unsupported`, so the
+    /// column reads as `<+m>`: this reader could not follow it, said in the one
+    /// way that cannot be mistaken for a value.
+    private static func nested(
+        _ format: String, of schema: UnsafePointer<ArrowSchema>, depth: Int
+    ) -> Nested? {
+        guard depth < maxNesting, let children = schema.pointee.children else { return nil }
+        let count = Int(schema.pointee.n_children)
+
+        func field(_ index: Int) -> Field? {
+            guard index < count, let child = children[index] else { return nil }
+            return Field(
+                name: child.pointee.name.map { String(cString: $0) } ?? "",
+                kind: kind(of: child, depth: depth + 1))
+        }
+
+        switch format {
+        case "+l":
+            guard count == 1, let element = field(0) else { return nil }
+            return .list(element)
+        case "+s":
+            let fields = (0..<count).compactMap(field)
+            guard fields.count == count else { return nil }
+            return .structure(fields)
+        case "+m":
+            // A map's child is `struct<key, value>`. Anything else under `+m` is
+            // a node this reader has no rule for, and guessing which child was
+            // the key would be reading a layout rather than being told it.
+            guard count == 1, let entries = field(0), entries.kind.childFields.count == 2
+            else { return nil }
+            return .map(entries: entries)
+        default:
+            guard format.hasPrefix("+w:"), let width = Int(format.dropFirst(3)), width > 0,
+                count == 1, let element = field(0)
+            else { return nil }
+            return .fixedList(element, width: width)
+        }
+    }
+
     private static func kind(fromFormat f: String) -> Kind {
         switch f {
         case "b": return .bool
@@ -427,6 +609,14 @@ private struct ColumnBatch {
     let validity: UnsafePointer<UInt8>?
     let buffer1: UnsafeRawPointer?
     let buffer2: UnsafeRawPointer?
+    /// The child columns, in the order `Kind.childFields` names them, and empty
+    /// for every column whose values are in its own buffers.
+    ///
+    /// Pointers like everything else here. The children are already inside the
+    /// batch this table retains, so following them costs one small value per
+    /// child per batch and copies nothing — which is the whole reason a nested
+    /// value can be read on demand rather than materialised into the model.
+    let children: [ColumnBatch]
 
     init(array: UnsafeMutablePointer<ArrowArray>, kind: ArrowTable.Kind, length: Int) {
         self.kind = kind
@@ -437,6 +627,27 @@ private struct ColumnBatch {
         self.validity = n > 0 ? buffers?[0]?.assumingMemoryBound(to: UInt8.self) : nil
         self.buffer1 = n > 1 ? buffers?[1].map { UnsafeRawPointer($0) } : nil
         self.buffer2 = n > 2 ? buffers?[2].map { UnsafeRawPointer($0) } : nil
+
+        // All of the children or none of them. A list one short of what the
+        // schema named would put a struct's second field under its first name,
+        // which is a wrong value that reads as a right one; an empty list is
+        // refused by every reader below and shows as `<+s>`.
+        let fields = kind.childFields
+        var children: [ColumnBatch] = []
+        if !fields.isEmpty, Int(array.pointee.n_children) == fields.count,
+            let kids = array.pointee.children
+        {
+            children.reserveCapacity(fields.count)
+            for (at, field) in fields.enumerated() {
+                guard let kid = kids[at] else {
+                    children.removeAll()
+                    break
+                }
+                children.append(
+                    ColumnBatch(array: kid, kind: field.kind, length: Int(kid.pointee.length)))
+            }
+        }
+        self.children = children
     }
 
     /// Address of the column's primary data buffer, for the zero-copy probe.
@@ -491,9 +702,200 @@ private struct ColumnBatch {
             let start = Int(offsets[idx])
             let end = Int(offsets[idx + 1])
             return "0x… (\(end - start) B)"
+        case .nested:
+            return json(at: i, budget: ArrowTable.cellBudget)
         case .unsupported(let f):
             return "<\(f)>"
         }
+    }
+
+    // MARK: - Nested values
+
+    /// One nested cell as JSON, spending at most `budget` characters on it.
+    func json(at i: Int, budget: Int) -> String {
+        var sink = JSONSink(budget: budget)
+        writeJSON(at: i, to: &sink)
+        return sink.text
+    }
+
+    /// What a nested cell reads as when the batch disagrees with the schema it
+    /// arrived with — a struct carrying fewer children than the fields it was
+    /// described by, a list whose offsets point outside its values.
+    ///
+    /// A JSON string rather than `null`, which would say the database holds
+    /// nothing there, and rather than nothing at all, which would leave a
+    /// document that does not parse. What has gone wrong by then is memory, and
+    /// the recoverable end of that is a cell that says so.
+    private static let unreadable = "\"<unreadable>\""
+
+    /// Appends this cell's value to `sink`, following children where there are
+    /// any.
+    ///
+    /// Every index handed to a child is a *logical* one, as the C data interface
+    /// defines it: the child adds its own `offset` and the caller adds the
+    /// parent's. Getting that wrong is the failure this whole file is careful
+    /// about — a batch read four bytes off answers a plausible value from the
+    /// neighbouring row rather than failing.
+    private func writeJSON(at i: Int, to sink: inout JSONSink) {
+        guard !sink.isFull else { return }
+        guard i >= 0, i < length else {
+            sink.write(Self.unreadable)
+            return
+        }
+        guard case .nested(let nested) = kind else {
+            sink.write(isNull(i) ? "null" : scalarJSON(at: i))
+            return
+        }
+        if isNull(i) {
+            sink.write("null")
+            return
+        }
+        let idx = offset + i
+        switch nested {
+        case .list:
+            guard children.count == 1, let offsets = buffer1?.assumingMemoryBound(to: Int32.self)
+            else {
+                sink.write(Self.unreadable)
+                return
+            }
+            writeElements(children[0], Int(offsets[idx])..<Int(offsets[idx + 1]), to: &sink)
+
+        case .fixedList(_, let width):
+            guard children.count == 1 else {
+                sink.write(Self.unreadable)
+                return
+            }
+            writeElements(children[0], idx * width..<(idx + 1) * width, to: &sink)
+
+        case .structure(let fields):
+            guard children.count == fields.count else {
+                sink.write(Self.unreadable)
+                return
+            }
+            sink.write("{")
+            for (at, field) in fields.enumerated() {
+                if at > 0 { sink.write(",") }
+                sink.write(Self.quoted(field.name))
+                sink.write(":")
+                // The parent's own row index, not the field's position: a
+                // struct's children are one array each, indexed by the row.
+                children[at].writeJSON(at: idx, to: &sink)
+                if sink.isFull { break }
+            }
+            sink.write("}")
+
+        case .map:
+            guard children.count == 1, children[0].children.count == 2,
+                let offsets = buffer1?.assumingMemoryBound(to: Int32.self)
+            else {
+                sink.write(Self.unreadable)
+                return
+            }
+            writeEntries(children[0], Int(offsets[idx])..<Int(offsets[idx + 1]), to: &sink)
+        }
+    }
+
+    /// A run of a child's values as a JSON array.
+    private func writeElements(
+        _ element: ColumnBatch, _ range: Range<Int>, to sink: inout JSONSink
+    ) {
+        guard range.lowerBound >= 0, range.upperBound >= range.lowerBound,
+            range.upperBound <= element.length
+        else {
+            sink.write(Self.unreadable)
+            return
+        }
+        sink.write("[")
+        for (at, index) in range.enumerated() {
+            if at > 0 { sink.write(",") }
+            element.writeJSON(at: index, to: &sink)
+            if sink.isFull { break }
+        }
+        sink.write("]")
+    }
+
+    /// A run of a map's entries as a JSON object.
+    ///
+    /// The entries struct is stepped over rather than written out: a map spelled
+    /// as `[{"key":"x","value":1}]` would be this reader describing Arrow's
+    /// layout, where `{"x":1}` is the value the database holds. A key that is not
+    /// a string is quoted anyway, because a JSON key has to be one — the same
+    /// answer Cassandra's driver gives for a map keyed by a number.
+    private func writeEntries(
+        _ entries: ColumnBatch, _ range: Range<Int>, to sink: inout JSONSink
+    ) {
+        guard range.lowerBound >= 0, range.upperBound >= range.lowerBound,
+            range.upperBound <= entries.length
+        else {
+            sink.write(Self.unreadable)
+            return
+        }
+        let keys = entries.children[0]
+        let values = entries.children[1]
+        sink.write("{")
+        for (at, index) in range.enumerated() {
+            if at > 0 { sink.write(",") }
+            // The entries array's own offset, because these two are its
+            // children and the walk is stepping over it rather than through it.
+            let logical = entries.offset + index
+            sink.write(Self.quoted(keys.text(at: logical)))
+            sink.write(":")
+            values.writeJSON(at: logical, to: &sink)
+            if sink.isFull { break }
+        }
+        sink.write("}")
+    }
+
+    /// One value that is not nested, as a JSON literal.
+    ///
+    /// Numbers and booleans bare; everything else quoted, because JSON has no
+    /// spelling of its own for a timestamp, a date or a blob and the string is
+    /// the same text the grid draws for a column of them. A decimal is quoted
+    /// too, and that is a decision rather than an omission: JSON's number grammar
+    /// would take it, and every reader on the other side would parse it through a
+    /// double and lose the exactness the column was declared for.
+    private func scalarJSON(at i: Int) -> String {
+        switch kind {
+        case .bool, .int16, .int32, .int64:
+            return text(at: i)
+        case .float32, .float64:
+            let written = text(at: i)
+            // JSON has no infinity and no NaN, and a document holding the bare
+            // word would not parse. Strings, which is what every JSON encoder
+            // does with the three of them.
+            return ["inf", "-inf", "nan", "-nan"].contains(written)
+                ? Self.quoted(written) : written
+        default:
+            return Self.quoted(text(at: i))
+        }
+    }
+
+    /// One string as a JSON literal.
+    ///
+    /// Written out rather than handed to `JSONSerialization`, which allocates an
+    /// object per call and, before its fragment option, would not encode a bare
+    /// string at all. The control characters are the ones that matter: a `text`
+    /// column holding a newline inside a struct would otherwise end the line and
+    /// leave a document the viewer refuses to lay out.
+    private static func quoted(_ text: String) -> String {
+        var out = "\""
+        out.reserveCapacity(text.utf8.count + 2)
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    out += String(format: "\\u%04x", scalar.value)
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return out + "\""
     }
 
     /// See `ArrowTable.bytes(row:column:)`.
@@ -580,6 +982,52 @@ private struct ColumnBatch {
         f.timeZone = TimeZone(identifier: "UTC")
         return f
     }()
+}
+
+/// A JSON document being written under a character budget.
+///
+/// The budget is the memory rule of this whole path, not tidiness. Nothing here
+/// holds a child array or a decoded value: a nested cell is walked when
+/// somebody looks at it and the string is thrown away with the frame. What that
+/// leaves exposed is the walk itself — a `LIST` of ten thousand elements is ten
+/// thousand appends whether or not anyone can read the result — so the walk
+/// carries its own stopping condition rather than trusting the caller's cell to
+/// be narrow.
+///
+/// A struct rather than a `String` and an `Int` threaded by hand, because the
+/// check for "have I written enough" has to happen at every level of the
+/// recursion and `String.count` is a walk of its own.
+private struct JSONSink {
+    private var written = ""
+    private var budget: Int
+    /// Whether the walk stopped short. Read by every loop above, so that a list
+    /// past its budget is abandoned instead of visited to the end writing
+    /// nothing.
+    private(set) var isFull = false
+
+    init(budget: Int) {
+        self.budget = max(budget, 0)
+    }
+
+    mutating func write(_ piece: String) {
+        guard !isFull else { return }
+        let count = piece.count
+        guard count <= budget else {
+            written += piece.prefix(budget)
+            budget = 0
+            isFull = true
+            return
+        }
+        written += piece
+        budget -= count
+    }
+
+    /// What was written, with an ellipsis where the walk stopped short.
+    ///
+    /// The ellipsis is load bearing: a truncated document does not parse, and
+    /// the value viewer's fallback for one that does not parse is to show it as
+    /// stored. Without a mark, a cut list would read as a whole one.
+    var text: String { isFull ? written + "…" : written }
 }
 
 /// Arrow decimal128 is a 16-byte little-endian two's-complement integer.

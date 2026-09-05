@@ -562,6 +562,77 @@ async fn a_statement_with_no_rows_still_names_its_columns() {
     seed(&mut client, &format!("DROP TABLE {table}")).await;
 }
 
+/// Nested types cross this boundary as nesting rather than as text.
+///
+/// A finding rather than a behaviour, and the one the front end's nested reader
+/// rests on. Twelve of the fifteen drivers build Arrow a value at a time and
+/// flatten a list or a struct on the way — DuckDB's own driver renders them the
+/// way its shell does, ClickHouse casts them to `String` in the statement — so
+/// for years no Arrow child ever reached the grid, and the reader that would have
+/// had to follow one was never written. This driver has no `arrow_map.rs` to
+/// flatten anything in, and neither do BigQuery's and Databricks's, so what the
+/// server describes is what the caller receives.
+///
+/// Checked against a server rather than reasoned about, because the reasoning is
+/// what was wrong before: the limitation this closes said the drivers cast
+/// nesting to text before it got here, which was true of the twelve that have a
+/// place to cast it and false of the three that do not.
+///
+/// The four are the four the Swift reader knows, and this is where that list came
+/// from — a fifth spelling appearing here is the day it grows a case.
+#[tokio::test]
+#[ignore = "requires an Arrow Flight SQL server"]
+async fn nested_types_cross_as_nesting_rather_than_as_text() {
+    use arrow::datatypes::DataType;
+    let _turn = ONE_AT_A_TIME.lock().await;
+    let source = source().await;
+    let stream = Driver::query(
+        &source,
+        "SELECT [1, 2, 3] AS a_list, {'qty': 2, 'unit': 'kg'} AS a_struct, \
+         MAP {'x': 1, 'y': 2} AS a_map, ['a', 'b']::VARCHAR[2] AS an_array",
+        10,
+    )
+    .await
+    .expect("the statement did not run");
+
+    let schema = stream.schema();
+    let shape = |at: usize| format!("{:?}", schema.field(at).data_type());
+    assert!(
+        matches!(schema.field(0).data_type(), DataType::List(_)),
+        "a DuckDB LIST should arrive as one: {}",
+        shape(0)
+    );
+    assert!(
+        matches!(schema.field(1).data_type(), DataType::Struct(_)),
+        "and a STRUCT as one: {}",
+        shape(1)
+    );
+    assert!(
+        matches!(schema.field(2).data_type(), DataType::Map(..)),
+        "and a MAP as one: {}",
+        shape(2)
+    );
+    assert!(
+        matches!(schema.field(3).data_type(), DataType::FixedSizeList(_, 2)),
+        "and an ARRAY(n) as a fixed-size list of that width: {}",
+        shape(3)
+    );
+
+    // None of them is a string, which is the half of the claim that a reader on
+    // the other side depends on: a column already flattened would need no walk.
+    for at in 0..4 {
+        assert!(
+            !matches!(
+                schema.field(at).data_type(),
+                DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+            ),
+            "nothing flattened {} on the way: {}",
+            schema.field(at).name(),
+            shape(at)
+        );
+    }
+}
+
 /// A broken statement fails with the server's own words and no caret.
 ///
 /// No position, and it is a decision rather than a gap: the `LINE 1: … ^` in the
