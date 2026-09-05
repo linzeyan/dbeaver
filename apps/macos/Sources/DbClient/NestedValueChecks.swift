@@ -38,7 +38,10 @@ enum NestedValueChecks {
             checkAFixedSizeListTakesItsWidthFromTheFormatString()
             checkASlicedBatchAnswersForTheRowItWasAsked()
             checkAChildThatStartsPartWayThroughItsBufferIsFollowedThere()
+            checkAnOffsetsPairThatGoesBackwardsIsRefusedRatherThanFollowed()
+            checkABatchThatDisagreesWithItsSchemaIsNotReadAnyway()
             checkANullCellAndANullElementAreDifferentAnswers()
+            checkANestedChildThatIsNullSaysSoInsideTheDocument()
             checkAStringInsideAStructCannotEndTheDocument()
             checkTheCellIsCutToTheGridsBudgetAndSaysSo()
             checkTheViewerGetsTheWholeDocumentTheCellCouldNotHold()
@@ -175,6 +178,81 @@ enum NestedValueChecks {
         release(table, arena)
     }
 
+    // MARK: - A batch that disagrees with itself
+
+    /// An offsets buffer whose pair goes backwards reads as unreadable, and does
+    /// not take the window down.
+    ///
+    /// Found by mutation rather than by reading: `a..<b` traps when `b < a`, so a
+    /// range assembled from two offsets and then bounds-checked is a check that
+    /// never runs. The mutation that made a list one element short turned the
+    /// empty rows into `0..<-1` and killed the process — a crash where the whole
+    /// file's posture is that memory another language handed over gets refused
+    /// rather than followed. A grid that crashes on a corrupt page is a worse
+    /// failure than a cell that says it could not read one.
+    @MainActor private static func checkAnOffsetsPairThatGoesBackwardsIsRefusedRatherThanFollowed()
+    {
+        let arena = Arena()
+        let schema = arena.schema(format: "+l", name: "v")
+        arena.attach([arena.schema(format: "i", name: "l")], to: schema)
+        let values = arena.array(length: 3, buffers: [nil, arena.buffer([Int32(1), 2, 3])])
+        // Row 0's pair runs backwards; row 1's is ordinary, so the case also
+        // shows the refusal is per cell rather than per column.
+        let array = arena.array(length: 2, buffers: [nil, arena.buffer([Int32(2), 0, 3])])
+        arena.attach([values], to: array)
+        let table = arena.table(schema: schema, array: array)
+        expect(table.text(row: 0, column: 0), "\"<unreadable>\"", "a pair that goes backwards")
+        expect(table.text(row: 1, column: 0), "[1,2,3]", "and the row beside it still reads")
+        release(table, arena)
+
+        // And a pair that runs off the end of the values array. The per-element
+        // guard would catch each one and write a placeholder, so without the
+        // whole-run bound the cell reads `[1,2,3,"<unreadable>","<unreadable>"]`
+        // — a list two elements longer than the column holds, three of whose
+        // values are real. Refusing the cell says what happened; padding it out
+        // states a length the batch never had.
+        let second = Arena()
+        let past = second.schema(format: "+l", name: "v")
+        second.attach([second.schema(format: "i", name: "l")], to: past)
+        let short = second.array(length: 3, buffers: [nil, second.buffer([Int32(1), 2, 3])])
+        let overrun = second.array(length: 1, buffers: [nil, second.buffer([Int32(0), 5])])
+        second.attach([short], to: overrun)
+        let table2 = second.table(schema: past, array: overrun)
+        expect(
+            table2.text(row: 0, column: 0), "\"<unreadable>\"",
+            "a run that ends past the values array is refused whole")
+        release(table2, second)
+    }
+
+    /// A batch carrying children the schema did not name is refused, not read as
+    /// far as it lines up.
+    ///
+    /// The decision is "all of them or none", and the mutation that relaxed it to
+    /// "at least as many" survived until this case existed. Reading the first two
+    /// of three children is defensible right up to the moment the extra one was
+    /// there because the producer disagreed about the order — and a struct read
+    /// under the wrong names is a wrong value that looks like a right one, which
+    /// is what every guard in this file is for.
+    @MainActor private static func checkABatchThatDisagreesWithItsSchemaIsNotReadAnyway() {
+        let arena = Arena()
+        let schema = arena.schema(format: "+s", name: "v")
+        arena.attach(
+            [arena.schema(format: "i", name: "qty"), arena.schema(format: "u", name: "unit")],
+            to: schema)
+        let array = arena.array(length: 2, buffers: [nil])
+        arena.attach(
+            [
+                arena.array(length: 2, buffers: [nil, arena.buffer([Int32(5), 7])]),
+                arena.strings(["g", "kg"]),
+                arena.array(length: 2, buffers: [nil, arena.buffer([Int32(1), 2])])
+            ], to: array)
+        let table = arena.table(schema: schema, array: array)
+        expect(
+            table.text(row: 0, column: 0), "\"<unreadable>\"",
+            "three children under a two-field schema is a batch that cannot be trusted")
+        release(table, arena)
+    }
+
     // MARK: - Nulls, escaping, budgets
 
     /// A NULL list and a list of NULLs are different values, and the grid has to
@@ -191,6 +269,37 @@ enum NestedValueChecks {
         expect(table.isNull(row: 1, column: 0), true, "and says so where the grid asks")
         expect(table.text(row: 2, column: 0), "[null,2]", "a null element is a null in the list")
         expect(table.isNull(row: 2, column: 0), false, "in a cell that is not itself null")
+        release(table, arena)
+    }
+
+    /// A nested value that is itself NULL says so inside the document.
+    ///
+    /// The other half of the case above, and the one no fixture reached until a
+    /// mutation asked: a NULL *cell* is caught by `text(at:)` before the walk
+    /// starts, so the null guard inside the walk only ever answers for a nested
+    /// *child* — a struct field that is a struct, an element of a list of lists.
+    /// Without it the walk reads a row whose buffers say nothing is there and
+    /// answers `{}` or `[]`, which is a value the database does not hold.
+    @MainActor private static func checkANestedChildThatIsNullSaysSoInsideTheDocument() {
+        let arena = Arena()
+        let schema = arena.schema(format: "+l", name: "v")
+        let element = arena.schema(format: "+s", name: "item")
+        arena.attach([arena.schema(format: "i", name: "n")], to: element)
+        arena.attach([element], to: schema)
+
+        let numbers = arena.array(length: 2, buffers: [nil, arena.buffer([Int32(3), 4])])
+        // The first struct is null; its `n` still holds a number, which is what
+        // makes the answer `null` rather than `{"n":3}` a claim about the
+        // validity bitmap instead of about the buffer under it.
+        let structs = arena.array(length: 2, buffers: [arena.validity([false, true])])
+        arena.attach([numbers], to: structs)
+
+        let array = arena.array(length: 1, buffers: [nil, arena.buffer([Int32(0), 2])])
+        arena.attach([structs], to: array)
+        let table = arena.table(schema: schema, array: array)
+        expect(
+            table.text(row: 0, column: 0), "[null,{\"n\":4}]",
+            "a null struct inside a list is a null, not the row its buffers still hold")
         release(table, arena)
     }
 

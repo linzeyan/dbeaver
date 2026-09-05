@@ -758,14 +758,21 @@ private struct ColumnBatch {
                 sink.write(Self.unreadable)
                 return
             }
-            writeElements(children[0], Int(offsets[idx])..<Int(offsets[idx + 1]), to: &sink)
+            writeElements(
+                children[0], from: Int(offsets[idx]), to: Int(offsets[idx + 1]), into: &sink)
 
         case .fixedList(_, let width):
-            guard children.count == 1 else {
+            // Multiplied with the overflow reported rather than trapped, for the
+            // reason the bounds below are checked at all: the width is a number
+            // parsed out of a format string another process wrote, and `+w:` and
+            // a very large integer is a string a server can send.
+            let (start, wide) = idx.multipliedReportingOverflow(by: width)
+            let (end, past) = start.addingReportingOverflow(width)
+            guard children.count == 1, !wide, !past else {
                 sink.write(Self.unreadable)
                 return
             }
-            writeElements(children[0], idx * width..<(idx + 1) * width, to: &sink)
+            writeElements(children[0], from: start, to: end, into: &sink)
 
         case .structure(let fields):
             guard children.count == fields.count else {
@@ -791,22 +798,34 @@ private struct ColumnBatch {
                 sink.write(Self.unreadable)
                 return
             }
-            writeEntries(children[0], Int(offsets[idx])..<Int(offsets[idx + 1]), to: &sink)
+            writeEntries(
+                children[0], from: Int(offsets[idx]), to: Int(offsets[idx + 1]), into: &sink)
         }
+    }
+
+    /// Whether `start..<end` is a run this child actually holds.
+    ///
+    /// Asked before the range is built, and that is the whole reason it is a
+    /// function rather than a guard inside the loops below. `a..<b` traps when
+    /// `b < a`, so a `Range` assembled from two offsets and *then* checked is a
+    /// check that never runs: the offsets buffer is memory another process wrote,
+    /// and a pair that goes backwards would take the window down before anything
+    /// could refuse it. Every other bound in this file is read the same way for
+    /// the same reason.
+    private static func holds(_ child: ColumnBatch, from start: Int, to end: Int) -> Bool {
+        start >= 0 && end >= start && end <= child.length
     }
 
     /// A run of a child's values as a JSON array.
     private func writeElements(
-        _ element: ColumnBatch, _ range: Range<Int>, to sink: inout JSONSink
+        _ element: ColumnBatch, from start: Int, to end: Int, into sink: inout JSONSink
     ) {
-        guard range.lowerBound >= 0, range.upperBound >= range.lowerBound,
-            range.upperBound <= element.length
-        else {
+        guard Self.holds(element, from: start, to: end) else {
             sink.write(Self.unreadable)
             return
         }
         sink.write("[")
-        for (at, index) in range.enumerated() {
+        for (at, index) in (start..<end).enumerated() {
             if at > 0 { sink.write(",") }
             element.writeJSON(at: index, to: &sink)
             if sink.isFull { break }
@@ -822,18 +841,16 @@ private struct ColumnBatch {
     /// a string is quoted anyway, because a JSON key has to be one — the same
     /// answer Cassandra's driver gives for a map keyed by a number.
     private func writeEntries(
-        _ entries: ColumnBatch, _ range: Range<Int>, to sink: inout JSONSink
+        _ entries: ColumnBatch, from start: Int, to end: Int, into sink: inout JSONSink
     ) {
-        guard range.lowerBound >= 0, range.upperBound >= range.lowerBound,
-            range.upperBound <= entries.length
-        else {
+        guard Self.holds(entries, from: start, to: end) else {
             sink.write(Self.unreadable)
             return
         }
         let keys = entries.children[0]
         let values = entries.children[1]
         sink.write("{")
-        for (at, index) in range.enumerated() {
+        for (at, index) in (start..<end).enumerated() {
             if at > 0 { sink.write(",") }
             // The entries array's own offset, because these two are its
             // children and the walk is stepping over it rather than through it.
