@@ -3264,7 +3264,8 @@ final class AppModel {
             isNull
             ? .text
             : Self.rendering(
-                kind: grid.columns[s.column].kind, declared: declared,
+                kind: grid.columns[s.column].kind,
+                shape: grid.columns[s.column].valueShape, declared: declared,
                 bytes: { grid.bytes(row: s.row, column: s.column) ?? [] })
         return InspectedCell(
             column: name,
@@ -3718,17 +3719,27 @@ final class AppModel {
             rows: browseResult.table)
     }
 
-    /// Which rendering a cell gets, from the two type sources this has.
+    /// Which rendering a cell gets, from the three type sources this has.
     ///
     /// The Arrow kind is always true of what arrived and is what identifies a
-    /// binary column; the declared type is the only thing that can say `jsonb`,
-    /// because the driver maps it to Utf8 like any other string. Neither is the
-    /// string itself — a `text` column holding `{}` is text.
-    private static func rendering(
-        kind: ArrowTable.Kind, declared: String, bytes: () -> [UInt8]
+    /// binary column. The other two both say "this text is a document", and they
+    /// are asked in this order because they answer for different columns:
+    ///
+    /// - `shape` is the *result's* claim, carried on the field the values came
+    ///   on. It is the only source for a column no relation declares — MongoDB's
+    ///   `_extra`, a DuckDB `STRUCT` the driver rendered on the way out — and it
+    ///   is the only one a statement in the Query tab has at all.
+    /// - `declared` is the *relation's*, read from the catalogue, which is where
+    ///   a PostgreSQL `jsonb` says what it is.
+    ///
+    /// Neither is the string itself — a `text` column holding `{}` is text, and
+    /// sniffing is what both of these exist to avoid.
+    static func rendering(
+        kind: ArrowTable.Kind, shape: String, declared: String, bytes: () -> [UInt8]
     ) -> ValueRendering {
         switch kind {
         case .binary: return .binary(bytes())
+        case .utf8 where shape == ArrowTable.jsonShape: return .json
         case .utf8 where ValueRendering.isJSONType(declared): return .json
         default: return .text
         }

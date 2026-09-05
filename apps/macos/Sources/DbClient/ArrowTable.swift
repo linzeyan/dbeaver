@@ -18,6 +18,16 @@ final class ArrowTable {
         /// declaration arrives beside the validity buffer instead of in it, and
         /// this is what tells a substituted NULL from one the data contains.
         let declaredNotNull: Bool
+        /// The shape the column's text values are written in, or "" where the
+        /// result made no claim.
+        ///
+        /// The result's claim rather than the relation's, and that is the whole
+        /// point of it: a column a driver invented (MongoDB's `_extra`) or
+        /// rendered on the way out (a DuckDB `STRUCT`) is in no catalogue, so
+        /// the declared type a browse reads has nothing to say about it. Empty
+        /// for nearly every column, which is why it is a string rather than an
+        /// enum — the reader compares it and does not switch on it.
+        let valueShape: String
         /// Cached per-batch accessors, indexed by batch.
         fileprivate var batches: [ColumnBatch] = []
     }
@@ -105,19 +115,34 @@ final class ArrowTable {
         columns = (0..<Int(schema.pointee.n_children)).map { i in
             let child = schema.pointee.children![i]!
             let name = child.pointee.name.map { String(cString: $0) } ?? "col\(i)"
+            let declared = Self.declarations(child.pointee.metadata)
             return Column(
                 name: name, kind: Self.kind(fromFormat: String(cString: child.pointee.format)),
-                declaredNotNull: Self.declaresNotNull(child.pointee.metadata))
+                declaredNotNull: declared.notNull, valueShape: declared.valueShape)
         }
     }
 
-    /// The key the core writes a NOT NULL declaration under.
+    /// The keys the core writes its field declarations under.
     ///
-    /// Spelled here as well as in `dbconn::DECLARED_NOT_NULL` because the C data
-    /// interface carries no shared header for it — the string is the contract.
+    /// Spelled here as well as in `dbconn::DECLARED_NOT_NULL` and
+    /// `dbconn::VALUE_SHAPE` because the C data interface carries no shared
+    /// header for them — the string is the contract.
     static let declaredNotNullKey = "dbclient.declared_not_null"
+    static let valueShapeKey = "dbclient.value_shape"
 
-    /// Whether a field's metadata carries that declaration.
+    /// The value `valueShapeKey` takes for a column of JSON documents. Matches
+    /// `dbconn::SHAPE_JSON`.
+    static let jsonShape = "json"
+
+    /// What one field's metadata declares about its column.
+    struct Declarations: Equatable {
+        /// Whether the server declared the column NOT NULL.
+        var notNull = false
+        /// The shape its text values are written in, or "" for no claim.
+        var valueShape = ""
+    }
+
+    /// Reads those declarations out of a field's metadata.
     ///
     /// The C data interface counts its lengths rather than terminating them, so
     /// the buffer may hold NUL bytes and reading it as a C string would stop at
@@ -125,26 +150,45 @@ final class ArrowTable {
     /// the key, an int32 value length, the value. None of it is promised to be
     /// aligned, hence the unaligned loads.
     ///
-    /// A count or length below zero answers false instead of trapping — this is
-    /// memory another language handed over, and a grid that crashes on it would
-    /// be a worse failure than a column drawn as though it were nullable. A
-    /// buffer that lies about a length in the other direction cannot be caught
-    /// here, because the format carries no total size to check it against.
-    static func declaresNotNull(_ metadata: UnsafePointer<CChar>?) -> Bool {
-        guard let metadata else { return false }
+    /// A count or length below zero answers the defaults instead of trapping —
+    /// this is memory another language handed over, and a grid that crashes on
+    /// it would be a worse failure than a column drawn as though it were
+    /// nullable. A buffer that lies about a length in the other direction cannot
+    /// be caught here, because the format carries no total size to check it
+    /// against. What has been read so far is kept rather than discarded: a
+    /// truncated buffer is corrupt whichever way it is read, and the entries
+    /// before the damage were whole.
+    ///
+    /// One walk for both keys rather than one per key. The buffer is walked with
+    /// unaligned loads over counted strings, and a second reader of it is a
+    /// second chance to mis-step by four bytes and answer a plausible default.
+    static func declarations(_ metadata: UnsafePointer<CChar>?) -> Declarations {
+        var found = Declarations()
+        guard let metadata else { return found }
         var cursor = UnsafeRawPointer(metadata)
         let pairs = cursor.loadUnaligned(as: Int32.self)
-        guard pairs > 0 else { return false }
+        guard pairs > 0 else { return found }
         cursor += MemoryLayout<Int32>.size
+        var seenNotNull = false
+        var seenShape = false
         for _ in 0..<pairs {
             guard let key = takeString(&cursor), let value = takeString(&cursor) else {
-                return false
+                return found
             }
-            // Decided at the first match: a second entry under the same key is
-            // not something the writer can produce.
-            if key == declaredNotNullKey { return value == "1" }
+            // Decided at the first match per key: a second entry under the same
+            // key is not something the writer can produce.
+            switch key {
+            case declaredNotNullKey where !seenNotNull:
+                found.notNull = value == "1"
+                seenNotNull = true
+            case valueShapeKey where !seenShape:
+                found.valueShape = value
+                seenShape = true
+            default:
+                continue
+            }
         }
-        return false
+        return found
     }
 
     /// One length-prefixed string, advancing the cursor past it.

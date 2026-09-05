@@ -4,12 +4,20 @@ import Foundation
 /// Executable checks for what the value viewer will let you edit, run by
 /// `--verify-value`.
 ///
-/// One decision is checked here and it is the one that can corrupt a column
-/// without anybody noticing: which string the editor starts from. The pane draws
+/// Two decisions are checked here. The first can corrupt a column without
+/// anybody noticing: which string the editor starts from. The pane draws
 /// a rendering — JSON re-indented, a blob dumped as hex, anything past the cap
 /// cut short — and a box seeded from that writes this program's formatting back
 /// to the server on the first Stage. `ValueEdit.offered` answers with the stored
-/// value or refuses, and every case below is about that difference.
+/// value or refuses, and every case in the first half is about that difference.
+///
+/// The second is which rendering a cell gets at all — `AppModel.rendering`,
+/// which is asked once per selection change and decides from types rather than
+/// from what a value looks like. Its two type sources answer for different
+/// columns and the cases say which: the relation's declared type reaches a
+/// browsed `jsonb`, and the result's own field reaches a column no relation
+/// describes. Getting that wrong is silent in both directions — a document left
+/// on one line, or a `text` column handed to a JSON parser.
 ///
 /// What is not here: staging itself. Putting a value into `staged` needs a
 /// browse result, which needs an Arrow table, which needs a server — the same
@@ -39,6 +47,10 @@ enum ValueViewerChecks {
             checkASignatureWithNoPictureBehindItFallsBackToTheBytes()
             checkAPictureTooLargeToDrawSaysSoAndKeepsItsBytes()
             checkAPictureIsStillNotSomethingThisCanEdit()
+            checkAColumnTheResultDeclaredJSONIsLaidOutWithNoCatalogueToAsk()
+            checkAColumnThatDeclaredNothingIsStillText()
+            checkTheRelationsDeclaredTypeStillAnswersOnItsOwn()
+            checkTheArrowKindIsAskedBeforeEitherDeclaration()
         }
         if failures == 0 {
             fputs("value: all checks passed\n", stderr)
@@ -363,7 +375,92 @@ enum ValueViewerChecks {
             "the same refusal a blob got before it could be looked at")
     }
 
+    // MARK: - Which rendering a cell gets
+
+    /// A column the *result* declared JSON is laid out, with no relation asked.
+    ///
+    /// The limitation this closes. MongoDB's `_extra` is JSON that `serde_json`
+    /// wrote and it is deliberately absent from `Shape::columns`, because no
+    /// document in a collection has a field this client invented — so the
+    /// declared type read from the catalogue is the empty string, and before
+    /// this the value sat on the one line it arrived on. The claim now rides on
+    /// the Arrow field, which is the only place it can be made without stating
+    /// that the collection has the column.
+    ///
+    /// The empty `declared` is the load-bearing argument: it is what says the
+    /// answer came from the result and could not have come from the catalogue.
+    @MainActor private static func checkAColumnTheResultDeclaredJSONIsLaidOutWithNoCatalogueToAsk()
+    {
+        expect(
+            name(
+                of: AppModel.rendering(
+                    kind: .utf8, shape: ArrowTable.jsonShape, declared: "", bytes: { [] })),
+            "json",
+            "the result's own field says the column holds documents")
+    }
+
+    /// And a column that declared nothing is text, whatever is in it.
+    ///
+    /// The negative the rule exists for. `_extra` could have been found by its
+    /// name, and a name is a string — the day a `text` column is called `_extra`
+    /// is the day that rule hands a JSON parser something that is not JSON. So
+    /// the shape has to be absent-by-default and read from the field.
+    @MainActor private static func checkAColumnThatDeclaredNothingIsStillText() {
+        expect(
+            name(of: AppModel.rendering(kind: .utf8, shape: "", declared: "", bytes: { [] })),
+            "text",
+            "no claim from either source, whatever the characters look like")
+        expect(
+            name(
+                of: AppModel.rendering(
+                    kind: .utf8, shape: "xml", declared: "", bytes: { [] })),
+            "text",
+            "and a shape this build has no rendering for is not guessed at")
+    }
+
+    /// The catalogue still answers on its own, for the columns it describes.
+    ///
+    /// A PostgreSQL `jsonb` carries no field metadata — the driver maps it to
+    /// Utf8 like any other string — so the older source has to keep working. A
+    /// change that moved every rendering onto the field would silently stop
+    /// laying out every `jsonb` column in the product.
+    @MainActor private static func checkTheRelationsDeclaredTypeStillAnswersOnItsOwn() {
+        expect(
+            name(
+                of: AppModel.rendering(kind: .utf8, shape: "", declared: "jsonb", bytes: { [] })),
+            "json",
+            "the relation's declared type, with nothing on the field")
+    }
+
+    /// The Arrow kind is asked first, and beats both declarations.
+    ///
+    /// What arrived is always true of the buffer; a declaration is a claim about
+    /// it. A binary column that somehow carried the JSON shape would otherwise
+    /// be handed to a re-indenter as text — and the bytes the viewer needs for
+    /// its hex dump are read here or never, because the batch is alive here and
+    /// gone by the time the pane draws.
+    @MainActor private static func checkTheArrowKindIsAskedBeforeEitherDeclaration() {
+        expect(
+            name(
+                of: AppModel.rendering(
+                    kind: .binary, shape: ArrowTable.jsonShape, declared: "jsonb",
+                    bytes: { [1, 2, 3] })),
+            "binary(3)",
+            "a binary column is binary however its field is labelled")
+    }
+
     // MARK: - Harness
+
+    /// Which case a rendering is, for a comparison that also reads as a
+    /// sentence when it fails. `ValueRendering` carries a payload the cases
+    /// below never assert on except by its size.
+    private static func name(of rendering: ValueRendering) -> String {
+        switch rendering {
+        case .text: return "text"
+        case .json: return "json"
+        case .binary(let bytes): return "binary(\(bytes.count))"
+        }
+    }
 
     /// A real picture of a known size, written by the system encoder.
     ///

@@ -28,12 +28,18 @@ import SwiftUI
 /// worse, would eventually meet a value that looks like JSON and is not.
 enum ValueRendering {
     case text
-    /// A column whose declared type says its values are JSON. The Arrow schema
-    /// cannot say it — every driver maps these to Utf8 — so this is only known
-    /// for a browsed relation. The Query pane gets `.text` for the same reason
-    /// the grid header falls back there: a statement's columns need not come
-    /// from any relation, and matching them by name against the browsed one
-    /// would claim a type they do not have.
+    /// A column whose values are JSON, said by one of two sources that both
+    /// name a type and neither of which reads the string.
+    ///
+    /// The relation's declared type is the older one, and for a `jsonb` it is
+    /// still the only one: the driver maps that column to Utf8 like any other
+    /// string, so nothing on the Arrow field distinguishes it. What that source
+    /// cannot reach is a column no relation declares — one the driver invented,
+    /// or one it rendered on the way out — and a statement in the Query pane,
+    /// whose columns need not come from any relation at all. Those say so on the
+    /// Arrow field instead (`dbconn::VALUE_SHAPE`), which is a claim about the
+    /// column the values actually arrived on rather than a name matched against
+    /// the browsed relation's.
     case json
     /// An Arrow binary column, with the cell's bytes. Carried here rather than
     /// re-read on demand because the read has to happen while the batch is
