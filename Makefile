@@ -219,10 +219,16 @@ test: ## Unit tests (no database required)
 # which, measured, was most of what those jobs were doing. Redis, whose
 # container is ready in a second, took the same twenty-one minutes as Cassandra.
 #
-# One command either way. A developer's shell sets no ARCHIVE and nextest builds
-# from source, as `cargo test` did; CI passes the archive it downloaded. Which
-# tests run, and in what order, is written once — here and in the targets below
-# — rather than once for the machine and once for the person.
+# One command either way. A developer's shell sets no UNPACKED and nextest
+# builds from source, as `cargo test` did; CI unpacks the archive once per job
+# and points this at what came out. Which tests run, and in what order, is
+# written once — here and in the targets below — rather than once for the
+# machine and once for the person.
+#
+# Unpacked once, and not handed `--archive-file` per command: nextest extracts
+# the whole archive every time it is given one, and `test-mssql` issues three
+# commands. That was 778 files unpacked three times, two minutes of a job whose
+# tests take seconds.
 #
 # `--no-fail-fast` because nextest stops the whole run at the first failure and
 # `cargo test` did not: it finished the binary it was in and reported every
@@ -237,9 +243,20 @@ test: ## Unit tests (no database required)
 # reach the same server at the same time. Checked before the switch rather than
 # after: the two create no table in common, and the pair that share a database
 # do not touch each other's schemas.
-ARCHIVE ?=
-NEXTEST = cargo nextest run --no-fail-fast \
-	$(if $(ARCHIVE),--archive-file $(ARCHIVE) --workspace-remap $(CURDIR),--workspace)
+UNPACKED ?=
+
+# `cargo-nextest` when it is on PATH, and the cargo subcommand otherwise.
+# Reaching it through cargo means reaching it through the rustup shim, which
+# reads rust-toolchain.toml and downloads an entire toolchain — in a job whose
+# whole point is that it never invokes rustc. Ten container jobs were each
+# paying for that. A developer without the bare binary on PATH gets the
+# subcommand, which needs cargo anyway because it is going to build.
+NEXTEST_BIN := $(shell command -v cargo-nextest 2>/dev/null || echo cargo)
+
+NEXTEST = $(NEXTEST_BIN) nextest run --no-fail-fast $(if $(UNPACKED),\
+	--binaries-metadata $(UNPACKED)/target/nextest/binaries-metadata.json \
+	--cargo-metadata $(UNPACKED)/target/nextest/cargo-metadata.json \
+	--workspace-remap $(CURDIR) --target-dir-remap $(UNPACKED)/target,--workspace)
 
 # `--workspace`, and not the package list of whichever target will run out of
 # this: cargo resolves features over the packages it is given, so an archive
@@ -252,7 +269,13 @@ NEXTEST_ARCHIVE := target/nextest/archive.tar.zst
 test-archive: ## Compile every test binary once, into an archive the integration targets can run from
 	@mkdir -p $(dir $(NEXTEST_ARCHIVE))
 	cargo nextest archive --workspace --archive-file $(NEXTEST_ARCHIVE)
-	@echo "archive: $(NEXTEST_ARCHIVE)  (run 'make test-postgres ARCHIVE=$(NEXTEST_ARCHIVE)')"
+
+.PHONY: test-unpack
+test-unpack: ## Unpack a test archive once: make test-unpack UNPACKED=dir [ARCHIVE=file]
+	@test -n "$(UNPACKED)" || { echo "test-unpack needs UNPACKED=<dir>"; exit 1; }
+	rm -rf $(UNPACKED) && mkdir -p $(UNPACKED)
+	tar --use-compress-program=unzstd -xf $(or $(ARCHIVE),$(NEXTEST_ARCHIVE)) -C $(UNPACKED)
+	@echo "unpacked: $(UNPACKED)  (run 'make test-postgres UNPACKED=$(UNPACKED)')"
 
 # Both compatible-MySQL servers are prerequisites, because the suite behind this
 # target runs their tests whether or not they are listed here — an unlisted
@@ -780,14 +803,29 @@ db-check-tidb: ## Fail unless the TiDB test container is reachable
 db-up-starrocks: ## Start the StarRocks test container
 	@docker compose up -d starrocks
 	@echo "waiting for starrocks (a minute or so on a cold start)..."
+# Waited for by asking whether a backend has registered, not with `SELECT 1`.
+# The frontend answers that constant on its own, well before any backend has
+# reported in, so the old loop returned on a cluster that would refuse the first
+# real statement with `Backend node not found ... alive: false`.
+#
+# It only started failing when the tests stopped compiling in the job. Twenty
+# minutes of rustc was the wait this loop was missing, and taking the
+# compilation out of the container jobs took the wait with it — which is what a
+# readiness check that answers the wrong question looks like when nothing is
+# slow enough to hide it any more.
 	@for i in $$(seq 1 300); do \
 		docker exec $(STARROCKS_CONTAINER) \
-			mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null 2>&1 && break; \
+			mysql -h 127.0.0.1 -P 9030 -u root -e 'SHOW BACKENDS' 2>/dev/null \
+			| grep -q true && break; \
 		sleep 2; \
 	done
 	@docker exec $(STARROCKS_CONTAINER) \
-		mysql -h 127.0.0.1 -P 9030 -u root -e 'SELECT 1' >/dev/null \
-		&& echo "starrocks ready"
+		mysql -h 127.0.0.1 -P 9030 -u root -e 'SHOW BACKENDS' 2>/dev/null \
+		| grep -q true \
+		&& echo "starrocks ready" \
+		|| { echo "starrocks has no live backend; its frontend answers but nothing can run" >&2; \
+		     docker exec $(STARROCKS_CONTAINER) \
+		       mysql -h 127.0.0.1 -P 9030 -u root -e 'SHOW BACKENDS' >&2; exit 1; }
 
 .PHONY: db-down-starrocks
 db-down-starrocks: ## Stop and remove the StarRocks test container

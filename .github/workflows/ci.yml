@@ -328,7 +328,7 @@ jobs:
       fail-fast: false
       matrix:
         server: ${{ fromJSON(needs.changes.outputs.servers) }}
-    # Both read by the Makefile: `ARCHIVE` sends the integration targets at the
+    # Both read by the Makefile: `UNPACKED` sends the integration targets at the
     # binaries `core` compiled instead of building their own, and `DBCHECK`
     # points the readiness gates at the probe it built. Together they are why
     # this job has no compiler cache and needs none — it compiles nothing.
@@ -337,7 +337,7 @@ jobs:
     # rustc, and a job that did would otherwise fail on a missing sccache rather
     # than on the interesting fact that it was compiling at all.
     env:
-      ARCHIVE: ${{ github.workspace }}/ci-payload/archive.tar.zst
+      UNPACKED: ${{ github.workspace }}/ci-tests
       DBCHECK: ${{ github.workspace }}/ci-payload/dbcheck
       RUSTC_WRAPPER: ""
     steps:
@@ -352,6 +352,12 @@ jobs:
       # these two is a program.
       - name: Make the probe runnable
         run: chmod +x ci-payload/dbcheck
+
+      # Once, here, rather than inside each `make` below — see the Makefile on
+      # why. The archive carries the build scripts' output directories as well
+      # as the binaries, which is 778 files for this workspace.
+      - name: Unpack the test binaries
+        run: make test-unpack ARCHIVE=ci-payload/archive.tar.zst
 
       - name: Start servers
         run: make ${{ matrix.server.up }}
