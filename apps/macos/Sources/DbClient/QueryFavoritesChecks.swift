@@ -21,6 +21,7 @@ enum QueryFavoritesChecks {
             checkSavingKeepsTheStatementThatWouldRun()
             checkAFavoriteArrivesInTheEditorReadyToRun()
             checkASecondOneIsAppendedRatherThanReplacing()
+            checkOneWithBlanksArrivesOnTheFirstOfThem()
             checkAnExportedFileReadsBackAsTheListThatWroteIt()
             checkAFileThisBuildCannotReadLeavesTheListAlone()
         }
@@ -197,6 +198,50 @@ enum QueryFavoritesChecks {
         }
         model.recall(favorite)
         expect(model.queryText, "SELECT 1;\n\nSELECT 2", "both statements, separated")
+    }
+
+    /// A saved query holding `${…}` arrives with the first blank selected, not
+    /// with the whole statement selected.
+    ///
+    /// The whole-statement selection exists so that the ⌘R after a recall sends
+    /// exactly what arrived. A statement still holding a blank is one no server
+    /// will accept, so that arrival would be aiming Run at something that cannot
+    /// run; the first thing to type is what it needs instead. Both halves are
+    /// pinned here — the blank one lands on a blank, the plain one still lands on
+    /// everything — because getting either wrong looks identical on screen until
+    /// somebody presses a key.
+    @MainActor private static func checkOneWithBlanksArrivesOnTheFirstOfThem() {
+        guard let model = makeModel() else { return }
+        model.recall(
+            QueryFavorite(
+                id: UUID(), name: "Rows by column",
+                sql: "SELECT * FROM ${table} WHERE ${column} = ${value}", scheme: "",
+                savedAt: Date()))
+        expect(selected(in: model), "${table}", "the first blank, not the statement around it")
+
+        // And Tab from there is the walk, which is what makes the arrival worth
+        // anything: the editor asks the same rule with the same offsets.
+        expect(
+            EditorTyping.placeholderJump(
+                in: model.queryText, selection: 14..<22)?.selection,
+            29..<38, "with the next blank one Tab away")
+
+        guard let plain = makeModel() else { return }
+        plain.recall(
+            QueryFavorite(
+                id: UUID(), name: "Count", sql: "SELECT count(*) FROM orders", scheme: "",
+                savedAt: Date()))
+        expect(
+            selected(in: plain), "SELECT count(*) FROM orders",
+            "a statement with no blanks is still selected whole, ready for ⌘R")
+    }
+
+    /// What the editor's selection covers, as the text it names.
+    @MainActor private static func selected(in model: AppModel) -> String? {
+        guard let indices = model.querySelection?.indices,
+            case .selection(let range) = indices
+        else { return nil }
+        return String(model.queryText[range])
     }
 
     // MARK: - The file

@@ -5676,7 +5676,13 @@ final class AppModel {
         queryText = prefix + sql
         let start = prefix.unicodeScalars.count
         let end = start + sql.unicodeScalars.count
-        if let selection = SQLScript.range(start..<end, in: queryText) {
+        // On the first blank where the statement has one, on the whole statement
+        // where it has none. Selecting the whole of it is what makes ⌘R mean
+        // exactly what arrived — but a statement still holding `${…}` is one no
+        // server will accept, so for that one the useful arrival is the caret on
+        // the first thing to type, with Tab walking to the rest.
+        let landing = EditorTyping.placeholder(in: queryText, from: start) ?? start..<end
+        if let selection = SQLScript.range(landing, in: queryText) {
             querySelection = TextSelection(range: selection)
         }
     }

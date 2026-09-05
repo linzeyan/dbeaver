@@ -31,6 +31,10 @@ enum EditorTypingChecks {
         checkAQuoteStaysSingleAgainstAWord()
         checkAFinishedKeywordIsLiftedOnlyWhileTheSettingSaysSo()
         checkTheLexerDecidesWhatCountsAsAKeyword()
+        checkABlankIsFoundByItsBracesAndNotAcrossALine()
+        checkTabWalksFromOneBlankToTheNext()
+        checkTheLastBlankHandsTheCaretBackRatherThanTheKey()
+        checkTabIsOnlyTheWalksWhileTheSelectionIsABlank()
         if failures == 0 {
             fputs("editor-typing: all checks passed\n", stderr)
         } else {
@@ -248,6 +252,88 @@ enum EditorTypingChecks {
             EditorTyping.keywordUpcase(
                 in: "selectx", selection: 6..<6, scheme: "postgres", rules: lifting),
             nil, "a caret still inside a word has finished nothing")
+    }
+
+    // MARK: - Snippet placeholders
+
+    /// A blank is `${…}` and nothing else, and it stops at the end of its line.
+    ///
+    /// The line rule is the one worth pinning: a `}` further down the buffer is
+    /// a brace somebody wrote, and a scan that reached it would hand Tab a
+    /// selection covering half a statement — which the next keystroke then types
+    /// over.
+    private static func checkABlankIsFoundByItsBracesAndNotAcrossALine() {
+        expect(
+            EditorTyping.placeholder(in: "where id = ${id}", from: 0), 11..<16,
+            "the braces and the word between them")
+        expect(
+            EditorTyping.placeholder(in: "${}", from: 0), 0..<3,
+            "a blank with no label is still a blank — there is nothing to interpret")
+        expect(
+            EditorTyping.placeholder(in: "where id = ${id}", from: 12), nil,
+            "the scan starts where it was told to, so a blank behind it is not offered")
+        expect(
+            EditorTyping.placeholder(in: "select 1", from: 0), nil,
+            "a statement with no blanks has none")
+        expect(
+            EditorTyping.placeholder(in: "${a\nb}", from: 0), nil,
+            "an opening brace whose partner is on the next line names nothing")
+        expect(
+            EditorTyping.placeholder(in: "cost > $1 and id = ${id}", from: 0), 19..<24,
+            "a bare $ is a parameter marker, not the head of a blank")
+        expect(
+            EditorTyping.placeholder(in: "${a} and ${b}", from: 4), 9..<13,
+            "and the next one is found from the end of the last")
+    }
+
+    /// Tab moves from one blank to the next, writing nothing.
+    ///
+    /// The empty insertion is the point: this is a navigation key, and an edit
+    /// that touched the buffer would put a keystroke on the undo stack for a
+    /// move that changed no text.
+    private static func checkTabWalksFromOneBlankToTheNext() {
+        let sql = "select ${cols} from ${table}"
+        expect(
+            EditorTyping.placeholderJump(in: sql, selection: 7..<14),
+            EditorTyping.Edit(replacing: 14..<14, insert: "", selection: 20..<28),
+            "the second blank is selected whole, and no text is written")
+    }
+
+    /// From the last blank, Tab collapses the selection instead of standing
+    /// aside.
+    ///
+    /// Standing aside would hand the key to the indent rule with a selection
+    /// still on screen, and Tab over a selection replaces it — so the last
+    /// blank would be deleted by the key that had been navigating to it.
+    private static func checkTheLastBlankHandsTheCaretBackRatherThanTheKey() {
+        let sql = "select ${cols} from t"
+        expect(
+            EditorTyping.placeholderJump(in: sql, selection: 7..<14),
+            EditorTyping.Edit(replacing: 14..<14, insert: "", selection: 14..<14),
+            "a caret just after the last blank, which is ordinary editing again")
+    }
+
+    /// Every other Tab in the buffer belongs to the indent rule.
+    ///
+    /// The selection is the whole of the walk's state, so this is what says the
+    /// walk has ended: filling a blank in makes the selection something that is
+    /// not one, and the next Tab indents. A rule that claimed Tab any wider
+    /// would be an editor where Tab sometimes does not indent, which is worse
+    /// than having no blanks at all.
+    private static func checkTabIsOnlyTheWalksWhileTheSelectionIsABlank() {
+        let sql = "select ${cols} from ${table}"
+        expect(
+            EditorTyping.placeholderJump(in: sql, selection: 9..<9), nil,
+            "a caret inside a blank is not a selection of one")
+        expect(
+            EditorTyping.placeholderJump(in: sql, selection: 7..<13), nil,
+            "and neither is a selection missing the closing brace")
+        expect(
+            EditorTyping.placeholderJump(in: "select cols from t", selection: 7..<11), nil,
+            "an ordinary selection is the indent rule's Tab")
+        expect(
+            EditorTyping.placeholderJump(in: sql, selection: 0..<0), nil,
+            "and so is a plain caret, even in a buffer that still holds blanks")
     }
 
     // MARK: - Harness
