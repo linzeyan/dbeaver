@@ -266,18 +266,23 @@ jobs:
       - name: Unit tests
         run: make test
 
-      # The one thing the container jobs need that is not a test: `db-check-*`
-      # opens the database through the same registry the application uses, and
-      # left as `cargo run` it was the last reason those jobs needed a compiler.
-      # `db-up-mssql`'s readiness loop alone spent ten minutes building it.
-      - name: Readiness probe
-        run: cargo build -p dbffi --bin dbcheck
-
       # Packing, not a second compilation: `make test` above built these same
       # binaries, and `cargo nextest archive` collects what it already has.
       - name: Test archive
         run: make test-archive
 
+      # `dbcheck` is taken from where `make test` left it rather than built.
+      # `cargo test` builds a package's binaries so that its integration tests
+      # can execute them, and uplifts them to `target/debug/` — which is the
+      # copy the archive above also carries.
+      #
+      # It was a `cargo build -p dbffi --bin dbcheck` step here for one run, and
+      # that step took 11m21s on top of the 14m36s `make test` had just spent.
+      # Naming one package and no test target is a different feature resolution
+      # — dev-dependencies contribute nothing to it — so cargo rebuilt the whole
+      # dependency graph as a second set of units, and sccache could not help
+      # because different features are different rustc invocations. If the file
+      # is ever not there, this fails loudly, which is the right way to find out.
       - name: Collect what the container jobs run
         run: |
           mkdir -p ci-payload
