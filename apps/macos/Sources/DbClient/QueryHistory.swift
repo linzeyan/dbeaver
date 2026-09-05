@@ -139,7 +139,11 @@ final class QueryHistory {
     /// others at half.
     static let untypedLimit = 100
 
-    private static let key = "dev.dbclient.queryHistory"
+    /// Not private, so that `--verify-query-history` can write what an earlier
+    /// build would have left here and watch the sweep take it out. A check that
+    /// spelled the key itself would be a second copy of it, and the day they
+    /// disagree is the day the sweep looks like it works.
+    static let key = "dev.dbclient.queryHistory"
 
     private let defaults: UserDefaults
 
@@ -148,6 +152,37 @@ final class QueryHistory {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         entries = Self.load(from: defaults)
+        if sweepSecrets() { save() }
+    }
+
+    /// Takes secrets out of what a previous launch wrote, once, at launch.
+    ///
+    /// Every build before this one stored the statement as typed, so the
+    /// password that made this worth fixing is already on the disk. Redacting
+    /// only new entries would leave it exactly where it is, and this is the one
+    /// pass that can reach it.
+    ///
+    /// Asked in PostgreSQL's dialect, because the entries do not record which
+    /// one they were sent in. It is the widest of the ones this build speaks and
+    /// the only one where `$$…$$` is a literal at all, so it takes out at least
+    /// as much as the right dialect would — which is the direction to be wrong
+    /// in here. What it costs is that a MySQL statement using backticks may lose
+    /// a literal it did not have to; a history entry is not re-run from here
+    /// anyway.
+    ///
+    /// Returns whether anything changed, so that the ordinary launch — which is
+    /// every launch after the first one on this build — writes nothing.
+    private func sweepSecrets() -> Bool {
+        var swept = false
+        entries = entries.map { entry in
+            let redacted = SQLScript.redacted(entry.sql, scheme: "postgresql")
+            guard redacted != entry.sql else { return entry }
+            swept = true
+            return QueryHistoryEntry(
+                id: entry.id, sql: redacted, ranAt: entry.ranAt, origin: entry.origin,
+                milliseconds: entry.milliseconds, outcome: entry.outcome)
+        }
+        return swept
     }
 
     /// Records a statement that was actually sent.
@@ -155,12 +190,27 @@ final class QueryHistory {
     /// A failure is recorded like any other outcome, and is the entry most worth
     /// keeping: the statement with the typo in it is precisely the one someone
     /// comes back for.
+    ///
+    /// What is kept is the statement with its secrets taken out, and that
+    /// happens here rather than at any of the eleven call sites. This list ends
+    /// up in a file that nothing encrypts, and `ALTER USER app IDENTIFIED BY
+    /// 'hunter2'` typed into the Query tab is a password on its way onto a disk
+    /// — against this build's rule that a password never reaches one. One place
+    /// to do it means there is no call site that can forget, which is why
+    /// `scheme` is required rather than defaulted: a caller that did not supply
+    /// one would be redacting against the wrong dialect, and `$$…$$` is a
+    /// literal in one of them and not in the others.
+    ///
+    /// The redacted form is what the list shows as well as what is stored. A
+    /// statement somebody cannot re-run from here unchanged is the point: an
+    /// ellipsis is not a password, and re-running it would send one.
     func record(
         _ sql: String, from origin: QueryHistoryOrigin, outcome: QueryHistoryOutcome,
-        milliseconds: Double, at ranAt: Date = Date()
+        milliseconds: Double, scheme: String, at ranAt: Date = Date()
     ) {
-        let statement = sql.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !statement.isEmpty else { return }
+        let sent = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sent.isEmpty else { return }
+        let statement = SQLScript.redacted(sent, scheme: scheme)
         let entry = QueryHistoryEntry(
             id: UUID(), sql: statement, ranAt: ranAt, origin: origin,
             milliseconds: milliseconds, outcome: outcome)

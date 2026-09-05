@@ -28,6 +28,9 @@ enum QueryHistoryChecks {
             checkTheScriptTerminatesEveryStatementExactlyOnce()
             checkAnUnmeasuredStatementGetsNoDuration()
             checkTheLogIsWhatThePanelIsShowing()
+            checkAPasswordTypedIntoTheQueryTabIsNotWrittenDown()
+            checkTheStatementIsReadInTheDialectItWasSentIn()
+            checkWhatAnEarlierBuildWroteIsSweptAtLaunch()
         }
         if failures == 0 {
             fputs("query-history: all checks passed\n", stderr)
@@ -43,7 +46,8 @@ enum QueryHistoryChecks {
     /// likely to be dropped silently, because nothing refuses to draw a zero.
     @MainActor private static func checkAnEntryKeepsWhatCausedItAndWhatItTook() {
         let history = make()
-        history.record("SELECT 1", from: .browse, outcome: .rows(1), milliseconds: 12.5)
+        history.record(
+            "SELECT 1", from: .browse, outcome: .rows(1), milliseconds: 12.5, scheme: "sqlite")
         expect(history.entries.first?.origin, .browse, "the entry says what caused it")
         expect(history.entries.first?.milliseconds, 12.5, "and what the server took")
     }
@@ -52,8 +56,10 @@ enum QueryHistoryChecks {
     /// one entry, not four.
     @MainActor private static func checkTheSameStatementFromOneOriginReplacesItself() {
         let history = make()
-        history.record("SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1)
-        history.record("SELECT 1", from: .query, outcome: .rows(2), milliseconds: 2)
+        history.record(
+            "SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
+        history.record(
+            "SELECT 1", from: .query, outcome: .rows(2), milliseconds: 2, scheme: "sqlite")
         expect(history.entries.count, 1, "the second run replaces the first")
         expect(history.entries.first?.outcome, .rows(2), "with the newer answer")
     }
@@ -63,8 +69,10 @@ enum QueryHistoryChecks {
     /// run this or did the sidebar" with whichever came second.
     @MainActor private static func checkTheSameStatementFromTwoOriginsIsTwoEntries() {
         let history = make()
-        history.record("SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1)
-        history.record("SELECT 1", from: .browse, outcome: .rows(1), milliseconds: 1)
+        history.record(
+            "SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
+        history.record(
+            "SELECT 1", from: .browse, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
         expect(history.entries.count, 2, "one statement from two places is two entries")
     }
 
@@ -73,9 +81,12 @@ enum QueryHistoryChecks {
     /// statement somebody typed — the one thing this store exists to give back.
     @MainActor private static func checkBrowsesCannotEvictATypedStatement() {
         let history = make()
-        history.record("SELECT typed", from: .query, outcome: .rows(1), milliseconds: 1)
+        history.record(
+            "SELECT typed", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
         for i in 0..<(QueryHistory.untypedLimit + 20) {
-            history.record("SELECT browse \(i)", from: .browse, outcome: .rows(1), milliseconds: 1)
+            history.record(
+                "SELECT browse \(i)", from: .browse, outcome: .rows(1), milliseconds: 1,
+                scheme: "sqlite")
         }
         expect(
             history.entries.contains { $0.sql == "SELECT typed" }, true,
@@ -90,7 +101,9 @@ enum QueryHistoryChecks {
     @MainActor private static func checkTheOldestUntypedGoesFirst() {
         let history = make()
         for i in 0..<(QueryHistory.untypedLimit + 1) {
-            history.record("SELECT browse \(i)", from: .browse, outcome: .rows(1), milliseconds: 1)
+            history.record(
+                "SELECT browse \(i)", from: .browse, outcome: .rows(1), milliseconds: 1,
+                scheme: "sqlite")
         }
         expect(
             history.entries.contains { $0.sql == "SELECT browse 0" }, false,
@@ -105,7 +118,8 @@ enum QueryHistoryChecks {
     @MainActor private static func checkTheWholeListIsStillCapped() {
         let history = make()
         for i in 0..<(QueryHistory.limit + 10) {
-            history.record("SELECT \(i)", from: .query, outcome: .rows(1), milliseconds: 1)
+            history.record(
+                "SELECT \(i)", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
         }
         expect(history.entries.count, QueryHistory.limit, "the list stops at its limit")
         expect(history.entries.first?.sql, "SELECT \(QueryHistory.limit + 9)", "newest first")
@@ -115,7 +129,7 @@ enum QueryHistoryChecks {
     /// thing a rewrite of `record` drops.
     @MainActor private static func checkAnEmptyStatementIsNotAStatement() {
         let history = make()
-        history.record("   \n ", from: .query, outcome: .rows(0), milliseconds: 0)
+        history.record("   \n ", from: .query, outcome: .rows(0), milliseconds: 0, scheme: "sqlite")
         expect(history.entries.count, 0, "nothing was recorded")
     }
 
@@ -124,7 +138,8 @@ enum QueryHistoryChecks {
     /// somebody typed from the one the sidebar sent.
     @MainActor private static func checkTheScriptSaysWhatCausedEachStatement() {
         let history = make()
-        history.record("SELECT 1", from: .browse, outcome: .rows(3), milliseconds: 12)
+        history.record(
+            "SELECT 1", from: .browse, outcome: .rows(3), milliseconds: 12, scheme: "sqlite")
         let script = QueryHistory.script(history.entries)
         expect(script.contains("-- browse ·"), true, "the comment names the origin")
         expect(script.contains("12 ms"), true, "and what it took")
@@ -135,8 +150,10 @@ enum QueryHistoryChecks {
     /// a bare statement are ways for the file to fail to run.
     @MainActor private static func checkTheScriptTerminatesEveryStatementExactlyOnce() {
         let history = make()
-        history.record("SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1)
-        history.record("SELECT 2;", from: .query, outcome: .rows(1), milliseconds: 1)
+        history.record(
+            "SELECT 1", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
+        history.record(
+            "SELECT 2;", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
         let script = QueryHistory.script(history.entries)
         expect(script.contains("SELECT 1;"), true, "the bare statement gains one")
         expect(
@@ -150,7 +167,7 @@ enum QueryHistoryChecks {
         let history = make()
         history.record(
             "DELETE FROM t WHERE id = 1", from: .edit, outcome: .affected(1),
-            milliseconds: 0)
+            milliseconds: 0, scheme: "sqlite")
         expect(QueryHistory.script(history.entries).contains("0 ms"), false, "no duration is shown")
     }
 
@@ -159,8 +176,10 @@ enum QueryHistoryChecks {
     /// stays live over a log with nothing in it.
     @MainActor private static func checkTheLogIsWhatThePanelIsShowing() {
         let model = makeModel()
-        model.history.record("SELECT typed", from: .query, outcome: .rows(1), milliseconds: 1)
-        model.history.record("SELECT browsed", from: .browse, outcome: .rows(1), milliseconds: 1)
+        model.history.record(
+            "SELECT typed", from: .query, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
+        model.history.record(
+            "SELECT browsed", from: .browse, outcome: .rows(1), milliseconds: 1, scheme: "sqlite")
         expect(model.shownHistory.count, 1, "the browse is out while All is off")
         expect(model.canExportHistory, true, "and there is still something to write")
 
@@ -172,6 +191,82 @@ enum QueryHistoryChecks {
 
         model.historyFilter = "nothing matches this"
         expect(model.canExportHistory, false, "and a filter that hides everything empties the log")
+    }
+
+    // MARK: - What must not be written down
+
+    /// A password typed into the Query tab does not reach the file.
+    ///
+    /// The list is stored in a plist that nothing encrypts and can be exported
+    /// as `.sql`, so an entry holding `hunter2` is a password on a disk —
+    /// against this build's rule that one never gets there. Both ways out are
+    /// checked, because they are separate code paths and the export reads the
+    /// stored entries rather than re-deriving anything.
+    @MainActor private static func checkAPasswordTypedIntoTheQueryTabIsNotWrittenDown() {
+        let history = make()
+        history.record(
+            "ALTER USER app IDENTIFIED BY 'hunter2'", from: .query, outcome: .affected(0),
+            milliseconds: 3, scheme: "mysql")
+
+        expect(
+            history.entries.first?.sql, "ALTER USER app IDENTIFIED BY '…'",
+            "the statement is kept in the shape it was, and the secret is not")
+        expect(
+            QueryHistory.script(history.entries).contains("hunter2"), false,
+            "and the exported script cannot carry what the store does not hold")
+    }
+
+    /// The dialect the statement was sent in is the one it is read with.
+    ///
+    /// `$$…$$` is a string literal in PostgreSQL and is not one anywhere else,
+    /// so the same statement redacts differently depending on which was named.
+    /// That is what makes `scheme` a required argument rather than a defaulted
+    /// one: a call site that passed the wrong dialect would leave the body
+    /// standing, and this is the pair that notices.
+    @MainActor private static func checkTheStatementIsReadInTheDialectItWasSentIn() {
+        let postgres = make()
+        postgres.record(
+            "ALTER ROLE app PASSWORD $$hunter2$$", from: .query, outcome: .affected(0),
+            milliseconds: 1, scheme: "postgresql")
+        expect(
+            postgres.entries.first?.sql, "ALTER ROLE app PASSWORD '…'",
+            "a dollar-quoted body is a literal here, and is the form a search written for "
+                + "quotes would have walked past")
+
+        let sqlite = make()
+        sqlite.record(
+            "ALTER ROLE app PASSWORD $$hunter2$$", from: .query, outcome: .affected(0),
+            milliseconds: 1, scheme: "sqlite")
+        expect(
+            sqlite.entries.first?.sql != postgres.entries.first?.sql, true,
+            "and a dialect with no such literal reads the same text differently, which is the "
+                + "whole reason the caller has to say which one it was")
+    }
+
+    /// What an earlier build wrote is taken out at the next launch.
+    ///
+    /// Every build before this one stored the statement as typed, so the
+    /// password that made this worth fixing is already on the disk. The check
+    /// reads the defaults back rather than the entries: fixing it in memory and
+    /// not writing it would pass an inspection of the list while leaving the
+    /// plist exactly as it was.
+    @MainActor private static func checkWhatAnEarlierBuildWroteIsSweptAtLaunch() {
+        let store = ScratchDefaults.store("verify-query-history-sweep")
+        let stale = QueryHistoryEntry(
+            id: UUID(), sql: "ALTER USER app IDENTIFIED BY 'hunter2'", ranAt: Date(),
+            origin: .query, milliseconds: 1, outcome: .affected(0))
+        store.set(try? JSONEncoder().encode([stale]), forKey: QueryHistory.key)
+
+        let history = QueryHistory(defaults: store)
+        expect(
+            history.entries.first?.sql, "ALTER USER app IDENTIFIED BY '…'",
+            "the entry a previous launch left comes back with the secret gone")
+
+        let written = store.data(forKey: QueryHistory.key)
+            .map { String(decoding: $0, as: UTF8.self) }
+        expect(
+            written?.contains("hunter2"), false,
+            "and the store itself no longer holds it, which is the only thing that matters")
     }
 
     // MARK: - Fixture

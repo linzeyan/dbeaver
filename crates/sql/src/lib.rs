@@ -20,6 +20,7 @@ mod parse;
 /// functions are `prefix` and `read`, which say what they mean under `plan::` and
 /// nothing at all at the root of a crate this size.
 pub mod plan;
+mod redact;
 mod script;
 
 pub use complete::{Completion, Expect, complete};
@@ -31,4 +32,5 @@ pub use dialect::{
 pub use format::format;
 pub use lex::{Token, TokenKind, tokens};
 pub use parse::{Scope, Source, Statement, statement};
+pub use redact::redacted;
 pub use script::{Origin, Scan, Span, Target, error_offset, scan, statements, target};

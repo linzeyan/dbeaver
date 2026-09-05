@@ -275,6 +275,24 @@ enum SQLScript {
         return Danger(rawValue: String(cString: raw)) ?? .modify
     }
 
+    /// What `sql` may be written to a file as.
+    ///
+    /// `sql` itself for nearly every statement, and a copy with the literals
+    /// taken out of the handful that carry a password. Asked of the core for the
+    /// reason `danger` is asked of it — a match over the text would redact the
+    /// word in a comment and walk past `$$hunter2$$` — and the rule it applies
+    /// is in `crates/sql/src/redact.rs`.
+    ///
+    /// A NULL answer means nothing had to be taken out, which is the ordinary
+    /// case. That is why this returns the statement rather than an optional:
+    /// there is no third outcome to distinguish, and a caller holding an
+    /// optional would have somewhere to put the original by mistake.
+    static func redacted(_ sql: String, scheme: String) -> String {
+        guard let raw = db_sql_redacted(sql, scheme) else { return sql }
+        defer { db_string_free(raw) }
+        return String(cString: raw)
+    }
+
     /// The core's reading of `script`, in the dialect `scheme` names.
     ///
     /// Memoized on its arguments, which is what holds a keystroke to one call

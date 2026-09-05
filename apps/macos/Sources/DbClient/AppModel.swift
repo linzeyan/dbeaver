@@ -3655,7 +3655,7 @@ final class AppModel {
             for statement in sent {
                 history.record(
                     statement.sql, from: .edit, outcome: .affected(statement.affected),
-                    milliseconds: 0)
+                    milliseconds: 0, scheme: scheme)
             }
             staged = StagedChanges()
             isBusy = false
@@ -4285,7 +4285,7 @@ final class AppModel {
             // answer to what came back, and `capped` is what says there is more.
             history.record(
                 browseStatementText, from: .browse, outcome: .rows(grid.rowCount),
-                milliseconds: fetched.milliseconds)
+                milliseconds: fetched.milliseconds, scheme: scheme)
         }
         // The rows describe themselves from here on, so `status` goes back to
         // describing the connection. Not putting it back is what left "Running…"
@@ -5695,7 +5695,7 @@ final class AppModel {
             // statement would make both of them worth checking.
             history.record(
                 step.sql, from: .query, outcome: outcome,
-                milliseconds: step.result.milliseconds)
+                milliseconds: step.result.milliseconds, scheme: scheme)
         }
         // Where the eye should go. A run that stopped has exactly one place
         // worth looking and it is the statement that stopped it; a run that
@@ -7024,7 +7024,8 @@ final class AppModel {
             isBusy = false
             relations[schema] = made.listed
             history.record(
-                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0,
+                scheme: scheme)
             status = "Made \(table)"
             // Selected, so the window is showing the table the rows are about to
             // go into. Empty until the import lands, which is the honest picture
@@ -7220,7 +7221,8 @@ final class AppModel {
             isBusy = false
             relations[schema] = changed.listed
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
+                scheme: scheme)
             status =
                 "\(change.pastTense) \(schema).\(change == .rename ? newName : relation.name)"
             // Where the selection lands is the one thing this cannot read off the
@@ -7402,7 +7404,8 @@ final class AppModel {
             databases = changed.databases
             schemas = changed.schemas
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
+                scheme: scheme)
             status = "\(change.pastTense) \(name)"
             refreshTransaction()
         }
@@ -7599,7 +7602,8 @@ final class AppModel {
                 rowIdentity = changed.identity
             }
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
+                scheme: scheme)
             status = "\(change.pastTense) \(plan.qualified).\(change.columnName)"
             // The grid is over columns that just moved, so whatever it is showing
             // is a row shape the server no longer has.
@@ -7759,7 +7763,8 @@ final class AppModel {
                 rowIdentity = changed.identity
             }
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
+                scheme: scheme)
             status = "\(change.pastTense) \(change.indexName) on \(plan.qualified)"
         }
     }
@@ -7968,7 +7973,8 @@ final class AppModel {
                 rowIdentity = changed.identity
             }
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
+                scheme: scheme)
             status = "\(change.pastTense) \(change.constraintName) on \(plan.qualified)"
         }
     }
@@ -8173,7 +8179,8 @@ final class AppModel {
             isBusy = false
             relations[schema] = made.listed
             history.record(
-                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0)
+                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0,
+                scheme: scheme)
             status = "Made \(schema).\(name)"
             // Opened onto, which is what a table nobody has put anything in is
             // for: the grid shows no rows and the Structure tab shows the
