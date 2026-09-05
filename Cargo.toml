@@ -4,6 +4,7 @@ members = [
     "crates/catalog",
     "crates/conn",
     "crates/ddl",
+    "crates/diff",
     "crates/drivers/athena",
     "crates/drivers/bigquery",
     "crates/drivers/cassandra",

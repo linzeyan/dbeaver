@@ -206,6 +206,9 @@ if CommandLine.arguments.contains("--verify-theme") {
 if CommandLine.arguments.contains("--verify-plan") {
     exit(MainActor.assumeIsolated { PlanChecks.run() } ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-diff") {
+    exit(MainActor.assumeIsolated { SchemaDiffChecks.run() } ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-mcp") {
     exit(MCPChecks.run() ? 0 : 1)
 }
@@ -859,6 +862,14 @@ let dropConnection = CommandLine.arguments.contains("--drop-connection")
 /// one above: the menu item is grey until a second connection is open, and
 /// nothing on a screenshot run opens one.
 let transferPicker = CommandLine.arguments.contains("--transfer-picker")
+
+/// `--schema-diff a:b` compares two schemas and leaves the report on screen.
+///
+/// A state a capture cannot click into for the same reason `--transfer-picker`
+/// exists, plus one of its own: the sheet is empty until a comparison has
+/// finished, and what is worth photographing is the table of differences rather
+/// than the two pickers above it.
+let schemaDiffPair = argument("--schema-diff")
 
 /// `--second-window` opens a second window, the way File ▸ New Window does.
 ///
@@ -3761,6 +3772,81 @@ func openTransferPicker(model: AppModel) {
     poll()
 }
 
+/// Drives `--schema-diff a:b`: compares the two schemas and leaves the finished
+/// report on screen.
+///
+/// A capture flag rather than a probe. `--verify-diff` asks whether the rules
+/// behind the report are right, against two SQLite files it makes itself; what
+/// only the shutter can answer is whether six columns of a database's own words
+/// fit in the sheet, and whether the two headings still say which side is which
+/// once they are `connection.schema`.
+///
+/// The two schemas are made outside this process — `make screenshot-diff` seeds
+/// them — so the tree is re-read before the pickers are asked to offer them. Both
+/// sides are the one connection `--conn` names, which is the ordinary shape of a
+/// comparison and means the flag needs nothing a screenshot run does not have.
+@MainActor
+func openSchemaDiff(model: AppModel, pair: String) {
+    guard connArgument != nil else {
+        fputs("--schema-diff needs --conn\n", stderr)
+        exit(2)
+    }
+    let names = pair.split(separator: ":", maxSplits: 1).map(String.init)
+    guard names.count == 2 else {
+        fputs("--schema-diff takes two schema names, as left:right\n", stderr)
+        exit(2)
+    }
+    let deadline = CFAbsoluteTimeGetCurrent() + 120
+    var refreshed = false
+    var asked = false
+
+    func settled() -> Bool {
+        guard let session = model.sessions.first else { return false }
+        return session.db != nil && !session.isBusy
+    }
+
+    func poll() {
+        guard settled() else { return again() }
+        guard refreshed else {
+            refreshed = true
+            model.refresh()
+            return again()
+        }
+        guard asked else {
+            asked = true
+            model.schemaDiffTarget = model.sessions[0].id
+            model.schemaDiffLeftSchema = names[0]
+            model.schemaDiffRightSchema = names[1]
+            model.presentSchemaDiff()
+            model.compareSchemas()
+            return again()
+        }
+        guard !model.isComparingSchemas else { return again() }
+        // The count as well as the sheet, because an empty table and a sheet
+        // that never opened are the same picture — and a report of nothing is
+        // the likeliest way for the seeding step to have gone wrong.
+        fputs(
+            "schema diff: open=\(model.isSchemaDiffOpen) "
+                + "pair=\(model.schemaDiffLeftSchema):\(model.schemaDiffRightSchema) "
+                + "differences=\(model.schemaComparison?.report.differences.count ?? -1)\n",
+            stderr)
+    }
+
+    /// No exit on the deadline, for the reason `openTransferPicker` gives: the
+    /// window is being photographed, and a run that gave up would be
+    /// photographed too.
+    func again() {
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("schema diff: the comparison did not finish in time\n", stderr)
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
 /// Drives `--rename-buffer`: puts the Query pane up and opens the name field on
 /// the buffer the editor is in.
 ///
@@ -4281,6 +4367,7 @@ if benchMode {
         if let switchToDatabase { switchDatabaseWhenReady(model: model, to: switchToDatabase) }
         if dropConnection { dropConnectionWhenReady(model: model) }
         if transferPicker { openTransferPicker(model: model) }
+        if let schemaDiffPair { openSchemaDiff(model: model, pair: schemaDiffPair) }
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if showFindBar { showFindBarWhenReady(model: model) }

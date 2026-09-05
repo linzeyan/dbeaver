@@ -266,6 +266,26 @@ final class Database: @unchecked Sendable {
         try decodeJSON(db_variables_json(handle, &errOut), as: [ServerVariable].self)
     }
 
+    /// Where this connection's `schema` and one on `other` disagree.
+    ///
+    /// Both handles cross in one call rather than each side being read here and
+    /// compared in Swift. What that buys is the rules: what counts as a
+    /// difference lives in the core, where the second front end will find it,
+    /// and the several hundred round trips a schema costs stay on the core's
+    /// side of the boundary instead of becoming as many FFI crossings.
+    ///
+    /// Slow in proportion to the two schemas, and there is nothing to poll and
+    /// no way to stop it — see the header note on `db_schema_diff_json`. Both
+    /// connections are in use for the duration, which is why the caller marks
+    /// them busy.
+    func schemaDiff(of schema: String, against other: Database, schema theirs: String)
+        throws -> SchemaDiffReport
+    {
+        try decodeJSON(
+            db_schema_diff_json(handle, schema, other.rawHandle, theirs, &errOut),
+            as: SchemaDiffReport.self)
+    }
+
     func columns(schema: String, relation: String) throws -> [ColumnInfo] {
         try decodeJSON(
             db_columns_json(handle, schema, relation, &errOut), as: [ColumnInfo].self)

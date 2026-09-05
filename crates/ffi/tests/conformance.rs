@@ -53,11 +53,11 @@ use dbffi::{
     db_indexes_json, db_names_forget, db_new_table_sql, db_processes_json, db_query, db_query_free,
     db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
     db_relations_json, db_routine_definition_json, db_routines_json, db_row_identity_json,
-    db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format, db_sql_plan_json,
-    db_sql_plan_prefix, db_sql_scan_json, db_string_free, db_table_change_sql, db_table_info_json,
-    db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step, db_triggers_json,
-    db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback, db_tx_rollback_to,
-    db_tx_savepoint, db_tx_state_json, db_variables_json,
+    db_schema_diff_json, db_schemas_json, db_sequences_json, db_sql_error_offset, db_sql_format,
+    db_sql_plan_json, db_sql_plan_prefix, db_sql_scan_json, db_string_free, db_table_change_sql,
+    db_table_info_json, db_transfer_cancel, db_transfer_free, db_transfer_start, db_transfer_step,
+    db_triggers_json, db_tx_autocommit, db_tx_commit, db_tx_release, db_tx_rollback,
+    db_tx_rollback_to, db_tx_savepoint, db_tx_state_json, db_variables_json,
 };
 
 // Test db_connect with null connection string
@@ -1018,6 +1018,147 @@ fn a_plan_that_cannot_be_drawn_is_null_rather_than_an_error() {
     ] {
         assert!(unsafe { db_sql_plan_json(product, rows) }.is_null());
     }
+}
+
+/// Two schemas on two connections, compared across the boundary.
+///
+/// On SQLite, so this runs under plain `cargo test`: two scratch files are two
+/// servers as far as the call is concerned, which is the arrangement that matters
+/// — a diff read through one handle would never notice that the second handle's
+/// driver was the one being asked.
+///
+/// The report is checked for its shape as well as its contents. A relation only
+/// one side has must be one line; if it ever became one line per column, this
+/// still finds every difference it looks for and the count is the only thing that
+/// says so.
+#[test]
+fn two_schemas_are_compared_through_two_handles() {
+    let open = |name: &str, statements: &[&str]| {
+        let path = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"").expect("scratch database file");
+        let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+        assert!(!handle.is_null(), "the scratch SQLite file should open");
+        for sql in statements {
+            ran(handle, sql);
+        }
+        (handle, path)
+    };
+
+    let (left, left_path) = open(
+        "dbffi-diff-left.db",
+        &[
+            "CREATE TABLE main.invoice (id INTEGER PRIMARY KEY, sku TEXT, qty INTEGER NOT NULL)",
+            "CREATE TABLE main.draft (id INTEGER)",
+        ],
+    );
+    let (right, right_path) = open(
+        "dbffi-diff-right.db",
+        &[
+            "CREATE TABLE main.invoice (id INTEGER PRIMARY KEY, sku TEXT, qty INTEGER)",
+            "CREATE TABLE main.posted (id INTEGER)",
+        ],
+    );
+
+    let main = CString::new("main").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_schema_diff_json(left, main.as_ptr(), right, main.as_ptr(), &mut err) };
+    assert!(!raw.is_null(), "the diff failed: {}", complaint(&mut err));
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+
+    let report: serde_json::Value = serde_json::from_str(&text).expect("a report is JSON");
+    assert_eq!(report["left_relations"], serde_json::json!(2));
+    assert_eq!(report["right_relations"], serde_json::json!(2));
+    let differences = report["differences"].as_array().expect("a list");
+
+    let about = |table: &str| -> Vec<&serde_json::Value> {
+        differences.iter().filter(|d| d["table"] == table).collect()
+    };
+
+    let draft = about("draft");
+    assert_eq!(draft.len(), 1, "a missing table is one line: {text}");
+    assert_eq!(draft[0]["kind"], serde_json::json!("relation"));
+    assert_eq!(draft[0]["verdict"], serde_json::json!("only_left"));
+    assert_eq!(draft[0]["right"], serde_json::json!(""));
+
+    let posted = about("posted");
+    assert_eq!(posted.len(), 1, "and so is an added one: {text}");
+    assert_eq!(posted[0]["verdict"], serde_json::json!("only_right"));
+
+    // The one column that changed, and only that column: the two tables agree
+    // about `id` and `sku`, and a comparison that read position would call them
+    // changed too.
+    let invoice = about("invoice");
+    assert_eq!(invoice.len(), 1, "one column changed: {text}");
+    assert_eq!(invoice[0]["object"], serde_json::json!("qty"));
+    assert_eq!(invoice[0]["kind"], serde_json::json!("column"));
+    assert_eq!(invoice[0]["verdict"], serde_json::json!("changed"));
+    assert!(
+        invoice[0]["left"].as_str().unwrap().contains("not null"),
+        "the left side keeps its own words: {text}"
+    );
+    assert!(
+        !invoice[0]["right"].as_str().unwrap().contains("not null"),
+        "and so does the right: {text}"
+    );
+
+    // A schema against itself is the report that says nothing happened, and it is
+    // the one a reader trusts the rest by.
+    let mut err: *mut c_char = ptr::null_mut();
+    let raw = unsafe { db_schema_diff_json(left, main.as_ptr(), left, main.as_ptr(), &mut err) };
+    assert!(!raw.is_null(), "the diff failed: {}", complaint(&mut err));
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+    unsafe { db_string_free(raw) };
+    let report: serde_json::Value = serde_json::from_str(&text).expect("a report is JSON");
+    assert_eq!(
+        report["differences"].as_array().unwrap().len(),
+        0,
+        "a schema differs from itself: {text}"
+    );
+
+    unsafe { db_free(left) };
+    unsafe { db_free(right) };
+    let _ = std::fs::remove_file(&left_path);
+    let _ = std::fs::remove_file(&right_path);
+}
+
+/// The arguments the diff refuses to read at all.
+///
+/// A schema that cannot be read is a failure with a message, never an empty side:
+/// a login without rights to one of the two schemas would otherwise produce a
+/// report saying every relation in it had been dropped.
+#[test]
+fn the_diff_call_says_why_it_could_not_read_its_arguments() {
+    let path = std::env::temp_dir().join("dbffi-diff-arguments.db");
+    let _ = std::fs::remove_file(&path);
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+
+    let main = CString::new("main").unwrap();
+    let invalid = CString::new(vec![b'm', b'a', 0xff, 0xfe]).unwrap();
+    for (left, left_schema, right, right_schema) in [
+        (ptr::null_mut(), main.as_ptr(), handle, main.as_ptr()),
+        (handle, main.as_ptr(), ptr::null_mut(), main.as_ptr()),
+        (handle, ptr::null(), handle, main.as_ptr()),
+        (handle, main.as_ptr(), handle, ptr::null()),
+        (handle, invalid.as_ptr(), handle, main.as_ptr()),
+        (handle, main.as_ptr(), handle, invalid.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe { db_schema_diff_json(left, left_schema, right, right_schema, &mut err) };
+        assert!(raw.is_null(), "the diff read an argument it cannot read");
+        assert!(!err.is_null(), "db_schema_diff_json must say why it failed");
+        unsafe { db_string_free(err) };
+    }
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

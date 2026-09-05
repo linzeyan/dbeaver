@@ -1284,8 +1284,8 @@ enum AppModelConnectionChecks {
     /// open the whole time.
     ///
     /// Wired here the way `WindowList.adopt` wires it, and through the same two
-    /// calls: `receivableSessions` on the other model and
-    /// `TransferTarget.inAnotherWindow` for the name. A fixture that built the
+    /// calls: `idleSessions` on the other model and
+    /// `ConnectionChoice.inAnotherWindow` for the name. A fixture that built the
     /// label out of its own string would pass whatever the window layer did.
     private static func checkATransferReachesTheConnectionsInTheOtherWindows() {
         MainActor.assumeIsolated {
@@ -1317,8 +1317,8 @@ enum AppModelConnectionChecks {
             expect(
                 here.transferTargets.isEmpty, true,
                 "one window with one connection has nowhere to send")
-            here.otherWindowTargets = {
-                elsewhere.receivableSessions.map(TransferTarget.inAnotherWindow)
+            here.otherWindowChoices = {
+                elsewhere.idleSessions.map(ConnectionChoice.inAnotherWindow)
             }
             expect(here.transferTargets.count, 1, "the other window's connection is a target")
             expect(

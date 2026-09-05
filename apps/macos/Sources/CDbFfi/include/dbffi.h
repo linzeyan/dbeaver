@@ -219,6 +219,26 @@ char* db_sql_plan_prefix(const char* product);
 // already on screen — so what a front end does with NULL is go on showing them.
 char* db_sql_plan_json(const char* product, const char* rows);
 
+// Where two schemas disagree: a JSON object with the two relation counts and a
+// list of differences, each naming its relation, the object within it, what kind
+// of object it is, which side has it, and how each side describes it. Released
+// with db_string_free.
+//
+// Two handles, like db_transfer_start: what is being asked about is the pair, and
+// reading each side separately would put a second copy of the comparison rules in
+// the front end.
+//
+// Slow in proportion to the schema — every relation costs a read of its columns
+// and, where it is a table, of its indexes, constraints and foreign keys. There is
+// nothing to poll and no way to stop it; the call is read-only, so the worst a
+// caller can do is wait.
+//
+// NULL with err set where either schema could not be read. That is a failure and
+// not an empty side: a login without rights to one of them would otherwise get a
+// report saying every relation had been dropped.
+char* db_schema_diff_json(DbHandle* left, const char* left_schema,
+                          DbHandle* right, const char* right_schema, char** err);
+
 // What running this SQL would do: "safe", "modify", "dangerous" or "fatal".
 // Released with db_string_free. NULL where the text could not be read at all.
 //

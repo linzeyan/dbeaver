@@ -686,6 +686,15 @@ enum AppMenu {
             action: #selector(ServerCommands.showServerVariables(_:)), keyEquivalent: "")
         variables.target = server
 
+        // With the two above rather than beside Transfer in File, although both
+        // reach a second connection. Those write; this reads, and what it reads
+        // is the shape of the server rather than anything in it — which is the
+        // subject this menu is.
+        let compare = menu.addItem(
+            withTitle: "Compare Schemas…",
+            action: #selector(ServerCommands.compareSchemas(_:)), keyEquivalent: "")
+        compare.target = server
+
         // Behind a separator, because these are the items here that change
         // something. The two above read. This is also the only place a database
         // can be *made* from: dropping one is a right-click on the row that is
@@ -1178,6 +1187,8 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
 
     @objc func showServerVariables(_ sender: Any?) { model.openVariables() }
 
+    @objc func compareSchemas(_ sender: Any?) { model.presentSchemaDiff() }
+
     /// The empty name is the starting point, and deliberately: there is nothing
     /// to suggest for a database that does not exist, and a name invented here
     /// would be one somebody had to notice before changing it.
@@ -1196,6 +1207,10 @@ final class ServerCommands: NSObject, NSMenuItemValidation {
         switch item.action {
         case #selector(showServerProcesses(_:)): model.watchesServerProcesses
         case #selector(showServerVariables(_:)): model.readsServerVariables
+        // No capability behind this one: every driver answers the metadata calls
+        // a comparison is made of, and what it needs instead is a connection to
+        // compare with — which with one tab open is this one.
+        case #selector(compareSchemas(_:)): model.canCompareSchemas
         case #selector(newDatabase(_:)): model.changesDatabases
         case #selector(newTable(_:)): model.makesTables
         default: false
