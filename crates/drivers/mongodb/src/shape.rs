@@ -46,6 +46,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use bson::{Bson, Document};
+use dbconn::{SHAPE_JSON, VALUE_SHAPE};
 use std::sync::Arc;
 
 use crate::MongoError;
@@ -82,6 +83,10 @@ pub enum ColumnType {
     ///
     /// A field holding a document in one record and a string in another unifies
     /// to `Text`, where no such promise is made.
+    ///
+    /// The result's own field carries `VALUE_SHAPE` as well, which is what a
+    /// statement in the Query tab is left with: its columns come from no
+    /// relation, so there is no declared type there to read the name off.
     Document,
     /// MongoDB's own identifier, as the 24 hex digits it is written with.
     ///
@@ -262,6 +267,15 @@ fn fits(value: &Bson, ty: ColumnType) -> bool {
     }
 }
 
+/// The metadata that says a Utf8 column holds JSON.
+///
+/// Both columns it goes on were written by `serde_json` — `text_of` for a nested
+/// field, `leftovers` for the overflow — so the claim is about what this file
+/// produced rather than about what the characters look like.
+fn json_shape() -> std::collections::HashMap<String, String> {
+    [(VALUE_SHAPE.to_string(), SHAPE_JSON.to_string())].into()
+}
+
 /// The columns a result will have, and where each document's leftovers go.
 #[derive(Debug, Clone)]
 pub struct Shape {
@@ -326,13 +340,24 @@ impl Shape {
             // every sampled document may still be missing from the next one, and
             // a schema that promised otherwise would be a promise this database
             // cannot keep.
-            .map(|(name, ty)| Field::new(name, ty.arrow(), true))
+            .map(|(name, ty)| {
+                let field = Field::new(name, ty.arrow(), true);
+                match ty {
+                    ColumnType::Document => field.with_metadata(json_shape()),
+                    _ => field,
+                }
+            })
             .collect();
         // An empty result has no columns at all, and giving it a lone `_extra`
         // would state that a collection has a field when nothing has
         // established it has any documents.
         if !fields.is_empty() {
-            fields.push(Field::new(EXTRA, DataType::Utf8, true));
+            // The declaration `columns()` cannot make. The structure pane lists
+            // what the collection holds and `_extra` is not one of those, so a
+            // front end reading types from the relation finds nothing for this
+            // column and shows the JSON as the one line it arrived on. The
+            // result's own field is the only place the claim belongs.
+            fields.push(Field::new(EXTRA, DataType::Utf8, true).with_metadata(json_shape()));
         }
         let schema = Arc::new(Schema::new(fields));
         Shape {
@@ -809,6 +834,65 @@ mod tests {
     #[test]
     fn an_empty_result_states_no_columns_rather_than_guessing_at_id() {
         assert!(shape_of(&[]).columns().is_empty());
+    }
+
+    /// What the field says, for the two columns whose values this file wrote as
+    /// JSON.
+    fn shape_of_field(shape: &Shape, name: &str) -> Option<String> {
+        shape
+            .schema()
+            .field_with_name(name)
+            .ok()?
+            .metadata()
+            .get(VALUE_SHAPE)
+            .cloned()
+    }
+
+    #[test]
+    fn the_overflow_column_says_on_the_field_that_it_holds_json() {
+        // The limitation this closes. `columns()` deliberately omits `_extra` —
+        // no document has a field this client invented — so a reader taking
+        // types from the relation finds nothing for it and shows the one line
+        // `serde_json` wrote. The result's own field is where the claim can be
+        // made without stating that the collection has the column.
+        let docs = vec![doc! { "a": 1i32 }, doc! { "a": 2i32, "b": 3i32 }];
+        let shape = shape_of(&docs);
+        assert_eq!(shape_of_field(&shape, EXTRA).as_deref(), Some(SHAPE_JSON));
+        assert!(
+            shape.columns().iter().all(|(n, _)| n != EXTRA),
+            "and it is still not a field of the collection"
+        );
+    }
+
+    #[test]
+    fn a_document_column_says_it_on_the_field_as_well_as_in_its_type() {
+        // The declared type is only reachable for a browsed collection. A
+        // statement in the Query tab returns columns no relation describes, and
+        // before this the same nested value laid out on one tab and not on the
+        // other.
+        let docs = vec![doc! { "address": doc! { "city": "Taipei" } }];
+        let shape = shape_of(&docs);
+        assert_eq!(
+            shape_of_field(&shape, "address").as_deref(),
+            Some(SHAPE_JSON)
+        );
+    }
+
+    #[test]
+    fn a_column_that_is_not_json_says_nothing_on_its_field() {
+        // The negative half, and the one that matters: a rule loose enough to
+        // mark the ObjectId column would hand 24 hex digits to a JSON parser
+        // that fails, and the failure is drawn where the value used to be.
+        let id = ObjectId::parse_str("65a1b2c3d4e5f60718293a4b").expect("a valid id");
+        let docs = vec![doc! { "_id": id, "name": "a", "n": 1i32 }];
+        let shape = shape_of(&docs);
+        for column in ["_id", "name", "n"] {
+            assert_eq!(
+                shape_of_field(&shape, column),
+                None,
+                "{column} holds no JSON and must not claim to"
+            );
+        }
     }
 
     #[test]

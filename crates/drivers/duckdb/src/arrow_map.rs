@@ -17,11 +17,27 @@
 //!
 //! **Columns the reader can only read through their children are rendered to
 //! text.** `apps/macos/Sources/DbClient/ArrowTable.swift` maps a closed set of
-//! Arrow format strings and never looks at `children`, so a `STRUCT` column
-//! reaches the grid as `<+s>` in every cell — not a value, not a null, the format
-//! string itself. DuckDB is the driver most likely to produce one: `STRUCT`,
-//! `LIST`, `MAP`, `ARRAY(n)`, `UNION` and `ENUM` are ordinary DuckDB types, not
-//! extensions.
+//! Arrow format strings, and a column it has no case for reaches the grid as
+//! `<+s>` in every cell — not a value, not a null, the format string itself.
+//! DuckDB is the driver most likely to produce one: `STRUCT`, `LIST`, `MAP`,
+//! `ARRAY(n)`, `UNION` and `ENUM` are ordinary DuckDB types, not extensions.
+//!
+//! Four of those six the reader now follows. It grew a walk into `children` for
+//! `+l`, `+s`, `+m` and `+w:N` on the day a Flight SQL server sent nesting no
+//! driver had flattened — there being no `arrow_map.rs` in that driver, nor in
+//! BigQuery's or Databricks's, to flatten it in. So this file's rendering is no
+//! longer the only thing standing between a `STRUCT` and a format string; it is
+//! now a *second* rendering of the same value, and the two disagree: a DuckDB
+//! struct reaches the grid here as `{qty: 2, unit: kg}`, DuckDB's own spelling,
+//! and reaches it over Flight SQL — which is this same DuckDB, behind a protocol
+//! — as `{"qty":2,"unit":"kg"}`. That is a conflict rather than a preference, and
+//! the way out of it is to stop rendering the four here and let the reader read
+//! them, which would also give the value viewer a `STRUCT` it can lay out instead
+//! of a line. It is left standing because deleting a rendering is a change to
+//! what every DuckDB user already sees, and it belongs in its own round with its
+//! own screenshot. `UNION`, `ENUM` and the list views below are not in that
+//! argument: nothing follows those, and this is the only thing between them and
+//! `<+ud:>`.
 //!
 //! The line is drawn at whether the column's own buffers hold the value.
 //! `UBIGINT` arrives as `UInt64`, which the reader also has no case for — but the
@@ -45,7 +61,10 @@ use crate::DuckError;
 /// Nothing reads it yet. It is written because a schema that says `Utf8` and
 /// nothing else is a schema claiming DuckDB returned a string, and the one thing
 /// a type label must not do is state something the column was never declared
-/// with. When the grid grows a nested renderer this is where it starts.
+/// with. The grid has since grown a nested renderer, and this is still where the
+/// undoing of this file starts: it is the only record of what each rendered
+/// column was, and so the only way to tell a `STRUCT` that was flattened here
+/// from a `VARCHAR` that was always one.
 pub const RENDERED_FROM: &str = "duckdb.rendered_from";
 
 /// Settings that change the Arrow type of a column, fixed at DuckDB 1.5.5's

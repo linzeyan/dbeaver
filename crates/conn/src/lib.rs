@@ -71,6 +71,36 @@ use std::fmt;
 /// learn a new spelling for each database that reports the same fact.
 pub const DECLARED_NOT_NULL: &str = "dbclient.declared_not_null";
 
+/// Field metadata naming the shape a column's text values are written in.
+///
+/// The relation's declared types answer this for a browse — a `jsonb` column is
+/// spelled `jsonb` in the catalogue, and the value viewer lays it out on the
+/// strength of that name. Two kinds of column have no such answer and are the
+/// reason this exists:
+///
+/// - one the *result* invented, which no relation declares. MongoDB's `_extra`
+///   is the case: it is JSON that `serde_json` wrote, and it is deliberately not
+///   in `Shape::columns`, because no document in a collection has a field this
+///   client made up.
+/// - one a driver rendered on the way out. A DuckDB `STRUCT` is a text column by
+///   the time it crosses, and the declared type it came from is not the shape
+///   the characters are now in.
+///
+/// Matching such a column by name instead is the one thing this path must not
+/// do — a rendering decided from a string is a rendering that eventually meets a
+/// `text` column called `_extra` — so the claim rides on the field the values
+/// arrive on.
+///
+/// Not namespaced per driver, for the reason `DECLARED_NOT_NULL` is not: the
+/// reader is the grid, and one fact should not need a spelling per database.
+pub const VALUE_SHAPE: &str = "dbclient.value_shape";
+
+/// The one shape there is: the column's values are JSON documents.
+///
+/// A constant rather than a bare string because both ends of the FFI have to
+/// agree on it and only one of them is in this language.
+pub const SHAPE_JSON: &str = "json";
+
 /// A failure, reduced to what a front end acts on.
 ///
 /// Three fields, because there are three questions: what to show, where to put
@@ -1076,7 +1106,23 @@ pub trait CursorCancel: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{Browse, ServerInfo};
+    use super::{Browse, DECLARED_NOT_NULL, SHAPE_JSON, ServerInfo, VALUE_SHAPE};
+
+    /// The three strings that are the FFI contract, written out.
+    ///
+    /// Asserted against literals rather than against each other because the
+    /// other end of each is in Swift, where they are literals too
+    /// (`ArrowTable.declaredNotNullKey`, `.valueShapeKey`, `.jsonShape`, pinned
+    /// by `--verify-schema-metadata`). The C data interface carries no shared
+    /// header, so nothing but a pair of tests spelling the same characters holds
+    /// the two languages together — and a rename on this side that only the
+    /// symbol followed would compile, pass, and quietly stop reaching the grid.
+    #[test]
+    fn the_field_declarations_are_spelled_the_way_the_reader_spells_them() {
+        assert_eq!(DECLARED_NOT_NULL, "dbclient.declared_not_null");
+        assert_eq!(VALUE_SHAPE, "dbclient.value_shape");
+        assert_eq!(SHAPE_JSON, "json");
+    }
 
     fn browse<'a>(
         filter: Option<&'a str>,

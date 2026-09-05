@@ -28,17 +28,35 @@ import SwiftUI
 /// worse, would eventually meet a value that looks like JSON and is not.
 enum ValueRendering {
     case text
-    /// A column whose declared type says its values are JSON. The Arrow schema
-    /// cannot say it — every driver maps these to Utf8 — so this is only known
-    /// for a browsed relation. The Query pane gets `.text` for the same reason
-    /// the grid header falls back there: a statement's columns need not come
-    /// from any relation, and matching them by name against the browsed one
-    /// would claim a type they do not have.
+    /// A column whose values are JSON, said by one of two sources that both
+    /// name a type and neither of which reads the string.
+    ///
+    /// The relation's declared type is the older one, and for a `jsonb` it is
+    /// still the only one: the driver maps that column to Utf8 like any other
+    /// string, so nothing on the Arrow field distinguishes it. What that source
+    /// cannot reach is a column no relation declares — one the driver invented,
+    /// or one it rendered on the way out — and a statement in the Query pane,
+    /// whose columns need not come from any relation at all. Those say so on the
+    /// Arrow field instead (`dbconn::VALUE_SHAPE`), which is a claim about the
+    /// column the values actually arrived on rather than a name matched against
+    /// the browsed relation's.
     case json
     /// An Arrow binary column, with the cell's bytes. Carried here rather than
     /// re-read on demand because the read has to happen while the batch is
     /// alive, and the view is drawn after the model has finished with it.
     case binary([UInt8])
+    /// An Arrow column whose values are in children rather than in its own
+    /// buffers — a `LIST`, a `STRUCT`, a `MAP`. The reader spells one out as
+    /// JSON, so the pane lays it out with the same walk it lays a document out
+    /// with.
+    ///
+    /// A case of its own rather than a second way of reaching `.json`, because
+    /// the two answer differently about editing and the difference is silent. A
+    /// `jsonb` cell holds a document the server sent and the box starts from it;
+    /// a nested cell holds no string at all — what is on screen is this reader's
+    /// JSON of buffers that have no text form — so there is nothing an editor
+    /// could honestly start from.
+    case nested
 
     /// Whether a declared type is one whose values are JSON.
     ///
@@ -251,6 +269,17 @@ struct RenderedValue {
             }
             return clipped(pretty, note: "pretty-printed · \(measure)", wraps: false)
 
+        case .nested:
+            // No character count here, and that is the difference from a
+            // document: a nested column stores no string for one to measure. The
+            // JSON on screen was made out of the column's children, and the
+            // sentence says that rather than a length that would be this
+            // program's own. The raw line is the fallback where it does not
+            // parse, which is what a value cut at the reader's budget looks
+            // like.
+            let note = "read from the column's children"
+            return clipped(prettyPrintedJSON(cell.value) ?? cell.value, note: note, wraps: false)
+
         case .text:
             return clipped(cell.value, note: nil, wraps: true)
         }
@@ -398,6 +427,17 @@ enum ValueEdit: Equatable {
             // truncated transcription of itself. A hex editor is a real piece
             // of work and has not been earned; until it is, say so.
             return .refused("A binary value cannot be edited here.")
+        }
+
+        if case .nested = cell.rendering {
+            // The same judgement, for the same reason one step further out. What
+            // is on screen is JSON this reader assembled from a `STRUCT`'s
+            // children, and the column holds no text at all — so a box seeded
+            // from it would offer to write this program's rendering into a
+            // column that has no string form to write it as. Composing the
+            // literal a server would take is the driver's grammar, not a text
+            // box's.
+            return .refused("A nested value cannot be edited here.")
         }
 
         guard cell.value.count <= RenderedValue.characterCap else {

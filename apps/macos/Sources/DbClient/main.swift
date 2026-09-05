@@ -75,7 +75,7 @@ let reconnectTo = argument("--reconnect")
 // `--verify-browse-state`, `--verify-history`, `--verify-progressive`,
 // `--verify-filter-rows`,
 // `--verify-metadata`,
-// `--verify-schema-metadata`, `--verify-import`, `--verify-fk-nav`,
+// `--verify-schema-metadata`, `--verify-nested`, `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
 // `--verify-relation-change`, `--verify-database-change`, `--verify-new-table`,
 // `--verify-column-change`,
@@ -126,6 +126,9 @@ if CommandLine.arguments.contains("--verify-metadata") {
 }
 if CommandLine.arguments.contains("--verify-schema-metadata") {
     exit(SchemaMetadataChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-nested") {
+    exit(NestedValueChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-fk-nav") {
     exit(FKNavigationChecks.run() ? 0 : 1)
@@ -249,10 +252,29 @@ if CommandLine.arguments.contains("--verify-quitting") {
 let imageStatement: String? =
     CommandLine.arguments.contains("--view-image") ? pictureStatement() : nil
 
+/// `--view-nested` opens the Query tab on a result holding a list, a struct and
+/// a map, so that the grid and the value viewer have nesting to draw.
+///
+/// The same kind of flag as `--view-image` and, unlike it, one this process
+/// cannot fake: a nested column is not something a statement can encode into a
+/// literal the way a picture is hex. The value has to arrive as Arrow children,
+/// which means a connection to one of the three drivers that pass the server's
+/// own schema across — Flight SQL, BigQuery, Databricks. The statement is
+/// DuckDB's spelling because the project's Flight SQL subject is DuckDB behind
+/// the protocol (`docker-compose.yml`, `DATABASE_BACKEND: duckdb`), which is the
+/// one of the three that `make db-up-flightsql` puts up. Pointed at anything
+/// else it is a syntax error, and the editor says so where it says so for any
+/// other statement.
+let nestedStatement: String? =
+    CommandLine.arguments.contains("--view-nested")
+    ? "SELECT [1, 2, 3] AS a_list, {'qty': 2, 'unit': 'kg'} AS a_struct, "
+        + "MAP {'x': 1, 'y': 2} AS a_map"
+    : nil
+
 /// `--tab structure|content|query` opens straight to a pane. Screenshots are
 /// how rendering defects get caught here, and a screenshot cannot click.
 let initialTab =
-    imageStatement != nil
+    (imageStatement ?? nestedStatement) != nil
     ? DetailTab.query
     : (argument("--tab").flatMap { DetailTab(rawValue: $0.capitalized) } ?? .content)
 
@@ -262,7 +284,7 @@ let initialTab =
 let initialAppearance = argument("--appearance").flatMap(Appearance.Setting.init(rawValue:))
 
 /// `--sql "SELECT …"` opens on the Query tab with that statement already run.
-let initialSQL = imageStatement ?? argument("--sql")
+let initialSQL = imageStatement ?? nestedStatement ?? argument("--sql")
 
 /// `--caret 42` puts the editor's caret at that offset, counted in Unicode
 /// scalars from the start of `--sql`.
@@ -745,7 +767,12 @@ let initialSection = argument("--section").flatMap { requested in
 /// neither — synthetic events need accessibility permission this environment
 /// does not grant. Without it the one thing that catches a rendering defect in
 /// the viewer, a screenshot of the viewer, cannot be taken.
-let initialCell = argument("--cell") ?? (imageStatement != nil ? "image_data" : nil)
+/// `--view-nested` opens on its struct, because the struct is the column whose
+/// rendering has both halves in it: the grid's one-line preview and the pane's
+/// laid-out document. The list and the map are one cell along.
+let initialCell =
+    argument("--cell") ?? (imageStatement != nil ? "image_data" : nil)
+    ?? (nestedStatement != nil ? "a_struct" : nil)
 
 /// `--edit-value` opens the box on the cell `--cell` chose, instead of the
 /// reading pane.

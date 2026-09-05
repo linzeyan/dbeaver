@@ -3264,7 +3264,8 @@ final class AppModel {
             isNull
             ? .text
             : Self.rendering(
-                kind: grid.columns[s.column].kind, declared: declared,
+                kind: grid.columns[s.column].kind,
+                shape: grid.columns[s.column].valueShape, declared: declared,
                 bytes: { grid.bytes(row: s.row, column: s.column) ?? [] })
         return InspectedCell(
             column: name,
@@ -3718,17 +3719,28 @@ final class AppModel {
             rows: browseResult.table)
     }
 
-    /// Which rendering a cell gets, from the two type sources this has.
+    /// Which rendering a cell gets, from the three type sources this has.
     ///
     /// The Arrow kind is always true of what arrived and is what identifies a
-    /// binary column; the declared type is the only thing that can say `jsonb`,
-    /// because the driver maps it to Utf8 like any other string. Neither is the
-    /// string itself — a `text` column holding `{}` is text.
-    private static func rendering(
-        kind: ArrowTable.Kind, declared: String, bytes: () -> [UInt8]
+    /// binary column. The other two both say "this text is a document", and they
+    /// are asked in this order because they answer for different columns:
+    ///
+    /// - `shape` is the *result's* claim, carried on the field the values came
+    ///   on. It is the only source for a column no relation declares — MongoDB's
+    ///   `_extra`, a DuckDB `STRUCT` the driver rendered on the way out — and it
+    ///   is the only one a statement in the Query tab has at all.
+    /// - `declared` is the *relation's*, read from the catalogue, which is where
+    ///   a PostgreSQL `jsonb` says what it is.
+    ///
+    /// Neither is the string itself — a `text` column holding `{}` is text, and
+    /// sniffing is what both of these exist to avoid.
+    static func rendering(
+        kind: ArrowTable.Kind, shape: String, declared: String, bytes: () -> [UInt8]
     ) -> ValueRendering {
         switch kind {
         case .binary: return .binary(bytes())
+        case .nested: return .nested
+        case .utf8 where shape == ArrowTable.jsonShape: return .json
         case .utf8 where ValueRendering.isJSONType(declared): return .json
         default: return .text
         }
@@ -3737,10 +3749,23 @@ final class AppModel {
     /// The strip's one-line form of a cell, which for a binary column is not
     /// what the grid draws: "12 B" is the most a column-width cell can say, and
     /// the strip has room for the bytes themselves.
-    private static func text(
+    ///
+    /// Not private, for the reason `rendering` above is not: building the
+    /// `ResultSet` that `cell(at:in:)` reads needs a server, and the two lines
+    /// where a nested cell diverges from the grid's own text are the ones that
+    /// decide whether the pane shows a value or a truncation of one.
+    /// `NestedValueChecks` calls it with a table it built itself.
+    static func text(
         of rendering: ValueRendering, in grid: ArrowTable, at s: GridSelection
     ) -> String {
         if case .binary(let bytes) = rendering { return ValueRendering.preview(bytes: bytes) }
+        // And for a nested column it is not what the grid draws either, for the
+        // mirror-image reason: the cell is a preview cut at the reader's cell
+        // budget, and the strip and the pane below it are where the whole
+        // document goes. Read here because here is where the batch is alive.
+        if case .nested = rendering, let document = grid.json(row: s.row, column: s.column) {
+            return document
+        }
         return grid.text(row: s.row, column: s.column)
     }
 
