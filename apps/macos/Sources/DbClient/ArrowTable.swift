@@ -737,6 +737,12 @@ private struct ColumnBatch {
     /// about — a batch read four bytes off answers a plausible value from the
     /// neighbouring row rather than failing.
     private func writeJSON(at i: Int, to sink: inout JSONSink) {
+        // A run the walk cannot afford is not entered at all, and that is a claim
+        // about the mark as much as about the cost. `JSONSink.text` reports the
+        // run the walk was in when it stopped; a child stepped into on a spent
+        // budget would report *its* length instead, so a document cut on a field's
+        // name would claim that field's contents are the only thing missing while
+        // saying nothing about the fields after it.
         guard !sink.isFull else { return }
         guard i >= 0, i < length else {
             sink.write(Self.unreadable)
@@ -781,13 +787,16 @@ private struct ColumnBatch {
             }
             sink.write("{")
             for (at, field) in fields.enumerated() {
+                guard !sink.isFull else {
+                    sink.abandon(fields.count - at)
+                    break
+                }
                 if at > 0 { sink.write(",") }
                 sink.write(Self.quoted(field.name))
                 sink.write(":")
                 // The parent's own row index, not the field's position: a
                 // struct's children are one array each, indexed by the row.
                 children[at].writeJSON(at: idx, to: &sink)
-                if sink.isFull { break }
             }
             sink.write("}")
 
@@ -826,9 +835,19 @@ private struct ColumnBatch {
         }
         sink.write("[")
         for (at, index) in (start..<end).enumerated() {
+            // Asked before the element is written rather than after it, so that
+            // the loop still knows what it is leaving behind: `end - index` is the
+            // run this walk turned back from, and it is the number the cell
+            // reports. Checked after the write, the budget would still hold — the
+            // sink refuses what it cannot afford either way — but the walk would
+            // have visited every element of a ten-thousand-element list to write
+            // nothing, and the mark would have no number to give.
+            guard !sink.isFull else {
+                sink.abandon(end - index)
+                break
+            }
             if at > 0 { sink.write(",") }
             element.writeJSON(at: index, to: &sink)
-            if sink.isFull { break }
         }
         sink.write("]")
     }
@@ -851,6 +870,10 @@ private struct ColumnBatch {
         let values = entries.children[1]
         sink.write("{")
         for (at, index) in (start..<end).enumerated() {
+            guard !sink.isFull else {
+                sink.abandon(end - index)
+                break
+            }
             if at > 0 { sink.write(",") }
             // The entries array's own offset, because these two are its
             // children and the walk is stepping over it rather than through it.
@@ -858,7 +881,6 @@ private struct ColumnBatch {
             sink.write(Self.quoted(keys.text(at: logical)))
             sink.write(":")
             values.writeJSON(at: logical, to: &sink)
-            if sink.isFull { break }
         }
         sink.write("}")
     }
@@ -1017,17 +1039,23 @@ private struct ColumnBatch {
 private struct JSONSink {
     private var written = ""
     private var budget: Int
-    /// Whether the walk stopped short. Read by every loop above, so that a list
-    /// past its budget is abandoned instead of visited to the end writing
-    /// nothing.
+    /// Whether the walk stopped short. Read at the top of every loop above, so
+    /// that a list past its budget is turned back from rather than visited to the
+    /// end writing nothing.
     private(set) var isFull = false
+    /// Values the walk turned back from, summed over the runs it unwound through.
+    private(set) var abandoned = 0
 
     init(budget: Int) {
         self.budget = max(budget, 0)
     }
 
+    /// There is deliberately no `isFull` fast path here. Once the budget is spent
+    /// it stays at zero, so the guard below takes `prefix(0)` and appends nothing,
+    /// and a build with the fast path and a build without it produce the same
+    /// string for every input. A branch nothing can tell apart is a branch this
+    /// file would rather not carry.
     mutating func write(_ piece: String) {
-        guard !isFull else { return }
         let count = piece.count
         guard count <= budget else {
             written += piece.prefix(budget)
@@ -1039,12 +1067,29 @@ private struct JSONSink {
         budget -= count
     }
 
-    /// What was written, with an ellipsis where the walk stopped short.
+    /// Records a run the walk decided not to visit.
+    mutating func abandon(_ count: Int) {
+        abandoned += max(count, 0)
+    }
+
+    /// What was written, and how much of the value is not in it.
     ///
     /// The ellipsis is load bearing: a truncated document does not parse, and
     /// the value viewer's fallback for one that does not parse is to show it as
     /// stored. Without a mark, a cut list would read as a whole one.
-    var text: String { isFull ? written + "…" : written }
+    ///
+    /// The count beside it is the same obligation `RenderedValue.clipped` meets
+    /// when it writes "first 128,000 of 500,000 characters", and the reason the
+    /// loops above check their budget before each element rather than after:
+    /// `[0,1,2,3,4…` cannot tell a five-element list from a five-thousand-element
+    /// one, and the wrong reading is the expensive one. Zero is spelled as a bare
+    /// ellipsis, for the cut that landed on a field's name rather than inside a
+    /// run — there is nothing counted to report, and "(0 more)" would be a lie
+    /// about a value that has more.
+    var text: String {
+        guard isFull else { return written }
+        return abandoned > 0 ? written + "… (\(abandoned) more)" : written + "…"
+    }
 }
 
 /// Arrow decimal128 is a 16-byte little-endian two's-complement integer.

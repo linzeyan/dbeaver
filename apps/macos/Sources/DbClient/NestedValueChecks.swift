@@ -45,6 +45,8 @@ enum NestedValueChecks {
             checkAStringInsideAStructCannotEndTheDocument()
             checkTheCellIsCutToTheGridsBudgetAndSaysSo()
             checkTheViewerGetsTheWholeDocumentTheCellCouldNotHold()
+            checkAWalkPastItsBudgetTurnsBackRatherThanRunningOn()
+            checkAValueTheWalkNeverOpenedIsNotCountedAsLeftBehind()
             checkAListOfStructsIsReadAllTheWayDown()
             checkASchemaNestedPastTheCapIsRefusedRatherThanFollowed()
             checkAMapWhoseChildIsNotAPairIsNotGuessedAt()
@@ -331,13 +333,15 @@ enum NestedValueChecks {
         let arena = Arena()
         let table = lists(arena, rows: [[], Array(0..<1000).map { Int32($0) }, []])
         let drawn = table.text(row: 1, column: 0)
-        expect(drawn.hasSuffix("…"), true, "the cut is marked where it happened")
+        expect(
+            drawn.hasSuffix("… (911 more)"), true,
+            "the cut is marked where it happened, and says how much is behind it")
         // 256 characters and the mark, written out rather than read back off
         // `cellBudget`: a check that took its expectation from the constant would
         // agree with any value the constant had, which is a check that cannot
         // fail. Raising the budget should mean deciding this line again.
         expect(
-            drawn.count, 257,
+            drawn.count, 268,
             "and the cell holds the budget and the mark, not the thousand elements")
         expect(
             ArrowTable.cellBudget, 256,
@@ -374,6 +378,69 @@ enum NestedValueChecks {
             of: .nested, in: table, at: GridSelection(row: 1, column: 0, anchor: nil))
         expect(strip.hasSuffix("…"), false, "the strip is given the document, not the cell")
         expect(strip.count, document.count, "the same one the viewer's own call builds")
+        release(table, arena)
+    }
+
+    /// The budget stops the walk, not only the writing.
+    ///
+    /// This is the half of the budget that is a memory rule rather than a layout
+    /// one, and until the mark carried a number nothing here could see it: the
+    /// sink refuses an over-budget write on its own, so a walk that visited every
+    /// element of a thousand-element list writing nothing drew exactly the cell a
+    /// walk that turned back after five drew. The same string, an order of
+    /// magnitude apart in cost. The count beside the ellipsis is what tells them
+    /// apart, because a walk can only report what it left if it stopped where it
+    /// left it.
+    ///
+    /// The lengths counted below are counted against a 256-character cell.
+    /// Raising `cellBudget` means counting them again — the check above pins the
+    /// constant so that these cannot go quietly wrong.
+    @MainActor private static func checkAWalkPastItsBudgetTurnsBackRatherThanRunningOn() {
+        // `{`, `"a"`, `:` and a 250-character string quoted overrun 256 inside the
+        // first field's value, leaving the second field one the walk never reached.
+        let arena = Arena()
+        let table = structOfList(arena, note: String(repeating: "x", count: 250))
+        let drawn = table.text(row: 0, column: 0)
+        expect(
+            drawn.hasSuffix("… (1 more)"), true,
+            "a struct stops at the field the budget ran out on and counts the rest")
+        expect(drawn.count, 266, "having spent the budget and nothing past it")
+        release(table, arena)
+
+        // Three 60-character keys with their values, and a fourth key cut in half,
+        // come to 256. The fifth entry is one the walk never opens.
+        let keyed = Arena()
+        let table2 = wideMap(
+            keyed, keys: (0..<5).map { "k\($0)" + String(repeating: "y", count: 58) })
+        let entries = table2.text(row: 0, column: 0)
+        expect(
+            entries.hasSuffix("… (1 more)"), true,
+            "and a map does the same over its entries, which are a run and not fields")
+        expect(entries.count, 266, "to the same budget")
+        release(table2, keyed)
+    }
+
+    /// And it does not count a value it never opened.
+    ///
+    /// The number belongs to the run the walk was in when it stopped. A cell cut
+    /// on a field's *name* has not looked inside that field, and reporting the
+    /// field's length there would describe one list the reader cannot see the
+    /// start of while saying nothing about the fields behind it. So the walk
+    /// refuses a run it cannot spend on rather than entering it and turning back —
+    /// the cheaper answer and the honest one at the same time.
+    @MainActor private static func checkAValueTheWalkNeverOpenedIsNotCountedAsLeftBehind() {
+        // `{`, `"a"`, `:`, a 245-character string quoted, `,` and `"b"` come to
+        // exactly 256, so the budget runs out on the colon before the list and the
+        // list is never read.
+        let arena = Arena()
+        let table = structOfList(arena, note: String(repeating: "x", count: 245))
+        let drawn = table.text(row: 0, column: 0)
+        expect(
+            drawn.hasSuffix("\"b\"…"), true,
+            "the cut lands on the field's name, and the mark carries no count")
+        expect(
+            drawn.contains("more)"), false,
+            "because the four elements behind it are not a run this walk was ever in")
         release(table, arena)
     }
 
@@ -543,6 +610,51 @@ enum NestedValueChecks {
         arena.attach([keys, values], to: entries)
 
         let array = arena.array(length: 3, buffers: [nil, arena.buffer([Int32(0), 1, 3, 3])])
+        arena.attach([entries], to: array)
+        return arena.table(schema: schema, array: array)
+    }
+
+    /// One `struct<a: utf8, b: list<int32>>` row: the note, then `[1,2,3,4]`.
+    ///
+    /// The field names are one character each because the checks that use this
+    /// count them, and the note is the caller's so that the cut can be placed
+    /// exactly where a check wants it. Nesting under the second field rather than
+    /// beside it, because the rule being checked is about a run the walk may or
+    /// may not step into.
+    @MainActor private static func structOfList(_ arena: Arena, note: String) -> ArrowTable {
+        let schema = arena.schema(format: "+s", name: "v")
+        let tail = arena.schema(format: "+l", name: "b")
+        arena.attach([arena.schema(format: "i", name: "item")], to: tail)
+        arena.attach([arena.schema(format: "u", name: "a"), tail], to: schema)
+
+        let leaves = arena.array(length: 4, buffers: [nil, arena.buffer([Int32(1), 2, 3, 4])])
+        let tails = arena.array(length: 1, buffers: [nil, arena.buffer([Int32(0), 4])])
+        arena.attach([leaves], to: tails)
+
+        let array = arena.array(length: 1, buffers: [nil])
+        arena.attach([arena.strings([note]), tails], to: array)
+        return arena.table(schema: schema, array: array)
+    }
+
+    /// One `map<utf8, int32>` row holding every key given, valued by position.
+    ///
+    /// Wide rather than deep: a map with more entries than a cell can hold is the
+    /// only shape that reaches the entries loop's own budget rule.
+    @MainActor private static func wideMap(_ arena: Arena, keys: [String]) -> ArrowTable {
+        let schema = arena.schema(format: "+m", name: "v")
+        let entriesSchema = arena.schema(format: "+s", name: "entries")
+        arena.attach(
+            [arena.schema(format: "u", name: "key"), arena.schema(format: "i", name: "value")],
+            to: entriesSchema)
+        arena.attach([entriesSchema], to: schema)
+
+        let values = arena.array(
+            length: keys.count, buffers: [nil, arena.buffer(keys.indices.map { Int32($0) })])
+        let entries = arena.array(length: keys.count, buffers: [nil])
+        arena.attach([arena.strings(keys), values], to: entries)
+
+        let array = arena.array(
+            length: 1, buffers: [nil, arena.buffer([Int32(0), Int32(keys.count)])])
         arena.attach([entries], to: array)
         return arena.table(schema: schema, array: array)
     }
