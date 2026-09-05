@@ -1363,6 +1363,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dbdiff"
+version = "0.1.0"
+dependencies = [
+ "dbconn",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "dbedit"
 version = "0.1.0"
 dependencies = [
@@ -1382,6 +1391,7 @@ dependencies = [
  "dbcatalog",
  "dbconn",
  "dbddl",
+ "dbdiff",
  "dbedit",
  "dbsql",
  "dbtransfer",

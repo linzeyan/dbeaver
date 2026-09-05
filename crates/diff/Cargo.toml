@@ -1,0 +1,13 @@
+[package]
+name = "dbdiff"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+dbconn = { path = "../conn" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }

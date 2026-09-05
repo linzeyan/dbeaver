@@ -889,6 +889,64 @@ pub unsafe extern "C" fn db_sql_plan_json(
     json_result(&plan, ptr::null_mut())
 }
 
+/// Where two schemas disagree, as a JSON object holding the two relation counts
+/// and a list of differences. Release with `db_string_free`.
+///
+/// Two handles, like `db_transfer_start`: what is being asked about is the pair,
+/// and reading each side separately would mean handing the front end two catalogs
+/// to compare — a second copy of the rules, in the language the second front end
+/// will not be written in.
+///
+/// Slow in proportion to the schema. Every relation on both sides costs a read of
+/// its columns and, where it is a table, of its indexes, constraints and foreign
+/// keys, so a hundred tables is several hundred round trips and a remote server
+/// makes each of them cost its latency. There is nothing to poll and no way to
+/// stop it: the call is read-only, so the worst a caller can do is wait.
+///
+/// Null on failure with `err` set. A schema that cannot be read is a failure and
+/// not an empty side — a login without rights to one of them would otherwise
+/// produce a report saying every relation had been dropped.
+///
+/// # Safety
+/// Both handles must come from `db_connect` and not have been freed. Both schema
+/// names must be valid NUL-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_schema_diff_json(
+    left: *mut DbHandle,
+    left_schema: *const c_char,
+    right: *mut DbHandle,
+    right_schema: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if left.is_null() || right.is_null() || left_schema.is_null() || right_schema.is_null() {
+        unsafe { set_err(err, "null handle or schema") };
+        return ptr::null_mut();
+    }
+    let (Ok(left_schema), Ok(right_schema)) = (
+        unsafe { CStr::from_ptr(left_schema) }.to_str(),
+        unsafe { CStr::from_ptr(right_schema) }.to_str(),
+    ) else {
+        unsafe { set_err(err, "a schema name is not valid UTF-8") };
+        return ptr::null_mut();
+    };
+    let (left, right) = (unsafe { &*left }, unsafe { &*right });
+    // Sequentially, although the two sides are independent. They may be the same
+    // connection — comparing two schemas on one server is the ordinary case —
+    // and a driver holding one session would then be asked two questions at once.
+    let read = runtime().block_on(async {
+        let this = dbdiff::read(left.driver.as_ref(), left_schema).await?;
+        let that = dbdiff::read(right.driver.as_ref(), right_schema).await?;
+        Ok::<_, dbconn::DbError>((this, that))
+    });
+    match read {
+        Ok((this, that)) => json_result(&dbdiff::compare(&this, &that), err),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
 /// What running `text` would do: `safe`, `modify`, `dangerous` or `fatal`.
 /// Release with `db_string_free`.
 ///
