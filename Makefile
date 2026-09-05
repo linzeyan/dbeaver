@@ -371,6 +371,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-editor-theme
 	./$(APP_BIN) --verify-theme
 	./$(APP_BIN) --verify-plan
+	./$(APP_BIN) --verify-diff
 	./$(APP_BIN) --verify-mcp
 
 # The settings checked against a live window rather than as rules on their own.
@@ -1016,6 +1017,16 @@ bench-verify: release db-check ## Prove result buffers cross the FFI without cop
 screenshot: package db-check ## Capture the app window: make screenshot OUT=/tmp/grid.png TAB=content
 	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/grid.png)" \
 		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --tab "$(or $(TAB),content)"
+
+# The comparison sheet, over two schemas seeded outside the app. The seeding is
+# here rather than in the capture flag because this is the one step that needs to
+# know there is a container: the window is handed two schema names and asks the
+# server about them like any other pair.
+.PHONY: screenshot-diff
+screenshot-diff: package db-check ## Capture the schema comparison: make screenshot-diff OUT=/tmp/diff.png
+	docker exec -i $(PG_CONTAINER) psql -q -U bench -d bench < $(TOOLS)/seed-diff-schemas.sql
+	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/schema-diff.png)" \
+		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --schema-diff diff_prod:diff_staging
 
 ##@ Baseline
 

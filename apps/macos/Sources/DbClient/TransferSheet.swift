@@ -1,36 +1,5 @@
 import SwiftUI
 
-/// A connection a transfer could send rows to, and what the picker calls it.
-///
-/// A pair rather than the session alone, because the name a connection carries
-/// stopped being enough the moment there was a second window. Two windows are
-/// most often the same saved connections opened twice — that is what a second
-/// window is *for* — so the labels collide, and a picker offering "prod" twice
-/// with nothing between them is a choice nobody can make.
-@MainActor
-struct TransferTarget: Identifiable {
-    let session: Session
-    let label: String
-
-    var id: UUID { session.id }
-
-    /// A connection in the window doing the asking, called what its tab is
-    /// called.
-    static func inThisWindow(_ session: Session) -> TransferTarget {
-        TransferTarget(session: session, label: session.connectionLabel)
-    }
-
-    /// A connection in one of the other windows, named for where it is.
-    ///
-    /// Not numbered. AppKit numbers nothing on screen — the Window menu lists
-    /// titles — so "Window 2" would be a number this application never shows
-    /// anywhere else. What the person needs to know is that the rows will land
-    /// somewhere they are not looking, and that is what this says.
-    static func inAnotherWindow(_ session: Session) -> TransferTarget {
-        TransferTarget(session: session, label: "\(session.connectionLabel) — another window")
-    }
-}
-
 /// The Transfer picker: which open connection this result's rows go to, and
 /// which table on it they go into.
 ///
@@ -56,11 +25,11 @@ struct TransferSheet: View {
     @State private var highlighted = 0
     @FocusState private var typing: Bool
 
-    private var targets: [TransferTarget] { model.transferTargets }
+    private var targets: [ConnectionChoice] { model.transferTargets }
 
     /// Falls back to the first target rather than to nothing, so the sheet still
     /// names a database after the selected connection has been closed under it.
-    private var target: TransferTarget? { targets.first { $0.id == chosen } ?? targets.first }
+    private var target: ConnectionChoice? { targets.first { $0.id == chosen } ?? targets.first }
 
     private var matches: [GoToTarget] {
         guard let target else { return [] }

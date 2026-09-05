@@ -5937,28 +5937,32 @@ final class AppModel {
     /// is not a nonsense — a table copied within one database is a real thing to
     /// want — but the core writes through a second connection, and this session's
     /// is the one the source cursor is reading on.
-    var transferTargets: [TransferTarget] {
-        receivableSessions.filter { $0 !== session }.map(TransferTarget.inThisWindow)
-            + otherWindowTargets()
+    var transferTargets: [ConnectionChoice] {
+        idleSessions.filter { $0 !== session }.map(ConnectionChoice.inThisWindow)
+            + otherWindowChoices()
     }
 
-    /// The tabs of this window that could take a transfer, whoever is asking.
+    /// The tabs of this window whose connection is free to be asked something,
+    /// whoever is asking.
     ///
-    /// `transferTargets` is this without the tab doing the asking; `WindowList`
-    /// calls it on the *other* windows, where that tab is not among these and
-    /// there is nothing to leave out.
-    var receivableSessions: [Session] {
+    /// `transferTargets` is this without the tab doing the asking; a comparison
+    /// keeps that tab, because two schemas on one server is the ordinary case
+    /// and reading both of them is one connection answering twice rather than
+    /// two things happening at once. `WindowList` calls it on the *other*
+    /// windows, where that tab is not among these and there is nothing to leave
+    /// out.
+    var idleSessions: [Session] {
         sessions.filter { $0.db != nil && !$0.isBusy && !$0.isTransferring }
     }
 
-    /// What the other windows can take, already named for being elsewhere.
+    /// What the other windows can offer, already named for being elsewhere.
     ///
     /// Injected by `WindowList` and answering nothing by default, which is the
     /// answer for a model with no window layer over it — every model a
     /// `--verify-*` suite builds. A closure rather than a list because the
     /// windows behind this one open, close and become busy while it is on
     /// screen, and the picker reads this each time it draws.
-    var otherWindowTargets: () -> [TransferTarget] = { [] }
+    var otherWindowChoices: () -> [ConnectionChoice] = { [] }
 
     /// Whether there is a result to send and somewhere to send it.
     ///
@@ -6123,6 +6127,170 @@ final class AppModel {
         transferHandle = nil
         transferTarget?.isBusy = false
         transferTarget = nil
+    }
+
+    // MARK: - Comparing two schemas
+
+    /// Whether the comparison sheet is on screen.
+    ///
+    /// On the window rather than on the session, as `isTransferPickerOpen` is
+    /// and for the same reason: a sheet covers the window, and one flag per tab
+    /// would leave a report open behind a tab somebody switched away from.
+    var isSchemaDiffOpen = false
+
+    /// Which connection this one is being compared with, by id rather than by
+    /// position — the list of open connections is live, as the transfer
+    /// picker's is.
+    var schemaDiffTarget: UUID?
+    var schemaDiffLeftSchema = ""
+    var schemaDiffRightSchema = ""
+
+    /// The last report and the pair it is of, or nil before anything has been
+    /// compared.
+    var schemaComparison: SchemaComparison?
+    var isComparingSchemas = false
+
+    /// The connection a running comparison is holding, so that it can be let go
+    /// again — including from `fail`, which is not told which pair went wrong.
+    /// Nil when the two sides are the same tab, which holds nothing.
+    private var schemaDiffHeld: ConnectionChoice?
+
+    /// Every connection a comparison could be against, this one included.
+    ///
+    /// Including this one, unlike `transferTargets`: two schemas on one server
+    /// is the ordinary case for a comparison, and the core reads the two sides
+    /// one after the other — the same handle twice is one connection answering
+    /// twice rather than two things happening at once.
+    var schemaDiffChoices: [ConnectionChoice] {
+        let idle = idleSessions.map(ConnectionChoice.inThisWindow) + otherWindowChoices()
+        // A connection a comparison is holding stays in the list under the name
+        // it was chosen by. It is marked busy for the duration — that is what
+        // stops its own tab sending something down the same connection — and
+        // dropping it here would blank the picker that named it while the
+        // comparison it named was still running.
+        guard let held = schemaDiffHeld, !idle.contains(where: { $0.session === held.session })
+        else { return idle }
+        return idle + [held]
+    }
+
+    /// The connection a comparison would be against.
+    ///
+    /// Falls back to the first offered rather than to nothing, for the reason the
+    /// transfer picker does: the list is live, and a connection closed under an
+    /// open sheet would otherwise leave a Compare button that does nothing and
+    /// says nothing. One reading of the choice, used by the picker and by the
+    /// button, so the two cannot mean different connections.
+    var schemaDiffChoice: ConnectionChoice? {
+        let choices = schemaDiffChoices
+        return choices.first { $0.id == schemaDiffTarget } ?? choices.first
+    }
+
+    /// Whether there is a connection to compare from and one to compare with.
+    var canCompareSchemas: Bool {
+        db != nil && !isBusy && !isComparingSchemas && !schemaDiffChoices.isEmpty
+    }
+
+    /// Opens the sheet on a pair that both connections actually have.
+    ///
+    /// Anything remembered from last time that the connection in front cannot
+    /// offer is dropped rather than shown greyed: a picker still holding a
+    /// schema that is not on this server would send it anyway.
+    func presentSchemaDiff() {
+        guard canCompareSchemas else { return }
+        if !session.schemas.contains(where: { $0.name == schemaDiffLeftSchema }) {
+            schemaDiffLeftSchema = Self.firstSchema(on: session)
+        }
+        if !schemaDiffChoices.contains(where: { $0.id == schemaDiffTarget }) {
+            schemaDiffTarget = session.id
+        }
+        schemaDiffTargetChanged()
+        isSchemaDiffOpen = true
+    }
+
+    func closeSchemaDiff() {
+        // The comparison in flight is not stopped, because there is nothing to
+        // stop it with — see the note on `db_schema_diff_json`. It goes on, lets
+        // both connections go when it finishes, and leaves its summary in the
+        // status bar; reopening the sheet shows the report.
+        isSchemaDiffOpen = false
+    }
+
+    /// Puts the right-hand schema back on something the chosen connection has.
+    ///
+    /// Called when the target changes as well as when the sheet opens: the two
+    /// pickers are one choice in two halves, and a connection changed under a
+    /// schema name that only the previous one had is a pair that cannot be read.
+    func schemaDiffTargetChanged() {
+        guard let target = schemaDiffChoice?.session else { return }
+        if !target.schemas.contains(where: { $0.name == schemaDiffRightSchema }) {
+            schemaDiffRightSchema = Self.firstSchema(on: target)
+        }
+    }
+
+    /// What a schema picker opens on.
+    ///
+    /// `public` first, which is the rule the navigator opens a connection on —
+    /// two different answers to "which schema does this application mean by
+    /// default" is how a window comes to disagree with itself. The system
+    /// schemas are skipped rather than left out of the picker: comparing
+    /// `pg_catalog` across two servers is a real thing to want, and a list with
+    /// nothing but user schemas in it could not answer that.
+    private static func firstSchema(on session: Session) -> String {
+        let schemas = session.schemas
+        return
+            (schemas.first { $0.name == "public" } ?? schemas.first { !$0.isSystem }
+            ?? schemas.first)?.name ?? ""
+    }
+
+    /// Compares the two schemas the pickers name.
+    ///
+    /// Runs on this session's queue, which is what serialises it against
+    /// everything else this tab does. The other connection is marked busy for
+    /// the duration instead: it is not on this queue, and its own tab sending a
+    /// statement down it while the core is reading its catalog would be two uses
+    /// of one connection.
+    func compareSchemas() {
+        guard canCompareSchemas, let choice = schemaDiffChoice, let targetDb = choice.session.db
+        else { return }
+        let mine = schemaDiffLeftSchema
+        let theirs = schemaDiffRightSchema
+        guard !mine.isEmpty, !theirs.isEmpty else {
+            errorMessage = "Name a schema on each side."
+            return
+        }
+        // Qualified on both sides, always. The ordinary comparison is two
+        // schemas on one server, where the connection's name is the same word
+        // twice and the schema is the whole of what tells the columns apart.
+        let leftName = "\(connectionLabel).\(mine)"
+        let rightName = "\(choice.label).\(theirs)"
+
+        isComparingSchemas = true
+        errorMessage = nil
+        // The previous report goes now rather than when this one lands. A table
+        // whose headings name one pair and whose rows are of another is worse
+        // than an empty panel.
+        schemaComparison = nil
+        // In the status bar as well as in the sheet, so a comparison somebody
+        // closed the sheet over is still visibly running somewhere.
+        status = "Comparing \(leftName) with \(rightName)…"
+        if choice.session !== session {
+            choice.session.isBusy = true
+            schemaDiffHeld = choice
+        }
+        run(
+            { db in try db.schemaDiff(of: mine, against: targetDb, schema: theirs) },
+            then: { [self] report in
+                endSchemaComparison()
+                schemaComparison = SchemaComparison(
+                    left: leftName, right: rightName, report: report)
+                status = report.summary(left: leftName, right: rightName)
+            })
+    }
+
+    private func endSchemaComparison() {
+        isComparingSchemas = false
+        schemaDiffHeld?.session.isBusy = false
+        schemaDiffHeld = nil
     }
 
     // MARK: - Import
@@ -7944,6 +8112,11 @@ final class AppModel {
         }
 
         if isTransferring { endTransfer() }
+        // Through `endSchemaComparison` for the reason `endTransfer` is: a
+        // comparison that failed is still holding the other connection busy, and
+        // a tab left marked busy over a comparison that is not running is a tab
+        // nothing will ever release.
+        if isComparingSchemas { endSchemaComparison() }
         errorMessage = message
         status = "Failed"
         if let statement { pointAtSyntaxError(statement) }

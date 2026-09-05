@@ -1,6 +1,38 @@
 import AppKit
 import SwiftUI
 
+/// An open connection a picker can offer, and what it calls it.
+///
+/// Here rather than beside either picker that uses it, because the rule it
+/// carries is a window rule. A pair rather than the session alone: the name a
+/// connection carries stopped being enough the moment there was a second window.
+/// Two windows are most often the same saved connections opened twice — that is
+/// what a second window is *for* — so the labels collide, and a picker offering
+/// "prod" twice with nothing between them is a choice nobody can make.
+@MainActor
+struct ConnectionChoice: Identifiable {
+    let session: Session
+    let label: String
+
+    var id: UUID { session.id }
+
+    /// A connection in the window doing the asking, called what its tab is
+    /// called.
+    static func inThisWindow(_ session: Session) -> ConnectionChoice {
+        ConnectionChoice(session: session, label: session.connectionLabel)
+    }
+
+    /// A connection in one of the other windows, named for where it is.
+    ///
+    /// Not numbered. AppKit numbers nothing on screen — the Window menu lists
+    /// titles — so "Window 2" would be a number this application never shows
+    /// anywhere else. What the person needs to know is that the work will land
+    /// somewhere they are not looking, and that is what this says.
+    static func inAnotherWindow(_ session: Session) -> ConnectionChoice {
+        ConnectionChoice(session: session, label: "\(session.connectionLabel) — another window")
+    }
+}
+
 /// One window: the AppKit window, the model behind it, and the delegate that
 /// answers for both.
 ///
@@ -173,19 +205,19 @@ final class WindowList {
     @discardableResult
     func adopt(_ model: AppModel) -> WindowController {
         let controller = WindowController(model: model, in: self)
-        // Where a transfer started in this window can send rows: the connections
-        // every other window has open. Read when the picker draws rather than
-        // taken now, because the windows this walks did not all exist when this
-        // one was built — and the one being built is left out by identity, so a
-        // window is never offered its own tabs twice.
+        // What a picker in this window can reach past its own tabs: the
+        // connections every other window has open. Read when the picker draws
+        // rather than taken now, because the windows this walks did not all
+        // exist when this one was built — and the one being built is left out by
+        // identity, so a window is never offered its own tabs twice.
         // Weakly on both sides. The closure is a property of the model it asks
         // about, so a strong capture of either would be a window that never gets
         // released — and the model of a window that has closed outlives it for
         // as long as `FrontWindow` is still pointing at it.
-        model.otherWindowTargets = { [weak self, weak model] in
+        model.otherWindowChoices = { [weak self, weak model] in
             guard let self, let model else { return [] }
             return windows.filter { $0.model !== model }
-                .flatMap { $0.model.receivableSessions.map(TransferTarget.inAnotherWindow) }
+                .flatMap { $0.model.idleSessions.map(ConnectionChoice.inAnotherWindow) }
         }
         controller.show(after: windows.last)
         windows.append(controller)
