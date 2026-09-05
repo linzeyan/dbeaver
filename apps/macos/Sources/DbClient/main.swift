@@ -3875,10 +3875,20 @@ func openSchemaDiagram(model: AppModel, schema: String) {
         exit(2)
     }
     let deadline = CFAbsoluteTimeGetCurrent() + 120
+    var refreshed = false
     var asked = false
 
     func poll() {
         guard let session = model.sessions.first, session.db != nil, !session.isBusy else {
+            return again()
+        }
+        // The schema is seeded outside this process, as `--schema-diff`'s is, so
+        // the tree is re-read before the picker is asked to offer it. Without
+        // this the sheet falls back to the first schema the connection has and
+        // photographs the wrong one rather than failing.
+        guard refreshed else {
+            refreshed = true
+            model.refresh()
             return again()
         }
         guard asked else {

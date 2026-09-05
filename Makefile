@@ -1092,6 +1092,16 @@ screenshot-diff: package db-check ## Capture the schema comparison: make screens
 	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/schema-diff.png)" \
 		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --schema-diff diff_prod:diff_staging
 
+# The diagram, over a schema seeded outside the app for the reason above. This is
+# the one surface in the window that no check can look at — the rules behind the
+# layout are all in `--verify-schema-diagram`, and whether the result is legible
+# is a question only the shutter answers.
+.PHONY: screenshot-diagram
+screenshot-diagram: package db-check ## Capture the schema diagram: make screenshot-diagram OUT=/tmp/erd.png
+	docker exec -i $(PG_CONTAINER) psql -q -U bench -d bench < $(TOOLS)/seed-diagram-schema.sql
+	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/schema-diagram.png)" \
+		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --schema-diagram erd_demo
+
 ##@ Baseline
 
 .PHONY: baseline
