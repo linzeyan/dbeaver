@@ -183,6 +183,80 @@ enum EditorTyping {
         return Edit(replacing: start..<caret, insert: lifted, selection: selection)
     }
 
+    // MARK: - Snippet placeholders
+
+    /// The first blank at or after `offset`, or nil where the text holds none.
+    ///
+    /// A blank is spelt `${anything}`, and the spelling is fixed rather than a
+    /// setting for the reason every other habit in this file is one line rather
+    /// than an engine: a statement somebody saved last year has to still have
+    /// blanks this editor recognises, and a configurable delimiter makes that
+    /// depend on a preference nobody remembers changing.
+    ///
+    /// `${…}` and not `?` or `:name`, both of which are parameter markers some
+    /// driver here really sends, nor `<…>`, which is two operators. Sequel Ace
+    /// spells its snippets with the same braces (`SPTextView.insertAsSnippet`),
+    /// without the numbering, the defaults and the mirrors it carries and this
+    /// deliberately does not: order here is document order, which is the order
+    /// the statement is read in, and an index is a second thing to keep
+    /// consistent that nothing in this build reads.
+    ///
+    /// The word inside is never interpreted — it is a label for whoever is
+    /// filling it in. What it buys is that a blank left unfilled is a syntax
+    /// error in every dialect this build speaks, so the server refuses it
+    /// instead of running something else.
+    ///
+    /// A blank does not span a line: a `}` further down the buffer is a brace
+    /// somebody wrote, and reading the text between as one blank would select
+    /// half a statement.
+    static func placeholder(in text: String, from offset: Int) -> Range<Int>? {
+        let scalars = Array(text.unicodeScalars)
+        var i = max(offset, 0)
+        while i + 1 < scalars.count {
+            guard scalars[i] == "$", scalars[i + 1] == "{" else {
+                i += 1
+                continue
+            }
+            var end = i + 2
+            while end < scalars.count, scalars[end] != "}", scalars[end] != "\n" { end += 1 }
+            if end < scalars.count, scalars[end] == "}" { return i..<(end + 1) }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Where Tab goes while the selection is a blank: onto the next one, or —
+    /// for the last — to a caret just after it. Nil otherwise, which hands the
+    /// key back to the indent rule.
+    ///
+    /// The selection is the whole of this feature's state. There is no snippet
+    /// session to open, nothing to release when the buffer, the tab or the
+    /// window goes away, and no way for a walk begun in one editor to still be
+    /// running when another is looked at. Typing over a blank ends the walk by
+    /// making the selection something that is not a blank, which is exactly the
+    /// moment it should end.
+    ///
+    /// The last blank collapses rather than standing aside, and that is the one
+    /// case worth spelling out: Tab over a selection replaces it, so handing the
+    /// key back there would let Tab delete the blank it had just been
+    /// navigating. Deselecting says "back to ordinary editing" in the keystroke
+    /// that asked for it, and the Tab after that indents as always.
+    ///
+    /// A caret is refused by the same comparison as everything else, without a
+    /// clause of its own: a blank is at least `${}`, so an empty selection can
+    /// never equal one.
+    static func placeholderJump(in text: String, selection: Range<Int>) -> Edit? {
+        guard placeholder(in: text, from: selection.lowerBound) == selection else { return nil }
+        let landing =
+            placeholder(in: text, from: selection.upperBound)
+            ?? selection.upperBound..<selection.upperBound
+        // An empty insertion over an empty range: nothing is written and only
+        // the selection moves, which is the shape `apply` already handles.
+        return Edit(
+            replacing: selection.upperBound..<selection.upperBound, insert: "",
+            selection: landing)
+    }
+
     private static func isWord(_ scalar: Unicode.Scalar) -> Bool {
         scalar == "_" || CharacterSet.alphanumerics.contains(scalar)
     }

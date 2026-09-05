@@ -88,6 +88,9 @@ let reconnectTo = argument("--reconnect")
 if CommandLine.arguments.contains("--verify-splitter") {
     exit(SQLScriptChecks.run() ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-script-run") {
+    exit(ScriptRunChecks.run() ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-connection") {
     exit(ConnectionChecks.run() ? 0 : 1)
 }
@@ -932,6 +935,15 @@ let filterObjects = CommandLine.arguments.contains("--filter-objects")
 /// is where the bar reads it from anyway — so the shot shows matches and a
 /// count instead of an empty field.
 let showFindBar = CommandLine.arguments.contains("--find-bar")
+
+/// `--snippet` recalls a saved query holding blanks into the editor.
+///
+/// Exists for the reason `--history-pick` does: a favorite is chosen by clicking
+/// a row in a panel, and a capture can click nothing. The statement is made here
+/// rather than taken from the person's list — a capture must not depend on what
+/// they happen to have kept — and never goes through `QueryFavorites.save`,
+/// which would write it into their real list to take one picture.
+let snippetMode = CommandLine.arguments.contains("--snippet")
 
 /// `--settings <pane>` opens the Settings window on the named pane, for the
 /// captures that show it. The whole run is pointed at a scratch defaults suite
@@ -3339,6 +3351,45 @@ func showFindBarWhenReady(model: AppModel) {
     poll()
 }
 
+/// Drives `--snippet`: puts a saved query with three blanks in it into the
+/// editor, so a shot shows where a recalled snippet leaves the caret.
+///
+/// Waits for the connection although the recall needs none, for the reason
+/// `showFindBarWhenReady` does: the capture that wants the editor wants the
+/// window behind it populated. The selection is printed as well as drawn — a
+/// screenshot shows a highlight, and only the log says which characters it
+/// covers.
+@MainActor
+func recallSnippetWhenReady(model: AppModel) {
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    func poll() {
+        guard !model.schemas.isEmpty, !model.isBusy else {
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                fputs("snippet probe timed out waiting for a connection\n", stderr)
+                exit(1)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                MainActor.assumeIsolated(poll)
+            }
+            return
+        }
+        model.recall(
+            QueryFavorite(
+                id: UUID(), name: "Rows by column",
+                sql: "SELECT *\n  FROM ${table}\n WHERE ${column} = ${value}",
+                scheme: model.scheme, savedAt: Date()))
+        // One line, because a probe's output is read with `rg`.
+        let buffer = model.queryText.replacingOccurrences(of: "\n", with: "⏎")
+        var covered = "(none)"
+        if let indices = model.querySelection?.indices, case .selection(let range) = indices {
+            covered = String(model.queryText[range])
+        }
+        fputs("snippet  buffer   \(buffer)\n", stderr)
+        fputs("snippet  selected \(covered)\n", stderr)
+    }
+    poll()
+}
+
 /// Drives `--complete`: opens the list of names under the editor's caret, the
 /// way ⌥⎋ does, once the connection is up.
 ///
@@ -4481,6 +4532,7 @@ if benchMode {
         if collapseSidebar { model.wantsSidebarRail = true }
         if filterObjects { filterObjectsWhenReady(model: model) }
         if showFindBar { showFindBarWhenReady(model: model) }
+        if snippetMode { recallSnippetWhenReady(model: model) }
         if mcpProbePort != nil {
             // After `follow`, which is where the server starts and the token is
             // minted. No token means it did not start, and the coordinator has

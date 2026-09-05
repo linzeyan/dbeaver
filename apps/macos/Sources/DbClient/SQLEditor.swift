@@ -474,6 +474,18 @@ struct SQLEditor: NSViewRepresentable {
                     EditorTyping.newline(
                         in: cachedString, selection: scalarSelection(), rules: parent.typing))
             case #selector(NSResponder.insertTab(_:)):
+                // The blanks of a recalled snippet come first: while the
+                // selection is one of them Tab belongs to the walk between
+                // them, and the indent rule answers every other Tab in the
+                // buffer. Asked in this order rather than merged, because the
+                // two are different questions about the same key and only one
+                // of them ever has an answer.
+                if apply(
+                    EditorTyping.placeholderJump(
+                        in: cachedString, selection: scalarSelection()))
+                {
+                    return true
+                }
                 return apply(
                     EditorTyping.tab(
                         in: cachedString, selection: scalarSelection(), rules: parent.typing))
