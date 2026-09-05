@@ -435,6 +435,7 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-theme
 	./$(APP_BIN) --verify-plan
 	./$(APP_BIN) --verify-diff
+	./$(APP_BIN) --verify-schema-diagram
 	./$(APP_BIN) --verify-mcp
 
 # The settings checked against a live window rather than as rules on their own.
