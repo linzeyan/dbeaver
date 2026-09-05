@@ -545,6 +545,50 @@ char* db_new_table_sql(DbHandle* handle, const char* schema, const char* name,
 char* db_index_change_sql(DbHandle* handle, const char* schema, const char* relation,
                           const char* change, char** err);
 
+// The statement for adding or removing a constraint of a relation, as text.
+// Release with db_string_free. Returns NULL and sets *err on failure.
+//
+// Written and not run, like the change calls above it.
+//
+// `change` is tagged JSON, one of:
+//
+//   {"change": "create", "constraint": {"sort": "unique", "name": …,
+//                                       "columns": [...]}}
+//   {"change": "create", "constraint": {"sort": "check", "name": …,
+//                                       "expression": …}}
+//   {"change": "create", "constraint": {"sort": "foreign_key", "name": …,
+//                                       "columns": [...], "other_schema": …,
+//                                       "other_table": …, "other_columns": [...],
+//                                       "on_delete": …, "on_update": …}}
+//   {"change": "drop", "name": …, "sort": "unique" | "check" | "foreign_key"}
+//
+// Two verbs and not three. No server here alters a constraint in place —
+// DBeaver's own modify path is the delete followed by the create, which is two
+// statements and a window in which the table is unconstrained — so what crosses
+// is the two that are one statement each.
+//
+// The drop carries a sort as well as a name, which is one field more than the
+// index drop needs and is not redundant: PostgreSQL drops all three with
+// DROP CONSTRAINT and MySQL writes DROP KEY, DROP CONSTRAINT and
+// DROP FOREIGN KEY, so a name alone would leave nothing to choose the noun with.
+//
+// A referential action is one of no_action, restrict, cascade, set_null,
+// set_default. Absent takes the server's default, which is no_action everywhere
+// and is written as nothing at all; a word this build does not know is refused
+// by name rather than becoming that default.
+//
+// There is no primary key among the sorts. DBeaver drops one on MySQL as
+// ALTER TABLE t DROP PRIMARY KEY, with no name in the statement, and emits
+// nothing at all when the key is the one an AUTO_INCREMENT column needs;
+// db_constraints_json does not list one either, a primary key reaching the front
+// end as its index.
+//
+// Whether this connection writes either at all is db_capabilities_json's
+// changes_constraints, which is not implied by changes_indexes: SQLite makes and
+// drops an index and cannot write two of the three constraints.
+char* db_constraint_change_sql(DbHandle* handle, const char* schema, const char* relation,
+                               const char* change, char** err);
+
 char* db_column_change_sql(DbHandle* handle, const char* schema, const char* relation,
                            const char* change, char** err);
 

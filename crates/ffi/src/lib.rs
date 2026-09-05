@@ -474,6 +474,7 @@ pub unsafe extern "C" fn db_capabilities_json(
             alters_columns: h.dialect.is_some_and(dbddl::alters_columns),
             changes_indexes: h.dialect.is_some_and(dbddl::changes_indexes),
             index_methods: h.dialect.map_or(&[], dbddl::index_methods),
+            changes_constraints: h.dialect.is_some_and(dbddl::changes_constraints),
             changes_databases: h.dialect.is_some_and(dbddl::changes_databases),
         },
         err,
@@ -573,6 +574,21 @@ struct Surface {
     /// having one method: MySQL takes `USING HASH` and InnoDB ignores it, so it
     /// is left out rather than offered and quietly discarded.
     index_methods: &'static [&'static str],
+
+    /// Whether `db_constraint_change_sql` writes either statement for this
+    /// database.
+    ///
+    /// Its own flag again, and SQLite is what stops it being a second reading of
+    /// `changes_indexes`: it makes and drops an index, and its `ALTER TABLE`
+    /// cannot write two of the three constraints. A front end reading one flag
+    /// for both would put an Add Foreign Key on a SQLite table that refuses
+    /// every time it is clicked.
+    ///
+    /// One flag for all three sorts, which is why SQLite answers false rather
+    /// than half-true: the library this build links does take a check
+    /// constraint, and a section drawn from a capability that is right about one
+    /// item in three is a section that lies about the other two.
+    changes_constraints: bool,
 
     /// Whether `db_database_change_sql` writes anything at all for this
     /// database.
@@ -2230,6 +2246,251 @@ pub unsafe extern "C" fn db_index_change_sql(
         let listed = h.driver.relations(schema).await?;
         match listed.into_iter().find(|info| info.name == relation) {
             Some(info) => dbddl::index_change(dialect, &info, change),
+            None => Err(dbconn::DbError::new(format!(
+                "{schema}.{relation} is not there"
+            ))),
+        }
+    });
+    match written.and_then(|text| {
+        CString::new(text)
+            .map_err(|e| dbconn::DbError::new(format!("the statement is not text: {e}")))
+    }) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            unsafe { set_err(err, e) };
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Which of the three sorts a constraint statement is about, as it crosses the
+/// boundary.
+///
+/// Spelled rather than numbered, for the reason every other tag here is: a sort
+/// that shifted by one because somebody inserted a variant would drop a foreign
+/// key with the noun for a unique constraint, and on MySQL that is a statement
+/// the server parses and refuses with a message about the wrong object.
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ConstraintSortRequest {
+    Unique,
+    Check,
+    ForeignKey,
+}
+
+impl From<ConstraintSortRequest> for dbddl::ConstraintSort {
+    fn from(sort: ConstraintSortRequest) -> Self {
+        match sort {
+            ConstraintSortRequest::Unique => dbddl::ConstraintSort::Unique,
+            ConstraintSortRequest::Check => dbddl::ConstraintSort::Check,
+            ConstraintSortRequest::ForeignKey => dbddl::ConstraintSort::ForeignKey,
+        }
+    }
+}
+
+/// A constraint that does not exist yet, as it crosses the boundary.
+///
+/// Tagged on `sort` rather than carrying every field and leaving two-thirds of
+/// them null, because that is the shape of the thing: a check has no columns and
+/// a unique constraint has no table to point at. A sort this library does not
+/// know is refused by serde rather than falling through to one it does.
+#[derive(serde::Deserialize)]
+#[serde(tag = "sort", rename_all = "snake_case")]
+enum NewConstraintRequest {
+    Unique {
+        name: String,
+        columns: Vec<String>,
+    },
+    Check {
+        name: String,
+        expression: String,
+    },
+    ForeignKey {
+        name: String,
+        columns: Vec<String>,
+        /// Absent means the front end had nothing to call the container, which
+        /// is what `db_new_table_sql` reads an empty schema as: the table the
+        /// connection would have found anyway rather than a container called
+        /// nothing.
+        #[serde(default)]
+        other_schema: String,
+        other_table: String,
+        other_columns: Vec<String>,
+        /// Absent takes the server's own default, which is `NO ACTION` on every
+        /// one of these and is written as nothing at all. A word this build does
+        /// not know is refused by name rather than quietly becoming that
+        /// default — a key that stopped cascading without saying so is a key
+        /// that runs and does the wrong thing.
+        #[serde(default)]
+        on_delete: Option<String>,
+        #[serde(default)]
+        on_update: Option<String>,
+    },
+}
+
+impl NewConstraintRequest {
+    /// The constraint this describes, or a refusal naming what it asked for.
+    fn into_constraint(self) -> dbconn::DbResult<dbddl::NewConstraint> {
+        Ok(match self {
+            NewConstraintRequest::Unique { name, columns } => {
+                dbddl::NewConstraint::Unique { name, columns }
+            }
+            NewConstraintRequest::Check { name, expression } => {
+                dbddl::NewConstraint::Check { name, expression }
+            }
+            NewConstraintRequest::ForeignKey {
+                name,
+                columns,
+                other_schema,
+                other_table,
+                other_columns,
+                on_delete,
+                on_update,
+            } => dbddl::NewConstraint::ForeignKey {
+                name,
+                columns,
+                other_schema,
+                other_table,
+                other_columns,
+                on_delete: rule(on_delete)?,
+                on_update: rule(on_update)?,
+            },
+        })
+    }
+}
+
+/// The referential action `word` names, or the server's default where nothing
+/// was said.
+fn rule(word: Option<String>) -> dbconn::DbResult<dbddl::ReferentialAction> {
+    match word {
+        None => Ok(dbddl::ReferentialAction::NoAction),
+        Some(word) => dbddl::ReferentialAction::parse(&word),
+    }
+}
+
+/// One change to one constraint, as it crosses the boundary.
+///
+/// Tagged like `db_index_change_sql`'s, and the drop carries a sort as well as a
+/// name — which is one more field than the index drop needs and is not
+/// redundant: MySQL spells the drop three different ways for the three sorts,
+/// and the name alone would leave nothing to choose the noun with.
+#[derive(serde::Deserialize)]
+#[serde(tag = "change", rename_all = "snake_case")]
+enum ConstraintChangeRequest {
+    Create {
+        constraint: NewConstraintRequest,
+    },
+    Drop {
+        name: String,
+        sort: ConstraintSortRequest,
+    },
+}
+
+/// The statement for adding or removing a constraint of a relation, as text.
+/// Release with `db_string_free`.
+///
+/// Written and not run, like the change calls above it.
+///
+/// `change` is one of:
+///
+/// ```json
+/// {"change": "create", "constraint": {"sort": "unique", "name": …,
+///                                     "columns": [...]}}
+/// {"change": "create", "constraint": {"sort": "check", "name": …,
+///                                     "expression": …}}
+/// {"change": "create", "constraint": {"sort": "foreign_key", "name": …,
+///                                     "columns": [...], "other_schema": …,
+///                                     "other_table": …, "other_columns": [...],
+///                                     "on_delete": …, "on_update": …}}
+/// {"change": "drop", "name": …, "sort": "unique" | "check" | "foreign_key"}
+/// ```
+///
+/// Two verbs and not three. No server here alters a constraint in place —
+/// upstream's own modify path is the delete followed by the create, which is two
+/// statements and a window in which the table is unconstrained — so what crosses
+/// is the two that are one statement each.
+///
+/// No primary key among the sorts. `MySQLConstraintManager` drops one as
+/// `ALTER TABLE t DROP PRIMARY KEY`, with no name in the statement at all, and
+/// emits nothing whatsoever when the key is the one an `AUTO_INCREMENT` column
+/// needs; and `db_constraints_json` does not list one either, a primary key
+/// reaching the front end as its index.
+///
+/// The relation's kind is read from the server, like `db_index_change_sql` reads
+/// it: a view has no rows of its own to make a rule about.
+///
+/// Whether this connection writes either at all is `db_capabilities_json`'s
+/// `changes_constraints`, which is not implied by `changes_indexes` — SQLite
+/// makes and drops an index and cannot write two of the three constraints.
+///
+/// # Safety
+/// `handle` must come from `db_connect` and not have been freed. `schema`,
+/// `relation` and `change` must be valid NUL-terminated C strings. `err` must be
+/// null or point to writable storage for one `char *`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn db_constraint_change_sql(
+    handle: *mut DbHandle,
+    schema: *const c_char,
+    relation: *const c_char,
+    change: *const c_char,
+    err: *mut *mut c_char,
+) -> *mut c_char {
+    if handle.is_null() || schema.is_null() || relation.is_null() || change.is_null() {
+        unsafe { set_err(err, "null handle, schema, relation, or change") };
+        return ptr::null_mut();
+    }
+    let (schema, relation, change) = unsafe {
+        match (
+            CStr::from_ptr(schema).to_str(),
+            CStr::from_ptr(relation).to_str(),
+            CStr::from_ptr(change).to_str(),
+        ) {
+            (Ok(s), Ok(r), Ok(c)) => (s, r, c),
+            _ => {
+                set_err(err, "schema, relation, or change is not valid UTF-8");
+                return ptr::null_mut();
+            }
+        }
+    };
+    let requested: ConstraintChangeRequest = match serde_json::from_str(change) {
+        Ok(requested) => requested,
+        Err(e) => {
+            unsafe { set_err(err, format!("that is not a change to a constraint: {e}")) };
+            return ptr::null_mut();
+        }
+    };
+    // Built out here for the reason the added column and the new index are:
+    // `ConstraintChange::Create` borrows it, and the borrow has to outlive the
+    // call it is passed to.
+    let (created, drop) = match requested {
+        ConstraintChangeRequest::Create { constraint } => match constraint.into_constraint() {
+            Ok(constraint) => (Some(constraint), None),
+            Err(e) => {
+                unsafe { set_err(err, e) };
+                return ptr::null_mut();
+            }
+        },
+        ConstraintChangeRequest::Drop { name, sort } => (None, Some((name, sort))),
+    };
+    let change = match (&created, &drop) {
+        (Some(constraint), _) => dbddl::ConstraintChange::Create(constraint),
+        (None, Some((name, sort))) => dbddl::ConstraintChange::Drop {
+            name,
+            sort: (*sort).into(),
+        },
+        (None, None) => unreachable!("every request is a create or a drop"),
+    };
+
+    let h = unsafe { &*handle };
+    let written = runtime().block_on(async {
+        let Some(dialect) = h.dialect else {
+            return Err(dbconn::DbError::new(
+                "this build does not write DDL for this database",
+            ));
+        };
+        let listed = h.driver.relations(schema).await?;
+        match listed.into_iter().find(|info| info.name == relation) {
+            Some(info) => dbddl::constraint_change(dialect, &info, change),
             None => Err(dbconn::DbError::new(format!(
                 "{schema}.{relation} is not there"
             ))),
