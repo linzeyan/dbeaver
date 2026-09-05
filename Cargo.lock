@@ -1366,6 +1366,7 @@ dependencies = [
 name = "dbdiff"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dbconn",
  "serde",
  "tokio",

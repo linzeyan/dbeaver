@@ -624,6 +624,24 @@ mod tests {
         );
     }
 
+    /// A column that stopped being part of the key is a difference somebody has
+    /// to know about, and the description is the only place this build reads the
+    /// key from — there is no other call that would notice.
+    #[test]
+    fn a_column_leaving_the_primary_key_is_a_difference() {
+        let keyed = |is_primary_key| {
+            let mut info = column_info("id", "integer");
+            info.is_primary_key = is_primary_key;
+            side(vec![table("orders", vec![info])])
+        };
+        let report = compare(&keyed(true), &keyed(false));
+        assert_eq!(report.differences.len(), 1);
+        assert_eq!(report.differences[0].object, "id");
+        assert_eq!(report.differences[0].verdict, Verdict::Changed);
+        assert_eq!(report.differences[0].left, "integer primary key");
+        assert_eq!(report.differences[0].right, "integer");
+    }
+
     /// The kind is said once, whichever of the two shapes a server hands back.
     #[test]
     fn a_constraint_names_what_kind_it_is_exactly_once() {

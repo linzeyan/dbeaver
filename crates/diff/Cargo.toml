@@ -10,4 +10,5 @@ dbconn = { path = "../conn" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+async-trait.workspace = true
 tokio = { workspace = true, features = ["full"] }
