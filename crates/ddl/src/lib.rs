@@ -814,6 +814,393 @@ pub(crate) fn index_change_text(
     Ok(script.finish())
 }
 
+/// Which kind of constraint a statement is about.
+///
+/// Its own enum rather than `dbconn::ConstraintKind`, and the two are not the
+/// same question. That one describes what the catalog reported and carries
+/// `Exclude` and `Other`, neither of which any form here can compose; this one
+/// is the closed set of things that can be *written*, and it carries the foreign
+/// key, which `Driver::constraints` deliberately leaves out because the
+/// structure pane gives it a section of its own.
+///
+/// The drop needs it. PostgreSQL spells all three `DROP CONSTRAINT` and MySQL
+/// spells them three different ways, so a drop that only knew the name would
+/// have nothing to choose the noun with — see [`ConstraintStyle`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConstraintSort {
+    Unique,
+    Check,
+    ForeignKey,
+}
+
+/// What a foreign key does to this table's rows when the row it points at moves.
+///
+/// A closed set for the reason [`ColumnKind`] is one: the alternative is a text
+/// field, and a rule typed by hand is SQL spelled for a server the front end
+/// does not know. These five are `DBSForeignKeyModifyRule`'s, minus the
+/// `UNKNOWN` that stands for a catalog value upstream could not read — which is
+/// a thing a key can be read *as* and not a thing a key can be asked *for*.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReferentialAction {
+    /// The server refuses to move the other row, checked at the end of the
+    /// statement. Written as nothing at all: `DBSForeignKeyModifyRule.NO_ACTION`
+    /// has a null clause and `appendUpdateDeleteRule` skips a rule with an empty
+    /// one, which is also what leaves it out of a table's rendered DDL.
+    NoAction,
+    /// The same refusal, checked immediately. A different rule from `NoAction`
+    /// on every server here, and the difference only shows inside a transaction
+    /// that would have put the rows right before it ended.
+    Restrict,
+    Cascade,
+    SetNull,
+    SetDefault,
+}
+
+impl ReferentialAction {
+    /// What goes after `ON DELETE`, and empty for the rule that writes nothing.
+    pub(crate) fn clause(self) -> &'static str {
+        match self {
+            ReferentialAction::NoAction => "",
+            ReferentialAction::Restrict => "RESTRICT",
+            ReferentialAction::Cascade => "CASCADE",
+            ReferentialAction::SetNull => "SET NULL",
+            ReferentialAction::SetDefault => "SET DEFAULT",
+        }
+    }
+
+    /// The spelling that crosses the FFI, paired with [`ReferentialAction::parse`]
+    /// for the reason [`ColumnKind::word`] is paired with its own: the seam has
+    /// no compiler on it, so the two are checked against each other.
+    ///
+    /// Deliberately not [`ReferentialAction::clause`], although four of the five
+    /// would round-trip through it. The fifth would not — `NoAction`'s clause is
+    /// the empty string, which is also what an absent field looks like — and a
+    /// wire form that cannot tell "leave it alone" from "was not answered" is
+    /// one where the commonest rule is the one that goes missing.
+    pub fn word(self) -> &'static str {
+        match self {
+            ReferentialAction::NoAction => "no_action",
+            ReferentialAction::Restrict => "restrict",
+            ReferentialAction::Cascade => "cascade",
+            ReferentialAction::SetNull => "set_null",
+            ReferentialAction::SetDefault => "set_default",
+        }
+    }
+
+    /// The rule `word` names, or a refusal quoting what arrived.
+    ///
+    /// Refused rather than defaulted to `NoAction`: a key that silently stopped
+    /// cascading because the front end sent a spelling this build no longer
+    /// reads is a key whose whole point went missing without a message.
+    pub fn parse(word: &str) -> DbResult<Self> {
+        Ok(match word {
+            "no_action" => ReferentialAction::NoAction,
+            "restrict" => ReferentialAction::Restrict,
+            "cascade" => ReferentialAction::Cascade,
+            "set_null" => ReferentialAction::SetNull,
+            "set_default" => ReferentialAction::SetDefault,
+            other => {
+                return Err(DbError::new(format!(
+                    "{other:?} is not a rule a foreign key can be given"
+                )));
+            }
+        })
+    }
+}
+
+/// A table constraint that does not exist yet.
+///
+/// Three variants rather than one struct with a kind beside it, because the
+/// three are asked different questions: a unique constraint is over columns, a
+/// check is over an expression this build does not parse, and a foreign key
+/// names another table's columns as well as its own. One struct holding all of
+/// them would be two-thirds empty whichever was being made.
+///
+/// No primary key, and the reason is upstream rather than effort. The statement
+/// is a different shape everywhere it matters —
+/// `MySQLConstraintManager.getDropConstraintPattern` drops one as
+/// `ALTER TABLE t DROP PRIMARY KEY`, with no name in it at all, and
+/// `tryGetColumnOfPrimaryKeyConstraintForAutoincrementColumn` makes upstream
+/// emit nothing whatsoever when the key is the one an `AUTO_INCREMENT` column
+/// needs. This build has nowhere to put the item either: `Driver::constraints`
+/// leaves primary and foreign keys out, and a primary key reaches the structure
+/// pane as its index, where the Drop Index item is already drawn shut.
+#[derive(Clone, Debug, PartialEq)]
+pub enum NewConstraint {
+    /// `UNIQUE (columns)`, over the columns in the order given.
+    ///
+    /// The order is written as given although it does not change the meaning —
+    /// unlike an index's, where `(a, b)` and `(b, a)` are different objects. It
+    /// is not thrown away because the index the server builds underneath does
+    /// take the order, and a statement that reordered somebody's columns would
+    /// silently build the other index.
+    Unique { name: String, columns: Vec<String> },
+    /// `CHECK (expression)`, with the expression written exactly as given.
+    ///
+    /// Not quoted and not checked, for the reason [`NewColumn::default`] is
+    /// neither: a check is an expression in the server's own grammar, and
+    /// telling a legal one from a mistake means parsing that grammar. What was
+    /// typed is what is sent, and the statement is shown before it goes.
+    Check { name: String, expression: String },
+    /// `FOREIGN KEY (columns) REFERENCES other(columns)` and the two rules.
+    ForeignKey {
+        name: String,
+        columns: Vec<String>,
+        /// Empty where the front end has nothing to call the container, which
+        /// is the rule [`new_table`] follows: `REFERENCES .orders` is a syntax
+        /// error where `REFERENCES orders` is the table it meant.
+        other_schema: String,
+        other_table: String,
+        other_columns: Vec<String>,
+        on_delete: ReferentialAction,
+        on_update: ReferentialAction,
+    },
+}
+
+impl NewConstraint {
+    /// What it will be called, which every arm has and every refusal names.
+    pub fn name(&self) -> &str {
+        match self {
+            NewConstraint::Unique { name, .. }
+            | NewConstraint::Check { name, .. }
+            | NewConstraint::ForeignKey { name, .. } => name,
+        }
+    }
+
+    /// Which of the three it is, which is what a drop of it would need.
+    pub fn sort(&self) -> ConstraintSort {
+        match self {
+            NewConstraint::Unique { .. } => ConstraintSort::Unique,
+            NewConstraint::Check { .. } => ConstraintSort::Check,
+            NewConstraint::ForeignKey { .. } => ConstraintSort::ForeignKey,
+        }
+    }
+}
+
+/// What to do to a constraint of a relation.
+///
+/// Two verbs, like [`IndexChange`] and for a stronger reason: no server here
+/// alters a constraint in place at all, and upstream's own modify path says so
+/// — `PostgreForeignKeyManager.addObjectModifyActions` and MySQL's both emit the
+/// delete followed by the create. Two statements, and a window in between where
+/// the table is unconstrained and rows can arrive that the new key would have
+/// refused. What is offered is the two that are one statement each.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConstraintChange<'a> {
+    Create(&'a NewConstraint),
+    /// The sort travels with the name because the statement needs it: see
+    /// [`ConstraintStyle`].
+    Drop {
+        name: &'a str,
+        sort: ConstraintSort,
+    },
+}
+
+/// The two ways these servers spell a constraint statement differently.
+///
+/// A struct for the reason [`IndexStyle`] is one: the fields travel together and
+/// one server's spelling written for another is a statement that reads
+/// correctly and does not run. What is *not* in it is the opening — upstream's
+/// `SQLConstraintManager` and `SQLForeignKeyManager` both write the literal
+/// `"ALTER TABLE "` rather than asking the relation for its own noun, which is
+/// where they differ from the column manager, so there is no noun to carry.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConstraintStyle {
+    /// What follows `ADD CONSTRAINT <name>` for a unique constraint. `UNIQUE`
+    /// on PostgreSQL and `UNIQUE KEY` on MySQL, which is
+    /// `MySQLConstants.CONSTRAINT_UNIQUE` overriding
+    /// `getAddConstraintTypeClause`.
+    pub unique: &'static str,
+    /// What follows `DROP` for a unique constraint. `CONSTRAINT` on PostgreSQL
+    /// and `KEY` on MySQL, where a unique constraint *is* its index.
+    pub drop_unique: &'static str,
+    /// What follows `DROP` for a check constraint.
+    ///
+    /// `CONSTRAINT` on both servers written so far, and carried anyway rather
+    /// than assumed: MySQL spells the three drops three different ways, so this
+    /// is a question each renderer has to answer per sort, and a field that
+    /// happens to agree today is cheaper than the next renderer inheriting a
+    /// word nobody checked for it.
+    pub drop_check: &'static str,
+    /// What follows `DROP` for a foreign key. `CONSTRAINT` on PostgreSQL and
+    /// `FOREIGN KEY` on MySQL — `MySQLForeignKeyManager.getDropForeignKeyPattern`,
+    /// which is the spelling every MySQL takes, where the generic
+    /// `DROP CONSTRAINT` needs 8.0.19.
+    pub drop_foreign_key: &'static str,
+}
+
+/// `ALTER TABLE … ADD CONSTRAINT` and the drop, which is the whole of what this
+/// offers.
+///
+/// `ALTER TABLE` and not the relation's own noun, because that is what upstream
+/// writes: both constraint managers concatenate the keyword rather than calling
+/// `getTableTypeName`, so a foreign table there is altered as a table. Which
+/// relations are offered this at all is the renderer's to decide before calling
+/// here.
+pub(crate) fn constraint_change_text(
+    dialect: &'static Dialect,
+    style: ConstraintStyle,
+    schema: &str,
+    table: &str,
+    change: ConstraintChange<'_>,
+) -> DbResult<String> {
+    let qualify = |schema: &str, name: &str| match schema.is_empty() {
+        true => dialect.quote(name),
+        false => format!("{}.{}", dialect.quote(schema), dialect.quote(name)),
+    };
+    let clause = match change {
+        ConstraintChange::Create(constraint) => {
+            if constraint.name().is_empty() {
+                return Err(DbError::new("a constraint needs a name"));
+            }
+            format!(
+                "ADD CONSTRAINT {} {}",
+                dialect.quote(constraint.name()),
+                constraint_body(dialect, style, constraint, &qualify)?
+            )
+        }
+        ConstraintChange::Drop { name, sort } => {
+            if name.is_empty() {
+                return Err(DbError::new("a constraint needs a name"));
+            }
+            let noun = match sort {
+                ConstraintSort::Unique => style.drop_unique,
+                ConstraintSort::Check => style.drop_check,
+                ConstraintSort::ForeignKey => style.drop_foreign_key,
+            };
+            format!("DROP {noun} {}", dialect.quote(name))
+        }
+    };
+    let mut script = Script::new();
+    script.statement(&format!("ALTER TABLE {} {clause}", qualify(schema, table)));
+    Ok(script.finish())
+}
+
+/// The half of an `ADD CONSTRAINT` that says what the constraint is.
+fn constraint_body(
+    dialect: &'static Dialect,
+    style: ConstraintStyle,
+    constraint: &NewConstraint,
+    qualify: &impl Fn(&str, &str) -> String,
+) -> DbResult<String> {
+    Ok(match constraint {
+        NewConstraint::Unique { name, columns } => {
+            format!(
+                "{} ({})",
+                style.unique,
+                key_columns(
+                    dialect,
+                    name,
+                    columns,
+                    "unique over no columns, which constrains \
+                     nothing"
+                )?
+            )
+        }
+        NewConstraint::Check { expression, .. } => {
+            // `CHECK ()` is a syntax error rather than a check that passes, so
+            // the emptiness is caught here and named — the sheet can put the
+            // sentence beside the field, where a server's syntax error cannot
+            // go.
+            if expression.trim().is_empty() {
+                return Err(DbError::new("a check constraint needs an expression"));
+            }
+            format!("CHECK ({expression})")
+        }
+        NewConstraint::ForeignKey {
+            name,
+            columns,
+            other_schema,
+            other_table,
+            other_columns,
+            on_delete,
+            on_update,
+        } => {
+            if other_table.is_empty() {
+                return Err(DbError::new("a foreign key needs a table to reference"));
+            }
+            let here = key_columns(
+                dialect,
+                name,
+                columns,
+                "a foreign key over no columns, which references nothing",
+            )?;
+            let there = key_columns(
+                dialect,
+                name,
+                other_columns,
+                "a foreign key referencing no columns, which points at nothing",
+            )?;
+            // Caught here rather than at the server, which does say so —
+            // PostgreSQL answers "number of referencing and referenced columns
+            // for foreign key disagree" — because the sheet can say it while the
+            // second list is still being filled in, and because a pair that
+            // happens to be the same length and in the wrong order is the
+            // mistake nothing anywhere catches.
+            if columns.len() != other_columns.len() {
+                return Err(DbError::new(format!(
+                    "{name} names {} column{} here and {} there, and a foreign key matches them \
+                     one to one",
+                    columns.len(),
+                    if columns.len() == 1 { "" } else { "s" },
+                    other_columns.len()
+                )));
+            }
+            let mut declaration = format!(
+                "FOREIGN KEY ({here}) REFERENCES {}({there})",
+                qualify(other_schema, other_table)
+            );
+            // Delete before update, which is the order `appendUpdateDeleteRule`
+            // appends them in, and a rule with no clause disappears rather than
+            // being written out — that is what keeps `NO ACTION`, the default on
+            // every one of these servers, out of the statement.
+            if !on_delete.clause().is_empty() {
+                declaration.push_str(&format!(" ON DELETE {}", on_delete.clause()));
+            }
+            if !on_update.clause().is_empty() {
+                declaration.push_str(&format!(" ON UPDATE {}", on_update.clause()));
+            }
+            declaration
+        }
+    })
+}
+
+/// The columns of a key, quoted and comma-joined the way upstream joins them.
+///
+/// A bare comma and no space, which is what both managers append
+/// (`decl.append(",")`) and what [`postgres::quoted_list`] already writes for a
+/// foreign key inside a table's DDL. The constraints beside it there are spaced,
+/// and that is not an inconsistency to fix: those come from
+/// `pg_get_constraintdef` and this does not.
+fn key_columns(
+    dialect: &'static Dialect,
+    name: &str,
+    columns: &[String],
+    empty: &str,
+) -> DbResult<String> {
+    if columns.is_empty() {
+        return Err(DbError::new(format!("{name} would be {empty}")));
+    }
+    for (position, column) in columns.iter().enumerate() {
+        if column.is_empty() {
+            return Err(DbError::new("a constraint column needs a name"));
+        }
+        // Named twice, and the second mention does nothing at all. PostgreSQL
+        // refuses it and MySQL takes it, so catching it here is what makes the
+        // two servers answer the same question the same way.
+        if columns[..position].contains(column) {
+            return Err(DbError::new(format!(
+                "{column} is named twice, and a constraint cannot be over one column twice"
+            )));
+        }
+    }
+    Ok(columns
+        .iter()
+        .map(|column| dialect.quote(column))
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
 /// The half of DDL generation that is genuinely per-database.
 ///
 /// One method, because that is how much the databases share. Upstream's own
@@ -922,6 +1309,33 @@ pub trait Renderer: Send + Sync {
 
     /// Whether this renderer writes either [`IndexChange`] at all.
     fn changes_indexes(&self) -> bool;
+
+    /// The statement for adding or removing a constraint of `relation`.
+    ///
+    /// No default, for the reason `index_change` has none, and here the shape
+    /// differs by *which* constraint as well as by which server: PostgreSQL
+    /// drops all three with `DROP CONSTRAINT`, and MySQL drops a unique
+    /// constraint with `DROP KEY`, a check with `DROP CONSTRAINT` and a foreign
+    /// key with `DROP FOREIGN KEY`.
+    fn constraint_change(
+        &self,
+        relation: &RelationInfo,
+        change: ConstraintChange<'_>,
+    ) -> DbResult<String>;
+
+    /// Whether this renderer writes either [`ConstraintChange`] at all.
+    ///
+    /// Its own flag and not a second reading of `changes_indexes`, and SQLite is
+    /// what makes the two different questions rather than one asked twice: it
+    /// makes and drops an index, and its `ALTER TABLE` has no constraint clause
+    /// at all. Upstream says the same in two places —
+    /// `SQLiteSQLDialect.supportsAlterTableStatement` returns false, which is
+    /// what `GenericPrimaryKeyManager.canCreateObject` reads to grey the item
+    /// out, and `SQLiteTableForeignKeyManager` throws
+    /// "Forein key creation needs table recreation" from all three of its
+    /// actions. A build that read one flag for both would put two menu items on
+    /// a SQLite table that refuse whichever is clicked.
+    fn changes_constraints(&self) -> bool;
 
     /// The access methods this build offers for an index on this server, in the
     /// order a picker should show them.
@@ -1032,6 +1446,32 @@ pub fn changes_indexes(dialect: &'static Dialect) -> bool {
     for_dialect(dialect).is_some_and(|renderer| renderer.changes_indexes())
 }
 
+/// The statement that would make `change` to a constraint of `relation`, in the
+/// SQL `dialect` writes.
+///
+/// Rendered and handed back rather than run, like [`table_change`]. A dropped
+/// foreign key stops being enforced immediately, and the rows that arrive while
+/// it is gone are the ones that stop it being addable again.
+pub fn constraint_change(
+    dialect: &'static Dialect,
+    relation: &RelationInfo,
+    change: ConstraintChange<'_>,
+) -> DbResult<String> {
+    render(dialect, |renderer| {
+        renderer.constraint_change(relation, change)
+    })
+}
+
+/// Whether this build adds or removes a constraint on `dialect`.
+///
+/// What the Structure tab reads to decide whether its constraint and foreign key
+/// controls exist. Deliberately not folded into [`changes_indexes`]: SQLite
+/// answers the two differently, its `ALTER TABLE` having no constraint clause at
+/// all.
+pub fn changes_constraints(dialect: &'static Dialect) -> bool {
+    for_dialect(dialect).is_some_and(|renderer| renderer.changes_constraints())
+}
+
 /// The access methods offered for an index on `dialect`, empty where the front
 /// end should not draw the picker at all.
 pub fn index_methods(dialect: &'static Dialect) -> &'static [&'static str] {
@@ -1132,8 +1572,8 @@ impl Script {
 #[cfg(test)]
 mod tests {
     use super::{
-        ColumnChange, ColumnKind, DatabaseChange, DefaultChange, IndexChange, NewColumn, NewIndex,
-        TableChange,
+        ColumnChange, ColumnKind, ConstraintChange, ConstraintSort, DatabaseChange, DefaultChange,
+        IndexChange, NewColumn, NewConstraint, NewIndex, ReferentialAction, TableChange,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use dbconn::{RelationInfo, RelationKind};
@@ -2639,5 +3079,525 @@ ORDER BY tuple();"
                 dialect.name
             );
         }
+    }
+
+    /// A unique constraint over two columns, one of which has to be quoted.
+    fn a_unique_key() -> NewConstraint {
+        NewConstraint::Unique {
+            name: "orders_sku_key".into(),
+            columns: vec!["sku".into(), "Line No".into()],
+        }
+    }
+
+    fn a_check() -> NewConstraint {
+        NewConstraint::Check {
+            name: "orders_qty_check".into(),
+            expression: "qty > 0".into(),
+        }
+    }
+
+    /// A foreign key with one rule set and the other left at the default, which
+    /// is the pair that shows what `NO ACTION` costs to write and to leave out.
+    fn a_foreign_key() -> NewConstraint {
+        NewConstraint::ForeignKey {
+            name: "orders_customer_fk".into(),
+            columns: vec!["customer_id".into()],
+            other_schema: "staging".into(),
+            other_table: "customers".into(),
+            other_columns: vec!["id".into()],
+            on_delete: ReferentialAction::Cascade,
+            on_update: ReferentialAction::NoAction,
+        }
+    }
+
+    /// Each constraint statement written out in full, for each database that
+    /// writes one.
+    ///
+    /// Strings and not a rule, for the reason the other spelling tests are
+    /// written that way — and here the differences are small enough to be
+    /// invisible and large enough to be a statement the server refuses. MySQL
+    /// adds a unique constraint as `UNIQUE KEY` where PostgreSQL says `UNIQUE`,
+    /// and it spells the three drops three different ways where PostgreSQL has
+    /// exactly one.
+    #[test]
+    fn a_constraint_is_spelled_the_way_the_server_being_changed_reads_it() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let unique = a_unique_key();
+        let check = a_check();
+        let foreign_key = a_foreign_key();
+        let cases: &[(&Dialect, ConstraintChange, &str)] = &[
+            // The key columns are joined by a bare comma, which is what both of
+            // upstream's managers append and what a foreign key inside a
+            // table's rendered DDL already uses.
+            (
+                &dbsql::POSTGRES,
+                ConstraintChange::Create(&unique),
+                "ALTER TABLE staging.orders ADD CONSTRAINT orders_sku_key \
+                 UNIQUE (sku,\"Line No\");",
+            ),
+            (
+                &dbsql::POSTGRES,
+                ConstraintChange::Create(&check),
+                "ALTER TABLE staging.orders ADD CONSTRAINT orders_qty_check CHECK (qty > 0);",
+            ),
+            (
+                &dbsql::POSTGRES,
+                ConstraintChange::Create(&foreign_key),
+                "ALTER TABLE staging.orders ADD CONSTRAINT orders_customer_fk \
+                 FOREIGN KEY (customer_id) REFERENCES staging.customers(id) ON DELETE CASCADE;",
+            ),
+            // One noun for all three: a unique constraint and its index are two
+            // objects on PostgreSQL, and dropping the index is refused because
+            // the constraint requires it.
+            (
+                &dbsql::POSTGRES,
+                ConstraintChange::Drop {
+                    name: "orders_sku_key",
+                    sort: ConstraintSort::Unique,
+                },
+                "ALTER TABLE staging.orders DROP CONSTRAINT orders_sku_key;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                ConstraintChange::Drop {
+                    name: "orders_qty_check",
+                    sort: ConstraintSort::Check,
+                },
+                "ALTER TABLE staging.orders DROP CONSTRAINT orders_qty_check;",
+            ),
+            (
+                &dbsql::POSTGRES,
+                ConstraintChange::Drop {
+                    name: "orders_customer_fk",
+                    sort: ConstraintSort::ForeignKey,
+                },
+                "ALTER TABLE staging.orders DROP CONSTRAINT orders_customer_fk;",
+            ),
+            // `UNIQUE KEY`, which is `MySQLConstants.CONSTRAINT_UNIQUE`.
+            (
+                &dbsql::MYSQL,
+                ConstraintChange::Create(&unique),
+                "ALTER TABLE staging.orders ADD CONSTRAINT orders_sku_key \
+                 UNIQUE KEY (sku,`Line No`);",
+            ),
+            (
+                &dbsql::MYSQL,
+                ConstraintChange::Create(&check),
+                "ALTER TABLE staging.orders ADD CONSTRAINT orders_qty_check CHECK (qty > 0);",
+            ),
+            (
+                &dbsql::MYSQL,
+                ConstraintChange::Create(&foreign_key),
+                "ALTER TABLE staging.orders ADD CONSTRAINT orders_customer_fk \
+                 FOREIGN KEY (customer_id) REFERENCES staging.customers(id) ON DELETE CASCADE;",
+            ),
+            // Three nouns for three sorts, which is the whole reason the sort
+            // travels with the name. A unique constraint on MySQL *is* its
+            // index, so it goes by `DROP KEY`.
+            (
+                &dbsql::MYSQL,
+                ConstraintChange::Drop {
+                    name: "orders_sku_key",
+                    sort: ConstraintSort::Unique,
+                },
+                "ALTER TABLE staging.orders DROP KEY orders_sku_key;",
+            ),
+            (
+                &dbsql::MYSQL,
+                ConstraintChange::Drop {
+                    name: "orders_qty_check",
+                    sort: ConstraintSort::Check,
+                },
+                "ALTER TABLE staging.orders DROP CONSTRAINT orders_qty_check;",
+            ),
+            // `DROP FOREIGN KEY`, which every MySQL takes; the generic
+            // `DROP CONSTRAINT` reaches a foreign key only from 8.0.19.
+            (
+                &dbsql::MYSQL,
+                ConstraintChange::Drop {
+                    name: "orders_customer_fk",
+                    sort: ConstraintSort::ForeignKey,
+                },
+                "ALTER TABLE staging.orders DROP FOREIGN KEY orders_customer_fk;",
+            ),
+        ];
+        for (dialect, change, expected) in cases {
+            let statement = super::constraint_change(dialect, &orders, *change)
+                .unwrap_or_else(|e| panic!("{} refused {change:?}: {e}", dialect.name));
+            assert_eq!(
+                statement, *expected,
+                "{} wrote the wrong statement for {change:?}",
+                dialect.name
+            );
+        }
+
+        // A name typed by hand is quoted, which is the half of these statements
+        // the cases above cannot show: every name in them is one a server would
+        // read bare.
+        let awkward = NewConstraint::Check {
+            name: "Qty Positive".into(),
+            expression: "qty > 0".into(),
+        };
+        assert_eq!(
+            super::constraint_change(
+                &dbsql::POSTGRES,
+                &orders,
+                ConstraintChange::Create(&awkward)
+            )
+            .expect("PostgreSQL adds a constraint whose name needs quoting"),
+            "ALTER TABLE staging.orders ADD CONSTRAINT \"Qty Positive\" CHECK (qty > 0);"
+        );
+    }
+
+    /// A rule that changes nothing is written as nothing, and the two that are
+    /// written come out in upstream's order.
+    ///
+    /// `NO ACTION` is every one of these servers' default and
+    /// `DBSForeignKeyModifyRule.NO_ACTION` has a null clause, so
+    /// `appendUpdateDeleteRule` skips it — which is also why a key rendered into
+    /// a table's DDL never mentions it. A build that wrote it out would produce
+    /// a statement that runs and reads as though somebody chose it.
+    #[test]
+    fn a_foreign_key_writes_only_the_rules_that_change_something() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let with = |on_delete, on_update| NewConstraint::ForeignKey {
+            name: "orders_customer_fk".into(),
+            columns: vec!["customer_id".into()],
+            other_schema: "staging".into(),
+            other_table: "customers".into(),
+            other_columns: vec!["id".into()],
+            on_delete,
+            on_update,
+        };
+        let both_default = with(ReferentialAction::NoAction, ReferentialAction::NoAction);
+        assert_eq!(
+            super::constraint_change(
+                &dbsql::POSTGRES,
+                &orders,
+                ConstraintChange::Create(&both_default)
+            )
+            .expect("PostgreSQL adds a foreign key"),
+            "ALTER TABLE staging.orders ADD CONSTRAINT orders_customer_fk \
+             FOREIGN KEY (customer_id) REFERENCES staging.customers(id);"
+        );
+
+        // Delete before update, as `appendUpdateDeleteRule` appends them, and
+        // the two spellings that are two words.
+        let both_set = with(ReferentialAction::SetNull, ReferentialAction::SetDefault);
+        assert_eq!(
+            super::constraint_change(
+                &dbsql::POSTGRES,
+                &orders,
+                ConstraintChange::Create(&both_set)
+            )
+            .expect("PostgreSQL adds a foreign key"),
+            "ALTER TABLE staging.orders ADD CONSTRAINT orders_customer_fk \
+             FOREIGN KEY (customer_id) REFERENCES staging.customers(id) \
+             ON DELETE SET NULL ON UPDATE SET DEFAULT;"
+        );
+
+        // `RESTRICT` is not `NO ACTION` under another name: both refuse, and
+        // only this one refuses before the end of the statement. Written out,
+        // where the default is not.
+        let restricted = with(ReferentialAction::Restrict, ReferentialAction::NoAction);
+        assert_eq!(
+            super::constraint_change(
+                &dbsql::POSTGRES,
+                &orders,
+                ConstraintChange::Create(&restricted)
+            )
+            .expect("PostgreSQL adds a foreign key"),
+            "ALTER TABLE staging.orders ADD CONSTRAINT orders_customer_fk \
+             FOREIGN KEY (customer_id) REFERENCES staging.customers(id) ON DELETE RESTRICT;"
+        );
+
+        // A table the front end has no container name for is referenced bare,
+        // the rule `new_table` follows: `REFERENCES .customers` is a syntax
+        // error where `REFERENCES customers` is the table that was meant.
+        let unqualified = NewConstraint::ForeignKey {
+            name: "orders_customer_fk".into(),
+            columns: vec!["customer_id".into()],
+            other_schema: String::new(),
+            other_table: "customers".into(),
+            other_columns: vec!["id".into()],
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+        };
+        assert!(
+            super::constraint_change(
+                &dbsql::POSTGRES,
+                &orders,
+                ConstraintChange::Create(&unqualified)
+            )
+            .expect("PostgreSQL adds a foreign key")
+            .contains("REFERENCES customers(id)"),
+            "an empty container became a bare dot"
+        );
+    }
+
+    /// The word for a referential action survives the trip to the front end and
+    /// back.
+    ///
+    /// The seam with no compiler on it, checked the way [`ColumnKind`]'s is. The
+    /// hazard here is quieter than a refused column: a key whose rule silently
+    /// became `NO ACTION` is a key that runs, is accepted, and stops doing the
+    /// one thing it was made for.
+    #[test]
+    fn every_referential_action_is_spelled_the_same_in_both_directions() {
+        for action in [
+            ReferentialAction::NoAction,
+            ReferentialAction::Restrict,
+            ReferentialAction::Cascade,
+            ReferentialAction::SetNull,
+            ReferentialAction::SetDefault,
+        ] {
+            let word = action.word();
+            assert_eq!(
+                ReferentialAction::parse(word).unwrap_or_else(|e| panic!("{word}: {e}")),
+                action,
+                "{word} did not come back as the rule that wrote it"
+            );
+        }
+
+        // The clause is not the wire word, and this is why: the rule that writes
+        // nothing has an empty clause, which is indistinguishable from a field
+        // nobody answered.
+        assert_eq!(ReferentialAction::NoAction.clause(), "");
+        for word in ["", "cascade ", "CASCADE", "no action", "set-null"] {
+            let error = ReferentialAction::parse(word)
+                .expect_err("a rule was invented for a word this build does not write");
+            assert!(error.to_string().contains(word), "{error}");
+        }
+    }
+
+    /// The statements no server should be sent.
+    ///
+    /// Every one of these would otherwise reach the server and come back as a
+    /// message about syntax rather than about the thing that was wrong. The
+    /// mismatched column counts are the case worth the most: PostgreSQL does say
+    /// so, and it says so after the sheet has been dismissed.
+    #[test]
+    fn a_constraint_that_constrains_nothing_is_refused_rather_than_sent() {
+        let orders = relation("staging", "orders", RelationKind::Table);
+        let unnamed = NewConstraint::Unique {
+            name: String::new(),
+            columns: vec!["sku".into()],
+        };
+        let no_columns = NewConstraint::Unique {
+            name: "orders_key".into(),
+            columns: vec![],
+        };
+        let unnamed_column = NewConstraint::Unique {
+            name: "orders_key".into(),
+            columns: vec![String::new()],
+        };
+        let twice = NewConstraint::Unique {
+            name: "orders_key".into(),
+            columns: vec!["sku".into(), "qty".into(), "sku".into()],
+        };
+        let empty_check = NewConstraint::Check {
+            name: "orders_check".into(),
+            expression: "   ".into(),
+        };
+        let nowhere = NewConstraint::ForeignKey {
+            name: "orders_fk".into(),
+            columns: vec!["customer_id".into()],
+            other_schema: "staging".into(),
+            other_table: String::new(),
+            other_columns: vec!["id".into()],
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+        };
+        let lopsided = NewConstraint::ForeignKey {
+            name: "orders_fk".into(),
+            columns: vec!["customer_id".into(), "region".into()],
+            other_schema: "staging".into(),
+            other_table: "customers".into(),
+            other_columns: vec!["id".into()],
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+        };
+        let cases: &[(&str, ConstraintChange)] = &[
+            (
+                "a constraint needs a name",
+                ConstraintChange::Create(&unnamed),
+            ),
+            ("constrains nothing", ConstraintChange::Create(&no_columns)),
+            (
+                "a constraint column needs a name",
+                ConstraintChange::Create(&unnamed_column),
+            ),
+            ("named twice", ConstraintChange::Create(&twice)),
+            // Whitespace is empty, which is what stops a check that is three
+            // spaces — `CHECK (   )` is a syntax error and not a rule that
+            // always passes.
+            (
+                "a check constraint needs an expression",
+                ConstraintChange::Create(&empty_check),
+            ),
+            (
+                "a foreign key needs a table to reference",
+                ConstraintChange::Create(&nowhere),
+            ),
+            (
+                "2 columns here and 1 there",
+                ConstraintChange::Create(&lopsided),
+            ),
+            (
+                "a constraint needs a name",
+                ConstraintChange::Drop {
+                    name: "",
+                    sort: ConstraintSort::Unique,
+                },
+            ),
+        ];
+        for (expected, change) in cases {
+            let error = super::constraint_change(&dbsql::POSTGRES, &orders, *change)
+                .expect_err("a statement was written for a constraint that constrains nothing");
+            assert!(
+                error.to_string().contains(expected),
+                "{change:?}: wanted {expected:?}, got {error}"
+            );
+        }
+    }
+
+    /// A view has no rows of its own to make a rule about.
+    #[test]
+    fn no_database_constrains_a_view() {
+        let view = relation("staging", "summary", RelationKind::View);
+        for dialect in [&dbsql::POSTGRES, &dbsql::MYSQL] {
+            let error = super::constraint_change(
+                dialect,
+                &view,
+                ConstraintChange::Drop {
+                    name: "c",
+                    sort: ConstraintSort::Check,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                !error.to_string().contains("yet"),
+                "{}: a view is not a later release: {error}",
+                dialect.name
+            );
+        }
+    }
+
+    /// SQLite says a constraint means building the table again, rather than
+    /// promising one later.
+    ///
+    /// The refusal that is a limit and not a delay, and the case that makes
+    /// `changes_constraints` worth having: SQLite answers `changes_indexes`
+    /// true. What SQLite's own grammar does and does not take is checked against
+    /// a real file in `crates/ddl/tests/sqlite.rs`; what is pinned here is that
+    /// the sentence names the two sorts it has no syntax for and does not
+    /// promise a later release.
+    #[test]
+    fn sqlite_says_a_constraint_means_the_table_built_again_rather_than_promising_one_later() {
+        let orders = relation("main", "orders", RelationKind::Table);
+        let key = a_unique_key();
+        for change in [
+            ConstraintChange::Create(&key),
+            ConstraintChange::Drop {
+                name: "orders_sku_key",
+                sort: ConstraintSort::Unique,
+            },
+        ] {
+            let said = super::constraint_change(&dbsql::SQLITE, &orders, change)
+                .expect_err("SQLite wrote an ALTER TABLE … CONSTRAINT")
+                .to_string();
+            assert!(
+                said.contains("unique constraint or a foreign key"),
+                "the refusal should say which sorts SQLite has no syntax for: {said}"
+            );
+            assert!(
+                said.contains("building the table again"),
+                "the refusal should say what it would take instead: {said}"
+            );
+            assert!(
+                !said.contains("yet"),
+                "a refusal that will never change: {said}"
+            );
+        }
+
+        // The two flags are not one flag, and SQLite is where that is visible.
+        assert!(super::changes_indexes(&dbsql::SQLITE));
+        assert!(!super::changes_constraints(&dbsql::SQLITE));
+    }
+
+    /// `changes_constraints` and `constraint_change` say the same thing.
+    ///
+    /// The sixth of these, and its own test rather than a branch inside the
+    /// others: the capabilities are deliberately independent, and a check that
+    /// asserted them together would be the drift it exists to catch.
+    #[test]
+    fn a_renderer_that_claims_constraint_changes_writes_one() {
+        let table = relation("s", "t", RelationKind::Table);
+        for dialect in dbsql::ALL {
+            let Some(renderer) = super::for_dialect(dialect) else {
+                continue;
+            };
+            let written = renderer
+                .constraint_change(
+                    &table,
+                    ConstraintChange::Drop {
+                        name: "c",
+                        sort: ConstraintSort::Check,
+                    },
+                )
+                .is_ok();
+            assert_eq!(
+                renderer.changes_constraints(),
+                written,
+                "{} says it {} change a constraint and {} write the statement",
+                dialect.name,
+                if renderer.changes_constraints() {
+                    "can"
+                } else {
+                    "cannot"
+                },
+                if written { "does" } else { "does not" }
+            );
+            assert_eq!(
+                super::changes_constraints(dialect),
+                written,
+                "{} answers differently through the crate's own entry point",
+                dialect.name
+            );
+        }
+
+        // The three that are waiting for somebody to read the Java say so, and
+        // say "yet" — which is what tells them apart from SQLite above.
+        for dialect in [&dbsql::CLICKHOUSE, &dbsql::MSSQL, &dbsql::DUCKDB] {
+            let error = super::constraint_change(
+                dialect,
+                &table,
+                ConstraintChange::Drop {
+                    name: "c",
+                    sort: ConstraintSort::Check,
+                },
+            )
+            .expect_err("a statement was written for an unlit database");
+            assert!(
+                error.to_string().contains("yet"),
+                "{}: {error}",
+                dialect.name
+            );
+        }
+    }
+
+    /// A new constraint reports the sort a drop of it would need.
+    ///
+    /// The two travel separately over the boundary — a create carries the whole
+    /// constraint and a drop carries a name and a sort — and this is what keeps
+    /// the second derivable from the first rather than typed twice.
+    #[test]
+    fn a_new_constraint_names_its_own_sort() {
+        assert_eq!(a_unique_key().sort(), ConstraintSort::Unique);
+        assert_eq!(a_check().sort(), ConstraintSort::Check);
+        assert_eq!(a_foreign_key().sort(), ConstraintSort::ForeignKey);
+        assert_eq!(a_unique_key().name(), "orders_sku_key");
+        assert_eq!(a_check().name(), "orders_qty_check");
+        assert_eq!(a_foreign_key().name(), "orders_customer_fk");
     }
 }

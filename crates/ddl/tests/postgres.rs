@@ -842,3 +842,141 @@ async fn a_table_made_for_a_files_columns_is_one_postgresql_runs() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Constraints, against the server that has to take them
+// ---------------------------------------------------------------------------
+
+/// The three constraints this build writes are three PostgreSQL runs, and the
+/// three drops take them away again.
+///
+/// The golden strings in `dbddl`'s own tests say what the server is *told*. Only
+/// the server says whether it understood, and a constraint is where "looks
+/// right" is worth least: `ADD CONSTRAINT c UNIQUE (a,b)` and
+/// `ADD CONSTRAINT c UNIQUE(a, b)` read the same on the page and one of them is
+/// a rule the table now has.
+///
+/// Read back through `Driver::constraints` and `Driver::foreign_keys` rather
+/// than through the connection that ran the statements, so what is checked is
+/// the state the structure pane would draw afterwards — including the
+/// `ON DELETE CASCADE`, which is the clause that is silently absent when it is
+/// spelled wrong.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn the_constraints_written_for_postgresql_are_ones_it_runs() {
+    let source = bench().await;
+    run(&source, "DROP SCHEMA IF EXISTS ddl_constraints CASCADE").await;
+    run(&source, "CREATE SCHEMA ddl_constraints").await;
+    run(
+        &source,
+        "CREATE TABLE ddl_constraints.customers (id integer PRIMARY KEY)",
+    )
+    .await;
+    run(
+        &source,
+        "CREATE TABLE ddl_constraints.orders (
+             sku text NOT NULL,
+             \"Line No\" integer NOT NULL,
+             qty integer NOT NULL,
+             customer_id integer
+         )",
+    )
+    .await;
+
+    let orders = relation("ddl_constraints", "orders", RelationKind::Table);
+    let unique = dbddl::NewConstraint::Unique {
+        name: "orders_sku_key".into(),
+        columns: vec!["sku".into(), "Line No".into()],
+    };
+    let check = dbddl::NewConstraint::Check {
+        name: "orders_qty_check".into(),
+        expression: "qty > 0".into(),
+    };
+    let foreign_key = dbddl::NewConstraint::ForeignKey {
+        name: "orders_customer_fk".into(),
+        columns: vec!["customer_id".into()],
+        other_schema: "ddl_constraints".into(),
+        other_table: "customers".into(),
+        other_columns: vec!["id".into()],
+        on_delete: dbddl::ReferentialAction::Cascade,
+        on_update: dbddl::ReferentialAction::NoAction,
+    };
+    for constraint in [&unique, &check, &foreign_key] {
+        let statement = dbddl::constraint_change(
+            &dbsql::POSTGRES,
+            &orders,
+            dbddl::ConstraintChange::Create(constraint),
+        )
+        .unwrap_or_else(|e| panic!("PostgreSQL would not write {}: {e}", constraint.name()));
+        run(&source, &statement).await;
+    }
+
+    let listed: Vec<(String, String)> = source
+        .constraints("ddl_constraints", "orders")
+        .await
+        .expect("listing constraints failed")
+        .into_iter()
+        .map(|constraint| (constraint.name, constraint.definition))
+        .collect();
+    assert!(
+        listed
+            .iter()
+            .any(|(name, definition)| name == "orders_sku_key" && definition.starts_with("UNIQUE")),
+        "the unique constraint is not on the table: {listed:?}"
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|(name, definition)| name == "orders_qty_check" && definition.contains("qty > 0")),
+        "the check constraint is not on the table: {listed:?}"
+    );
+
+    let keys = source
+        .foreign_keys("ddl_constraints", "orders")
+        .await
+        .expect("listing foreign keys failed");
+    let key = keys
+        .iter()
+        .find(|key| key.name == "orders_customer_fk")
+        .unwrap_or_else(|| panic!("the foreign key is not on the table: {keys:?}"));
+    assert_eq!(key.local_columns, vec!["customer_id".to_string()]);
+    assert_eq!(key.other_table, "customers");
+    assert_eq!(key.other_columns, vec!["id".to_string()]);
+    // The clause that is invisible when it goes missing: a key written without
+    // it is still a key, and it stops taking the rows with it.
+    assert_eq!(key.on_delete, "CASCADE");
+    assert_eq!(key.on_update, "NO ACTION");
+
+    for (name, sort) in [
+        ("orders_sku_key", dbddl::ConstraintSort::Unique),
+        ("orders_qty_check", dbddl::ConstraintSort::Check),
+        ("orders_customer_fk", dbddl::ConstraintSort::ForeignKey),
+    ] {
+        let statement = dbddl::constraint_change(
+            &dbsql::POSTGRES,
+            &orders,
+            dbddl::ConstraintChange::Drop { name, sort },
+        )
+        .unwrap_or_else(|e| panic!("PostgreSQL would not write the drop of {name}: {e}"));
+        run(&source, &statement).await;
+    }
+
+    assert!(
+        source
+            .constraints("ddl_constraints", "orders")
+            .await
+            .expect("listing constraints failed")
+            .is_empty(),
+        "a constraint survived its own drop"
+    );
+    assert!(
+        source
+            .foreign_keys("ddl_constraints", "orders")
+            .await
+            .expect("listing foreign keys failed")
+            .is_empty(),
+        "the foreign key survived its own drop"
+    );
+
+    run(&source, "DROP SCHEMA ddl_constraints CASCADE").await;
+}
