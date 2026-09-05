@@ -270,7 +270,7 @@ enum ProcessesChecks {
             reportsRoutines: false,
             reportsSequences: false, serverProcesses: reach, reportsVariables: false,
             changesRelations: false, changesColumns: false, altersColumns: false,
-            changesIndexes: false, indexMethods: [],
+            changesIndexes: false, indexMethods: [], changesConstraints: false,
             changesDatabases: false)
     }
 

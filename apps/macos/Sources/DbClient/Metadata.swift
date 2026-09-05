@@ -166,6 +166,16 @@ struct Capabilities: Codable, Hashable {
     /// InnoDB ignores it, so it is left out rather than offered and discarded.
     let indexMethods: [String]
 
+    /// Whether the core writes an `ADD CONSTRAINT` or a `DROP` for one.
+    ///
+    /// Its own flag and not a second reading of `changesIndexes`, and SQLite is
+    /// what keeps the two apart in fact rather than in doctrine: it makes and
+    /// drops an index, and its `ALTER TABLE` cannot write two of the three
+    /// constraints. The Structure tab's constraint and foreign key menus come
+    /// from this alone, so that a SQLite table does not get an Add Foreign Key
+    /// that refuses every time it is clicked.
+    let changesConstraints: Bool
+
     /// Whether the core writes a statement that makes or drops a whole database.
     ///
     /// Not a second reading of `changesRelations`, and SQLite is what keeps them
@@ -190,7 +200,8 @@ struct Capabilities: Codable, Hashable {
         reportsRoutines: false,
         reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
         changesRelations: false, changesColumns: false, altersColumns: false,
-        changesIndexes: false, indexMethods: [], changesDatabases: false)
+        changesIndexes: false, indexMethods: [], changesConstraints: false,
+        changesDatabases: false)
 
     private enum CodingKeys: String, CodingKey {
         case transactional
@@ -208,6 +219,7 @@ struct Capabilities: Codable, Hashable {
         case altersColumns = "alters_columns"
         case changesIndexes = "changes_indexes"
         case indexMethods = "index_methods"
+        case changesConstraints = "changes_constraints"
         case changesDatabases = "changes_databases"
     }
 }

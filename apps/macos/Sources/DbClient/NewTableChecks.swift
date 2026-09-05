@@ -317,7 +317,7 @@ enum NewTableChecks {
             schemaIsTheDatabase: false, reportsRoutines: false,
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: changesRelations, changesColumns: false, altersColumns: false,
-            changesIndexes: false, indexMethods: [],
+            changesIndexes: false, indexMethods: [], changesConstraints: false,
             changesDatabases: false)
     }
 

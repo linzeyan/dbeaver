@@ -419,7 +419,8 @@ enum ColumnChangeChecks {
             reportsSequences: false, serverProcesses: .unreported, reportsVariables: false,
             changesRelations: changesRelations, changesColumns: changesColumns,
             altersColumns: altersColumns,
-            changesIndexes: false, indexMethods: [], changesDatabases: false)
+            changesIndexes: false, indexMethods: [], changesConstraints: false,
+            changesDatabases: false)
     }
 
     /// A model with no connection, built the way `NewTableChecks` builds its own:
