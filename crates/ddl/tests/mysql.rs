@@ -610,3 +610,131 @@ async fn a_table_made_for_a_files_columns_is_one_mysql_runs() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Constraints, against the server that has to take them
+// ---------------------------------------------------------------------------
+
+/// The three constraints this build writes are three MySQL runs, and the three
+/// drops — spelled three different ways — take them away again.
+///
+/// The drops are what this test is really for. PostgreSQL says
+/// `DROP CONSTRAINT` for all three and MySQL says `DROP KEY`,
+/// `DROP CONSTRAINT` and `DROP FOREIGN KEY`; borrowing PostgreSQL's noun for a
+/// unique constraint here produces a statement MySQL parses and then refuses
+/// with "check constraint … does not exist", which reads like the constraint
+/// went missing rather than like the statement being wrong.
+///
+/// Read back through `Driver::constraints` and `Driver::foreign_keys` so that
+/// what is checked is what the structure pane would draw.
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn the_constraints_written_for_mysql_are_ones_it_runs() {
+    let source = live().await;
+    run(&source, "DROP TABLE IF EXISTS dbclient_ddl.ddl_orders").await;
+    run(&source, "DROP TABLE IF EXISTS dbclient_ddl.ddl_customers").await;
+    run(
+        &source,
+        "CREATE TABLE dbclient_ddl.ddl_customers (id INT NOT NULL PRIMARY KEY)",
+    )
+    .await;
+    run(
+        &source,
+        "CREATE TABLE dbclient_ddl.ddl_orders (
+             sku VARCHAR(32) NOT NULL,
+             `Line No` INT NOT NULL,
+             qty INT NOT NULL,
+             customer_id INT
+         )",
+    )
+    .await;
+
+    let orders = relation("dbclient_ddl", "ddl_orders", RelationKind::Table);
+    let unique = dbddl::NewConstraint::Unique {
+        name: "orders_sku_key".into(),
+        columns: vec!["sku".into(), "Line No".into()],
+    };
+    let check = dbddl::NewConstraint::Check {
+        name: "orders_qty_check".into(),
+        expression: "qty > 0".into(),
+    };
+    let foreign_key = dbddl::NewConstraint::ForeignKey {
+        name: "orders_customer_fk".into(),
+        columns: vec!["customer_id".into()],
+        other_schema: "dbclient_ddl".into(),
+        other_table: "ddl_customers".into(),
+        other_columns: vec!["id".into()],
+        on_delete: dbddl::ReferentialAction::Cascade,
+        on_update: dbddl::ReferentialAction::NoAction,
+    };
+    for constraint in [&unique, &check, &foreign_key] {
+        let statement = dbddl::constraint_change(
+            &dbsql::MYSQL,
+            &orders,
+            dbddl::ConstraintChange::Create(constraint),
+        )
+        .unwrap_or_else(|e| panic!("MySQL would not write {}: {e}", constraint.name()));
+        run(&source, &statement).await;
+    }
+
+    let names: Vec<String> = source
+        .constraints("dbclient_ddl", "ddl_orders")
+        .await
+        .expect("listing constraints failed")
+        .into_iter()
+        .map(|constraint| constraint.name)
+        .collect();
+    assert!(
+        names.iter().any(|name| name == "orders_sku_key"),
+        "the unique constraint is not on the table: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name == "orders_qty_check"),
+        "the check constraint is not on the table: {names:?}"
+    );
+
+    let keys = source
+        .foreign_keys("dbclient_ddl", "ddl_orders")
+        .await
+        .expect("listing foreign keys failed");
+    let key = keys
+        .iter()
+        .find(|key| key.name == "orders_customer_fk")
+        .unwrap_or_else(|| panic!("the foreign key is not on the table: {keys:?}"));
+    assert_eq!(key.other_table, "ddl_customers");
+    assert_eq!(key.on_delete, "CASCADE");
+
+    for (name, sort) in [
+        ("orders_sku_key", dbddl::ConstraintSort::Unique),
+        ("orders_qty_check", dbddl::ConstraintSort::Check),
+        ("orders_customer_fk", dbddl::ConstraintSort::ForeignKey),
+    ] {
+        let statement = dbddl::constraint_change(
+            &dbsql::MYSQL,
+            &orders,
+            dbddl::ConstraintChange::Drop { name, sort },
+        )
+        .unwrap_or_else(|e| panic!("MySQL would not write the drop of {name}: {e}"));
+        run(&source, &statement).await;
+    }
+
+    assert!(
+        source
+            .constraints("dbclient_ddl", "ddl_orders")
+            .await
+            .expect("listing constraints failed")
+            .is_empty(),
+        "a constraint survived its own drop"
+    );
+    assert!(
+        source
+            .foreign_keys("dbclient_ddl", "ddl_orders")
+            .await
+            .expect("listing foreign keys failed")
+            .is_empty(),
+        "the foreign key survived its own drop"
+    );
+
+    run(&source, "DROP TABLE dbclient_ddl.ddl_orders").await;
+    run(&source, "DROP TABLE dbclient_ddl.ddl_customers").await;
+}

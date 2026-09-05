@@ -115,6 +115,24 @@ impl Renderer for MsSql {
         &[]
     }
 
+    /// Neither is written yet, and this is its own pair of answers rather than a
+    /// second reading of the index ones: SQLite makes and drops an index and has
+    /// no constraint clause at all, so the two can differ and one flag for both
+    /// would have to be wrong about somebody.
+    fn constraint_change(
+        &self,
+        _relation: &RelationInfo,
+        _change: crate::ConstraintChange<'_>,
+    ) -> DbResult<String> {
+        Err(DbError::new(
+            "adding or removing a constraint has not been written for SQL Server yet",
+        ))
+    }
+
+    fn changes_constraints(&self) -> bool {
+        false
+    }
+
     /// Neither is written yet, for the reason the relation changes are not:
     /// upstream is the specification and the families are lit one at a time.
     fn database_change(&self, _change: DatabaseChange<'_>) -> DbResult<String> {

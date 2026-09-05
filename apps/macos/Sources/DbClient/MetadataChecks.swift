@@ -136,7 +136,8 @@ enum MetadataChecks {
              "reports_sequences":true,"server_processes":"interruptible",
              "reports_variables":true,"changes_relations":true,"changes_columns":true,
              "alters_columns":true,"changes_indexes":true,
-             "index_methods":["btree","hash"],"changes_databases":true}
+             "index_methods":["btree","hash"],"changes_constraints":true,
+             "changes_databases":true}
             """#)
         expect(both?.transactional, true, "a transactional connection says so")
         expect(both?.cancelStopsTheStatement, true, "and that its cancel reaches the server")
@@ -175,6 +176,13 @@ enum MetadataChecks {
         expect(
             both?.indexMethods, ["btree", "hash"],
             "and which access methods it is worth offering, in the order to show them")
+        // Not implied by the field above it. SQLite answers `changes_indexes`
+        // true and this one false, its `ALTER TABLE` reaching a check constraint
+        // and nothing else — a build that read one for the other would draw an
+        // Add Unique and an Add Foreign Key that always refuse.
+        expect(
+            both?.changesConstraints, true,
+            "and an ADD CONSTRAINT and a drop, which is not the same question as an index")
         expect(
             both?.changesDatabases, true,
             "and a create and a drop for a whole database, which is a separate question")
@@ -189,7 +197,7 @@ enum MetadataChecks {
              "reports_sequences":false,"server_processes":"unreported",
              "reports_variables":false,"changes_relations":false,"changes_columns":false,
              "alters_columns":false,"changes_indexes":false,
-             "index_methods":[],"changes_databases":false}
+             "index_methods":[],"changes_constraints":false,"changes_databases":false}
             """#)
         expect(neither?.cancelStopsTheStatement, false, "a cancel that never leaves this side")
         expect(
@@ -233,6 +241,9 @@ enum MetadataChecks {
             neither?.indexMethods, [],
             "and no method to offer, which is what draws no picker at all")
         expect(
+            neither?.changesConstraints, false,
+            "nor for a constraint, so neither the constraints nor the keys table draws a menu")
+        expect(
             neither?.changesDatabases, false,
             "nor for making one, so New Database is greyed")
 
@@ -247,7 +258,7 @@ enum MetadataChecks {
              "reports_sequences":true,"server_processes":"unreported",
              "reports_variables":false,"changes_relations":false,"changes_columns":false,
              "alters_columns":false,"changes_indexes":false,
-             "index_methods":[],"changes_databases":false}
+             "index_methods":[],"changes_constraints":false,"changes_databases":false}
             """#)
         expect(renamed == nil, true, "a key the core no longer writes is not guessed at")
 

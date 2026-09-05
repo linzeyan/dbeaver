@@ -233,6 +233,53 @@ impl Renderer for Mysql {
         &[]
     }
 
+    /// Both, and the drop is spelled three ways for the three sorts.
+    ///
+    /// `MySQLConstraintManager.getDropConstraintPattern` writes `DROP KEY` for a
+    /// unique constraint — which on MySQL *is* its index, there being no
+    /// separate object — and `DROP CONSTRAINT` for a check, which MySQL has had
+    /// since 8.0.16 and enforces as its own thing.
+    /// `MySQLForeignKeyManager.getDropForeignKeyPattern` writes
+    /// `DROP FOREIGN KEY`; the generic `DROP CONSTRAINT` reaches a foreign key
+    /// only from 8.0.19, so upstream's spelling is the one that runs everywhere.
+    ///
+    /// The add is `UNIQUE KEY` rather than `UNIQUE`, which is
+    /// `MySQLConstants.CONSTRAINT_UNIQUE` overriding
+    /// `getAddConstraintTypeClause`. Both are legal MySQL; the one upstream
+    /// writes is the one written here, so that a reader comparing the two files
+    /// finds the same words.
+    fn constraint_change(
+        &self,
+        relation: &RelationInfo,
+        change: crate::ConstraintChange<'_>,
+    ) -> DbResult<String> {
+        match relation.kind {
+            RelationKind::Table | RelationKind::PartitionedTable => {}
+            kind => {
+                return Err(DbError::new(format!(
+                    "{} is a {kind:?}, and a constraint is a rule about a table's own rows",
+                    qualified(&relation.schema, &relation.name)
+                )));
+            }
+        }
+        crate::constraint_change_text(
+            &dbsql::MYSQL,
+            crate::ConstraintStyle {
+                unique: "UNIQUE KEY",
+                drop_unique: "KEY",
+                drop_check: "CONSTRAINT",
+                drop_foreign_key: "FOREIGN KEY",
+            },
+            &relation.schema,
+            &relation.name,
+            change,
+        )
+    }
+
+    fn changes_constraints(&self) -> bool {
+        true
+    }
+
     /// `CREATE SCHEMA` and `DROP SCHEMA`, as `MySQLDatabaseManager` writes them.
     ///
     /// `SCHEMA` and not `DATABASE`, which upstream chose and MySQL treats as the

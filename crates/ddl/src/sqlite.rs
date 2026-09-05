@@ -233,6 +233,49 @@ impl Renderer for Sqlite {
         &[]
     }
 
+    /// Neither, and this is the pair that keeps `changes_constraints` apart from
+    /// `changes_indexes`: SQLite makes and drops an index and cannot write two
+    /// of the three constraints.
+    ///
+    /// Upstream's position is that it can write none of them.
+    /// `SQLiteSQLDialect.supportsAlterTableStatement` returns false, which is
+    /// what `GenericUtils.canAlterTable` reads and what
+    /// `GenericPrimaryKeyManager.canCreateObject` refuses on; and
+    /// `SQLiteTableForeignKeyManager` throws
+    /// "Forein key creation needs table recreation" from create, modify and
+    /// delete alike, running `SQLiteUtils.makeRecreateTableCommand` instead.
+    ///
+    /// That is no longer the whole truth, and the difference is deliberate to
+    /// record rather than to act on. The amalgamation this build links takes
+    /// `ALTER TABLE … ADD CONSTRAINT <name> CHECK (…)` and has a
+    /// `DROP CONSTRAINT` that parses; it still stops at the keyword for a unique
+    /// constraint and for a foreign key, both of which are part of the text the
+    /// table was created from. `crates/ddl/tests/sqlite.rs` sends all three to a
+    /// real file and is where that is written down.
+    ///
+    /// So the answer is no, and not out of deference to upstream: one capability
+    /// stands for three sorts here, and drawing the section from it would give a
+    /// SQLite table an Add Unique and an Add Foreign Key that refuse whichever
+    /// is clicked — which is what `alters_columns` was split out to stop. The
+    /// check constraint is what that costs, and the refusal names it rather than
+    /// claiming SQLite has no constraint syntax at all.
+    fn constraint_change(
+        &self,
+        relation: &RelationInfo,
+        _change: crate::ConstraintChange<'_>,
+    ) -> DbResult<String> {
+        Err(DbError::new(format!(
+            "SQLite's ALTER TABLE reaches a check constraint and nothing else: a unique \
+             constraint or a foreign key is part of the text {} was created from, and adding or \
+             removing one means building the table again around it",
+            qualified(&relation.schema, &relation.name)
+        )))
+    }
+
+    fn changes_constraints(&self) -> bool {
+        false
+    }
+
     /// Neither, and not because nobody has written them.
     ///
     /// A SQLite database is a file. It is made by opening a path that has none

@@ -155,6 +155,9 @@ if CommandLine.arguments.contains("--verify-column-change") {
 if CommandLine.arguments.contains("--verify-index-change") {
     exit(MainActor.assumeIsolated { IndexChangeChecks.run() } ? 0 : 1)
 }
+if CommandLine.arguments.contains("--verify-constraint-change") {
+    exit(MainActor.assumeIsolated { ConstraintChangeChecks.run() } ? 0 : 1)
+}
 if CommandLine.arguments.contains("--verify-session-restore") {
     exit(MainActor.assumeIsolated { SessionRestoreChecks.run() } ? 0 : 1)
 }
@@ -1406,6 +1409,86 @@ func openIndexChangeSheet(model: AppModel, argument: String) {
         if !asked, model.changesIndexes, let relation = model.selected, !model.columns.isEmpty {
             asked = true
             model.prepareIndexChange(change, of: relation)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            MainActor.assumeIsolated(poll)
+        }
+    }
+    poll()
+}
+
+/// `--change-constraint create:<column,column>|drop:<constraint>` opens the
+/// constraint sheet.
+///
+/// Exists for the reason `--change-index` does: both are behind a right-click on
+/// the Structure tab, and a menu is a window of its own.
+///
+/// The create fills in a foreign key rather than a unique constraint, which is
+/// the sort with something to show: it is the only one of the three whose form
+/// has a second table in it, a pair of referential rules, and a column list with
+/// both ends on each row.
+let changeConstraintArgument = argument("--change-constraint")
+
+/// Drives `--change-constraint`. Waits for the statement as well as the sheet.
+@MainActor
+func openConstraintChangeSheet(model: AppModel, argument: String) {
+    let parts = argument.split(separator: ":", maxSplits: 1)
+    let verb = String(parts[0])
+    let rest = parts.count == 2 ? String(parts[1]) : ""
+    let change: ConstraintChange? =
+        switch verb {
+        case "create" where !rest.isEmpty:
+            .create(
+                NewConstraint(
+                    sort: .foreignKey,
+                    name: "orders_customer_fk",
+                    columns: rest.split(separator: ",").map {
+                        // Both ends filled in, the second from the first: a
+                        // capture of a form with half its rows unanswered shows
+                        // the layout and none of the decision.
+                        ConstraintColumn(name: String($0), other: "id")
+                    },
+                    otherTable: "customers",
+                    onDelete: .cascade))
+        case "drop" where !rest.isEmpty: .drop(name: rest, sort: .foreignKey)
+        default: nil
+        }
+    guard let change else {
+        fputs(
+            "--change-constraint takes create:<column,column> or drop:<constraint>\n", stderr)
+        exit(2)
+    }
+
+    let deadline = CFAbsoluteTimeGetCurrent() + 180
+    var asked = false
+
+    func poll() {
+        if let error = model.errorMessage {
+            fputs("constraint change sheet failed: \(error)\n", stderr)
+            exit(1)
+        }
+        if let statement = model.constraintPlan?.statement {
+            fputs("\(change.verb)\n\(statement)\n", stderr)
+            return
+        }
+        if CFAbsoluteTimeGetCurrent() > deadline {
+            fputs("constraint change sheet timed out\n", stderr)
+            exit(1)
+        }
+        // The columns the picker offers come from the Structure tab having read
+        // them, so this waits for those as well as for the capability.
+        if !asked, model.changesConstraints, let relation = model.selected,
+            !model.columns.isEmpty
+        {
+            asked = true
+            var opening = change
+            // The schema the sheet opens on is the table's own, which is what
+            // the menu fills in and what most keys point inside of.
+            if case .create(var constraint) = opening {
+                constraint.otherSchema = relation.schema
+                opening = .create(constraint)
+            }
+            model.prepareConstraintChange(opening, of: relation)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             MainActor.assumeIsolated(poll)
@@ -4424,6 +4507,9 @@ if benchMode {
         }
         if let changeIndexArgument {
             openIndexChangeSheet(model: model, argument: changeIndexArgument)
+        }
+        if let changeConstraintArgument {
+            openConstraintChangeSheet(model: model, argument: changeConstraintArgument)
         }
         if let refreshAfter { refreshWhenReady(model: model, after: refreshAfter) }
         if secondWindow {

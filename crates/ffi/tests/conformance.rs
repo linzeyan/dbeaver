@@ -45,10 +45,10 @@ use arrow::ffi::{FFI_ArrowArray, FFI_ArrowSchema};
 
 use dbffi::{
     db_cancel, db_capabilities_json, db_column_change_sql, db_columns_json, db_complete_json,
-    db_connect, db_constraints_json, db_create_table_sql, db_cursor, db_cursor_cancel,
-    db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema, db_database_change_sql,
-    db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json, db_end_process,
-    db_export, db_export_sql, db_file_columns_json, db_foreign_keys_json, db_free,
+    db_connect, db_constraint_change_sql, db_constraints_json, db_create_table_sql, db_cursor,
+    db_cursor_cancel, db_cursor_close, db_cursor_free, db_cursor_next, db_cursor_schema,
+    db_database_change_sql, db_databases_json, db_ddl_text, db_definition_json, db_edit_sql_json,
+    db_end_process, db_export, db_export_sql, db_file_columns_json, db_foreign_keys_json, db_free,
     db_import_cancel, db_import_free, db_import_start, db_import_step, db_index_change_sql,
     db_indexes_json, db_names_forget, db_new_table_sql, db_processes_json, db_query, db_query_free,
     db_query_next, db_query_rows_affected, db_query_schema, db_referenced_by_json,
@@ -3155,6 +3155,263 @@ fn an_index_change_is_composed_and_runs_or_is_refused_by_name() {
 
     unsafe { db_free(handle) };
     let _ = std::fs::remove_file(&path);
+}
+
+/// SQLite reads every constraint wire form and writes none of them, and its
+/// capabilities say so before anybody asks.
+///
+/// The one connection this suite can open without a server is also the one that
+/// answers the two capabilities differently, so this is where the split is
+/// checked over a real handle rather than in a table: `changes_indexes` is true
+/// here and `changes_constraints` is false, and a build that had folded them
+/// into one would fail this without any statement being composed.
+///
+/// Every wire form is sent anyway, and what is checked is *which* refusal comes
+/// back. A request the library could not parse and a request it parsed and
+/// cannot write both return null, and telling them apart is the whole of what
+/// this call's JSON contract is worth: the first would mean the front end is
+/// spelling the boundary wrong and nobody would ever find out.
+#[test]
+fn sqlite_reads_every_constraint_change_and_writes_none_of_them() {
+    let path = std::env::temp_dir().join("dbffi-constraint-change.db");
+    std::fs::write(&path, b"").expect("scratch database file");
+    let conn = CString::new(format!("sqlite://{}", path.display())).unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "the scratch SQLite file should open");
+    ran(
+        handle,
+        "CREATE TABLE main.invoice (id INTEGER, sku TEXT, qty INTEGER)",
+    );
+
+    let raw = unsafe { db_capabilities_json(handle, &mut err) };
+    assert!(!raw.is_null(), "capabilities should be answerable");
+    let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    let said: serde_json::Value = serde_json::from_str(&text).expect("capabilities are JSON");
+    assert_eq!(
+        said["changes_indexes"],
+        serde_json::json!(true),
+        "SQLite makes and drops an index"
+    );
+    assert_eq!(
+        said["changes_constraints"],
+        serde_json::json!(false),
+        "and cannot write two of the three constraints, which is why this is its own flag"
+    );
+
+    let compose = |change: &str| {
+        let schema = CString::new("main").unwrap();
+        let relation = CString::new("invoice").unwrap();
+        let change = CString::new(change).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_constraint_change_sql(
+                handle,
+                schema.as_ptr(),
+                relation.as_ptr(),
+                change.as_ptr(),
+                &mut err,
+            )
+        };
+        if raw.is_null() {
+            return Err(complaint(&mut err));
+        }
+        assert!(err.is_null(), "a written statement must not also set err");
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        Ok(text)
+    };
+
+    // Every shape the boundary takes, including the two referential actions and
+    // the three drop sorts. Each is refused for SQLite's own reason, which is
+    // what says the JSON was read rather than rejected.
+    for change in [
+        r#"{"change":"create","constraint":{"sort":"unique","name":"invoice_sku_key",
+            "columns":["sku"]}}"#,
+        r#"{"change":"create","constraint":{"sort":"check","name":"invoice_qty_check",
+            "expression":"qty > 0"}}"#,
+        r#"{"change":"create","constraint":{"sort":"foreign_key","name":"invoice_fk",
+            "columns":["id"],"other_schema":"main","other_table":"customer",
+            "other_columns":["id"],"on_delete":"cascade","on_update":"set_null"}}"#,
+        r#"{"change":"drop","name":"invoice_sku_key","sort":"unique"}"#,
+        r#"{"change":"drop","name":"invoice_qty_check","sort":"check"}"#,
+        r#"{"change":"drop","name":"invoice_fk","sort":"foreign_key"}"#,
+    ] {
+        let why = compose(change).expect_err("SQLite wrote a constraint statement");
+        assert!(
+            why.contains("ALTER TABLE"),
+            "the refusal should be SQLite's own rather than a parse failure: {why}\n{change}"
+        );
+        assert!(!why.contains("yet"), "got {why}");
+    }
+
+    // A sort this build does not have must not fall through to one it does.
+    // `primary_key` is the tempting one, and dropping a foreign key with the
+    // noun for a unique constraint is a statement MySQL parses.
+    //
+    // `rename` is tempting for the same reason the index call names it:
+    // PostgreSQL has `ALTER TABLE … RENAME CONSTRAINT`.
+    for change in [
+        r#"{"change":"create","constraint":{"sort":"primary_key","name":"c","columns":["id"]}}"#,
+        r#"{"change":"drop","name":"c","sort":"primary_key"}"#,
+        r#"{"change":"drop","name":"c"}"#,
+        r#"{"change":"rename","name":"c","to":"d"}"#,
+        r#"{"change":"create","constraint":{"sort":"check","name":"c"}}"#,
+        r#"{"change":"create"}"#,
+        "",
+    ] {
+        let why = compose(change).expect_err("there is no such change");
+        assert!(
+            why.contains("that is not a change to a constraint"),
+            "a request this build cannot read should say so: {why}\n{change}"
+        );
+    }
+
+    // A rule this build does not write is refused by name, rather than becoming
+    // the default it is nearest to.
+    let why = compose(
+        r#"{"change":"create","constraint":{"sort":"foreign_key","name":"c","columns":["id"],
+            "other_table":"customer","other_columns":["id"],"on_delete":"CASCADE"}}"#,
+    )
+    .expect_err("a rule spelled for nobody was taken");
+    assert!(why.contains("CASCADE"), "got {why}");
+
+    unsafe { db_free(handle) };
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The wire form becomes the statement PostgreSQL runs, and the drop takes it
+/// away again.
+///
+/// The half `sqlite_reads_every_constraint_change_and_writes_none_of_them`
+/// cannot reach: SQLite refuses all of this, so nothing there proves that a
+/// `"cascade"` in the JSON arrives as `ON DELETE CASCADE` rather than as
+/// nothing. Composed through the boundary and then run, with the result read
+/// back out of the catalog through the same boundary.
+#[test]
+#[ignore = "requires the benchmark database"]
+fn a_constraint_change_crosses_the_boundary_and_runs() {
+    let conn_str = CString::new("postgres://bench:bench@127.0.0.1:55432/bench").unwrap();
+    let mut err: *mut c_char = ptr::null_mut();
+    let handle = unsafe { db_connect(conn_str.as_ptr(), ptr::null(), 10, &mut err) };
+    assert!(!handle.is_null(), "benchmark database unreachable");
+
+    ran(handle, "DROP SCHEMA IF EXISTS ffi_constraints CASCADE");
+    ran(handle, "CREATE SCHEMA ffi_constraints");
+    ran(
+        handle,
+        "CREATE TABLE ffi_constraints.customer (id integer PRIMARY KEY)",
+    );
+    ran(
+        handle,
+        "CREATE TABLE ffi_constraints.invoice (id integer, customer_id integer, qty integer)",
+    );
+
+    let compose = |change: &str| {
+        let schema = CString::new("ffi_constraints").unwrap();
+        let relation = CString::new("invoice").unwrap();
+        let change = CString::new(change).unwrap();
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_constraint_change_sql(
+                handle,
+                schema.as_ptr(),
+                relation.as_ptr(),
+                change.as_ptr(),
+                &mut err,
+            )
+        };
+        assert!(
+            !raw.is_null(),
+            "PostgreSQL refused to write it: {}",
+            complaint(&mut err)
+        );
+        let text = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_owned();
+        unsafe { db_string_free(raw) };
+        text
+    };
+
+    let key = compose(
+        r#"{"change":"create","constraint":{"sort":"foreign_key","name":"invoice_customer_fk",
+            "columns":["customer_id"],"other_schema":"ffi_constraints",
+            "other_table":"customer","other_columns":["id"],"on_delete":"cascade"}}"#,
+    );
+    assert_eq!(
+        key,
+        "ALTER TABLE ffi_constraints.invoice ADD CONSTRAINT invoice_customer_fk \
+         FOREIGN KEY (customer_id) REFERENCES ffi_constraints.customer(id) ON DELETE CASCADE;",
+        "the rule in the JSON did not reach the statement"
+    );
+    ran(handle, &key);
+
+    let check = compose(
+        r#"{"change":"create","constraint":{"sort":"check","name":"invoice_qty_check",
+            "expression":"qty > 0"}}"#,
+    );
+    ran(handle, &check);
+
+    let schema = CString::new("ffi_constraints").unwrap();
+    let relation = CString::new("invoice").unwrap();
+    let raw = unsafe { db_foreign_keys_json(handle, schema.as_ptr(), relation.as_ptr(), &mut err) };
+    assert!(!raw.is_null(), "the foreign keys should be listable");
+    let listed = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    assert!(
+        listed.contains("invoice_customer_fk") && listed.contains("CASCADE"),
+        "the key the boundary made is not the key the boundary reads back: {listed}"
+    );
+
+    let raw = unsafe { db_constraints_json(handle, schema.as_ptr(), relation.as_ptr(), &mut err) };
+    assert!(!raw.is_null(), "the constraints should be listable");
+    let listed = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    assert!(
+        listed.contains("invoice_qty_check"),
+        "the check the boundary made is not on the table: {listed}"
+    );
+
+    for change in [
+        r#"{"change":"drop","name":"invoice_customer_fk","sort":"foreign_key"}"#,
+        r#"{"change":"drop","name":"invoice_qty_check","sort":"check"}"#,
+    ] {
+        let statement = compose(change);
+        ran(handle, &statement);
+    }
+
+    let raw = unsafe { db_constraints_json(handle, schema.as_ptr(), relation.as_ptr(), &mut err) };
+    let listed = unsafe { CStr::from_ptr(raw) }.to_str().unwrap().to_string();
+    unsafe { db_string_free(raw) };
+    assert_eq!(listed.trim(), "[]", "a constraint survived its own drop");
+
+    ran(handle, "DROP SCHEMA ffi_constraints CASCADE");
+    unsafe { db_free(handle) };
+}
+
+/// The arguments this call refuses to read at all.
+#[test]
+fn the_constraint_change_call_says_why_it_could_not_read_its_arguments() {
+    let public = CString::new("public").unwrap();
+    let change = CString::new(r#"{"change":"drop","name":"c","sort":"check"}"#).unwrap();
+    let invalid = CString::new(vec![b'p', b'u', b'b', 0xff, 0xfe]).unwrap();
+    for (schema, relation, requested) in [
+        (public.as_ptr(), public.as_ptr(), change.as_ptr()),
+        (ptr::null(), public.as_ptr(), change.as_ptr()),
+        (public.as_ptr(), ptr::null(), change.as_ptr()),
+        (public.as_ptr(), public.as_ptr(), ptr::null()),
+        (invalid.as_ptr(), public.as_ptr(), change.as_ptr()),
+    ] {
+        let mut err: *mut c_char = ptr::null_mut();
+        let raw = unsafe {
+            db_constraint_change_sql(ptr::null_mut(), schema, relation, requested, &mut err)
+        };
+        assert!(raw.is_null());
+        assert!(
+            !err.is_null(),
+            "db_constraint_change_sql must say why it refused"
+        );
+        unsafe { db_string_free(err) };
+    }
 }
 
 /// The arguments this call refuses to read at all.

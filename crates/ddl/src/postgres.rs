@@ -217,6 +217,50 @@ impl Renderer for Postgres {
         true
     }
 
+    /// Both, and all three sorts drop by the one noun.
+    ///
+    /// `PostgreConstraintManager` and `PostgreForeignKeyManager` both override
+    /// their drop pattern back to the shared `DROP CONSTRAINT`, which is the
+    /// only spelling PostgreSQL has: a unique constraint and its index are two
+    /// objects here, and `DROP INDEX` on the index behind one is refused with
+    /// "cannot drop index … because constraint … requires it".
+    ///
+    /// A table only. A view has no constraints, and a foreign table takes a
+    /// `CHECK` and nothing else — offering the other two there would be offering
+    /// statements the server refuses by name, and offering only the check would
+    /// mean a menu whose items depend on the row rather than on the table.
+    fn constraint_change(
+        &self,
+        relation: &RelationInfo,
+        change: crate::ConstraintChange<'_>,
+    ) -> DbResult<String> {
+        match relation.kind {
+            RelationKind::Table | RelationKind::PartitionedTable => {}
+            kind => {
+                return Err(DbError::new(format!(
+                    "{} is a {kind:?}, and a constraint is a rule about a table's own rows",
+                    qualified(&relation.schema, &relation.name)
+                )));
+            }
+        }
+        crate::constraint_change_text(
+            &dbsql::POSTGRES,
+            crate::ConstraintStyle {
+                unique: "UNIQUE",
+                drop_unique: "CONSTRAINT",
+                drop_check: "CONSTRAINT",
+                drop_foreign_key: "CONSTRAINT",
+            },
+            &relation.schema,
+            &relation.name,
+            change,
+        )
+    }
+
+    fn changes_constraints(&self) -> bool {
+        true
+    }
+
     /// The five general-purpose methods `pg_am` lists, in the order somebody
     /// choosing one would read them: the default first, then the four that are
     /// each for one shape of data.

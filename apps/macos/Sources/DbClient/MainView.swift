@@ -117,6 +117,9 @@ struct MainView: View {
         .sheet(isPresented: $model.isNewTableSheetOpen) { NewTableSheet(model: model) }
         .sheet(isPresented: $model.isColumnChangeSheetOpen) { ColumnChangeSheet(model: model) }
         .sheet(isPresented: $model.isIndexChangeSheetOpen) { IndexChangeSheet(model: model) }
+        .sheet(isPresented: $model.isConstraintChangeSheetOpen) {
+            ConstraintChangeSheet(model: model)
+        }
         // The routine first, matching the panes: while one is selected it is
         // what the window is about, and the table underneath is only what it
         // will go back to.
@@ -1691,7 +1694,37 @@ struct StructurePane: View {
             }
             .width(min: 80, ideal: 150)
         }
+        .contextMenu(forSelectionType: RelationshipInfo.ID.self) { keyMenu(for: $0) }
         .structureTableSurface()
+    }
+
+    /// The foreign keys table's row menu, drawn only where the core writes these
+    /// statements — the rule the indexes table's menu follows above.
+    ///
+    /// The new key opens on the sort this section is about, so that the menu
+    /// item and the sheet agree about what was asked for; the sheet's own picker
+    /// is still live, a form for three sorts being one form.
+    @ViewBuilder
+    private func keyMenu(for names: Set<RelationshipInfo.ID>) -> some View {
+        if model.changesConstraints, let relation = model.selected {
+            Button(ConstraintChange.create(NewConstraint(sort: .foreignKey)).menuTitle) {
+                model.prepareConstraintChange(
+                    .create(
+                        NewConstraint(sort: .foreignKey, otherSchema: relation.schema)),
+                    of: relation)
+            }
+            // One row only: the statement names one key, and the sheet shows one
+            // statement.
+            if names.count == 1,
+                let key = model.foreignKeys.first(where: { names.contains($0.id) })
+            {
+                Divider()
+                Button(ConstraintChange.drop(name: key.name, sort: .foreignKey).menuTitle) {
+                    model.prepareConstraintChange(
+                        .drop(name: key.name, sort: .foreignKey), of: relation)
+                }
+            }
+        }
     }
 
     private var referencedByTable: some View {
@@ -1754,7 +1787,52 @@ struct StructurePane: View {
                     .help(constraint.definition)
             }
         }
+        .contextMenu(forSelectionType: ConstraintInfo.ID.self) { constraintMenu(for: $0) }
         .structureTableSurface()
+    }
+
+    /// The constraints table's row menu, drawn only where the core writes these
+    /// statements.
+    ///
+    /// The drop carries the row's own kind, because that is what decides the
+    /// statement: PostgreSQL drops all three with `DROP CONSTRAINT` and MySQL
+    /// writes `DROP KEY` for a unique constraint and `DROP CONSTRAINT` for a
+    /// check. A kind this build cannot write — an exclusion constraint, or
+    /// whatever a future catalog reports as something else — has no item at all
+    /// rather than one that opens a sheet and refuses.
+    @ViewBuilder
+    private func constraintMenu(for names: Set<ConstraintInfo.ID>) -> some View {
+        if model.changesConstraints, let relation = model.selected {
+            Button(ConstraintChange.create(NewConstraint()).menuTitle) {
+                model.prepareConstraintChange(.create(NewConstraint()), of: relation)
+            }
+            if names.count == 1,
+                let constraint = model.constraints.first(where: { names.contains($0.id) }),
+                let sort = Self.sort(of: constraint.kind)
+            {
+                Divider()
+                Button(ConstraintChange.drop(name: constraint.name, sort: sort).menuTitle) {
+                    model.prepareConstraintChange(
+                        .drop(name: constraint.name, sort: sort), of: relation)
+                }
+            }
+        }
+    }
+
+    /// The sort a listed constraint would be dropped as, or nil where this build
+    /// writes no statement for it.
+    ///
+    /// Two of the four kinds the catalog reports have no drop here. An exclusion
+    /// constraint is PostgreSQL's alone and drops as `DROP CONSTRAINT` like the
+    /// rest — but the row would then offer a drop for something the New
+    /// Constraint form cannot make, which is a menu that can take away more than
+    /// it can put back. `other` is the kind nobody has read the catalog for.
+    static func sort(of kind: ConstraintInfo.Kind) -> ConstraintSort? {
+        switch kind {
+        case .unique: return .unique
+        case .check: return .check
+        case .exclude, .other: return nil
+        }
     }
 
     private var triggersTable: some View {

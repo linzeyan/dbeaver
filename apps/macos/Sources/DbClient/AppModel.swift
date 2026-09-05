@@ -7521,6 +7521,217 @@ final class AppModel {
         let identity: RowIdentity?
     }
 
+    // MARK: - Changing a constraint
+
+    /// Whether this connection adds or removes a constraint.
+    ///
+    /// Its own capability, and SQLite is what keeps it from being a second
+    /// reading of `changesIndexes`: it makes and drops an index, and its
+    /// `ALTER TABLE` cannot write two of the three constraints.
+    var changesConstraints: Bool {
+        capabilities.changesConstraints && safety.writeRefusal == nil && !isBusy
+    }
+
+    /// A constraint about to be added or dropped, and the statement for it.
+    var constraintPlan: ConstraintChangePlan?
+
+    var isConstraintChangeSheetOpen: Bool {
+        get { constraintPlan != nil }
+        set { if !newValue { constraintPlan = nil } }
+    }
+
+    /// One relation, one change to one of its constraints, and the statement
+    /// written for exactly that change.
+    struct ConstraintChangePlan {
+        let relation: RelationInfo
+        var change: ConstraintChange
+        var written: Written?
+
+        struct Written {
+            /// The whole change, for the reason `IndexChangePlan` stores the
+            /// whole one: a column added to the list or a referential rule
+            /// changed while the round trip is in the air would otherwise be
+            /// sent as the statement that had the old answer — and a foreign key
+            /// that cascades where somebody asked for restrict is one nothing
+            /// later will notice.
+            let change: ConstraintChange
+            let text: String?
+            let refusal: String?
+        }
+
+        var statement: String? { written?.change == change ? written?.text : nil }
+        var refusal: String? { written?.change == change ? written?.refusal : nil }
+
+        /// What the pane shows: the last statement written, current or not.
+        var preview: String { written?.text ?? "" }
+
+        var qualified: String { "\(relation.schema).\(relation.name)" }
+    }
+
+    /// Opens the sheet showing what `change` would do to a constraint of
+    /// `relation`.
+    func prepareConstraintChange(_ change: ConstraintChange, of relation: RelationInfo) {
+        if let refusal = safety.writeRefusal {
+            errorMessage = "\(refusal) \(relation.schema).\(relation.name) is unchanged."
+            return
+        }
+        errorMessage = nil
+        constraintPlan = ConstraintChangePlan(relation: relation, change: change, written: nil)
+        renderConstraintChange()
+    }
+
+    /// Applies an edit to the plan's change and rewrites the statement.
+    func editConstraintChange(_ edit: (inout ConstraintChange) -> Void) {
+        guard var plan = constraintPlan else { return }
+        edit(&plan.change)
+        constraintPlan = plan
+        renderConstraintChange()
+    }
+
+    private func renderConstraintChange() {
+        guard let plan = constraintPlan else { return }
+        let (relation, change) = (plan.relation, plan.change)
+        // Answered here rather than after a round trip, so that they appear as
+        // the field empties. Everything else is the core's — including which
+        // sorts this server can write, which is not a question this side can
+        // answer for a particular table.
+        let missing = Self.unanswered(change)
+        if let missing {
+            constraintPlan?.written = ConstraintChangePlan.Written(
+                change: change, text: nil, refusal: missing)
+            return
+        }
+        run { db -> Result<String, DbError> in
+            do {
+                return .success(
+                    try db.constraintChangeSQL(
+                        schema: relation.schema, relation: relation.name, change: change))
+            } catch {
+                return .failure(
+                    error as? DbError ?? DbError(description: String(describing: error)))
+            }
+        } then: { [self] answer in
+            guard constraintPlan?.relation == relation else { return }
+            constraintPlan?.written =
+                switch answer {
+                case .success(let statement):
+                    ConstraintChangePlan.Written(change: change, text: statement, refusal: nil)
+                case .failure(let error):
+                    ConstraintChangePlan.Written(
+                        change: change, text: nil, refusal: String(describing: error))
+                }
+        }
+    }
+
+    /// The field nobody has filled in yet, or nil when the form is answerable.
+    ///
+    /// Only the empties, and only the ones this side can see: a name, a column
+    /// row nobody has chosen, a check with nothing in it, a key pointing at no
+    /// table. Each is a question rather than a mistake, so it is answered beside
+    /// the field instead of being sent and refused — which is also what stops a
+    /// round trip per keystroke while somebody is still typing the first letter.
+    static func unanswered(_ change: ConstraintChange) -> String? {
+        guard case .create(let constraint) = change else { return nil }
+        if constraint.name.trimmingCharacters(in: .whitespaces).isEmpty {
+            return "A constraint needs a name."
+        }
+        switch constraint.sort {
+        case .check:
+            if constraint.expression.trimmingCharacters(in: .whitespaces).isEmpty {
+                return "A check constraint needs an expression."
+            }
+        case .unique:
+            if constraint.columns.contains(where: { $0.name.isEmpty }) {
+                return "Every column of a constraint needs a name."
+            }
+        case .foreignKey:
+            if constraint.otherTable.trimmingCharacters(in: .whitespaces).isEmpty {
+                return "A foreign key needs a table to reference."
+            }
+            if constraint.columns.contains(where: { $0.name.isEmpty }) {
+                return "Every column of a constraint needs a name."
+            }
+            // Each row holds both ends, so this cannot be a count that
+            // disagrees; it is a row where the other end has not been typed.
+            if constraint.columns.contains(where: {
+                $0.other.trimmingCharacters(in: .whitespaces).isEmpty
+            }) {
+                return "Every column needs the column it references."
+            }
+        }
+        return nil
+    }
+
+    /// Why the sheet's button is not ready, or nil when it is.
+    var constraintChangeObstacle: String? {
+        guard let plan = constraintPlan else { return "Nothing to change." }
+        if let refusal = plan.refusal { return refusal }
+        guard let statement = plan.statement, !statement.isEmpty else { return "Writing it…" }
+        return nil
+    }
+
+    /// Runs the statement the sheet has been showing, then reads the constraints
+    /// back.
+    func applyConstraintChange() {
+        guard let plan = constraintPlan, let statement = plan.statement,
+            constraintChangeObstacle == nil
+        else {
+            return
+        }
+        constraintPlan = nil
+        let (relation, change) = (plan.relation, plan.change)
+        isBusy = true
+        status = "\(change.progressive) \(change.constraintName) on \(plan.qualified)…"
+        errorMessage = nil
+        run { db -> ChangedConstraints in
+            let query = try db.query(statement, batchRows: 1)
+            // Drained: a unique constraint over values that are not unique, or a
+            // foreign key over rows that name something absent, is refused while
+            // the statement executes rather than while it is accepted.
+            while try query.nextBatch() != nil {}
+            db.forgetNames()
+            // Both lists and the identity. Both, because a foreign key and a
+            // check live in different sections and one statement can only change
+            // one of them — reading only the section the item was opened from
+            // would leave the other showing what was there a moment ago. The
+            // identity, because a unique constraint over columns that cannot be
+            // null is one of the things that can name a row, so making or
+            // dropping one changes whether the grid can edit at all.
+            return ChangedConstraints(
+                affected: query.rowsAffected ?? 0,
+                constraints: try db.constraints(
+                    schema: relation.schema, relation: relation.name),
+                foreignKeys: try db.foreignKeys(
+                    schema: relation.schema, relation: relation.name),
+                indexes: try db.indexes(schema: relation.schema, relation: relation.name),
+                identity: try db.rowIdentity(schema: relation.schema, relation: relation.name))
+        } then: { [self] changed in
+            isBusy = false
+            if selected == relation {
+                constraints = changed.constraints
+                foreignKeys = changed.foreignKeys
+                // The index list too: a unique constraint arrives with an index
+                // underneath it on every one of these servers, and a pane that
+                // did not read it back would be showing a table with a rule and
+                // no index to enforce it.
+                indexes = changed.indexes
+                rowIdentity = changed.identity
+            }
+            history.record(
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
+            status = "\(change.pastTense) \(change.constraintName) on \(plan.qualified)"
+        }
+    }
+
+    /// A relation's constraints as they are after one of them changed.
+    private struct ChangedConstraints: Sendable {
+        let affected: Int
+        let constraints: [ConstraintInfo]
+        let foreignKeys: [RelationshipInfo]
+        let indexes: [IndexInfo]
+        let identity: RowIdentity?
+    }
+
     // MARK: - Making a table
 
     /// Whether this connection can be asked to make a table.

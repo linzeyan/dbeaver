@@ -706,6 +706,150 @@ async fn a_rename_and_a_drop_are_statements_sqlite_runs() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// The two capabilities SQLite answers differently
+// ---------------------------------------------------------------------------
+
+/// SQLite makes and drops an index, and takes one constraint out of three —
+/// which is why the two capabilities are separate and why this one is off.
+///
+/// The reason `changes_constraints` exists apart from `changes_indexes`, and
+/// the reason the answer is what it is, are both here in one file. The index
+/// statement this build writes is sent and accepted; the three
+/// `ADD CONSTRAINT`s upstream's shared managers write are sent to the same
+/// table, and what comes back is not what reading the Java would have led
+/// anybody to expect.
+///
+/// Upstream's position is that SQLite has none of this:
+/// `SQLiteSQLDialect.supportsAlterTableStatement` returns false, which is what
+/// `GenericUtils.canAlterTable` reads and `GenericPrimaryKeyManager` refuses on,
+/// and `SQLiteTableForeignKeyManager` throws "Forein key creation needs table
+/// recreation" from create, modify and delete alike. That was true of every
+/// SQLite when it was written and is no longer true of the one this build links:
+/// the amalgamation `rusqlite` bundles has `ALTER TABLE … ADD CONSTRAINT` for a
+/// CHECK and a `DROP CONSTRAINT` that parses, and still refuses a unique
+/// constraint and a foreign key at the keyword. This test is where that is
+/// written down, because it is the kind of fact that is only ever true of the
+/// library in the binary and can change under the next bump.
+///
+/// So the capability stays off, and not out of deference: one flag stands for
+/// three sorts, and two of the three cannot be written here. Drawing the section
+/// would give a SQLite table an Add Unique and an Add Foreign Key that refuse
+/// whichever is clicked, which is the thing `alters_columns` was split out to
+/// stop. What is lost is the check constraint, and that is a limitation to
+/// record rather than a menu to lie with.
+///
+/// The pair matters more than either half. A build that had folded the two
+/// capabilities into one would pass whichever half it kept and fail this.
+#[tokio::test]
+async fn sqlite_takes_an_index_statement_and_two_constraints_out_of_three_it_cannot() {
+    let dir = tempfile::tempdir().expect("no temporary directory");
+    let path = dir.path().join("constraints.db");
+    let conn = rusqlite::Connection::open(&path).expect("could not create the fixture");
+    conn.execute_batch(
+        "CREATE TABLE orders (sku TEXT NOT NULL, qty INTEGER NOT NULL, customer_id INTEGER);",
+    )
+    .expect("could not seed the fixture");
+
+    let orders = relation("main", "orders", RelationKind::Table);
+
+    // The half that works. Written by this build, run by SQLite, and read back
+    // out of the catalog so that the index is a fact rather than an absence of
+    // errors.
+    let index = dbddl::NewIndex {
+        name: "orders_sku_idx".into(),
+        columns: vec!["sku".into()],
+        unique: true,
+        method: None,
+    };
+    let created = dbddl::index_change(&dbsql::SQLITE, &orders, dbddl::IndexChange::Create(&index))
+        .expect("SQLite would not write a CREATE INDEX");
+    conn.execute_batch(&created)
+        .unwrap_or_else(|e| panic!("SQLite refused the index: {e}\n{created}"));
+    let indexed: String = conn
+        .query_row(
+            "SELECT name FROM main.sqlite_master WHERE type = 'index' AND tbl_name = 'orders'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the index this build wrote is not in the catalog");
+    assert_eq!(indexed, "orders_sku_idx");
+
+    // The two that cannot be written, in the words upstream's shared managers
+    // write them — `SQLConstraintManager.addObjectCreateActions` and
+    // `SQLForeignKeyManager.getNestedDeclarationScript` — aimed at the table
+    // that is right there. Both stop at the keyword after the constraint's
+    // name, which is as far as SQLite's grammar goes.
+    for (statement, keyword) in [
+        (
+            "ALTER TABLE main.orders ADD CONSTRAINT orders_sku_key UNIQUE (sku)",
+            "UNIQUE",
+        ),
+        (
+            "ALTER TABLE main.orders ADD CONSTRAINT orders_customer_fk FOREIGN KEY (customer_id) \
+             REFERENCES customers(id)",
+            "FOREIGN",
+        ),
+    ] {
+        let refused = match conn.execute_batch(statement) {
+            Ok(()) => panic!("SQLite accepted a constraint it has no syntax for: {statement}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            refused.contains("syntax error") && refused.contains(keyword),
+            "SQLite refused {statement} somewhere other than at {keyword}: {refused}"
+        );
+    }
+
+    // And the one that is taken, which is the fact upstream does not have and
+    // the reason this test asserts what the library does rather than what the
+    // Java says it does. The clause lands in the stored `CREATE TABLE` as a
+    // table constraint, which is where a reader of the DDL tab would find it.
+    conn.execute_batch("ALTER TABLE main.orders ADD CONSTRAINT orders_qty_check CHECK (qty > 0)")
+        .expect("the bundled SQLite no longer takes a CHECK constraint; see this test's note");
+    let stored: String = conn
+        .query_row(
+            "SELECT sql FROM main.sqlite_master WHERE name = 'orders'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("the table went away");
+    assert!(
+        stored.ends_with("CONSTRAINT orders_qty_check CHECK (qty > 0))"),
+        "the check went somewhere other than into the table's own text: {stored}"
+    );
+    drop(conn);
+
+    // And what this build says about the same table. Two sorts out of three
+    // cannot be written, so nothing is offered — and the refusal says which two,
+    // rather than claiming SQLite has no constraint syntax at all.
+    assert!(dbddl::changes_indexes(&dbsql::SQLITE));
+    assert!(!dbddl::changes_constraints(&dbsql::SQLITE));
+    let key = dbddl::NewConstraint::Unique {
+        name: "orders_sku_key".into(),
+        columns: vec!["sku".into()],
+    };
+    let said = dbddl::constraint_change(
+        &dbsql::SQLITE,
+        &orders,
+        dbddl::ConstraintChange::Create(&key),
+    )
+    .expect_err("SQLite wrote an ADD CONSTRAINT")
+    .to_string();
+    assert!(
+        said.contains("unique constraint or a foreign key"),
+        "the refusal should say which sorts SQLite has no syntax for: {said}"
+    );
+    assert!(
+        said.contains("building the table again"),
+        "the refusal should say what it would take instead: {said}"
+    );
+    assert!(
+        !said.contains("yet"),
+        "a refusal that will never change by waiting: {said}"
+    );
+}
+
 /// The relations `main` holds, as the navigator would list them.
 async fn names(path: &std::path::Path) -> Vec<String> {
     let source = SqliteSource::connect(path.to_str().expect("a temporary path is UTF-8"))
