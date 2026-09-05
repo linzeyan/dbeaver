@@ -204,8 +204,13 @@ enum SchemaDiffChecks {
         let model = makeModel()
         guard let here = opened([]), let there = opened([]) else { return }
         model.sessions[0].db = here
+        // `archive` before `public`, and a system schema before both. The three
+        // together are what makes the default testable: "the first" would open
+        // on pg_catalog and "the first that is not the engine's own" would open
+        // on archive, and only the navigator's own rule opens on public.
         model.sessions[0].schemas = [
             SchemaInfo(name: "pg_catalog", isSystem: true),
+            SchemaInfo(name: "archive", isSystem: false),
             SchemaInfo(name: "public", isSystem: false)
         ]
         model.presentConnection()
@@ -225,10 +230,11 @@ enum SchemaDiffChecks {
         model.schemaDiffRightSchema = "somewhere_else"
         model.presentSchemaDiff()
         expect(model.isSchemaDiffOpen, true, "the sheet opens")
-        // The engine's own schemas are offered but not defaulted to: comparing
-        // two `pg_catalog`s is a real question and not the one anybody opens
-        // this for.
-        expect(model.schemaDiffLeftSchema, "public", "on a schema this connection has")
+        // The navigator's own rule, so a window cannot disagree with itself
+        // about which schema it means by default. The engine's own schemas are
+        // offered but not defaulted to: comparing two `pg_catalog`s is a real
+        // question and not the one anybody opens this for.
+        expect(model.schemaDiffLeftSchema, "public", "on the schema the tree opens on")
         expect(model.schemaDiffTarget, model.sessions[0].id, "against itself by default")
         expect(model.schemaDiffRightSchema, "public", "which is the same schema on both sides")
 
