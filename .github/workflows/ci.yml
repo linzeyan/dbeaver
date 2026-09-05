@@ -8,6 +8,21 @@
 # The steps are Makefile targets rather than open-coded cargo and swift calls.
 # A CI that reimplements the local commands drifts from them, and then a green
 # run stops saying that the documented workflow works.
+#
+# Three layers, each one deciding whether the next is worth paying for:
+# `changes` says which jobs this push needs at all, `core` compiles and checks
+# the workspace on one runner, and only then do ten container jobs and a macOS
+# runner start. Before that ordering existed, a clippy warning cost a full run —
+# thirteen runners, a dozen containers, about 270 runner-minutes, and the macOS
+# ones billed at ten times the rest — to discover something the first five
+# minutes already knew.
+#
+# `core` compiles for all of them. It hands the container jobs a nextest archive
+# and a prebuilt readiness probe, and those jobs then run tests without a
+# compiler: nothing under `crates/` is built eleven times any more. What that
+# was costing is not an estimate — every integration job spent about twenty
+# minutes compiling before it reached its first test, and Redis, whose container
+# is ready in a second, took the same twenty-one minutes as Cassandra.
 name: CI
 
 on:
@@ -25,6 +40,34 @@ permissions:
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
+
+# One compiler cache and one set of profile knobs for every job that runs cargo,
+# set here rather than repeated in each of them.
+#
+# Two different answers to the same twenty-two crates, because the jobs want
+# different things from them. The container jobs are handed compiled test
+# binaries and build nothing at all — that is the archive `core` uploads below.
+# `core` and the macOS job do have to compile, and what they get is sccache:
+# `Swatinem/rust-cache` deletes this workspace's own artifacts from `target/`
+# before saving and keeps only the third-party dependencies, which is the right
+# thing for it to do and leaves everything under `crates/` to be built again
+# from nothing. sccache looks each object up by the hash of its input, so a run
+# finds what the run before it compiled.
+#
+# `CARGO_INCREMENTAL: 0` because sccache cannot cache an incremental
+# compilation and quietly stops caching when it meets one. Incremental buys
+# nothing here anyway: a runner has no previous build to be incremental against.
+#
+# `line-tables-only` keeps the file and line in a panic's backtrace, which is
+# the whole of what a failure here is read through, and drops the rest — which
+# is most of the bytes in a debug build of arrow and tokio, most of the time
+# spent linking fifty test binaries, most of what the caches have to carry, and
+# most of an archive that is now downloaded ten times per run.
+env:
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   # Which of the jobs below this push actually needs.
@@ -158,6 +201,11 @@ jobs:
               return path.startswith("crates/") and not path.startswith("crates/drivers/")
 
           rebuild = any(infra(f) or shared_rust(f) for f in files)
+          # Every reason to run a server is also a reason `core` is true — a
+          # driver lives under `crates/`, and `rebuild` sets both. The
+          # integration jobs lean on that: they are gated on `core` having
+          # passed, which would silently never happen if these two could
+          # disagree.
           core = rebuild or any(f.startswith("crates/") for f in files)
           # `.swift-format` asks for the macOS job alone: it is the one file in
           # the tree that decides whether `make fmt-check` passes and means
@@ -173,6 +221,20 @@ jobs:
                + f"servers={[s['name'] for s in servers] or 'none'}")
           PY
 
+  # The gate. Everything below waits for this, for two reasons that happen to
+  # point the same way.
+  #
+  # The first is what it costs to be wrong: a clippy warning or a failed unit
+  # test used to be found by twelve runners at once, ten of which had already
+  # pulled their images and started their databases. One runner is enough to
+  # find it.
+  #
+  # The second is that this job is where the workspace gets compiled. It fills
+  # both caches — the dependency artifacts that `rust-cache` saves under this
+  # shared key, and every object sccache stores — so the jobs after it restore a
+  # build instead of repeating one. That is why gating on it does not cost the
+  # five minutes it looks like it costs: the jobs it delays each get back far
+  # more than that.
   core:
     name: Core (Linux)
     runs-on: ubuntu-latest
@@ -180,7 +242,17 @@ jobs:
     if: needs.changes.outputs.core == 'true'
     steps:
       - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: taiki-e/install-action@nextest
+      # A shared key rather than the default one, which is derived from the job
+      # name and so gave each of the twelve jobs a cache of its own. Twelve
+      # caches of a gigabyte or so do not fit in the ten this repository is
+      # allowed, so they evicted each other and most jobs started cold. One key
+      # for every Linux job building the dev profile — which, now that the
+      # container jobs compile nothing, means this one and the next run of it.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-dev
 
       # `make fmt-check` covers Rust and Swift and fails without the Xcode
       # toolchain, so this job runs the half it can and leaves the whole gate to
@@ -193,6 +265,41 @@ jobs:
 
       - name: Unit tests
         run: make test
+
+      # The one thing the container jobs need that is not a test: `db-check-*`
+      # opens the database through the same registry the application uses, and
+      # left as `cargo run` it was the last reason those jobs needed a compiler.
+      # `db-up-mssql`'s readiness loop alone spent ten minutes building it.
+      - name: Readiness probe
+        run: cargo build -p dbffi --bin dbcheck
+
+      # Packing, not a second compilation: `make test` above built these same
+      # binaries, and `cargo nextest archive` collects what it already has.
+      - name: Test archive
+        run: make test-archive
+
+      - name: Collect what the container jobs run
+        run: |
+          mkdir -p ci-payload
+          cp target/nextest/archive.tar.zst target/debug/dbcheck ci-payload/
+          du -sh ci-payload/*
+
+      # `compression-level: 0` because the archive is already zstd and the probe
+      # is an executable: compressing either again spends minutes to save
+      # nothing, ten times over on the download side.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-payload
+          path: ci-payload/
+          retention-days: 1
+          compression-level: 0
+
+      # Printed because a compiler cache that has quietly stopped working looks
+      # exactly like one that is working: the build is correct either way, only
+      # slower. The hit rate is the number that says which of those this run was.
+      - name: Compiler cache
+        if: always()
+        run: sccache --show-stats
 
   # One job per server family rather than one `make test-integration`, which is
   # what this job used to be. That target now wants twelve servers up at once, and
@@ -207,7 +314,7 @@ jobs:
   integration:
     name: Integration (${{ matrix.server.name }})
     runs-on: ubuntu-latest
-    needs: changes
+    needs: [changes, core]
     if: needs.changes.outputs.servers != '[]'
     strategy:
       # These jobs are a partition of one suite, not attempts at the same thing.
@@ -216,9 +323,30 @@ jobs:
       fail-fast: false
       matrix:
         server: ${{ fromJSON(needs.changes.outputs.servers) }}
+    # Both read by the Makefile: `ARCHIVE` sends the integration targets at the
+    # binaries `core` compiled instead of building their own, and `DBCHECK`
+    # points the readiness gates at the probe it built. Together they are why
+    # this job has no compiler cache and needs none — it compiles nothing.
+    #
+    # `RUSTC_WRAPPER` is cleared for the same reason. Nothing here should reach
+    # rustc, and a job that did would otherwise fail on a missing sccache rather
+    # than on the interesting fact that it was compiling at all.
+    env:
+      ARCHIVE: ${{ github.workspace }}/ci-payload/archive.tar.zst
+      DBCHECK: ${{ github.workspace }}/ci-payload/dbcheck
+      RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-payload
+          path: ci-payload
+
+      # An artifact travels as a zip, which has no place to record that one of
+      # these two is a program.
+      - name: Make the probe runnable
+        run: chmod +x ci-payload/dbcheck
 
       - name: Start servers
         run: make ${{ matrix.server.up }}
@@ -228,15 +356,36 @@ jobs:
 
   app:
     name: App (macOS)
-    needs: changes
-    if: needs.changes.outputs.app == 'true'
+    needs: [changes, core]
+    # Behind the gate when there is a gate, and not behind it when there is not:
+    # a change to the Swift sources alone leaves `core` skipped, and a job that
+    # took the default view of a skipped dependency would skip with it — which
+    # would leave the one job that checks the front end not running on the one
+    # kind of change that is nothing but front end. `!cancelled()` is what puts
+    # that decision here instead: naming any status function replaces the
+    # implicit `success()`, and the two results this will accept are then said
+    # out loud rather than left to be inferred.
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.app == 'true'
+          && (needs.core.result == 'success' || needs.core.result == 'skipped') }}
     # Pinned rather than `macos-latest`: the package's deployment target is
     # macOS 15, so the binary this job builds will not launch on an older
     # runner, and `macos-latest` is whatever GitHub currently points it at.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      # Its own key, and it writes: this job builds the release profile on a
+      # different host, so it shares nothing with the Linux jobs above and there
+      # is no second macOS job to race it.
+      #
+      # No cache for `apps/macos/.build`. The package has no external
+      # dependencies, so all that directory holds is this app's own objects, and
+      # llbuild decides what to rebuild from each source file's timestamp — which
+      # a checkout has just set to now. Restoring it would buy a relink at best.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release
 
       # swift-format ships inside the Xcode toolchain, which no Linux runner
       # has. This step is the only place the Swift sources get checked at all.
@@ -259,3 +408,7 @@ jobs:
             print('::error::' + pathlib.Path('/tmp/swift-checks.log').read_text()[-3000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
+
+      - name: Compiler cache
+        if: always()
+        run: sccache --show-stats

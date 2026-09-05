@@ -97,7 +97,14 @@ PG_CONN := postgres://bench:bench@127.0.0.1:$(PG_PORT)/bench
 # well under a millisecond for every connection after it — so a limit chosen for
 # how fast a ready database answers would be a limit that fires on the forwarder
 # instead, and the gate would fail on a server that is fine.
-DBCHECK := cargo run -q -p dbffi --bin dbcheck --
+#
+# `?=` so CI can hand this an already-built binary. `cargo run` is what a
+# developer wants — it rebuilds when the registry changed underneath it — and it
+# was also the last thing in the integration jobs that needed a compiler once
+# those started running their tests out of a prebuilt archive. Left as it was,
+# `db-up-mssql`'s readiness loop alone spent ten minutes compiling this before
+# the first connection attempt.
+DBCHECK ?= cargo run -q -p dbffi --bin dbcheck --
 DBCHECK_TIMEOUT := 10
 
 # One URL per server, beside the port it is built from. Written here rather than
@@ -203,6 +210,50 @@ run-console: release ## Launch the raw binary, keeping stdout in the terminal
 test: ## Unit tests (no database required)
 	cargo test --workspace
 
+# How every integration target below runs its tests.
+#
+# `cargo nextest` rather than `cargo test`, for one property `cargo test` does
+# not have: it can compile the test binaries once and hand them around. CI
+# builds an archive in its gate job and the ten container jobs run out of that,
+# instead of each of them repeating the same twenty minutes of compilation —
+# which, measured, was most of what those jobs were doing. Redis, whose
+# container is ready in a second, took the same twenty-one minutes as Cassandra.
+#
+# One command either way. A developer's shell sets no ARCHIVE and nextest builds
+# from source, as `cargo test` did; CI passes the archive it downloaded. Which
+# tests run, and in what order, is written once — here and in the targets below
+# — rather than once for the machine and once for the person.
+#
+# `--no-fail-fast` because nextest stops the whole run at the first failure and
+# `cargo test` did not: it finished the binary it was in and reported every
+# failure in it. On a suite that cannot be reproduced without the container that
+# produced it, hearing about one of five failures is being told to push again
+# four more times.
+#
+# One behaviour does change, and it is worth knowing about. `cargo test -p a -p
+# b` ran a's binaries and then b's; nextest puts everything it selected into one
+# pool and spreads it across the cores. Inside a binary that was already true —
+# what is new is that a driver's own suite and the FFI's conformance suite now
+# reach the same server at the same time. Checked before the switch rather than
+# after: the two create no table in common, and the pair that share a database
+# do not touch each other's schemas.
+ARCHIVE ?=
+NEXTEST = cargo nextest run --no-fail-fast \
+	$(if $(ARCHIVE),--archive-file $(ARCHIVE) --workspace-remap $(CURDIR),--workspace)
+
+# `--workspace`, and not the package list of whichever target will run out of
+# this: cargo resolves features over the packages it is given, so an archive
+# built per target would be a different compilation of the same crates and the
+# jobs would share nothing. It is also what makes this archive answer for every
+# target below at once.
+NEXTEST_ARCHIVE := target/nextest/archive.tar.zst
+
+.PHONY: test-archive
+test-archive: ## Compile every test binary once, into an archive the integration targets can run from
+	@mkdir -p $(dir $(NEXTEST_ARCHIVE))
+	cargo nextest archive --workspace --archive-file $(NEXTEST_ARCHIVE)
+	@echo "archive: $(NEXTEST_ARCHIVE)  (run 'make test-postgres ARCHIVE=$(NEXTEST_ARCHIVE)')"
+
 # Both compatible-MySQL servers are prerequisites, because the suite behind this
 # target runs their tests whether or not they are listed here — an unlisted
 # server does not make `make test-integration` cheaper, it only makes the failure
@@ -212,7 +263,7 @@ test: ## Unit tests (no database required)
 # five gigabytes, which is a download to do once rather than a cost per run.
 .PHONY: test-integration
 test-integration: db-check db-check-compatible db-check-mongo db-check-clickhouse db-check-mysql db-check-mssql db-check-tidb db-check-starrocks db-check-redis db-check-cassandra db-check-trino db-check-flightsql ## Tests requiring a database server
-	cargo test --workspace -- --ignored
+	$(NEXTEST) --run-ignored=only
 
 # The same suite, split by which server has to be up. CI runs these as separate
 # jobs rather than running the target above: twelve servers on one runner is about
@@ -224,24 +275,24 @@ test-integration: db-check db-check-compatible db-check-mongo db-check-clickhous
 # picked up by `--workspace` above and has to be added to one of these by hand.
 #
 # Two crates hold tests for more than one database and are split further. `dbddl`
-# has a test file per database, so `--test` names its share exactly. The contract
-# suite is one binary holding a subject per database, so that one is split by
-# test name — `--exact`, because the compatibility subjects carry the driver's
-# name as well as their own and a plain `mysql` filter would pull TiDB and
-# StarRocks into a job where neither server is running.
+# has a test file per database, so `binary_id` names its share exactly. The
+# contract suite is one binary holding a subject per database, so that one is
+# split by test name — `test(=...)`, an equality match, because the
+# compatibility subjects carry the driver's name as well as their own and a
+# substring filter on `mysql` would pull TiDB and StarRocks into a job where
+# neither server is running.
 #
-# Three containers rather than two. `cargo test -p driver-postgres -- --ignored`
-# runs every ignored test in that crate, and five of them are the TLS ones,
-# which want a second PostgreSQL on a second port — so the job that runs this
-# has to start it, and the check below is what says so in one line instead of
-# five refused connections.
-.PHONY: test-postgres
-test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests behind PostgreSQL and the servers read through its driver
-# The skips are not tidiness. `-p dbffi` sweeps every target in that package,
-# and three of its tests open a connection through an SSH server — one this
-# target has no reason to start, and one `test-tunnel` does start.
+# Three containers rather than two. `package(=driver-postgres)` selects every
+# ignored test in that crate, and five of them are the TLS ones, which want a
+# second PostgreSQL on a second port — so the job that runs this has to start
+# it, and the check below is what says so in one line instead of five refused
+# connections.
 #
-# Listed one by one, having been tried as `--skip bastion` in between. That
+# The exclusions are not tidiness. `package(=dbffi)` sweeps every target in that
+# package, and three of its tests open a connection through an SSH server — one
+# this target has no reason to start, and one `test-tunnel` does start.
+#
+# Listed one by one, having been tried as a filter on `bastion` in between. That
 # catches `without_a_bastion_the_string_is_dialled_as_written`, which is named
 # for the bastion it does *not* use and needs only PostgreSQL — so the pattern
 # quietly stopped running a test this target is exactly the right place for.
@@ -249,77 +300,89 @@ test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests 
 # added here fails this job loudly and gets added to the list, and a test that
 # stops running says nothing at all.
 #
-# The fourth skip is the same sweep catching a different server: the conformance
-# test for a connection with no dialect needs Redis, which this job has no reason
-# to start. `test-redis` runs it by name, which is where it belongs.
-	cargo test -p driver-postgres -p dbffi -p dbtransfer -- --ignored \
-		--skip a_connection_opened_through_a_bastion_still_answers \
-		--skip a_driver_opens_on_a_host_only_the_bastion_can_reach \
-		--skip a_bastion_with_no_secret_at_all_asks_the_agent \
-		--skip a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them
-	cargo test -p dbddl --test postgres -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact \
-		postgres_satisfies_the_contract \
-		cockroachdb_reads_and_writes_through_the_postgres_driver \
-		greptimedb_reads_data_through_the_postgres_driver
+# The fourth exclusion is the same sweep catching a different server: the
+# conformance test for a connection with no dialect needs Redis, which this job
+# has no reason to start. `test-redis` runs it by name, which is where it
+# belongs.
+#
+# `test(...)` without `=` matches on substring, which is what `--skip` did
+# before it, so each line still names one test and excludes exactly that one.
+# In a variable rather than in the recipe because a filterset is one shell word:
+# a backslash inside the quotes would reach nextest as a backslash, and the four
+# would have to be written on one line to be written at all.
+#
+# The parentheses around the union in the recipe are load bearing. `-` binds as
+# tightly as `and` and `+` does not, so without them the whole list subtracts
+# from `package(=dbtransfer)` alone — which is not where any of these four
+# tests live, so all four would run, against servers this target does not start.
+# That is exactly the silent failure the paragraph above is about, and it is
+# what a filterset can do that `--skip` could not.
+POSTGRES_ELSEWHERE = \
+	- test(a_connection_opened_through_a_bastion_still_answers) \
+	- test(a_driver_opens_on_a_host_only_the_bastion_can_reach) \
+	- test(a_bastion_with_no_secret_at_all_asks_the_agent) \
+	- test(a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them)
+
+.PHONY: test-postgres
+test-postgres: db-check db-check-compatible db-check-pgtls ## Integration tests behind PostgreSQL and the servers read through its driver
+	$(NEXTEST) --run-ignored=only \
+		-E '(package(=driver-postgres) + package(=dbffi) + package(=dbtransfer)) $(POSTGRES_ELSEWHERE)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbddl::postgres)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and (test(=postgres_satisfies_the_contract) + test(=cockroachdb_reads_and_writes_through_the_postgres_driver) + test(=greptimedb_reads_data_through_the_postgres_driver))'
 
 .PHONY: test-mysql
 test-mysql: db-check-mysql db-check-tidb db-check-starrocks ## Integration tests behind MySQL and the servers read through its driver
-	cargo test -p driver-mysql -- --ignored
-	cargo test -p dbddl --test mysql -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact \
-		mysql_satisfies_the_contract \
-		tidb_reads_and_writes_through_the_mysql_driver \
-		starrocks_reads_and_writes_through_the_mysql_driver
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-mysql)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbddl::mysql)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and (test(=mysql_satisfies_the_contract) + test(=tidb_reads_and_writes_through_the_mysql_driver) + test(=starrocks_reads_and_writes_through_the_mysql_driver))'
 
 .PHONY: test-mssql
 test-mssql: db-check-mssql ## Integration tests behind SQL Server
-	cargo test -p driver-mssql -- --ignored
-	cargo test -p dbddl --test mssql -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact mssql_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-mssql)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbddl::mssql)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=mssql_satisfies_the_contract)'
 
 .PHONY: test-clickhouse
 test-clickhouse: db-check-clickhouse ## Integration tests behind ClickHouse
-	cargo test -p driver-clickhouse -- --ignored
-	cargo test -p dbddl --test clickhouse -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact clickhouse_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-clickhouse)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbddl::clickhouse)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=clickhouse_satisfies_the_contract)'
 
 .PHONY: test-mongodb
 test-mongodb: db-check-mongo ## Integration tests behind MongoDB
-	cargo test -p driver-mongodb -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact mongodb_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-mongodb)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=mongodb_satisfies_the_contract)'
 
 # No `dbddl` line: Redis has no DDL to generate. Its container is the cheapest
 # of the lot, so this job is the one to add a second small server to if another
 # ever needs a home.
 .PHONY: test-redis
 test-redis: db-check-redis ## Integration tests behind Redis
-	cargo test -p driver-redis -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact redis_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-redis)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=redis_satisfies_the_contract)'
 	# The FFI's only connection without a dialect, which is the one that shows
 	# db_edit_sql_json taking its other branch.
-	cargo test -p dbffi --test conformance -- --ignored --exact \
-	  a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbffi::conformance) and test(=a_connection_with_no_dialect_still_edits_rows_where_its_driver_writes_them)'
 
 # Slowest container of the lot to become ready — a minute or so before it will
 # answer — which is why it is its own job rather than a passenger on another.
 .PHONY: test-cassandra
 test-cassandra: db-check-cassandra ## Integration tests behind Cassandra
-	cargo test -p driver-cassandra -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact cassandra_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-cassandra)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=cassandra_satisfies_the_contract)'
 
 # The driver's own suite and the contract subject seed different schemas of the
 # `memory` catalog, so the two halves of this target do not collide when
-# `cargo test --workspace -- --ignored` runs them at once.
+# `make test-integration` runs them at once.
 .PHONY: test-trino
 test-trino: db-check-trino ## Integration tests behind Trino
-	cargo test -p driver-trino -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact trino_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-trino)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=trino_satisfies_the_contract)'
 
 .PHONY: test-flightsql
 test-flightsql: db-check-flightsql ## Integration tests behind Arrow Flight SQL
-	cargo test -p driver-flightsql -- --ignored
-	cargo test -p dbconn --test contract -- --ignored --exact flightsql_satisfies_the_contract
+	$(NEXTEST) --run-ignored=only -E 'package(=driver-flightsql)'
+	$(NEXTEST) --run-ignored=only -E 'binary_id(=dbconn::contract) and test(=flightsql_satisfies_the_contract)'
 
 # The SQL statement splitter's checks live behind a flag on the app binary
 # rather than in a test target: Package.swift declares one executable target and
@@ -524,20 +587,20 @@ db-down-pgtls: ## Stop and remove the TLS container, and its certificates
 
 .PHONY: test-pgtls
 test-pgtls: db-up-pgtls ## Run the PostgreSQL TLS tests against that container
-	cargo test -p driver-postgres --test tls -- --include-ignored
+	$(NEXTEST) --run-ignored=all -E 'binary_id(=driver-postgres::tls)'
 
 .PHONY: test-tunnel
 # Both crates, because the tunnel is only half tested by the crate that opens
 # one: what the FFI adds is keeping it alive for as long as the connection, and
 # that is visible only from the entry point the application actually calls.
 test-tunnel: db-up-ssh db-up ## Run the SSH tunnel tests against that container
-	cargo test -p dbtunnel -- --include-ignored
+	$(NEXTEST) --run-ignored=all -E 'package(=dbtunnel)'
 # `SSH_AUTH_SOCK` pointed at the fixture's agent, because the FFI reads it: the
 # connection form has no field for which agent, so `db_connect` asks the one
 # this process was started under. Left alone, that is the developer's own — and
 # their agent's keys are ones this fixture's server has never been told about,
 # so the check would fail on a machine where everything works.
-	SSH_AUTH_SOCK=$(SSH_AGENT_SOCK) cargo test -p dbffi --lib -- --include-ignored
+	SSH_AUTH_SOCK=$(SSH_AGENT_SOCK) $(NEXTEST) --run-ignored=all -E 'package(=dbffi) and kind(lib)'
 
 .PHONY: db-up-mongo
 db-up-mongo: ## Start the MongoDB test container
