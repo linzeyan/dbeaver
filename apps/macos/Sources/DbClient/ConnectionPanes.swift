@@ -194,30 +194,50 @@ struct ConnectionFormPane: View {
     @FocusState.Binding var focus: FocusArea?
 
     var body: some View {
-        form
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Theme.Surface.canvas.color)
-            .task {
-                // Where reading starts, and never the password field — which is
-                // what the form used to do when the other fields were already
-                // filled in.
-                //
-                // That one line was what put AppKit's AutoFill panel on screen.
-                // It is not summoned by having a secure field, it is summoned by
-                // a secure field holding focus: measured four ways against this
-                // window — the panel follows the focus and nothing else, the
-                // same build showing it and not showing it with only this line
-                // changed. So a form that focused the password field was asking
-                // for the panel before the user had asked for anything, which is
-                // the one thing about it nobody chose.
-                //
-                // It costs a remembered connection one Tab. What it buys is a
-                // form that opens as itself, and an AutoFill panel that appears
-                // when somebody puts the caret in the password field — which is
-                // the moment it is worth having. `buttons` keeps the band it
-                // lands in for that moment.
-                focus = .connectHost
+        // A card taller than the column it sits in still has to be finishable.
+        // Measured: 367pt for a file, 543 for the plainest server, 723 with a
+        // bastion, an SSL CA row and a banner — against a detail column of
+        // 516pt at the window's own minimum height. Centred in a frame it
+        // overflows, the card put Test, Save and Connect below the bottom edge
+        // of the window with nothing to scroll and no other way to reach them.
+        //
+        // `minHeight` is what makes this a floor rather than a bare scroll
+        // view: it holds the card centred for as long as the column has room,
+        // which is the case that was never broken and the one every capture of
+        // this pane has been taken in. Without it the card moves to the top of
+        // every window — a change to the answer rather than a fix to the
+        // failure.
+        GeometryReader { column in
+            ScrollView {
+                form.frame(maxWidth: .infinity, minHeight: column.size.height)
             }
+            // No rubber band under a form that already fits, which is most of
+            // them — a bounce is the column saying there is more below. The
+            // Settings panel makes the same call for the same reason.
+            .scrollBounceBehavior(.basedOnSize)
+        }
+        .background(Theme.Surface.canvas.color)
+        .task {
+            // Where reading starts, and never the password field — which is
+            // what the form used to do when the other fields were already
+            // filled in.
+            //
+            // That one line was what put AppKit's AutoFill panel on screen.
+            // It is not summoned by having a secure field, it is summoned by
+            // a secure field holding focus: measured four ways against this
+            // window — the panel follows the focus and nothing else, the
+            // same build showing it and not showing it with only this line
+            // changed. So a form that focused the password field was asking
+            // for the panel before the user had asked for anything, which is
+            // the one thing about it nobody chose.
+            //
+            // It costs a remembered connection one Tab. What it buys is a
+            // form that opens as itself, and an AutoFill panel that appears
+            // when somebody puts the caret in the password field — which is
+            // the moment it is worth having. `buttons` keeps the band it
+            // lands in for that moment.
+            focus = .connectHost
+        }
     }
 
     private var form: some View {

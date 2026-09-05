@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 import SwiftUI
@@ -6,6 +7,10 @@ import SwiftUI
 ///
 /// Tests the model layer of the connection chooser, ensuring that the AppModel
 /// correctly handles connection selection, editing, saving, and deletion.
+///
+/// One case is not model-layer and says so: whether the form can be reached in a
+/// short window is a fact about how the pane lays out, and there is nothing on
+/// the model to ask it of.
 enum AppModelConnectionChecks {
     private static var failures = 0
 
@@ -69,6 +74,7 @@ enum AppModelConnectionChecks {
         checkABastionSecretIsKeptTheWayThePasswordIs()
         checkTheNavigatorCacheKeepsOneTreePerDatabase()
         checkAReopenedConnectionDrawsLastTimesTreeAtOnce()
+        checkTheFormIsReachableInAColumnTooShortForIt()
         if failures == 0 {
             fputs("connection-form: all checks passed\n", stderr)
         } else {
@@ -2235,11 +2241,88 @@ enum AppModelConnectionChecks {
         }
     }
 
+    /// The form can be finished in a window at its own minimum height.
+    ///
+    /// The card is a fixed 420pt wide and as tall as the connection needs: 367pt
+    /// for a file, 543 for the plainest server, 663 once a bastion opens its four
+    /// rows. The detail column it sits in is 516pt at the window's smallest —
+    /// `contentLayoutRect` is 548 there and the tab strip takes 32 — so the card
+    /// does not fit, and centred in a frame it overflows it put Test, Save and
+    /// Connect below the bottom edge of the window with no way back to them.
+    ///
+    /// Both halves are the claim. A column with room keeps the card centred and
+    /// has nothing to scroll, which is what every capture of this pane shows; a
+    /// column without room scrolls. Measured through a real window because a
+    /// hosting view lays its scroll view out at display time and reports a
+    /// zero-sized document until then — `fittingSize` is no use here for the
+    /// reason `SettingsView.scrolls` records, a scroll view answers with the
+    /// height it was handed rather than the height of what it holds.
+    private static func checkTheFormIsReachableInAColumnTooShortForIt() {
+        MainActor.assumeIsolated {
+            let model = makeModel()
+            // The tallest ordinary shape, not a contrived one: a Postgres server
+            // behind a bastion, which opens Login, Key and Secret under the SSH
+            // row.
+            model.connectionDraft.settings.sshHost = "bastion.example.com"
+
+            guard let short = laidOut(model, inAColumn: 516),
+                let roomy = laidOut(model, inAColumn: 900)
+            else {
+                failures += 1
+                fputs("connection-form FAIL: the form pane holds a scroll view\n", stderr)
+                return
+            }
+
+            expect(
+                short.documentView.map { $0.frame.height > short.contentView.bounds.height }, true,
+                "a form taller than its column is inside something that scrolls to the rest of it")
+            expect(
+                roomy.documentView?.frame.height, roomy.contentView.bounds.height,
+                "and one the column has room for fills it exactly, so the card stays centred")
+            expect(
+                roomy.verticalScrollElasticity, NSScrollView.Elasticity.none,
+                "with no rubber band on the form that already fits")
+        }
+    }
+
     // MARK: - Harness
+
+    /// The scroll view inside a form pane given a column of `height`.
+    ///
+    /// In a window because that is what makes `NSHostingView` lay out for real.
+    private static func laidOut(_ model: AppModel, inAColumn height: CGFloat) -> NSScrollView? {
+        let host = NSHostingView(rootView: HostedConnectionForm(model: model))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: height),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = host
+        window.layoutIfNeeded()
+        host.displayIfNeeded()
+        return scrollView(under: host)
+    }
+
+    private static func scrollView(under view: NSView) -> NSScrollView? {
+        if let found = view as? NSScrollView { return found }
+        for child in view.subviews {
+            if let found = scrollView(under: child) { return found }
+        }
+        return nil
+    }
 
     private static func expect<T: Equatable>(_ got: T, _ want: T, _ what: String) {
         guard got != want else { return }
         failures += 1
         fputs("connection-form FAIL: \(what)\n  want: \(want)\n  got:  \(got)\n", stderr)
     }
+}
+
+/// The form pane with somewhere to put its focus, so a check can host it.
+///
+/// `ConnectionFormPane` takes a `@FocusState.Binding`, and only a view can own
+/// the state it binds to.
+private struct HostedConnectionForm: View {
+    @Bindable var model: AppModel
+    @FocusState private var focus: FocusArea?
+
+    var body: some View { ConnectionFormPane(model: model, focus: $focus) }
 }
