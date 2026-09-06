@@ -25,6 +25,7 @@ enum ThemeChecks {
         failures = 0
         defer { ScratchDefaults.release() }
         checkTheRampRunsBothWays()
+        checkAnIconButtonAnswersAPressMoreStronglyThanAHover()
         checkTextClearsItsBarOnEverySurfaceItIsDrawnOn()
         checkTheFaintToneIsFainterThanTheMutedOne()
         checkAConnectionMarkIsVisibleInBothAppearances()
@@ -101,6 +102,47 @@ enum ThemeChecks {
             let overlay = luminance(Theme.Surface.overlay)
             expect(canvas > raised, true, "light: the canvas is lighter than a panel on it")
             expect(raised > overlay, true, "light: a panel is lighter than the strip above it")
+        }
+    }
+
+    /// A press reads as heavier than a hover, both ways up.
+    ///
+    /// A bare icon button has nothing else to say it with. There is no label to
+    /// change and the foreground belongs to the call site, so the fill carries
+    /// the whole of the state — which means the two live states have to differ,
+    /// and they have to differ in the same *direction* under both sets of
+    /// values. "Pressed is brighter" is right on dark and backwards on light,
+    /// which is the mistake `checkTheRampRunsBothWays` exists to catch one level
+    /// up; this is the same mistake made in a component instead of in the ramp.
+    private static func checkAnIconButtonAnswersAPressMoreStronglyThanAHover() {
+        expect(
+            IconButtonStyle.fill(hovering: false, pressed: false, enabled: true) == nil, true,
+            "an icon button nobody is pointing at draws no fill at all")
+        for pressed in [false, true] {
+            for hovering in [false, true] {
+                expect(
+                    IconButtonStyle.fill(hovering: hovering, pressed: pressed, enabled: false)
+                        == nil, true,
+                    "a disabled icon button answers nothing (hovering: \(hovering),"
+                        + " pressed: \(pressed))")
+            }
+        }
+        inBothAppearances { appearance in
+            guard
+                let hover = IconButtonStyle.fill(hovering: true, pressed: false, enabled: true),
+                let press = IconButtonStyle.fill(hovering: true, pressed: true, enabled: true)
+            else {
+                failures += 1
+                fputs("theme FAIL: \(appearance): a live icon button drew nothing\n", stderr)
+                return
+            }
+            expect(
+                luminance(press) != luminance(hover), true,
+                "\(appearance): a press differs from a hover, or pressing says nothing new")
+            let canvas = luminance(Theme.Surface.canvas)
+            expect(
+                abs(luminance(press) - canvas) > abs(luminance(hover) - canvas), true,
+                "\(appearance): a press sits further from the canvas than a hover does")
         }
     }
 

@@ -655,7 +655,7 @@ struct NavigatorView: View {
                         .frame(width: 18, height: 16)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(IconButtonStyle())
                 .foregroundStyle(
                     model.makesTables ? Theme.Text.secondary.color : Theme.Text.tertiary.color
                 )
@@ -673,7 +673,7 @@ struct NavigatorView: View {
                         .frame(width: 18, height: 16)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(IconButtonStyle())
                 .foregroundStyle(
                     model.canDropSelected ? Theme.Text.secondary.color : Theme.Text.tertiary.color
                 )
@@ -698,7 +698,7 @@ struct NavigatorView: View {
                         .frame(width: 18, height: 16)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(IconButtonStyle())
                 // Coloured rather than left to the button style's dimming, so
                 // the disabled state reads at 10pt on a dark background.
                 .foregroundStyle(
@@ -878,8 +878,13 @@ private struct SchemaLabel: View {
 
     var body: some View {
         HStack(spacing: Theme.Space.xs + 2) {
+            // Medium, because the name beside it is: an SF Symbol takes its
+            // stroke from the weight it is given, and a regular glyph next to
+            // emphasised text reads as a hairline that lost an argument. The
+            // group heading below is the other way round and matches too — it
+            // sets its name in `body`, so its glyph stays regular.
             Image(systemName: isDatabase ? "cylinder" : "square.stack.3d.up")
-                .font(.system(size: 10))
+                .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(Theme.Text.secondary.color)
             Text(name)
                 .font(Theme.Typography.bodyEmphasis)

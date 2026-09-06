@@ -3,6 +3,90 @@ import SwiftUI
 // Shared chrome. Everything here exists because it appears in more than one
 // pane; a component used once belongs next to its use site instead.
 
+// MARK: - Icon buttons
+
+/// The feedback a bare icon button has no other way to give.
+///
+/// This window is full of an `Image` inside a `Button` under
+/// `.buttonStyle(.plain)`, and that style draws nothing of its own: the pointer
+/// crosses one and nothing happens, the mouse goes down and nothing happens, and
+/// the first confirmation the click landed is whatever the action then does.
+/// Several of them open a sheet and one of them is Drop, so "did that register?"
+/// is a question the window was leaving the user to answer by waiting.
+///
+/// A fill rather than a scale. Shrinking a control under the pointer is the
+/// phone's idiom and the web's; every icon control AppKit draws answers a press
+/// by changing what is behind it, and a press here should read the way the rest
+/// of the desktop does.
+///
+/// Hover is `Surface.overlay` and pressed is `Border.control`, which is the
+/// palette's own ramp used for what it is for. Each step is further from the
+/// canvas than the last in *both* sets — on dark that is lighter, on light it is
+/// darker — so pressed reads as heavier than hover in either appearance, rather
+/// than only in the one where "brighter" happens to mean "more".
+///
+/// The foreground is left alone on purpose. These call sites colour their own
+/// icons so the disabled state stays legible at 10pt (the navigator's footer in
+/// `MainView` says so in as many words), and a style that also had an opinion
+/// about the tint would be arguing with a decision already made and written down.
+struct IconButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Face(configuration: configuration)
+    }
+
+    /// The fill for a state, as something that can be asked rather than only
+    /// drawn.
+    ///
+    /// `Configuration.isPressed` cannot be introspected, so a check driving a
+    /// real button could observe only what its action did — the same wall
+    /// `ConstraintChange.isDestructive` sits on the other side of. Lifting the
+    /// decision out here is what makes it checkable at all.
+    ///
+    /// `nil` rather than a clear tone, so "draws nothing" is a state the suite
+    /// can name instead of a colour it has to compare against.
+    static func fill(hovering: Bool, pressed: Bool, enabled: Bool) -> Theme.Tone? {
+        // A button that cannot be pressed gives no feedback for pressing it.
+        // Checked here rather than left to hit testing, because `onHover` still
+        // fires over a disabled control.
+        guard enabled else { return nil }
+        if pressed { return Theme.Border.control }
+        return hovering ? Theme.Surface.overlay : nil
+    }
+
+    /// The label with its fill, as a view of its own so the hover has somewhere
+    /// to live: a `ButtonStyle` is handed a fresh `Configuration` on every call
+    /// and has no `@State` of its own to keep one in.
+    ///
+    /// Not named `Body`, which is the obvious name and does not compile.
+    /// `ButtonStyle` declares an associated type by that name, so a nested type
+    /// spelled the same way is read as satisfying it and then has to be as
+    /// visible as the style itself. The error says "must be as accessible as its
+    /// enclosing type", which names the rule and not the cause.
+    private struct Face: View {
+        let configuration: Configuration
+
+        @Environment(\.isEnabled) private var isEnabled
+        @Environment(\.accessibilityReduceMotion) private var reduceMotion
+        @State private var isHovering = false
+
+        var body: some View {
+            let tone = IconButtonStyle.fill(
+                hovering: isHovering, pressed: configuration.isPressed, enabled: isEnabled)
+            configuration.label
+                .background(
+                    RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                        .fill(tone?.color ?? .clear)
+                )
+                // The hover fades and the press does not. A press is over in
+                // less time than the fade would take, and animating it turns
+                // "down now" into "down a moment ago" — which is the one thing
+                // this style exists to stop happening.
+                .animation(Theme.Motion.ease(reduceMotion, Theme.Motion.quick), value: isHovering)
+                .onHover { isHovering = $0 }
+        }
+    }
+}
+
 // MARK: - Tabs
 
 /// The detail pane's tab bar.
