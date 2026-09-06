@@ -1918,7 +1918,7 @@ private struct StructureDetailStrip: View {
                     .padding(.horizontal, Theme.Space.sm)
                     .frame(height: 20)
                     .background(
-                        RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                        Theme.Radius.controlShape
                             .fill(
                                 selected == section
                                     ? Theme.Surface.overlay.color : Color.clear)
@@ -2104,7 +2104,7 @@ struct RecordPane: View {
                     .frame(width: 18, height: 18)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(IconButtonStyle())
             .foregroundStyle(Theme.Text.secondary.color)
             .help("Previous row (↑)")
             .accessibilityLabel("Previous row")
@@ -2117,7 +2117,7 @@ struct RecordPane: View {
                     .frame(width: 18, height: 18)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(IconButtonStyle())
             .foregroundStyle(Theme.Text.secondary.color)
             .help("Next row (↓)")
             .accessibilityLabel("Next row")
@@ -2130,7 +2130,7 @@ struct RecordPane: View {
                     .frame(width: 18, height: 18)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(IconButtonStyle())
             .foregroundStyle(Theme.Text.secondary.color)
             .help("Back to the grid (⌃⌘R)")
             .accessibilityLabel("Back to the grid")

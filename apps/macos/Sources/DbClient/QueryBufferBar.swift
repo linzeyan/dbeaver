@@ -113,10 +113,10 @@ private struct QueryBufferItem: View {
                     .padding(.horizontal, 4)
                     .padding(.vertical, 1)
                     .background(
-                        RoundedRectangle(cornerRadius: Theme.Radius.control)
+                        Theme.Radius.controlShape
                             .fill(Theme.Surface.raised.color)
                             .overlay(
-                                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                                Theme.Radius.controlShape
                                     .strokeBorder(Theme.Accent.selection.color, lineWidth: 1))
                     )
                     .onSubmit { commitRename(draft) }

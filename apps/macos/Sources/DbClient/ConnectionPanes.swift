@@ -347,11 +347,11 @@ struct ConnectionFormPane: View {
         .padding(Theme.Space.lg)
         .frame(width: 420)
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+            Theme.Radius.cardShape
                 .fill(Theme.Surface.raised.color)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+            Theme.Radius.cardShape
                 .strokeBorder(Theme.Border.hairline.color, lineWidth: 1)
         )
     }
@@ -938,9 +938,9 @@ private struct ConnectionRow: View {
             .padding(.horizontal, Theme.Space.sm)
             .frame(height: 40)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.control).fill(fill)
+                Theme.Radius.controlShape.fill(fill)
             )
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .contentShape(Theme.Radius.controlShape)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -1097,9 +1097,9 @@ private struct QuickConnectRow: View {
             .padding(.horizontal, Theme.Space.sm)
             .frame(height: 40)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.control).fill(fill)
+                Theme.Radius.controlShape.fill(fill)
             )
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .contentShape(Theme.Radius.controlShape)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -1203,11 +1203,11 @@ private struct ConnectionFilterField: View {
         .padding(.horizontal, Theme.Space.sm)
         .frame(height: 22)
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.control)
+            Theme.Radius.controlShape
                 .fill(Theme.Surface.canvas.opacity(0.6).color)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.control)
+            Theme.Radius.controlShape
                 .strokeBorder(
                     focus == .connectionFilter
                         ? Theme.Accent.selection.color : Theme.Border.hairline.color,

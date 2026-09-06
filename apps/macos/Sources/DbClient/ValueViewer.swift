@@ -733,11 +733,11 @@ struct CellValueEditor: View {
             .padding(.horizontal, Theme.Space.xs)
             .padding(.vertical, Theme.Space.xs)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                Theme.Radius.controlShape
                     .fill(Theme.Surface.canvas.opacity(0.6).color)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                Theme.Radius.controlShape
                     .strokeBorder(
                         focused ? Theme.Accent.selection.color : Theme.Border.hairline.color,
                         lineWidth: 1)

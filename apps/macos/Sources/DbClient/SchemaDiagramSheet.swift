@@ -206,10 +206,10 @@ struct SchemaDiagramSheet: View {
         }
         .background(Theme.Surface.raised.color)
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.card)
+            Theme.Radius.cardShape
                 .stroke(Theme.Border.control.color, lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .clipShape(Theme.Radius.cardShape)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(diagram.spoken(for: table))
     }

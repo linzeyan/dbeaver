@@ -74,7 +74,7 @@ struct IconButtonStyle: ButtonStyle {
                 hovering: isHovering, pressed: configuration.isPressed, enabled: isEnabled)
             configuration.label
                 .background(
-                    RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                    Theme.Radius.controlShape
                         .fill(tone?.color ?? .clear)
                 )
                 // The hover fades and the press does not. A press is over in
@@ -145,10 +145,10 @@ private struct TabButton: View {
             // transfer to a pointer-driven desktop app.
             .frame(height: 24)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                Theme.Radius.controlShape
                     .fill(background)
             )
-            .contentShape(RoundedRectangle(cornerRadius: Theme.Radius.control))
+            .contentShape(Theme.Radius.controlShape)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -361,11 +361,11 @@ struct SidebarFilterField: View {
         .padding(.horizontal, Theme.Space.sm)
         .frame(height: 22)
         .background(
-            RoundedRectangle(cornerRadius: Theme.Radius.control)
+            Theme.Radius.controlShape
                 .fill(Theme.Surface.canvas.opacity(0.6).color)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.control)
+            Theme.Radius.controlShape
                 .strokeBorder(
                     focus == .navigatorFilter
                         ? Theme.Accent.selection.color : Theme.Border.hairline.color,
@@ -419,11 +419,11 @@ struct CompactField: View {
             .padding(.horizontal, Theme.Space.sm)
             .frame(height: 22)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                Theme.Radius.controlShape
                     .fill(Theme.Surface.canvas.opacity(0.6).color)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.control)
+                Theme.Radius.controlShape
                     .strokeBorder(
                         focus == area ? Theme.Accent.selection.color : Theme.Border.hairline.color,
                         lineWidth: 1))

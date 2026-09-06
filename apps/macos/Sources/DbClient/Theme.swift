@@ -400,6 +400,27 @@ enum Theme {
     enum Radius {
         static let control: CGFloat = 5
         static let card: CGFloat = 7
+
+        /// The corner itself, rather than only how far it turns.
+        ///
+        /// `.continuous` is the curve every rounded surface macOS draws for
+        /// itself uses — a sheet, a text field, a button — and it is the half of
+        /// a corner a radius does not state. A circular arc meets its edges at
+        /// an angle the eye can find, so beside anything AppKit drew, a corner
+        /// left on the default reads as the sharper one.
+        ///
+        /// Handed out as shapes rather than left to each call site, because the
+        /// call sites are where it went wrong: twenty of the twenty-five rounded
+        /// rectangles in this tree said `cornerRadius:` and nothing else, which
+        /// is a default nobody chose and nobody could see until they were
+        /// counted. Stating it once removes the chance to forget it.
+        static var controlShape: RoundedRectangle {
+            RoundedRectangle(cornerRadius: control, style: .continuous)
+        }
+
+        static var cardShape: RoundedRectangle {
+            RoundedRectangle(cornerRadius: card, style: .continuous)
+        }
     }
 
     // MARK: - Type
