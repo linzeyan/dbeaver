@@ -424,8 +424,11 @@ jobs:
         if: always()
         run: sccache --show-stats
 
-  # The one claim the Windows front end rests on, made before a line of it is
-  # written: that the core needs nothing macOS has and Windows has not.
+  # What the Windows front end rests on, established before a line of it is
+  # written. The first question — does the core compile off macOS at all — was
+  # answered on cddff57109: yes, once the SSH agent's Unix socket was given a
+  # platform branch of its own, and nothing else in fifteen drivers objected.
+  # What this asks now is a step further in, and is described further down.
   #
   # It has to be a runner, because the question cannot be asked from the machine
   # this is developed on. `cargo check --target aarch64-pc-windows-msvc` gets 153
@@ -438,10 +441,23 @@ jobs:
   # this job has no such command to drift from, since the build it does is one
   # that fails on every machine in this project except a Windows one.
   #
-  # `build` and not `test`: what is being asked is whether fifteen drivers and
-  # the FFI they meet in compile off this branch at all. Running them wants
-  # containers, and containers on a Windows runner are a second question that
-  # only matters once the answer to this one is yes.
+  # `test` and not `build`, now that building is answered. Three things arrive
+  # with that, and the first is what this job was always for:
+  # `crates/ffi/tests/conformance.rs` opens by saying it exists "so the FFI
+  # contract is validated independently of macOS, which is what keeps the
+  # eventual Windows front-end from discovering a Swift-shaped API" — and until
+  # now the only machine it had ever been validated on was a Mac. Its
+  # argument-contract half needs no database and is written to run under plain
+  # `cargo test`; its live half is `#[ignore]`, so no container is implied.
+  #
+  # Second, this is the first time anything here *links*. DuckDB is C++ compiled
+  # into the staticlib, which is why the macOS package carries an explicit
+  # `.linkedLibrary("c++")`; whatever the MSVC equivalent of that turns out to
+  # be, a test binary is what finds it.
+  #
+  # Third, `cargo test` rather than nextest, because `cargo test --workspace` is
+  # exactly what `make test` runs on the Linux side: the two jobs should differ
+  # about the platform and not about the runner.
   #
   # x86_64 rather than the ARM the local VM runs, because the front end is not
   # what is being measured yet and x86_64 is the target every dependency here has
@@ -479,11 +495,11 @@ jobs:
       # 5000 rather than the 3000 next door: cargo prints every warning in the
       # graph before it prints why it stopped, so the part worth reading sits
       # further from the end than a Swift failure does.
-      - name: Build the core
+      - name: Test the core
         shell: bash
         run: |
           set -o pipefail
-          cargo build --workspace 2>&1 | tee build.log && exit 0
+          cargo test --workspace 2>&1 | tee build.log && exit 0
           python -c "import pathlib; \
             print('::error::' + pathlib.Path('build.log').read_text()[-5000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
