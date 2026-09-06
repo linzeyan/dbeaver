@@ -608,12 +608,21 @@ jobs:
           link() {
             local libs
             libs=$(grep -o 'native-static-libs:.*' natives.txt | head -1 | cut -d: -f2-)
-            echo "system libraries: $libs"
+            # A notice rather than an echo, on a green run rather than a red one.
+            # Asking rustc for this list was only ever worth doing if the answer
+            # reaches the person starting the WinUI project, and an echo reaches
+            # the log — which takes rights that the annotations do not.
+            echo "::notice::Windows link line for dbffi.lib:$libs"
 
             # `-` rather than `/` for every cl flag. Under Git Bash an argument
             # that starts with a slash is rewritten as a Windows path, so
             # `/nologo` would arrive as a filename; cl accepts both spellings and
             # only one of them survives the shell.
+            #
+            # `$libs` is unquoted on purpose: it is a list of libraries and has
+            # to split into one argument each. Quoting it hands the linker a
+            # single argument with spaces in its name.
+            # shellcheck disable=SC2086
             cl -nologo -EHsc -std:c++17 \
               -I apps/macos/Sources/CDbFfi/include \
               apps/windows/linkcheck/main.cpp \
