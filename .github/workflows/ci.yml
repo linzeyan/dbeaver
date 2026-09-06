@@ -376,8 +376,20 @@ jobs:
       - name: Start servers
         run: make ${{ matrix.server.up }}
 
+      # The tail as an annotation, the same arrangement the macOS and Windows
+      # jobs carry. The reason is sharper here: a red used to read `exit code 2`
+      # and stop, which does not name the failing test, never mind the assertion
+      # — and the log that would is behind rights not everyone working on this
+      # has. nextest prints its failures last, so the end of the log is the part
+      # worth carrying out.
       - name: Integration tests
-        run: make ${{ matrix.server.test }}
+        run: |
+          set -o pipefail
+          make ${{ matrix.server.test }} 2>&1 | tee tests.log && exit 0
+          python3 -c "import pathlib; \
+            print('::error::' + pathlib.Path('tests.log').read_text()[-5000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
 
   app:
     name: App (macOS)
@@ -539,27 +551,57 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo build -p dbffi
 
-          # A Rust staticlib does not record that its contents need ws2_32 and
-          # friends — the same gap macOS covers by naming `c++` in Package.swift.
-          # Asking the compiler beats keeping a list: this prints the link line
-          # the WinUI project will inherit, measured on the day it is used.
-          cargo rustc -p dbffi --crate-type staticlib \
-            -- --print native-static-libs 2>&1 | tee natives.log
-          libs=$(grep -o 'native-static-libs:.*' natives.log | head -1 | cut -d: -f2-)
-          echo "system libraries: $libs"
+          link() {
+            # `cargo test` above never built this: a staticlib is a crate type
+            # cargo produces for `build`, not for the test harness, so this is
+            # the step that first asks the archiver to run.
+            cargo build -p dbffi || return 1
 
-          # `-` rather than `/` for every cl flag. Under Git Bash an argument
-          # that starts with a slash is rewritten as a Windows path, so `/nologo`
-          # would arrive as a filename; cl accepts both spellings and only one of
-          # them survives the shell.
-          cl -nologo -EHsc -std:c++17 \
-            -I apps/macos/Sources/CDbFfi/include \
-            apps/windows/linkcheck/main.cpp \
-            -Fe:linkcheck.exe \
-            -link -LIBPATH:target/debug dbffi.lib $libs
-          ./linkcheck.exe
+            # A Rust staticlib does not record that its contents need ws2_32 and
+            # friends — the same gap macOS covers by naming `c++` in
+            # Package.swift. Asking the compiler beats keeping a list: this
+            # prints the link line the WinUI project will inherit, measured on
+            # the day it is used.
+            #
+            # `--lib` is not optional. The crate declares two crate types, and
+            # `--crate-type` may only narrow a single target, so without it
+            # cargo stops with "crate types to rustc can only be passed to one
+            # target" — which arrives as a bare exit 101 and looks like a build
+            # failure on a platform nobody can check by hand.
+            # Its own file rather than the log this step is teeing into: that
+            # one is written by `tee` at the far end of a pipe, and reading it
+            # from inside the pipe is a race against the flush.
+            cargo rustc -p dbffi --lib --crate-type staticlib \
+              -- --print native-static-libs >natives.txt 2>&1 || {
+                cat natives.txt
+                return 1
+              }
+            cat natives.txt
+            local libs
+            libs=$(grep -o 'native-static-libs:.*' natives.txt | head -1 | cut -d: -f2-)
+            echo "system libraries: $libs"
+
+            # `-` rather than `/` for every cl flag. Under Git Bash an argument
+            # that starts with a slash is rewritten as a Windows path, so
+            # `/nologo` would arrive as a filename; cl accepts both spellings and
+            # only one of them survives the shell.
+            cl -nologo -EHsc -std:c++17 \
+              -I apps/macos/Sources/CDbFfi/include \
+              apps/windows/linkcheck/main.cpp \
+              -Fe:linkcheck.exe \
+              -link -LIBPATH:target/debug dbffi.lib $libs || return 1
+            ./linkcheck.exe
+          }
+
+          # The same tail-as-annotation as the step above, and for its reason:
+          # this one failed once already with nothing but `exit code 101` to
+          # show for it, on the one platform that cannot be reproduced here.
+          link 2>&1 | tee link.log && exit 0
+          python -c "import pathlib; \
+            print('::error::' + pathlib.Path('link.log').read_text()[-5000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
 
       - name: Compiler cache
         if: always()
