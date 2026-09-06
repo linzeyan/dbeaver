@@ -423,3 +423,46 @@ jobs:
       - name: Compiler cache
         if: always()
         run: sccache --show-stats
+
+  # The one claim the Windows front end rests on, made before a line of it is
+  # written: that the core needs nothing macOS has and Windows has not.
+  #
+  # It has to be a runner, because the question cannot be asked from the machine
+  # this is developed on. `cargo check --target aarch64-pc-windows-msvc` gets 153
+  # crates in and then stops on `ring`'s build script — Apple's `cc` cannot emit
+  # an object for an MSVC target — and every crate that compiles C is behind that
+  # same wall. A cross toolchain would only move the wall.
+  #
+  # Open-coded cargo rather than a Makefile target, against this file's own rule.
+  # The rule is there so that CI cannot drift from the commands a developer runs;
+  # this job has no such command to drift from, since the build it does is one
+  # that fails on every machine in this project except a Windows one.
+  #
+  # `build` and not `test`: what is being asked is whether fifteen drivers and
+  # the FFI they meet in compile off this branch at all. Running them wants
+  # containers, and containers on a Windows runner are a second question that
+  # only matters once the answer to this one is yes.
+  #
+  # x86_64 rather than the ARM the local VM runs, because the front end is not
+  # what is being measured yet and x86_64 is the target every dependency here has
+  # already met. The ARM build is the front end's problem, on the day it exists.
+  windows:
+    name: Core (Windows)
+    needs: [changes, core]
+    if: needs.changes.outputs.core == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      # Its own key for the same reason the macOS job has one: a different host
+      # builds different artifacts, and there is no second Windows job to race.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-dev
+
+      - name: Build the core
+        run: cargo build --workspace
+
+      - name: Compiler cache
+        if: always()
+        run: sccache --show-stats
