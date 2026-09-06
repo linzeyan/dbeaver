@@ -92,6 +92,7 @@ jobs:
     outputs:
       core: ${{ steps.decide.outputs.core }}
       app: ${{ steps.decide.outputs.app }}
+      windows: ${{ steps.decide.outputs.windows }}
       servers: ${{ steps.decide.outputs.servers }}
     steps:
       - name: Decide
@@ -155,11 +156,16 @@ jobs:
                "test": "test-tunnel", "driver": None},
           ]
 
-          def emit(core, app, servers, why):
+          # `windows` defaults to true because every call that omits it is one of
+          # the "attribute nothing, run everything" paths below, and a gate that
+          # quietly defaulted to off would turn those into "run everything except
+          # the one platform nobody can check by hand".
+          def emit(core, app, servers, why, windows=True):
               print(f"::notice::{why}")
               with open(os.environ["GITHUB_OUTPUT"], "a") as out:
                   out.write(f"core={'true' if core else 'false'}\n")
                   out.write(f"app={'true' if app else 'false'}\n")
+                  out.write(f"windows={'true' if windows else 'false'}\n")
                   out.write("servers=" + json.dumps(
                       [{k: v for k, v in s.items() if k != "driver"} for s in servers]) + "\n")
               raise SystemExit(0)
@@ -216,9 +222,17 @@ jobs:
           servers = [s for s in SERVERS
                      if rebuild or (s["driver"] and any(
                          f.startswith(f"crates/drivers/{s['driver']}/") for f in files))]
+          # Everything `core` asks for, plus the link check's own sources. It
+          # needs to be a superset: a driver change leaves `rebuild` false, and
+          # a driver that reaches for a Unix-only API is exactly the mistake this
+          # job exists to catch. The extra term is what makes editing the link
+          # check run the link check, which reading `core` alone would not.
+          windows = core or any(f.startswith("apps/windows/") for f in files)
           emit(core, app, servers,
                f"{len(files)} files changed: core={core}, app={app}, "
-               + f"servers={[s['name'] for s in servers] or 'none'}")
+               + f"windows={windows}, "
+               + f"servers={[s['name'] for s in servers] or 'none'}",
+               windows=windows)
           PY
 
   # The gate. Everything below waits for this, for two reasons that happen to
@@ -465,7 +479,12 @@ jobs:
   windows:
     name: Core (Windows)
     needs: [changes, core]
-    if: needs.changes.outputs.core == 'true'
+    # The macOS job's arrangement, and for its reason: a change to the link check
+    # alone leaves `core` skipped, and taking the default view of a skipped
+    # dependency would skip the only job that can check that change.
+    if: >-
+      ${{ !cancelled() && needs.changes.outputs.windows == 'true'
+          && (needs.core.result == 'success' || needs.core.result == 'skipped') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -504,6 +523,43 @@ jobs:
             print('::error::' + pathlib.Path('build.log').read_text()[-5000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
+
+      # Everything above proves the core builds and its own tests pass. It says
+      # nothing about the question a front end actually asks, because Swift is
+      # the only thing that has ever linked this library, and it does so through
+      # a modulemap and a SwiftPM link line, neither of which exists here.
+      #
+      # `apps/windows/linkcheck` asks that question with no UI framework in the
+      # way, so a red run here is about the core rather than about XAML. The
+      # header still lives under `apps/macos` because Swift is still its only
+      # real consumer; the day the WinUI project exists is the day moving it
+      # somewhere neutral pays for itself.
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Link the core into a plain C++ program
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build -p dbffi
+
+          # A Rust staticlib does not record that its contents need ws2_32 and
+          # friends — the same gap macOS covers by naming `c++` in Package.swift.
+          # Asking the compiler beats keeping a list: this prints the link line
+          # the WinUI project will inherit, measured on the day it is used.
+          cargo rustc -p dbffi --crate-type staticlib \
+            -- --print native-static-libs 2>&1 | tee natives.log
+          libs=$(grep -o 'native-static-libs:.*' natives.log | head -1 | cut -d: -f2-)
+          echo "system libraries: $libs"
+
+          # `-` rather than `/` for every cl flag. Under Git Bash an argument
+          # that starts with a slash is rewritten as a Windows path, so `/nologo`
+          # would arrive as a filename; cl accepts both spellings and only one of
+          # them survives the shell.
+          cl -nologo -EHsc -std:c++17 \
+            -I apps/macos/Sources/CDbFfi/include \
+            apps/windows/linkcheck/main.cpp \
+            -Fe:linkcheck.exe \
+            -link -LIBPATH:target/debug dbffi.lib $libs
+          ./linkcheck.exe
 
       - name: Compiler cache
         if: always()

@@ -465,6 +465,24 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-schema-diagram
 	./$(APP_BIN) --verify-mcp
 
+# The Windows front end's first question, asked on the machine that is here.
+# `apps/windows/linkcheck` exists to show that a plain C++ program can include
+# the header and link the staticlib, which is what a front end that is not Swift
+# has to do. Only CI can answer the MSVC half; the C++ half is the half a typo
+# breaks, and a typo costs eight minutes there against five seconds here.
+#
+# The frameworks are the ones the Rust side pulls in on this platform, so this
+# says nothing about what Windows will need — CI asks rustc for that list rather
+# than keeping one.
+.PHONY: linkcheck
+linkcheck: release ## Build the Windows link check with the local C++ compiler
+	clang++ -std=c++17 -Wall -Wextra -Werror \
+		-I $(APP_DIR)/Sources/CDbFfi/include \
+		apps/windows/linkcheck/main.cpp -o target/linkcheck \
+		-L target/release -ldbffi \
+		-framework AppKit -framework Security -framework SystemConfiguration
+	./target/linkcheck
+
 # The settings checked against a live window rather than as rules on their own.
 # Separate from `test-swift`, which is the set of checks that need no server:
 # this one browses a real relation and presses Save, because which side of a
@@ -539,7 +557,7 @@ test-mcp: release ## Talk to the MCP server over a real socket
 	bash $(TOOLS)/mcp-smoke.sh ./$(APP_BIN) $(or $(PORT),8791)
 
 .PHONY: test-all
-test-all: test test-integration test-swift test-plan test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
+test-all: test test-integration test-swift linkcheck test-plan test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
 
 ##@ Quality
 
