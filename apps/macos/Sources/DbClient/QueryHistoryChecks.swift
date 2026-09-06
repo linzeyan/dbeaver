@@ -31,6 +31,7 @@ enum QueryHistoryChecks {
             checkAPasswordTypedIntoTheQueryTabIsNotWrittenDown()
             checkTheStatementIsReadInTheDialectItWasSentIn()
             checkWhatAnEarlierBuildWroteIsSweptAtLaunch()
+            checkAShapeThisBuildCannotReadIsTakenOffTheDisk()
         }
         if failures == 0 {
             fputs("query-history: all checks passed\n", stderr)
@@ -267,6 +268,36 @@ enum QueryHistoryChecks {
         expect(
             written?.contains("hunter2"), false,
             "and the store itself no longer holds it, which is the only thing that matters")
+    }
+
+    /// And a shape this build cannot read is taken off the disk, not just out of
+    /// the list.
+    ///
+    /// The case above is the sweep working on data it can read. This is the
+    /// other half of the same promise, and the half that was quietly untrue:
+    /// `load` shrugs at what it cannot decode, so the sweep mapped over an empty
+    /// list, decided nothing had changed and wrote nothing — leaving the blob it
+    /// could not read exactly where it was, password and all. The list looked
+    /// empty and the plist was not.
+    @MainActor private static func checkAShapeThisBuildCannotReadIsTakenOffTheDisk() {
+        let store = ScratchDefaults.store("verify-query-history-unreadable")
+        // A shape from a build that did not have all of today's fields. Any
+        // undecodable JSON reaches the same branch; this is the one that looks
+        // like something an earlier version of this file would have written.
+        let stale = #"[{"sql":"ALTER USER app IDENTIFIED BY 'hunter2'","origin":"query"}]"#
+        store.set(Data(stale.utf8), forKey: QueryHistory.key)
+
+        let history = QueryHistory(defaults: store)
+        expect(
+            history.entries.isEmpty, true,
+            "a shape this build cannot read opens an empty history rather than refusing to open")
+
+        let written = store.data(forKey: QueryHistory.key)
+            .map { String(decoding: $0, as: UTF8.self) }
+        expect(
+            written?.contains("hunter2"), false,
+            "and it does not stay on the disk, where it would be the one thing the sweep is "
+                + "unable to reach")
     }
 
     // MARK: - Fixture

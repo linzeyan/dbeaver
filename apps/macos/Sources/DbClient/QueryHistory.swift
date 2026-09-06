@@ -151,8 +151,18 @@ final class QueryHistory {
     /// `--history-store`. Everything else takes the default.
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        let stored = defaults.data(forKey: Self.key)
         entries = Self.load(from: defaults)
-        if sweepSecrets() { save() }
+        // A blob this build cannot decode is dropped from the list by `load`
+        // and would otherwise stay on the disk — the one place the sweep below
+        // cannot reach, since it maps over a list that came back empty. That
+        // leaves a password sitting in the plist until some later statement
+        // happens to overwrite the key, and a history nobody adds to never
+        // does. Writing the empty list is `load`'s drop actually landing. A
+        // stored empty list takes this branch too and is rewritten as itself,
+        // which costs nothing worth a second condition.
+        let unreadable = stored != nil && entries.isEmpty
+        if sweepSecrets() || unreadable { save() }
     }
 
     /// Takes secrets out of what a previous launch wrote, once, at launch.
