@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh::client;
+// Unix only, like the two constructors on it that this uses.
+#[cfg(unix)]
 use russh::keys::agent::client::AgentClient;
 use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
 use tokio::net::TcpListener;
@@ -56,6 +58,14 @@ pub enum TunnelError {
     NoAgent { at: String, why: String },
     #[error("the ssh-agent at {0} is holding no keys")]
     EmptyAgent(String),
+    /// Off Unix only, which is why it carries no socket: there was never one to
+    /// name. See `agent_accepted` for what is missing and what still works.
+    #[cfg(not(unix))]
+    #[error(
+        "this build cannot use an ssh-agent: an agent is reached over a Unix socket, and \
+         this platform keeps its own behind a named pipe. Use a key file or a password"
+    )]
+    NoAgentHere,
     #[error("{0}")]
     Ssh(#[from] russh::Error),
     #[error("{0}")]
@@ -218,55 +228,7 @@ impl Tunnel {
                     .success()
             }
             Credential::Agent { socket } => {
-                let at = socket
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "$SSH_AUTH_SOCK".to_string());
-                let mut agent = match &socket {
-                    Some(path) => AgentClient::connect_uds(path).await,
-                    None => AgentClient::connect_env().await,
-                }
-                .map_err(|why| TunnelError::NoAgent {
-                    at: at.clone(),
-                    why: why.to_string(),
-                })?;
-                let identities =
-                    agent
-                        .request_identities()
-                        .await
-                        .map_err(|why| TunnelError::NoAgent {
-                            at: at.clone(),
-                            why: why.to_string(),
-                        })?;
-                // Its own error rather than a refusal. An agent with nothing in
-                // it is a `ssh-add` that was never run, and reporting it as the
-                // server saying no would send somebody to the bastion to fix a
-                // problem on this side of it.
-                if identities.is_empty() {
-                    return Err(TunnelError::EmptyAgent(at));
-                }
-                let hash = session.best_supported_rsa_hash().await?.flatten();
-                // Every identity, not the first. An agent commonly holds several
-                // and the server accepts one of them; stopping at the first
-                // refusal would make the tunnel depend on the order `ssh-add`
-                // happened to run in.
-                let mut accepted = false;
-                for identity in identities {
-                    let public = identity.public_key().into_owned();
-                    if session
-                        .authenticate_publickey_with(&config.user, public, hash, &mut agent)
-                        .await
-                        .map_err(|why| TunnelError::NoAgent {
-                            at: at.clone(),
-                            why: why.to_string(),
-                        })?
-                        .success()
-                    {
-                        accepted = true;
-                        break;
-                    }
-                }
-                accepted
+                agent_accepted(&mut session, &config.user, socket).await?
             }
         };
         if !accepted {
@@ -300,4 +262,81 @@ impl Tunnel {
         });
         Ok(Tunnel { local, accepting })
     }
+}
+
+/// Whatever a running ssh-agent is holding, offered to the server in the order
+/// the agent lists them.
+///
+/// A function of its own so that the platform this cannot be done on is a
+/// `#[cfg]` on a signature rather than one inside a match arm, which would have
+/// put two spellings of the same forty lines beside each other.
+#[cfg(unix)]
+async fn agent_accepted(
+    session: &mut client::Handle<Gatekeeper>,
+    user: &str,
+    socket: Option<PathBuf>,
+) -> Result<bool, TunnelError> {
+    let at = socket
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "$SSH_AUTH_SOCK".to_string());
+    let mut agent = match &socket {
+        Some(path) => AgentClient::connect_uds(path).await,
+        None => AgentClient::connect_env().await,
+    }
+    .map_err(|why| TunnelError::NoAgent {
+        at: at.clone(),
+        why: why.to_string(),
+    })?;
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(|why| TunnelError::NoAgent {
+            at: at.clone(),
+            why: why.to_string(),
+        })?;
+    // Its own error rather than a refusal. An agent with nothing in it is a
+    // `ssh-add` that was never run, and reporting it as the server saying no
+    // would send somebody to the bastion to fix a problem on this side of it.
+    if identities.is_empty() {
+        return Err(TunnelError::EmptyAgent(at));
+    }
+    let hash = session.best_supported_rsa_hash().await?.flatten();
+    // Every identity, not the first. An agent commonly holds several and the
+    // server accepts one of them; stopping at the first refusal would make the
+    // tunnel depend on the order `ssh-add` happened to run in.
+    for identity in identities {
+        let public = identity.public_key().into_owned();
+        if session
+            .authenticate_publickey_with(user, public, hash, &mut agent)
+            .await
+            .map_err(|why| TunnelError::NoAgent {
+                at: at.clone(),
+                why: why.to_string(),
+            })?
+            .success()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The same question, on a platform where there is nothing to ask.
+///
+/// russh reaches an agent over a Unix socket — `connect_uds` and `connect_env`
+/// do not exist off one — and Windows keeps its OpenSSH agent behind a named
+/// pipe instead. Refused by name rather than left to fail as though no agent
+/// answered: "this build cannot do that" and "your agent is not running" send
+/// somebody to two different places, and only one of them is true here.
+///
+/// The named pipe is a real thing this could learn to speak. Until it does, the
+/// two credentials beside this one both work here.
+#[cfg(not(unix))]
+async fn agent_accepted(
+    _session: &mut client::Handle<Gatekeeper>,
+    _user: &str,
+    _socket: Option<PathBuf>,
+) -> Result<bool, TunnelError> {
+    Err(TunnelError::NoAgentHere)
 }
