@@ -619,11 +619,20 @@ jobs:
             # `/nologo` would arrive as a filename; cl accepts both spellings and
             # only one of them survives the shell.
             #
+            # `-MD` because the list above ends in `/defaultlib:msvcrt`: that is
+            # the dynamic CRT, and it is also the answer to what the MSVC side of
+            # `.linkedLibrary("c++")` turns out to be — DuckDB's C++ arrives with
+            # the CRT rather than as a library of its own. cl defaults to `-MT`,
+            # the static one, and a program this small links anyway; a real front
+            # end linking two CRTs is where the duplicate symbols start. Asking
+            # for the right one here is what makes this check resemble the thing
+            # it stands in for.
+            #
             # `$libs` is unquoted on purpose: it is a list of libraries and has
             # to split into one argument each. Quoting it hands the linker a
             # single argument with spaces in its name.
             # shellcheck disable=SC2086
-            cl -nologo -EHsc -std:c++17 \
+            cl -nologo -EHsc -MD -std:c++17 \
               -I apps/macos/Sources/CDbFfi/include \
               apps/windows/linkcheck/main.cpp \
               -Fe:linkcheck.exe \
