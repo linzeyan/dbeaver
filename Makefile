@@ -1144,6 +1144,17 @@ screenshot-diagram: package db-check ## Capture the schema diagram: make screens
 	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/schema-diagram.png)" \
 		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --schema-diagram erd_demo
 
+# The connection privileges sheet. Nothing is seeded: what it draws comes off
+# the login itself, and `bench` is already the widest case here — a superuser
+# holding all four role attributes and every privilege on the database, which is
+# the long value the label column has to sit beside. Whether that wraps, clips
+# or pushes the sheet out of shape is the one thing `--verify-login-info` cannot
+# answer.
+.PHONY: screenshot-login-info
+screenshot-login-info: package db-check ## Capture the connection privileges: make screenshot-login-info OUT=/tmp/privileges.png
+	swift $(TOOLS)/capture-window.swift "$(or $(OUT),/tmp/connection-privileges.png)" \
+		./$(APP_BUNDLE_BIN) --conn "$(PG_CONN)" --login-info
+
 ##@ Baseline
 
 .PHONY: baseline

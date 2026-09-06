@@ -31,6 +31,12 @@ struct LoginInfoSheet: View {
             Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
             footer
         }
+        // Sized for six rows and held there, so an ordinary four-row connection
+        // opens with room below the last one. Three of the rows are conditional
+        // — `Logged in as` after a SET ROLE, `Member of` for a role in a group,
+        // `Database` at all — and Refresh is right there in the header, so a
+        // sheet that fit its content would change size under the button that
+        // asked it to. Slack is the cheaper of the two.
         .frame(width: 460, height: 300)
         .background(Theme.Surface.raised.color)
         .onExitCommand { model.closeLoginInfo() }
