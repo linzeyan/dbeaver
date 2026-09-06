@@ -387,7 +387,7 @@ jobs:
           set -o pipefail
           make ${{ matrix.server.test }} 2>&1 | tee tests.log && exit 0
           python3 -c "import pathlib; \
-            print('::error::' + pathlib.Path('tests.log').read_text()[-5000:] \
+            print('::error::' + pathlib.Path('tests.log').read_text()[-4000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 
@@ -523,16 +523,18 @@ jobs:
       # exist, so the annotation step would fail on its own while reporting
       # nothing about the build. A relative path is the same path to both.
       #
-      # 5000 rather than the 3000 next door: cargo prints every warning in the
-      # graph before it prints why it stopped, so the part worth reading sits
-      # further from the end than a Swift failure does.
+      # 4000 because GitHub truncates an annotation at 4096 characters and does
+      # it from the end — which is the end this is for. Asking for 5000, as this
+      # did, spent the whole budget on the middle of the log and dropped the
+      # `failures:` block cargo prints last, so a red run listed every test that
+      # passed and stopped one line before saying which one had not.
       - name: Test the core
         shell: bash
         run: |
           set -o pipefail
           cargo test --workspace 2>&1 | tee build.log && exit 0
           python -c "import pathlib; \
-            print('::error::' + pathlib.Path('build.log').read_text()[-5000:] \
+            print('::error::' + pathlib.Path('build.log').read_text()[-4000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 
@@ -577,7 +579,7 @@ jobs:
 
           staticlib 2>&1 | tee staticlib.log && exit 0
           python -c "import pathlib; \
-            print('::error::' + pathlib.Path('staticlib.log').read_text()[-5000:] \
+            print('::error::' + pathlib.Path('staticlib.log').read_text()[-4000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 
@@ -645,7 +647,7 @@ jobs:
           # for it, on the one platform that cannot be reproduced here.
           link 2>&1 | tee link.log && exit 0
           python -c "import pathlib; \
-            print('::error::' + pathlib.Path('link.log').read_text()[-5000:] \
+            print('::error::' + pathlib.Path('link.log').read_text()[-4000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 

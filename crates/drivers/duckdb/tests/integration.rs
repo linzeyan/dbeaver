@@ -62,6 +62,28 @@ async fn failure(src: &DuckSource, sql: &str) -> DuckError {
     }
 }
 
+/// The same, for a fault too far into the result to be reached by the first
+/// page.
+///
+/// `failure` above looks in the two places a fault normally appears, and a page
+/// is a hundred rows: a bad row a quarter of a million in is not among them, so
+/// there the first batch arriving intact is the ordinary case rather than a
+/// broken promise. This one reads to the end and insists only that the error
+/// turns up somewhere.
+async fn failure_in_the_whole_result(src: &DuckSource, sql: &str) -> DuckError {
+    let mut stream = match src.query(sql, 100).await {
+        Err(e) => return e,
+        Ok(stream) => stream,
+    };
+    loop {
+        match stream.next_batch().await {
+            Err(e) => return e,
+            Ok(Some(_)) => continue,
+            Ok(None) => panic!("expected this to fail: {sql}"),
+        }
+    }
+}
+
 fn col<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> &'a T {
     let idx = batch.schema().index_of(name).expect("column missing");
     batch
@@ -785,11 +807,17 @@ async fn a_fault_in_a_row_a_quarter_of_a_million_in_still_fails_at_query() {
     // Worth pinning because it is not what "streaming execution" suggests.
     // `duckdb_execute_prepared_streaming` does not stop at the first chunk: the
     // pipeline runs across DuckDB's own threads, so a row 250,000 in that will
-    // not cast is found before `query` has returned. The trait allows either —
-    // it says only that a successful `query` has not established that the
-    // statement worked — and this driver turns out to be the strict one. The
-    // path where a failure does arrive at a batch instead is cancellation, and
-    // `a_cancelled_page_stops_the_fetch_rather_than_the_process` covers it.
+    // not cast is normally found before `query` has returned, and on this
+    // machine it always is. Normally — a Windows runner handed back a clean
+    // first page instead, three runs after three that had not, which is DuckDB's
+    // thread scheduling and not this driver's contract. The trait allows either,
+    // saying only that a successful `query` has not established that the
+    // statement worked, so what is asserted here is the part that is actually
+    // promised: the fault arrives somewhere in the result, it names the value,
+    // and it is not a cancellation. Reading to the end is what keeps that from
+    // being a claim about how fast a runner is. The path where a failure arrives
+    // as a cancellation instead is
+    // `a_cancelled_page_stops_the_fetch_rather_than_the_process`.
     let fixture = Fixture::new(
         "CREATE TABLE mixed AS
              SELECT i AS id,
@@ -797,7 +825,8 @@ async fn a_fault_in_a_row_a_quarter_of_a_million_in_still_fails_at_query() {
              FROM range(300000) t(i);",
     );
     let src = fixture.connect().await;
-    let err = failure(&src, "SELECT CAST(label AS INTEGER) AS n FROM mixed").await;
+    let err =
+        failure_in_the_whole_result(&src, "SELECT CAST(label AS INTEGER) AS n FROM mixed").await;
     assert!(
         !err.is_cancelled(),
         "a conversion error is not a cancellation"
