@@ -538,16 +538,6 @@ jobs:
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 
-      # Everything above proves the core builds and its own tests pass. It says
-      # nothing about the question a front end actually asks, because Swift is
-      # the only thing that has ever linked this library, and it does so through
-      # a modulemap and a SwiftPM link line, neither of which exists here.
-      #
-      # `apps/windows/linkcheck` asks that question with no UI framework in the
-      # way, so a red run here is about the core rather than about XAML. The
-      # header still lives under `apps/macos` because Swift is still its only
-      # real consumer; the day the WinUI project exists is the day moving it
-      # somewhere neutral pays for itself.
       # Both halves of this are cargo, and cargo has to run before the MSVC
       # environment below is set up — see that step for why.
       #
@@ -588,11 +578,17 @@ jobs:
       # the only thing that has ever linked this library, and it does so through
       # a modulemap and a SwiftPM link line, neither of which exists here.
       #
-      # `apps/windows/linkcheck` asks that question with no UI framework in the
-      # way, so a red run here is about the core rather than about XAML. The
-      # header still lives under `apps/macos` because Swift is still its only
-      # real consumer; the day the WinUI project exists is the day moving it
-      # somewhere neutral pays for itself.
+      # `apps/windows/ffi-check` asks that question with no UI framework in the
+      # way, so a red run here is about the core rather than about XAML. It links
+      # the staticlib and then uses it: DuckDB in memory, one query, and the
+      # batch read back through the Arrow C Data Interface with its values
+      # checked against what the SQL fixed. That second half is there because
+      # `dbffi.h` is written by hand and nothing else compares it against the
+      # library it describes — the Rust harness calls the functions from Rust and
+      # never reads the header, and Swift reads only the part it uses. The header
+      # still lives under `apps/macos` because Swift is still its only real
+      # consumer; the day the WinUI project exists is the day moving it somewhere
+      # neutral pays for itself.
       #
       # This comes last, after every cargo invocation, and that order is load
       # bearing. rustc finds the MSVC linker on its own; putting MSVC on PATH
@@ -602,7 +598,7 @@ jobs:
       # extra operand`, which reads like a DuckDB problem and is a PATH problem.
       # Only `cl` needs what this sets up.
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Link the core into a plain C++ program
+      - name: Use the core from a plain C++ program
         shell: bash
         run: |
           set -o pipefail
@@ -636,10 +632,10 @@ jobs:
             # shellcheck disable=SC2086
             cl -nologo -EHsc -MD -std:c++17 \
               -I apps/macos/Sources/CDbFfi/include \
-              apps/windows/linkcheck/main.cpp \
-              -Fe:linkcheck.exe \
+              apps/windows/ffi-check/main.cpp \
+              -Fe:ffi-check.exe \
               -link -LIBPATH:target/debug dbffi.lib $libs || return 1
-            ./linkcheck.exe
+            ./ffi-check.exe
           }
 
           # The same tail-as-annotation as the steps above, and for their reason:

@@ -465,23 +465,28 @@ test-swift: release ## Swift-side checks, run inside the app binary
 	./$(APP_BIN) --verify-schema-diagram
 	./$(APP_BIN) --verify-mcp
 
-# The Windows front end's first question, asked on the machine that is here.
-# `apps/windows/linkcheck` exists to show that a plain C++ program can include
-# the header and link the staticlib, which is what a front end that is not Swift
-# has to do. Only CI can answer the MSVC half; the C++ half is the half a typo
-# breaks, and a typo costs eight minutes there against five seconds here.
+# What a front end that is not Swift finds when it uses this core, asked on the
+# machine that is here rather than on a runner eight minutes away.
+#
+# `dbffi.h` is hand written and nothing else compares it against the library it
+# describes: the Rust conformance harness calls the functions from Rust and never
+# reads the header, and the macOS app reads it through a modulemap for the part
+# Swift happens to use. This compiles against it, so every struct offset is
+# decided from the header, and then reads a result back and checks the values.
+# It is not a Windows-only check even though Windows is why it exists — a header
+# that has drifted is wrong here too, and here it is five seconds to find out.
 #
 # The frameworks are the ones the Rust side pulls in on this platform, so this
 # says nothing about what Windows will need — CI asks rustc for that list rather
 # than keeping one.
-.PHONY: linkcheck
-linkcheck: release ## Build the Windows link check with the local C++ compiler
+.PHONY: ffi-check
+ffi-check: release ## Use the C surface from C++, the way a non-Swift front end would
 	clang++ -std=c++17 -Wall -Wextra -Werror \
 		-I $(APP_DIR)/Sources/CDbFfi/include \
-		apps/windows/linkcheck/main.cpp -o target/linkcheck \
+		apps/windows/ffi-check/main.cpp -o target/ffi-check \
 		-L target/release -ldbffi \
 		-framework AppKit -framework Security -framework SystemConfiguration
-	./target/linkcheck
+	./target/ffi-check
 
 # The settings checked against a live window rather than as rules on their own.
 # Separate from `test-swift`, which is the set of checks that need no server:
@@ -557,7 +562,7 @@ test-mcp: release ## Talk to the MCP server over a real socket
 	bash $(TOOLS)/mcp-smoke.sh ./$(APP_BIN) $(or $(PORT),8791)
 
 .PHONY: test-all
-test-all: test test-integration test-swift linkcheck test-plan test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
+test-all: test test-integration test-swift ffi-check test-plan test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
 
 ##@ Quality
 
