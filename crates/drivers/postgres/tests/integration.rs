@@ -1506,3 +1506,202 @@ async fn databases_list_what_could_be_opened() {
         .collect();
     assert_eq!(current, ["bench"], "exactly one is the one we are on");
 }
+
+/// What a value is under a given label, for the two tests below.
+fn labelled(fields: &[dbconn::InfoField], label: &str) -> Option<String> {
+    fields
+        .iter()
+        .find(|field| field.label == label)
+        .map(|field| field.value.clone())
+}
+
+/// What this connection says it is, against a server that actually answered.
+///
+/// `--verify-login-info` states every rule the sheet follows and does it with no
+/// server in sight. What it cannot reach is the half of the feature that is two
+/// PostgreSQL queries — whether they run at all, whether the identity comes back
+/// before the privileges, and whether the row that is only drawn after a
+/// `SET ROLE` stays away when nobody has assumed one.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_connection_says_who_it_is_and_what_it_may_do() {
+    let src = connect().await;
+    let fields = Driver::login_info(&src)
+        .await
+        .expect("the connection would not say who it is");
+
+    assert_eq!(labelled(&fields, "Connected as").as_deref(), Some("bench"));
+    assert_eq!(labelled(&fields, "Database").as_deref(), Some("bench"));
+    // Absent rather than repeating the row above it. This is the only assertion
+    // here that would still pass if the second query never ran, which is why the
+    // two below it are here as well.
+    assert_eq!(
+        labelled(&fields, "Logged in as"),
+        None,
+        "nothing has assumed a role, so there is no second identity to name"
+    );
+    assert!(
+        labelled(&fields, "Role attributes")
+            .expect("the attributes row is drawn on every login")
+            .contains("superuser"),
+        "the benchmark login is the one the container was created with; got {fields:?}"
+    );
+    assert!(
+        labelled(&fields, "On this database")
+            .unwrap_or_default()
+            .contains("create"),
+        "and it owns this database; got {fields:?}"
+    );
+
+    // Identity first, which is the order the question is asked in and the order
+    // the sheet draws. Nothing sorts these, so this is the driver's own order
+    // arriving intact.
+    assert_eq!(
+        fields.first().map(|field| field.label.as_str()),
+        Some("Connected as")
+    );
+}
+
+/// A login that was granted nothing is told so, rather than told nothing.
+///
+/// The test that makes the one above mean something. Every privilege question
+/// there answers yes, so a `has_database_privilege` call written to always
+/// answer yes — or four role attributes read off the wrong columns — would pass
+/// it unchanged. This runs the same two queries as a role holding none of them,
+/// and the answers have to differ.
+///
+/// `login_probe` gets CONNECT and TEMPORARY from PUBLIC and no CREATE, because
+/// that is what PostgreSQL gives a fresh role on somebody else's database. The
+/// gap between those two is the whole assertion.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_login_granted_nothing_is_told_so_rather_than_told_nothing() {
+    let admin = connect().await;
+    run(&admin, "DROP ROLE IF EXISTS login_probe").await;
+    run(&admin, "DROP ROLE IF EXISTS login_probe_team").await;
+    run(&admin, "CREATE ROLE login_probe LOGIN PASSWORD 'probe'").await;
+    run(&admin, "CREATE ROLE login_probe_team").await;
+
+    let probe =
+        PgSource::connect("host=127.0.0.1 port=55432 user=login_probe password=probe dbname=bench")
+            .await
+            .expect("the probe login could not connect");
+
+    let fields = Driver::login_info(&probe)
+        .await
+        .expect("the probe connection would not say who it is");
+    assert_eq!(
+        labelled(&fields, "Connected as").as_deref(),
+        Some("login_probe")
+    );
+    assert_eq!(
+        labelled(&fields, "Role attributes").as_deref(),
+        Some("none"),
+        "a role holding none of the four says so in one row rather than four; got {fields:?}"
+    );
+    assert_eq!(
+        labelled(&fields, "On this database").as_deref(),
+        Some("connect, temporary tables"),
+        "CONNECT and TEMPORARY come from PUBLIC and CREATE does not — which is the answer that \
+         says these are three separate questions and not one; got {fields:?}"
+    );
+    assert_eq!(
+        labelled(&fields, "Member of"),
+        None,
+        "and a role in no group has no such row at all"
+    );
+
+    // The membership subquery, which is the longest piece of SQL in this call
+    // and the one nothing above reaches. Granted after the first read, so the
+    // same connection answering differently is the assertion.
+    run(&admin, "GRANT login_probe_team TO login_probe").await;
+    let after = Driver::login_info(&probe)
+        .await
+        .expect("the probe connection would not say who it is");
+    assert_eq!(
+        labelled(&after, "Member of").as_deref(),
+        Some("login_probe_team"),
+        "got {after:?}"
+    );
+
+    drop(probe);
+    run(&admin, "DROP ROLE IF EXISTS login_probe").await;
+    run(&admin, "DROP ROLE IF EXISTS login_probe_team").await;
+}
+
+/// A catalog this login cannot read costs it the privileges, not its name.
+///
+/// `login_info`'s second query is allowed to fail. `pg_roles` is a `pg_catalog`
+/// view, and CockroachDB and GreptimeDB reach this driver without necessarily
+/// serving one — the identity gathered by the first query has to survive that,
+/// because the name is what somebody opened the sheet for. Neither of those two
+/// is in the compose file, so the same failure is arranged the only way this
+/// container can: the view is present and forbidden. What the driver sees is
+/// what it would see there — an error where the attributes were.
+///
+/// In a database of its own, because catalog privileges are per-database and
+/// revoking on `bench` would be this test reaching into every other one in the
+/// file. Same reason the counts test above keeps to its own schema.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_login_that_cannot_read_the_catalog_still_says_who_it_is() {
+    let admin = connect().await;
+    run(
+        &admin,
+        "DROP DATABASE IF EXISTS catalog_probe_db WITH (FORCE)",
+    )
+    .await;
+    run(&admin, "DROP ROLE IF EXISTS catalog_probe").await;
+    run(&admin, "CREATE ROLE catalog_probe LOGIN PASSWORD 'probe'").await;
+    run(&admin, "CREATE DATABASE catalog_probe_db").await;
+
+    let owner = PgSource::connect(
+        "host=127.0.0.1 port=55432 user=bench password=bench dbname=catalog_probe_db",
+    )
+    .await
+    .expect("the probe database could not be reached");
+    // Superusers bypass this, which is why the read below is made as the probe
+    // and not as the role that did the revoking.
+    run(&owner, "REVOKE SELECT ON pg_catalog.pg_roles FROM PUBLIC").await;
+
+    let probe = PgSource::connect(
+        "host=127.0.0.1 port=55432 user=catalog_probe password=probe dbname=catalog_probe_db",
+    )
+    .await
+    .expect("the probe login could not connect");
+    let read = Driver::login_info(&probe).await;
+
+    // Torn down before the assertions, so a wrong answer leaves no database
+    // behind to fail the next run at CREATE.
+    drop(probe);
+    drop(owner);
+    run(
+        &admin,
+        "DROP DATABASE IF EXISTS catalog_probe_db WITH (FORCE)",
+    )
+    .await;
+    run(&admin, "DROP ROLE IF EXISTS catalog_probe").await;
+
+    let fields = read.expect("a forbidden catalog is a missing answer, not a failed read");
+    assert_eq!(
+        labelled(&fields, "Connected as").as_deref(),
+        Some("catalog_probe"),
+        "the identity comes off the first query and outlives the second; got {fields:?}"
+    );
+    assert_eq!(
+        labelled(&fields, "Database").as_deref(),
+        Some("catalog_probe_db"),
+        "got {fields:?}"
+    );
+    assert_eq!(
+        labelled(&fields, "Role attributes"),
+        None,
+        "and nothing is guessed for the half that could not be read — an unreadable \
+         catalog is not a role holding no attributes; got {fields:?}"
+    );
+    assert_eq!(
+        labelled(&fields, "On this database"),
+        None,
+        "which goes for the privileges asked in the same query; got {fields:?}"
+    );
+}
