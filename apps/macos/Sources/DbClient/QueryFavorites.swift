@@ -30,9 +30,13 @@ struct QueryFavorite: Codable, Identifiable, Equatable {
 /// the same reason: one JSON blob under one key is all this needs, and a shared
 /// container is a place for two features written at the same time to collide.
 ///
-/// No limit, unlike the history's. A history is a log and its oldest entries are
-/// worth losing; a favorite is something a person typed a name for, and a store
-/// that silently dropped the two-hundred-and-first would be deleting their work.
+/// Limited only if somebody asks for one, and unlike the history's the limit
+/// does not evict. A history is a log and its oldest entries are worth losing; a
+/// favorite is something a person typed a name for, and a store that silently
+/// dropped the two-hundred-and-first would be deleting their work. So a full
+/// list refuses the newest — the one thing here whose owner is standing in front
+/// of it and can be told — and lowering the number stops more going in without
+/// touching what is already there.
 @Observable
 @MainActor
 final class QueryFavorites {
@@ -41,7 +45,24 @@ final class QueryFavorites {
     /// rather than scanned.
     private(set) var favorites: [QueryFavorite] = []
 
-    private static let key = "dev.dbclient.queryFavorites"
+    static let key = "dev.dbclient.queryFavorites"
+
+    /// The most this list may hold, or 0 for no limit. Read from the store the
+    /// entries are in, for the reason `QueryHistory.limit` gives.
+    var limit: Int { Preferences.favoritesLimit(in: defaults) }
+
+    /// Whether the next Save would be refused.
+    ///
+    /// Asked before saving rather than discovered by a nil coming back, because
+    /// the two ways `save` answers nil are worth telling apart: an empty name is
+    /// a button that should not have been pressable, and a full list is
+    /// something to say out loud.
+    var isFull: Bool { limit > 0 && favorites.count >= limit }
+
+    /// No limit unless somebody sets one. This list had none at all before the
+    /// setting existed, and a default that started deleting — or refusing —
+    /// would be a new rule applied to lists that were built without it.
+    static let defaultLimit = 0
 
     private let defaults: UserDefaults
 
@@ -62,8 +83,11 @@ final class QueryFavorites {
 
     /// Keeps a statement, and answers with what was kept.
     ///
-    /// Nil where there is nothing to keep. A favorite needs both halves: an
-    /// unnamed one cannot be found again, and an empty one has nothing to run.
+    /// Nil where there is nothing to keep, and nil where there is nowhere to put
+    /// it. A favorite needs both halves: an unnamed one cannot be found again,
+    /// and an empty one has nothing to run. The third nil is a full list, which
+    /// callers are expected to have asked about first — see `isFull` — because
+    /// it is the one a person needs told.
     ///
     /// Two favorites may share a name. The name is a label its owner chose, not
     /// a key — someone keeping `count` for four databases has named them
@@ -73,7 +97,7 @@ final class QueryFavorites {
     func save(name: String, sql: String, scheme: String) -> QueryFavorite? {
         let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let statement = sql.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !title.isEmpty, !statement.isEmpty else { return nil }
+        guard !title.isEmpty, !statement.isEmpty, !isFull else { return nil }
         let favorite = QueryFavorite(
             id: UUID(), name: title, sql: statement, scheme: scheme, savedAt: Date())
         favorites = Self.sorted(favorites + [favorite])
@@ -104,17 +128,29 @@ final class QueryFavorites {
     /// make the first mistaken import unrecoverable. An entry whose id is
     /// already here replaces that one, so importing the same file twice leaves
     /// one copy rather than two.
-    func merge(_ incoming: [QueryFavorite]) {
+    ///
+    /// Answers how many were left out because the list is full, so the window
+    /// can say so. An import that quietly kept some of a file would be the one
+    /// case where a person believes they have a statement they do not. A
+    /// replacement is never left out: it is not a new entry, and refusing it
+    /// would make re-importing a file somebody had edited depend on how full the
+    /// list happened to be.
+    @discardableResult
+    func merge(_ incoming: [QueryFavorite]) -> Int {
         var merged = favorites
+        var refused = 0
         for favorite in incoming {
             if let index = merged.firstIndex(where: { $0.id == favorite.id }) {
                 merged[index] = favorite
+            } else if limit > 0, merged.count >= limit {
+                refused += 1
             } else {
                 merged.append(favorite)
             }
         }
         favorites = Self.sorted(merged)
         write()
+        return refused
     }
 
     /// Ordered by name, then by when it was saved so that two with one name keep

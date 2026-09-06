@@ -998,41 +998,6 @@ pub unsafe extern "C" fn db_sql_danger(text: *const c_char, scheme: *const c_cha
     CString::new(word).map_or(ptr::null_mut(), CString::into_raw)
 }
 
-/// The statement as it may be written to a file, or NULL when it may be written
-/// as it is.
-///
-/// NULL is the ordinary answer and means "nothing was taken out", which is every
-/// statement but the handful that carry a secret. A caller that gets NULL keeps
-/// the text it already has; there is no case where NULL means the text could not
-/// be read, because the only way in is a string the caller built.
-///
-/// What counts as a secret and why the rule is deliberately over-broad is in
-/// `crates/sql/src/redact.rs`. It is here rather than in a front end for the
-/// reason `db_sql_danger` is: this side has a lexer, and a match over the raw
-/// text redacts the word in a comment and misses `$$hunter2$$`.
-///
-/// # Safety
-/// `text` and `scheme` must be valid NUL-terminated C strings. The returned
-/// string is the caller's, released with `db_string_free`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn db_sql_redacted(
-    text: *const c_char,
-    scheme: *const c_char,
-) -> *mut c_char {
-    if text.is_null() || scheme.is_null() {
-        return ptr::null_mut();
-    }
-    let (Ok(text), Ok(scheme)) = (
-        unsafe { CStr::from_ptr(text) }.to_str(),
-        unsafe { CStr::from_ptr(scheme) }.to_str(),
-    ) else {
-        return ptr::null_mut();
-    };
-    dbsql::redacted(text, dbsql::for_scheme(scheme))
-        .and_then(|redacted| CString::new(redacted).ok())
-        .map_or(ptr::null_mut(), CString::into_raw)
-}
-
 /// Where a server's error position lands in the buffer, or -1 when the number
 /// could not have come from what was sent.
 ///

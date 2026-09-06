@@ -124,10 +124,15 @@ final class QueryHistory {
     /// test is answered — the only entry it ever has to look at is the front.
     private(set) var entries: [QueryHistoryEntry] = []
 
-    /// How many statements are kept. Far more than anyone scrolls, and small
-    /// enough that the whole list decodes at launch without being noticed. Past
-    /// it the oldest go, because a history is read from the top.
-    static let limit = 200
+    /// How many statements are kept, or 0 for all of them.
+    ///
+    /// Read from the same store the entries are in rather than handed in. The
+    /// Settings window holds a `Preferences` and nothing else, and the histories
+    /// are built in `main.swift` before any window exists — a setting that had
+    /// to be passed from one to the other would need a path between two things
+    /// that never meet. `Preferences` writes the key; this reads it where it is
+    /// used, so a check driving a scratch suite sets it the same way.
+    var limit: Int { Preferences.historyLimit(in: defaults) }
 
     /// And how many of those may be statements nobody typed.
     ///
@@ -137,12 +142,21 @@ final class QueryHistory {
     /// thing this exists to give back, would have been pushed off the end by the
     /// sidebar. Half the list is reserved for the typed ones by capping the
     /// others at half.
-    static let untypedLimit = 100
+    ///
+    /// Derived rather than a second setting: the rule is "half the list", and
+    /// two numbers somebody could set independently would let them reserve more
+    /// room for browses than the list has.
+    var untypedLimit: Int { max(limit / 2, 1) }
+
+    /// What the cap is for somebody who has never chosen one. Far more than
+    /// anyone scrolls, and small enough that the whole list decodes at launch
+    /// without being noticed.
+    static let defaultLimit = 200
 
     /// Not private, so that `--verify-query-history` can write what an earlier
-    /// build would have left here and watch the sweep take it out. A check that
-    /// spelled the key itself would be a second copy of it, and the day they
-    /// disagree is the day the sweep looks like it works.
+    /// build would have left here and read back what this one wrote. A check
+    /// that spelled the key itself would be a second copy of it, and the day
+    /// they disagree is the day the check looks like it passes.
     static let key = "dev.dbclient.queryHistory"
 
     private let defaults: UserDefaults
@@ -151,48 +165,14 @@ final class QueryHistory {
     /// `--history-store`. Everything else takes the default.
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        let stored = defaults.data(forKey: Self.key)
         entries = Self.load(from: defaults)
-        // A blob this build cannot decode is dropped from the list by `load`
-        // and would otherwise stay on the disk — the one place the sweep below
-        // cannot reach, since it maps over a list that came back empty. That
-        // leaves a password sitting in the plist until some later statement
-        // happens to overwrite the key, and a history nobody adds to never
-        // does. Writing the empty list is `load`'s drop actually landing. A
-        // stored empty list takes this branch too and is rewritten as itself,
-        // which costs nothing worth a second condition.
-        let unreadable = stored != nil && entries.isEmpty
-        if sweepSecrets() || unreadable { save() }
-    }
-
-    /// Takes secrets out of what a previous launch wrote, once, at launch.
-    ///
-    /// Every build before this one stored the statement as typed, so the
-    /// password that made this worth fixing is already on the disk. Redacting
-    /// only new entries would leave it exactly where it is, and this is the one
-    /// pass that can reach it.
-    ///
-    /// Asked in PostgreSQL's dialect, because the entries do not record which
-    /// one they were sent in. It is the widest of the ones this build speaks and
-    /// the only one where `$$…$$` is a literal at all, so it takes out at least
-    /// as much as the right dialect would — which is the direction to be wrong
-    /// in here. What it costs is that a MySQL statement using backticks may lose
-    /// a literal it did not have to; a history entry is not re-run from here
-    /// anyway.
-    ///
-    /// Returns whether anything changed, so that the ordinary launch — which is
-    /// every launch after the first one on this build — writes nothing.
-    private func sweepSecrets() -> Bool {
-        var swept = false
-        entries = entries.map { entry in
-            let redacted = SQLScript.redacted(entry.sql, scheme: "postgresql")
-            guard redacted != entry.sql else { return entry }
-            swept = true
-            return QueryHistoryEntry(
-                id: entry.id, sql: redacted, ranAt: entry.ranAt, origin: entry.origin,
-                milliseconds: entry.milliseconds, outcome: entry.outcome)
-        }
-        return swept
+        // The cap can have been lowered since the last launch, in Settings or
+        // by hand in the plist, and what was loaded is held to it before
+        // anything reads it. Written back only when it actually shortened, so
+        // an ordinary launch touches nothing.
+        let loaded = entries.count
+        trim()
+        if entries.count != loaded { save() }
     }
 
     /// Records a statement that was actually sent.
@@ -201,26 +181,19 @@ final class QueryHistory {
     /// keeping: the statement with the typo in it is precisely the one someone
     /// comes back for.
     ///
-    /// What is kept is the statement with its secrets taken out, and that
-    /// happens here rather than at any of the eleven call sites. This list ends
-    /// up in a file that nothing encrypts, and `ALTER USER app IDENTIFIED BY
-    /// 'hunter2'` typed into the Query tab is a password on its way onto a disk
-    /// — against this build's rule that a password never reaches one. One place
-    /// to do it means there is no call site that can forget, which is why
-    /// `scheme` is required rather than defaulted: a caller that did not supply
-    /// one would be redacting against the wrong dialect, and `$$…$$` is a
-    /// literal in one of them and not in the others.
-    ///
-    /// The redacted form is what the list shows as well as what is stored. A
-    /// statement somebody cannot re-run from here unchanged is the point: an
-    /// ellipsis is not a password, and re-running it would send one.
+    /// The statement is kept exactly as it was sent. Every entry here is
+    /// something a person may want to run again — that is what a history is for,
+    /// and it is the same list Recall puts back into the editor — so a statement
+    /// this store had edited would be one that no longer does what it did. A
+    /// password typed into the Query tab is therefore written to the plist as
+    /// typed, and `limit` — how many are kept — is the only thing bounding how
+    /// long it stays there. limitations.md says what that costs.
     func record(
         _ sql: String, from origin: QueryHistoryOrigin, outcome: QueryHistoryOutcome,
-        milliseconds: Double, scheme: String, at ranAt: Date = Date()
+        milliseconds: Double, at ranAt: Date = Date()
     ) {
-        let sent = sql.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sent.isEmpty else { return }
-        let statement = SQLScript.redacted(sent, scheme: scheme)
+        let statement = sql.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !statement.isEmpty else { return }
         let entry = QueryHistoryEntry(
             id: UUID(), sql: statement, ranAt: ranAt, origin: origin,
             milliseconds: milliseconds, outcome: outcome)
@@ -253,16 +226,22 @@ final class QueryHistory {
     /// sequence, and a rule about which of two entries survives cannot be built
     /// on a predicate whose call order is unspecified.
     private func trim() {
+        let limit = limit
+        // Zero is "keep everything", which is the only thing an emptied field
+        // could honestly mean for a cap. Nothing is dropped, and the list grows
+        // for as long as somebody keeps running statements.
+        guard limit > 0 else { return }
+        let untypedLimit = untypedLimit
         var untyped = 0
         var kept: [QueryHistoryEntry] = []
-        kept.reserveCapacity(min(entries.count, Self.limit))
+        kept.reserveCapacity(min(entries.count, limit))
         for entry in entries {
             if entry.origin != .query {
                 untyped += 1
-                if untyped > Self.untypedLimit { continue }
+                if untyped > untypedLimit { continue }
             }
             kept.append(entry)
-            if kept.count == Self.limit { break }
+            if kept.count == limit { break }
         }
         entries = kept
     }
@@ -340,10 +319,12 @@ final class QueryHistory {
     /// that has never been anything else, and an application that refuses to
     /// open because a build from last week wrote a different shape would be a
     /// far worse trade than one that opens having forgotten.
+    /// Returns all of what was stored; the cap is `init`'s to apply, since it is
+    /// the one that then writes the shortened list back.
     private static func load(from defaults: UserDefaults) -> [QueryHistoryEntry] {
         guard let data = defaults.data(forKey: key),
             let decoded = try? JSONDecoder().decode([QueryHistoryEntry].self, from: data)
         else { return [] }
-        return Array(decoded.prefix(limit))
+        return decoded
     }
 }

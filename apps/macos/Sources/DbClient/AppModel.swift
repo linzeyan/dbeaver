@@ -3655,7 +3655,7 @@ final class AppModel {
             for statement in sent {
                 history.record(
                     statement.sql, from: .edit, outcome: .affected(statement.affected),
-                    milliseconds: 0, scheme: scheme)
+                    milliseconds: 0)
             }
             staged = StagedChanges()
             isBusy = false
@@ -4285,7 +4285,7 @@ final class AppModel {
             // answer to what came back, and `capped` is what says there is more.
             history.record(
                 browseStatementText, from: .browse, outcome: .rows(grid.rowCount),
-                milliseconds: fetched.milliseconds, scheme: scheme)
+                milliseconds: fetched.milliseconds)
         }
         // The rows describe themselves from here on, so `status` goes back to
         // describing the connection. Not putting it back is what left "Running…"
@@ -5695,7 +5695,7 @@ final class AppModel {
             // statement would make both of them worth checking.
             history.record(
                 step.sql, from: .query, outcome: outcome,
-                milliseconds: step.result.milliseconds, scheme: scheme)
+                milliseconds: step.result.milliseconds)
         }
         // Where the eye should go. A run that stopped has exactly one place
         // worth looking and it is the statement that stopped it; a run that
@@ -5850,9 +5850,20 @@ final class AppModel {
     /// The scheme is taken from the connection that is open and is empty where
     /// there is none — which is what later makes the statement offered
     /// everywhere rather than nowhere.
+    /// A full list is refused and said out loud, rather than making room. The
+    /// oldest favorite is somebody's named work and the newest is the only one
+    /// whose owner is standing here to be told, so the newest is the one that
+    /// loses — and it loses visibly, which is the whole difference between this
+    /// and an eviction.
     @discardableResult
     func saveQuery(named name: String) -> Bool {
         guard let sql = savedQuery else { return false }
+        if favorites.isFull {
+            errorMessage =
+                "Saved queries are full at \(favorites.limit). Remove one, or raise the limit in "
+                + "Settings, to keep this."
+            return false
+        }
         return favorites.save(name: name, sql: sql, scheme: scheme) != nil
     }
 
@@ -5892,8 +5903,15 @@ final class AppModel {
     func importFavorites(from url: URL) {
         do {
             let incoming = try QueryFavorites.decoded(try Data(contentsOf: url))
-            favorites.merge(incoming)
-            errorMessage = nil
+            let refused = favorites.merge(incoming)
+            // Said rather than swallowed. A partial import that reported success
+            // is the one case where somebody walks away believing they have a
+            // statement they do not.
+            errorMessage =
+                refused == 0
+                ? nil
+                : "\(refused) of \(incoming.count) were not kept: saved queries are full at "
+                    + "\(favorites.limit). Raise the limit in Settings and import again."
             activeTab = .query
             queryPanelTab = .favorites
             isHistoryOpen = true
@@ -7024,8 +7042,7 @@ final class AppModel {
             isBusy = false
             relations[schema] = made.listed
             history.record(
-                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0)
             status = "Made \(table)"
             // Selected, so the window is showing the table the rows are about to
             // go into. Empty until the import lands, which is the honest picture
@@ -7221,8 +7238,7 @@ final class AppModel {
             isBusy = false
             relations[schema] = changed.listed
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
             status =
                 "\(change.pastTense) \(schema).\(change == .rename ? newName : relation.name)"
             // Where the selection lands is the one thing this cannot read off the
@@ -7404,8 +7420,7 @@ final class AppModel {
             databases = changed.databases
             schemas = changed.schemas
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
             status = "\(change.pastTense) \(name)"
             refreshTransaction()
         }
@@ -7602,8 +7617,7 @@ final class AppModel {
                 rowIdentity = changed.identity
             }
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
             status = "\(change.pastTense) \(plan.qualified).\(change.columnName)"
             // The grid is over columns that just moved, so whatever it is showing
             // is a row shape the server no longer has.
@@ -7763,8 +7777,7 @@ final class AppModel {
                 rowIdentity = changed.identity
             }
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
             status = "\(change.pastTense) \(change.indexName) on \(plan.qualified)"
         }
     }
@@ -7973,8 +7986,7 @@ final class AppModel {
                 rowIdentity = changed.identity
             }
             history.record(
-                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(changed.affected), milliseconds: 0)
             status = "\(change.pastTense) \(change.constraintName) on \(plan.qualified)"
         }
     }
@@ -8179,8 +8191,7 @@ final class AppModel {
             isBusy = false
             relations[schema] = made.listed
             history.record(
-                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0,
-                scheme: scheme)
+                statement, from: .edit, outcome: .affected(made.affected), milliseconds: 0)
             status = "Made \(schema).\(name)"
             // Opened onto, which is what a table nobody has put anything in is
             // for: the grid shows no rows and the Structure tab shows the

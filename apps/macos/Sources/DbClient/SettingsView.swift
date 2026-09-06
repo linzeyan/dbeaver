@@ -196,6 +196,30 @@ struct SettingsView: View {
                 + "deletes that file.",
             isOn: $preferences.restoresSession)
 
+        SettingsNumber(
+            title: "Statements kept in the history",
+            explanation:
+                "The Query tab's history keeps this many, oldest out first, and half the "
+                + "list is held for statements you typed so that browsing a table cannot "
+                + "push them off the end. 0 keeps all of them. They are kept exactly as "
+                + "they were sent — that is what makes one runnable again — so a password "
+                + "you type into an ALTER USER is in that file until this number pushes it "
+                + "out. The file is ~/Library/Preferences/dev.dbclient.plist and nothing "
+                + "encrypts it.",
+            unit: "statements",
+            value: $preferences.historyLimit)
+
+        SettingsNumber(
+            title: "Saved queries kept",
+            explanation:
+                "The most the saved-query list will hold. 0 is no limit, which is what it "
+                + "was before this setting existed. A full list refuses the next Save and "
+                + "says so, rather than dropping the oldest — these have names you typed, "
+                + "and nothing here deletes one you did not delete. Lowering the number "
+                + "never removes anything either; it only stops more going in.",
+            unit: "queries",
+            value: $preferences.favoritesLimit)
+
         SettingsChoice(
             title: "Keep connections",
             explanation:

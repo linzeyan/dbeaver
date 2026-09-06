@@ -253,24 +253,6 @@ char* db_schema_diff_json(DbHandle* left, const char* left_schema,
 // guaranteeing something it cannot see.
 char* db_sql_danger(const char* text, const char* scheme);
 
-// The statement as it may be written to a file, or NULL when it may be written
-// as it is.
-//
-// NULL is the ordinary answer — it means nothing was taken out — so a caller
-// that gets one keeps the text it already has. It never means the text could
-// not be read: the only way in is a string the caller built.
-//
-// For the query history, which keeps statements across launches in a file
-// nothing encrypts. A password typed into the Query tab is the one thing that
-// must not be in there, and this is what takes it out. Deliberately over-broad:
-// a statement naming a secret loses every literal it has, because which
-// argument holds the password differs by dialect and by version.
-//
-// Takes no handle, like db_sql_danger, and lives on this side for the same
-// reason: a match over the raw text would redact the word in a comment and miss
-// a dollar-quoted body.
-char* db_sql_redacted(const char* text, const char* scheme);
-
 // Where a server error position lands in the buffer, or -1 when the number could
 // not have come from what was sent.
 //

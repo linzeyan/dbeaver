@@ -228,6 +228,31 @@ final class Preferences {
         didSet { store.set(notifiesOnDisconnect, forKey: Key.notifiesOnDisconnect) }
     }
 
+    /// How many statements the history keeps, with 0 for all of them.
+    ///
+    /// Two hundred by default: far more than anyone scrolls, and small enough
+    /// that the whole list decodes at launch without being noticed. It is also
+    /// the only control over how long a statement stays on the disk — the
+    /// history stores what was sent, verbatim, because it exists to be run again
+    /// — so 0 in the other direction is worth having as well. Setting it to 1
+    /// keeps the last statement; nothing here can be set to keep none, which is
+    /// what turning the history off would be and is not something this offers.
+    var historyLimit: Int {
+        didSet { store.set(historyLimit, forKey: Key.historyLimit) }
+    }
+
+    /// How many saved queries may be kept, with 0 for no limit.
+    ///
+    /// No limit by default, which is what this list had before there was a
+    /// setting. A favorite is something somebody typed a name for, so a full
+    /// list refuses the new one rather than dropping the oldest, and lowering
+    /// this number never deletes anything — it only stops more going in. That
+    /// makes it a brake rather than a cap, which is the only shape a limit on
+    /// named work can honestly take.
+    var favoritesLimit: Int {
+        didSet { store.set(favoritesLimit, forKey: Key.favoritesLimit) }
+    }
+
     /// The colours the SQL editor draws with, each kept as a hex string —
     /// `#RRGGBB`, or `#RRGGBBAA` where the tone is translucent.
     ///
@@ -386,6 +411,8 @@ final class Preferences {
         Key.editorUppercasesKeywords: false,
         Key.keepAliveSeconds: 60,
         Key.notifiesOnDisconnect: true,
+        Key.historyLimit: QueryHistory.defaultLimit,
+        Key.favoritesLimit: QueryFavorites.defaultLimit,
         Key.editorBackgroundColor: EditorTheme.defaults.background.hex,
         Key.editorTextColor: EditorTheme.defaults.text.hex,
         Key.editorKeywordColor: EditorTheme.defaults.keyword.hex,
@@ -408,6 +435,32 @@ final class Preferences {
     /// screen — both states the window that wrote the value could never reach.
     static let editorFontSizes = 10...18
 
+    /// The history's cap as `store` holds it, and the saved queries'.
+    ///
+    /// Static, and reading a store rather than an instance, because the two
+    /// lists that obey these are built in `main.swift` before any `Preferences`
+    /// exists and are handed the same `UserDefaults`. They read the key where
+    /// they use it; this is the one place that spells it and folds it.
+    ///
+    /// An absent key is nobody having chosen, which is the default and not zero:
+    /// `integer(forKey:)` answers 0 for both, and 0 is a meaningful setting here
+    /// — it means no cap. On the standard store the registered defaults make
+    /// this moot; on a scratch suite, which is what every check drives, they are
+    /// not registered and the difference is the whole answer. A negative number
+    /// in a hand-edited plist reads as 0, since there is no cap below none.
+    static func historyLimit(in store: UserDefaults) -> Int {
+        limit(Key.historyLimit, in: store, or: QueryHistory.defaultLimit)
+    }
+
+    static func favoritesLimit(in store: UserDefaults) -> Int {
+        limit(Key.favoritesLimit, in: store, or: QueryFavorites.defaultLimit)
+    }
+
+    private static func limit(_ key: String, in store: UserDefaults, or fallback: Int) -> Int {
+        guard store.object(forKey: key) != nil else { return fallback }
+        return max(store.integer(forKey: key), 0)
+    }
+
     private enum Key {
         static let restoresSession = "dev.dbclient.restoresSession"
         static let hidesEmptyColumns = "dev.dbclient.hidesEmptyColumns"
@@ -420,6 +473,8 @@ final class Preferences {
         static let passwordStorage = "dev.dbclient.passwordStorage"
         static let keepAliveSeconds = "dev.dbclient.keepAliveSeconds"
         static let notifiesOnDisconnect = "dev.dbclient.notifiesOnDisconnect"
+        static let historyLimit = "dev.dbclient.historyLimit"
+        static let favoritesLimit = "dev.dbclient.favoritesLimit"
         static let mcpServerEnabled = "dev.dbclient.mcpServerEnabled"
         static let mcpServerPort = "dev.dbclient.mcpServerPort"
         static let mcpRowCap = "dev.dbclient.mcpRowCap"
@@ -597,6 +652,8 @@ final class Preferences {
         let pinging = store.integer(forKey: Key.keepAliveSeconds)
         keepAliveSeconds = pinging < 0 ? 60 : pinging
         notifiesOnDisconnect = store.bool(forKey: Key.notifiesOnDisconnect)
+        historyLimit = Self.historyLimit(in: store)
+        favoritesLimit = Self.favoritesLimit(in: store)
         mcpServerEnabled = store.bool(forKey: Key.mcpServerEnabled)
         // Folded rather than trusted, for the reason the font size is: a port
         // this process cannot bind, read literally, would be the server failing

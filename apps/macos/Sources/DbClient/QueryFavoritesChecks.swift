@@ -24,6 +24,9 @@ enum QueryFavoritesChecks {
             checkOneWithBlanksArrivesOnTheFirstOfThem()
             checkAnExportedFileReadsBackAsTheListThatWroteIt()
             checkAFileThisBuildCannotReadLeavesTheListAlone()
+            checkAFullListRefusesTheNewestAndSaysSo()
+            checkLoweringTheLimitDeletesNothing()
+            checkAnImportPastTheLimitSaysWhatItLeftOut()
         }
         if failures == 0 {
             fputs("favorites: all checks passed\n", stderr)
@@ -304,6 +307,111 @@ enum QueryFavoritesChecks {
         expect(model.errorMessage != nil, true, "and the window says why nothing happened")
     }
 
+    // MARK: - How many are kept
+
+    /// A full list refuses the newest, and says which limit refused it.
+    ///
+    /// The opposite of the history's rule and deliberately so. These have names
+    /// somebody typed, so the entry that loses is the one whose owner is
+    /// standing here to be told — which is the whole difference between this and
+    /// an eviction, and the reason it has to be said out loud rather than
+    /// returned as a nil.
+    @MainActor private static func checkAFullListRefusesTheNewestAndSaysSo() {
+        guard let model = makeModel() else { return }
+        model.preferences.favoritesLimit = 2
+        model.favorites.save(name: "One", sql: "SELECT 1", scheme: "")
+        model.favorites.save(name: "Two", sql: "SELECT 2", scheme: "")
+
+        // The tab as well as the text: `savedQuery` is nil anywhere else, and a
+        // Save refused for that reason would satisfy the assertion below while
+        // proving nothing about the limit.
+        model.activeTab = .query
+        model.queryText = "SELECT 3"
+        expect(model.saveQuery(named: "Three"), false, "the third is refused")
+        expect(
+            model.errorMessage?.contains("full at 2"), true,
+            "and the limit that refused it is named, so the number is findable in Settings")
+        expect(model.favorites.favorites.count, 2, "with the two that were there untouched")
+        expect(
+            model.favorites.favorites.contains { $0.name == "One" }, true,
+            "including the oldest, which an evicting limit would have taken")
+
+        // And the store refuses it on its own account. `isFull` above is what
+        // lets the window name the number; the rule itself belongs to `save`,
+        // or the limit would be something only a caller who remembered to ask
+        // obeys — and `merge` on the same store already enforces it.
+        expect(
+            model.favorites.save(name: "Four", sql: "SELECT 4", scheme: "") == nil, true,
+            "the store refuses a full list without being asked first")
+        expect(model.favorites.favorites.count, 2, "and still keeps two")
+    }
+
+    /// Lowering the limit deletes nothing.
+    ///
+    /// A limit on named work is a brake, not a cap: it stops more going in. A
+    /// number somebody types into Settings must not be a delete button for
+    /// statements they wrote — and the failure this pins is silent, because a
+    /// list that quietly shortened would look exactly like a list that had been
+    /// that length.
+    @MainActor private static func checkLoweringTheLimitDeletesNothing() {
+        guard let model = makeModel() else { return }
+        for i in 0..<5 {
+            model.favorites.save(name: "Query \(i)", sql: "SELECT \(i)", scheme: "")
+        }
+        expect(model.favorites.favorites.count, 5, "five were kept with no limit set")
+
+        model.preferences.favoritesLimit = 2
+        expect(model.favorites.favorites.count, 5, "and all five survive the limit being lowered")
+        expect(model.favorites.isFull, true, "the list is simply full, so nothing more goes in")
+
+        model.activeTab = .query
+        model.queryText = "SELECT 6"
+        expect(model.saveQuery(named: "Six"), false, "which is what the next Save runs into")
+        expect(
+            model.errorMessage?.contains("full at 2"), true,
+            "and is told so rather than silently doing nothing")
+        expect(model.favorites.favorites.count, 5, "and it still deletes nothing")
+    }
+
+    /// An import past the limit says how many it left out.
+    ///
+    /// The one case where somebody can walk away believing they have a statement
+    /// they do not. A replacement is taken even when full — it is not a new
+    /// entry, and refusing it would make re-importing an edited file depend on
+    /// how full the list happened to be.
+    @MainActor private static func checkAnImportPastTheLimitSaysWhatItLeftOut() {
+        guard let model = makeModel() else { return }
+        model.preferences.favoritesLimit = 3
+        // Filled to the limit first. With room to spare the replacement below
+        // would be taken for the ordinary reason and would say nothing about
+        // being full, which is the whole claim.
+        let saved = (0..<3).compactMap {
+            model.favorites.save(name: "Kept \($0)", sql: "SELECT \($0)", scheme: "")
+        }
+        guard let kept = saved.first, saved.count == 3 else {
+            failures += 1
+            fputs("favorites FAIL: the three fixture favorites were kept\n", stderr)
+            return
+        }
+        expect(model.favorites.isFull, true, "the list is full before the import arrives")
+
+        let edited = QueryFavorite(
+            id: kept.id, name: "Kept 0, renamed", sql: "SELECT 0", scheme: "",
+            savedAt: kept.savedAt)
+        let incoming =
+            [edited]
+            + (0..<2).map {
+                QueryFavorite(
+                    id: UUID(), name: "New \($0)", sql: "SELECT new \($0)", scheme: "",
+                    savedAt: Date())
+            }
+        expect(model.favorites.merge(incoming), 2, "both new ones had nowhere to go")
+        expect(model.favorites.favorites.count, 3, "the list stops at its limit")
+        expect(
+            model.favorites.favorites.contains { $0.name == "Kept 0, renamed" }, true,
+            "and the one that replaced an entry was taken even though the list was full")
+    }
+
     // MARK: - Fixture
 
     /// A model on scratch stores throughout, with the config redirected.
@@ -312,12 +420,22 @@ enum QueryFavoritesChecks {
     /// connections and asks the Keychain for the first one's password, which in
     /// a process with no GUI session blocks forever — so the symptom is not a
     /// failed check but a `make test-swift` that never returns.
+    /// One suite for all three, and a fresh one per model — `ScratchDefaults`
+    /// mints a new domain on every call, so this has to be minted once and
+    /// shared rather than asked for three times.
+    ///
+    /// Shared because the limits are preferences the lists read out of the same
+    /// defaults they keep their entries in: three suites would be a model whose
+    /// Settings could not reach its own lists, which passes every case that does
+    /// not set one and silently answers "no limit" to every case that does.
     @MainActor private static func makeModel() -> AppModel? {
         guard let directory = scratchDirectory() else { return nil }
         setenv("XDG_CONFIG_HOME", directory.path, 1)
-        let history = QueryHistory(defaults: ScratchDefaults.store("verify-favorites"))
-        let preferences = Preferences(store: ScratchDefaults.store("verify-favorites"))
-        return AppModel(history: history, favorites: scratch(), preferences: preferences)
+        let store = ScratchDefaults.store("verify-favorites")
+        return AppModel(
+            history: QueryHistory(defaults: store),
+            favorites: QueryFavorites(defaults: store),
+            preferences: Preferences(store: store))
     }
 
     private static func scratchDirectory() -> URL? {
