@@ -678,7 +678,14 @@ jobs:
             ./dbclient.exe --verify-drivers
           }
 
-          draw 2>&1 | tee draw.log && exit 0
+          # The measurement is published on the way past, for the reason the link
+          # line above is: the check's whole argument is that a return code
+          # cannot tell you anything was painted, so accepting a return code as
+          # the only evidence it worked would be the same mistake one level up.
+          if draw 2>&1 | tee draw.log; then
+            echo "::notice::Direct2D $(grep -o '[0-9]* pixels painted.*' draw.log | head -1)"
+            exit 0
+          fi
           python -c "import pathlib; \
             print('::error::' + pathlib.Path('draw.log').read_text()[-4000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
