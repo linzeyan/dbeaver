@@ -539,7 +539,7 @@ test-mcp: release ## Talk to the MCP server over a real socket
 	bash $(TOOLS)/mcp-smoke.sh ./$(APP_BIN) $(or $(PORT),8791)
 
 .PHONY: test-all
-test-all: test test-integration test-swift test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
+test-all: test test-integration test-swift test-plan test-preferences test-history test-sessions test-transfer test-import test-mcp ## Every test
 
 ##@ Quality
 
