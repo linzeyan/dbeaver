@@ -546,6 +546,59 @@ jobs:
       # header still lives under `apps/macos` because Swift is still its only
       # real consumer; the day the WinUI project exists is the day moving it
       # somewhere neutral pays for itself.
+      # Both halves of this are cargo, and cargo has to run before the MSVC
+      # environment below is set up — see that step for why.
+      #
+      # `cargo test` above never built the staticlib: it is a crate type cargo
+      # produces for `build` and not for a test harness, so this is what first
+      # asks the archiver to run.
+      #
+      # Then a link line, asked of the compiler rather than kept in a list: a
+      # Rust staticlib does not record that its contents need ws2_32 and friends,
+      # the same gap macOS covers by naming `c++` in Package.swift. `--lib` is
+      # not optional — the crate declares two crate types and `--crate-type` may
+      # only narrow a single target, and without it cargo stops with "crate types
+      # to rustc can only be passed to one target". `natives.txt` rather than the
+      # teed log, because reading that from inside its own pipe races the flush.
+      - name: Build the staticlib and ask for its link line
+        shell: bash
+        run: |
+          set -o pipefail
+
+          staticlib() {
+            cargo build -p dbffi || return 1
+            cargo rustc -p dbffi --lib --crate-type staticlib \
+              -- --print native-static-libs >natives.txt 2>&1 || {
+                cat natives.txt
+                return 1
+              }
+            cat natives.txt
+          }
+
+          staticlib 2>&1 | tee staticlib.log && exit 0
+          python -c "import pathlib; \
+            print('::error::' + pathlib.Path('staticlib.log').read_text()[-5000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
+
+      # Everything above proves the core builds and its own tests pass. It says
+      # nothing about the question a front end actually asks, because Swift is
+      # the only thing that has ever linked this library, and it does so through
+      # a modulemap and a SwiftPM link line, neither of which exists here.
+      #
+      # `apps/windows/linkcheck` asks that question with no UI framework in the
+      # way, so a red run here is about the core rather than about XAML. The
+      # header still lives under `apps/macos` because Swift is still its only
+      # real consumer; the day the WinUI project exists is the day moving it
+      # somewhere neutral pays for itself.
+      #
+      # This comes last, after every cargo invocation, and that order is load
+      # bearing. rustc finds the MSVC linker on its own; putting MSVC on PATH
+      # does not help it and actively breaks it, because under `shell: bash` Git
+      # ships a coreutils `link` in `/usr/bin` that wins the lookup. A cargo
+      # build after this step dies inside `libduckdb-sys` with `/usr/bin/link:
+      # extra operand`, which reads like a DuckDB problem and is a PATH problem.
+      # Only `cl` needs what this sets up.
       - uses: ilammy/msvc-dev-cmd@v1
       - name: Link the core into a plain C++ program
         shell: bash
@@ -553,31 +606,6 @@ jobs:
           set -o pipefail
 
           link() {
-            # `cargo test` above never built this: a staticlib is a crate type
-            # cargo produces for `build`, not for the test harness, so this is
-            # the step that first asks the archiver to run.
-            cargo build -p dbffi || return 1
-
-            # A Rust staticlib does not record that its contents need ws2_32 and
-            # friends — the same gap macOS covers by naming `c++` in
-            # Package.swift. Asking the compiler beats keeping a list: this
-            # prints the link line the WinUI project will inherit, measured on
-            # the day it is used.
-            #
-            # `--lib` is not optional. The crate declares two crate types, and
-            # `--crate-type` may only narrow a single target, so without it
-            # cargo stops with "crate types to rustc can only be passed to one
-            # target" — which arrives as a bare exit 101 and looks like a build
-            # failure on a platform nobody can check by hand.
-            # Its own file rather than the log this step is teeing into: that
-            # one is written by `tee` at the far end of a pipe, and reading it
-            # from inside the pipe is a race against the flush.
-            cargo rustc -p dbffi --lib --crate-type staticlib \
-              -- --print native-static-libs >natives.txt 2>&1 || {
-                cat natives.txt
-                return 1
-              }
-            cat natives.txt
             local libs
             libs=$(grep -o 'native-static-libs:.*' natives.txt | head -1 | cut -d: -f2-)
             echo "system libraries: $libs"
@@ -594,9 +622,9 @@ jobs:
             ./linkcheck.exe
           }
 
-          # The same tail-as-annotation as the step above, and for its reason:
-          # this one failed once already with nothing but `exit code 101` to
-          # show for it, on the one platform that cannot be reproduced here.
+          # The same tail-as-annotation as the steps above, and for their reason:
+          # this one failed twice already with nothing but an exit code to show
+          # for it, on the one platform that cannot be reproduced here.
           link 2>&1 | tee link.log && exit 0
           python -c "import pathlib; \
             print('::error::' + pathlib.Path('link.log').read_text()[-5000:] \
