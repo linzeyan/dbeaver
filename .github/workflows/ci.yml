@@ -647,6 +647,43 @@ jobs:
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 
+      # The front end, from the bottom. The plan is WinUI 3 with a Direct2D grid,
+      # and this is the Direct2D half — asked first because it is where the hard
+      # questions are, and because none of them need a window to be wrong.
+      #
+      # `--verify-drivers` runs the checks inside the real binary behind a flag,
+      # the way the macOS app's `--verify-*` do, and draws into a WIC bitmap
+      # rather than a swap chain. A runner has no display and no GPU; a check
+      # that quietly needed either would fail for a reason unrelated to the code.
+      #
+      # Everything it uses ships with the Windows SDK, so this stays on the `cl`
+      # line above rather than acquiring a project file and a NuGet restore. Those
+      # arrive with the XAML shell, and when they do their failures will be about
+      # themselves instead of about whether Direct2D works.
+      - name: Draw with the stack the grid will use
+        shell: bash
+        run: |
+          set -o pipefail
+
+          draw() {
+            local libs
+            libs=$(grep -o 'native-static-libs:.*' natives.txt | head -1 | cut -d: -f2-)
+            # shellcheck disable=SC2086
+            cl -nologo -EHsc -MD -std:c++17 \
+              -I apps/macos/Sources/CDbFfi/include \
+              apps/windows/DbClient/main.cpp \
+              -Fe:dbclient.exe \
+              -link -LIBPATH:target/debug dbffi.lib \
+              d2d1.lib dwrite.lib windowscodecs.lib ole32.lib $libs || return 1
+            ./dbclient.exe --verify-drivers
+          }
+
+          draw 2>&1 | tee draw.log && exit 0
+          python -c "import pathlib; \
+            print('::error::' + pathlib.Path('draw.log').read_text()[-4000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
+
       - name: Compiler cache
         if: always()
         run: sccache --show-stats
