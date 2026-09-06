@@ -460,8 +460,34 @@ jobs:
         with:
           shared-key: windows-dev
 
+      # The tail is repeated as an annotation for the reason the macOS job gives,
+      # and more so here: that job's failures merely need a newer Xcode to
+      # reproduce, while this one's cannot be reproduced on any machine this
+      # project is developed on at all. The first red run said `exit code 1` and
+      # nothing else, which is a job that reports a problem and withholds it.
+      #
+      # `shell: bash` because the default on a Windows runner is PowerShell,
+      # which has no `pipefail` and would report `tee`'s exit code — the same
+      # trap the Makefile carries a note about.
+      #
+      # The log goes in the working directory rather than `/tmp`. Python here is
+      # a native Windows build and does not resolve the Git Bash path: `/tmp/x`
+      # reaches the shell fine and reaches Python as a filename that does not
+      # exist, so the annotation step would fail on its own while reporting
+      # nothing about the build. A relative path is the same path to both.
+      #
+      # 5000 rather than the 3000 next door: cargo prints every warning in the
+      # graph before it prints why it stopped, so the part worth reading sits
+      # further from the end than a Swift failure does.
       - name: Build the core
-        run: cargo build --workspace
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --workspace 2>&1 | tee build.log && exit 0
+          python -c "import pathlib; \
+            print('::error::' + pathlib.Path('build.log').read_text()[-5000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
 
       - name: Compiler cache
         if: always()
