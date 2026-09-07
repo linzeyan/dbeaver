@@ -21,7 +21,16 @@ tokio = { workspace = true, features = ["sync"] }
 # the database version, so `~1.10505.0` takes fixes to the binding and refuses
 # to move the database: a `cargo update` that changed the on-disk format would
 # otherwise arrive through a lockfile.
-duckdb = { version = "~1.10505.0", features = ["bundled"] }
+#
+# `json` is compiled in rather than left to be fetched. Without it DuckDB
+# autoloads the extension the first time a statement touches a JSON value —
+# which is a download and a write into a shared extension directory, on a
+# machine that may have neither, at the moment a user runs a query. It is the
+# same argument as `bundled` one paragraph up: the point of dropping the JVM is
+# that the user installs nothing, and an extension installed at runtime is still
+# an install. It also happens to be the thing that made the Windows test run
+# flaky, two fixtures racing to move the same file into the same directory.
+duckdb = { version = "~1.10505.0", features = ["bundled", "json"] }
 thiserror.workspace = true
 
 [dev-dependencies]
@@ -29,4 +38,4 @@ tokio = { workspace = true, features = ["full"] }
 tempfile = "3"
 # The tests build their fixtures with the library directly, so a fixture does
 # not depend on the code under test being right.
-duckdb = { version = "~1.10505.0", features = ["bundled"] }
+duckdb = { version = "~1.10505.0", features = ["bundled", "json"] }
