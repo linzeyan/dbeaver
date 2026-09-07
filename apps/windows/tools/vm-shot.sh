@@ -9,7 +9,7 @@
 # costs a round trip through a person with a screenshot tool.
 #
 #   apps/windows/tools/vm-shot.sh                                  # the desktop as it is
-#   apps/windows/tools/vm-shot.sh --start 'C:\src\dbeaver\dbclient.exe'
+#   apps/windows/tools/vm-shot.sh --start 'C:\src\dbeaver\target\dbclient.exe'
 #   apps/windows/tools/vm-shot.sh --wait 3 /tmp/grid.png           # slower; somewhere specific
 #
 #   DBEAVER_VM=host   ssh host to use (default: macshot-vm)

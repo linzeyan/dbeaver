@@ -69,6 +69,40 @@ constexpr float kMaxColumnWidth = 340.0f;
 // coincidence as an identity.
 constexpr float kFontSize = 12.0f;
 
+// Where text sits inside its band, transcribed rather than computed. Centring
+// the line inside the row by the face's own metrics put this side a point lower
+// than the other one — a disagreement about what a row looks like, arrived at
+// for no better reason than that it was the easier thing to work out.
+//
+// The header's second line, the declared type at 15, is not here. It needs the
+// type the server declared, which travels beside the result rather than in the
+// Arrow schema, and the Arrow kind is only its fallback. Anything invented to
+// fill the gap would be this grid stating a type a column may not have, which
+// `GridRenderer.swift` calls the one outcome worse than saying nothing. The band
+// is 32 tall because that line is coming.
+constexpr float kHeaderNameY = 2.0f;
+constexpr float kCellTextY = 3.0f;
+
+// `Theme.swift`'s light values, under the names it gives them. Dark mode is a
+// separate question — it begins by asking Windows which one the user is in, not
+// by writing a second set of numbers — and a front end that guessed at these
+// would be a front end that looks nearly like the other one.
+//
+// `banding` and `separator` are one colour at two alphas rather than two
+// colours: they are the ramp's direction at low strength, which is what keeps
+// them correct over whatever they land on.
+constexpr UINT32 kCanvas = 0xFFFFFF;      // Grid.background, Surface.canvas
+constexpr UINT32 kHeaderBand = 0xF1F5F9;  // Grid.header, Surface.raised
+constexpr UINT32 kInk = 0x1E293B;         // Grid.text
+constexpr UINT32 kHeaderInk = 0x475569;   // Grid.headerText, Text.secondary
+constexpr UINT32 kMutedInk = 0x51607A;    // Grid.nullText, Text.dataMuted
+constexpr UINT32 kRule = 0x0F172A;
+constexpr float kBandingAlpha = 0.030f;
+constexpr float kSeparatorAlpha = 0.080f;
+
+// What counts as a glyph when the bitmap is read back. See `Surface::ink_in`.
+constexpr BYTE kInkThreshold = 0xB4;
+
 int failures = 0;
 
 void check(bool ok, const char* what) {
@@ -150,16 +184,77 @@ struct Surface {
         return true;
     }
 
-    // Pixels differing from the colour the target was cleared to, inside one
-    // rectangle.
+    // Glyph pixels inside one rectangle.
     //
-    // Every call in a draw can succeed and leave a blank bitmap — a brush the
-    // same colour as the background, a layout positioned off the edge, a font
-    // that resolved to nothing — and `EndDraw` reports none of it. Asked of a
-    // rectangle rather than of the whole surface because "something was drawn"
-    // and "something was drawn *there*" are different questions, and only the
-    // second one notices a grid that painted every row on top of the first.
+    // Every call in a draw can succeed and leave nothing readable behind — a
+    // brush the same colour as the background, a layout positioned off the edge,
+    // a font that resolved to nothing — and `EndDraw` reports none of it. Asked
+    // of a rectangle rather than of the whole surface because "something was
+    // drawn" and "something was drawn *there*" are different questions, and only
+    // the second one notices a grid that painted every row on top of the first.
+    //
+    // Dark pixels rather than pixels that differ from the background, which is
+    // what this counted before the grid had any chrome. A banded, ruled,
+    // header-banded grid differs from its background almost everywhere, so that
+    // test now answers yes for a grid with no text written on it at all.
+    //
+    // Measured rather than assumed, by drawing exactly that: with the old
+    // predicate and every glyph suppressed, five of the seven checks that read
+    // the bitmap went green. The two that did not are the two that ask something
+    // sharper than "is there ink here" — one compares tones, the other requires
+    // a region to be *empty* — which is the shape the rest of them should grow
+    // towards.
+    //
+    // The threshold has room on both sides: the lightest thing this grid writes
+    // is `Grid.nullText`, whose lightest channel is 0x7A, and the darkest thing
+    // it fills is a separator over the header band, which lands near 0xE0.
     bool ink_in(float x0, float y0, float x1, float y1, UINT* out) const {
+        UINT painted = 0;
+        const bool read = each_pixel(x0, y0, x1, y1, [&painted](const BYTE* px) {
+            // BGRA, premultiplied over an opaque clear, so the channels are the
+            // colour. A glyph is the only thing here dark enough to put all
+            // three under the threshold.
+            if (px[0] < kInkThreshold && px[1] < kInkThreshold && px[2] < kInkThreshold) {
+                painted += 1;
+            }
+        });
+        *out = painted;
+        return read;
+    }
+
+    // The darkest pixel in a rectangle, as its lightest channel.
+    //
+    // What separates one text tone from another. `ink_in` above answers whether
+    // anything was written; this answers which brush wrote it, which is the only
+    // way a check can tell a NULL drawn as a value from a NULL drawn as a NULL —
+    // both put the same number of pixels in the same cell.
+    bool darkest_in(float x0, float y0, float x1, float y1, BYTE* out) const {
+        BYTE darkest = 0xFF;
+        const bool read = each_pixel(x0, y0, x1, y1, [&darkest](const BYTE* px) {
+            const BYTE lightest = px[0] > px[1] ? (px[0] > px[2] ? px[0] : px[2])
+                                                : (px[1] > px[2] ? px[1] : px[2]);
+            darkest = lightest < darkest ? lightest : darkest;
+        });
+        *out = darkest;
+        return read;
+    }
+
+    // One pixel, as B, G, R — for the fills, which are flat and can be compared
+    // against the tone they were asked for rather than merely against each other.
+    bool pixel_at(float x, float y, BYTE* bgr) const {
+        return each_pixel(x, y, x + 1.0f, y + 1.0f, [bgr](const BYTE* px) {
+            bgr[0] = px[0];
+            bgr[1] = px[1];
+            bgr[2] = px[2];
+        });
+    }
+
+  private:
+    // Locking, clamping and walking, in one place because three readers now do
+    // it. Getting any line of it wrong reads as a bitmap that was never drawn on,
+    // which is indistinguishable from the failure these are looking for.
+    template <typename Body>
+    bool each_pixel(float x0, float y0, float x1, float y1, Body&& body) const {
         WICRect all{0, 0, static_cast<INT>(kWidth), static_cast<INT>(kHeight)};
         ComPtr<IWICBitmapLock> locked;
         if (FAILED(bitmap->Lock(&all, WICBitmapLockRead, &locked))) {
@@ -177,19 +272,12 @@ struct Surface {
         const UINT to_x = static_cast<UINT>(x1 > kWidth ? kWidth : x1);
         const UINT to_y = static_cast<UINT>(y1 > kHeight ? kHeight : y1);
 
-        UINT painted = 0;
         for (UINT y = from_y; y < to_y; ++y) {
             const BYTE* row = pixels + static_cast<size_t>(y) * stride;
             for (UINT x = from_x; x < to_x; ++x) {
-                // BGRA, premultiplied. The target is cleared to opaque white, so
-                // a pixel with any channel below full is one the text reached.
-                const BYTE* px = row + static_cast<size_t>(x) * 4;
-                if (px[0] != 0xFF || px[1] != 0xFF || px[2] != 0xFF) {
-                    painted += 1;
-                }
+                body(row + static_cast<size_t>(x) * 4);
             }
         }
-        *out = painted;
         return true;
     }
 };
@@ -282,12 +370,15 @@ struct Monospace {
 
         const float per_em = static_cast<float>(face_metrics.designUnitsPerEm);
         advance = static_cast<float>(metrics[0].advanceWidth) * kFontSize / per_em;
-        // Asked of the face rather than guessed from the size. A row is 20 and
-        // the text has to sit inside it; deriving the inset from a made-up ratio
-        // is how text ends up a pixel high in one font and clipped in the next.
+        // Asked of the face rather than assumed from the size, and then checked
+        // rather than used to position anything. Where the text sits is
+        // transcribed from the macOS grid; what this answers is whether the line
+        // still fits under that number, which is the thing a different face
+        // would silently break — text clipped at the bottom of every row.
         line_height = static_cast<float>(face_metrics.ascent + face_metrics.descent
                                          + face_metrics.lineGap)
                       * kFontSize / per_em;
+        check(line_height <= kRowHeight - kCellTextY, "a line of text fits inside a row");
 
         hr = dwrite->CreateTextFormat(kFamily, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -313,6 +404,10 @@ struct Column {
     std::wstring heading;
     std::vector<std::wstring> cells;
     std::vector<bool> nulls;
+    // A property of the type, not of any value in it. A column of numbers is
+    // read by comparing magnitudes down it, and that only works when the units
+    // line up; `GridRenderer.swift` asks the column's kind the same question.
+    bool numeric = false;
     float x = 0.0f;
     float width = 0.0f;
 };
@@ -371,12 +466,13 @@ bool read_columns(DbHandle* handle, std::vector<Column>* out) {
     for (int64_t c = 0; c < batch.n_children; ++c) {
         const ArrowSchema& field = *schema.children[c];
         const ArrowArray& values = *batch.children[c];
+        const std::string format(field.format);
         Column column;
         column.heading = widen(field.name);
+        column.numeric = format == "l";
         for (int64_t r = 0; r < batch.length; ++r) {
             const bool present = valid_at(values, r);
             column.nulls.push_back(!present);
-            const std::string format(field.format);
             if (!present) {
                 column.cells.push_back(kNullText);
             } else if (format == "u") {
@@ -433,9 +529,46 @@ void lay_out(std::vector<Column>* columns, float advance) {
     }
 }
 
+// The brushes the grid draws with, made from whichever target is drawing.
+//
+// A brush belongs to the target it came from, so this is built twice — once for
+// the bitmap the checks read back, once for the window — rather than held
+// anywhere shared. Six of them together rather than made where each is first
+// needed, because the set is the palette: a colour that appears in one path and
+// not the other is the failure this whole arrangement is trying not to have.
+struct Palette {
+    ComPtr<ID2D1SolidColorBrush> ink;
+    ComPtr<ID2D1SolidColorBrush> muted;
+    ComPtr<ID2D1SolidColorBrush> header_ink;
+    ComPtr<ID2D1SolidColorBrush> header;
+    ComPtr<ID2D1SolidColorBrush> banding;
+    ComPtr<ID2D1SolidColorBrush> separator;
+
+    bool open(ID2D1RenderTarget* target) {
+        struct Wanted {
+            ComPtr<ID2D1SolidColorBrush>* into;
+            UINT32 rgb;
+            float alpha;
+        };
+        const Wanted wanted[] = {
+            {&ink, kInk, 1.0f},         {&muted, kMutedInk, 1.0f},
+            {&header_ink, kHeaderInk, 1.0f}, {&header, kHeaderBand, 1.0f},
+            {&banding, kRule, kBandingAlpha}, {&separator, kRule, kSeparatorAlpha},
+        };
+        for (const Wanted& one : wanted) {
+            const HRESULT hr = target->CreateSolidColorBrush(D2D1::ColorF(one.rgb, one.alpha),
+                                                            one.into->GetAddressOf());
+            if (FAILED(hr)) {
+                return failed("CreateSolidColorBrush", hr);
+            }
+        }
+        return true;
+    }
+};
+
 bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
                const std::wstring& text, float x, float y, float width,
-               ID2D1SolidColorBrush* brush) {
+               ID2D1SolidColorBrush* brush, bool align_right) {
     if (text.empty()) {
         return true;
     }
@@ -453,6 +586,9 @@ bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     if (FAILED(hr)) {
         return failed("CreateTextLayout", hr);
     }
+    if (align_right) {
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
     target->DrawTextLayout(D2D1::Point2F(x, y), layout.Get(), brush);
     return true;
 }
@@ -469,17 +605,62 @@ bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
 // the window has to notice `D2DERR_RECREATE_TARGET` coming back from `EndDraw`
 // and the bitmap can never see it.
 void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
-               const std::vector<Column>& columns, ID2D1SolidColorBrush* ink,
-               ID2D1SolidColorBrush* faint) {
-    target->Clear(D2D1::ColorF(D2D1::ColorF::White));
-    const float text_inset = (kRowHeight - font.line_height) / 2.0f;
+               const std::vector<Column>& columns, const Palette& palette) {
+    const D2D1_SIZE_F view = target->GetSize();
+    size_t rows = 0;
     for (const Column& column : columns) {
-        draw_text(target, dwrite, font, column.heading, column.x + kCellPadding,
-                  kHeaderHeight - kRowHeight + text_inset, column.width, ink);
+        rows = column.cells.size() > rows ? column.cells.size() : rows;
+    }
+
+    target->Clear(D2D1::ColorF(kCanvas));
+
+    // The order is `GridRenderer.swift`'s, and it is the order rather than a
+    // set of layers: banding first so text lands on top of it, separators next,
+    // then the header band over the top of the separators so that rows scroll
+    // under an opaque strip rather than through a stack of lines.
+    for (size_t r = 1; r < rows; r += 2) {
+        const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight;
+        target->FillRectangle(D2D1::RectF(0.0f, y, view.width, y + kRowHeight),
+                              palette.banding.Get());
+    }
+
+    // On the column's trailing edge, one DIP wide, and only between the columns
+    // — the run starts below the header band and the last column has no rule
+    // after it, because a line at the right of the last column would read as an
+    // empty column beginning there.
+    for (size_t c = 0; c + 1 < columns.size(); ++c) {
+        const float x = columns[c].x + columns[c].width;
+        target->FillRectangle(D2D1::RectF(x, kHeaderHeight, x + 1.0f, view.height),
+                              palette.separator.Get());
+    }
+
+    target->FillRectangle(D2D1::RectF(0.0f, 0.0f, view.width, kHeaderHeight),
+                          palette.header.Get());
+    target->FillRectangle(D2D1::RectF(0.0f, kHeaderHeight - 1.0f, view.width, kHeaderHeight),
+                          palette.separator.Get());
+
+    for (const Column& column : columns) {
+        // The text box is the cell inset by its padding on both sides, not the
+        // whole column. Left-aligned that distinction never showed; right
+        // -aligned it is the difference between a value on the padding and a
+        // value against the separator.
+        const float x = column.x + kCellPadding;
+        const float width = column.width - kCellPadding * 2.0f;
+
+        // Headers are left-aligned whichever way their column is. A heading is
+        // a name, and names read from the left even above a column of numbers.
+        draw_text(target, dwrite, font, column.heading, x, kHeaderNameY, width,
+                  palette.header_ink.Get(), false);
+
         for (size_t r = 0; r < column.cells.size(); ++r) {
-            const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight + text_inset;
-            draw_text(target, dwrite, font, column.cells[r], column.x + kCellPadding, y,
-                      column.width, column.nulls[r] ? faint : ink);
+            const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight + kCellTextY;
+            // NULL stays on the left even in a numeric column: it is a word
+            // rather than a quantity, and lining it up with the digits above it
+            // would invite reading it as one of them.
+            const bool null = column.nulls[r];
+            draw_text(target, dwrite, font, column.cells[r], x, y, width,
+                      null ? palette.muted.Get() : palette.ink.Get(),
+                      column.numeric && !null);
         }
     }
 }
@@ -533,27 +714,68 @@ bool the_grid_draws_a_result() {
     check(rising, "each column starts to the right of the one before it");
     check(columns[0].width >= kMinColumnWidth, "a narrow column is held to the minimum");
 
-    ComPtr<ID2D1SolidColorBrush> ink;
-    HRESULT hr = surface.target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &ink);
-    if (FAILED(hr)) {
-        return failed("CreateSolidColorBrush", hr);
-    }
-    // Dimmer, the way `Theme.Grid.nullText` is: NULL is a fact about the value,
-    // not one of its characters, and it should not read as data.
-    ComPtr<ID2D1SolidColorBrush> faint;
-    hr = surface.target->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.55f, 0.55f), &faint);
-    if (FAILED(hr)) {
-        return failed("CreateSolidColorBrush", hr);
+    check(columns[0].numeric, "the id column is read as a number");
+    check(!columns[1].numeric, "the name column is not");
+
+    Palette palette;
+    if (!palette.open(surface.target.Get())) {
+        return false;
     }
 
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, ink.Get(), faint.Get());
-    hr = surface.target->EndDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette);
+    HRESULT hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw", hr);
     }
 
     const float right = columns.back().x + columns.back().width;
+
+    // ------------------------------------------------------------------
+    // The chrome, asked of the pixels rather than of the code that drew it
+    // ------------------------------------------------------------------
+
+    // Compared against the tone `Theme.swift` names, not merely against the
+    // canvas. A header band drawn in some other pale colour differs from white
+    // and would satisfy anything weaker, while being the exact thing that makes
+    // one front end not look like the other.
+    BYTE band[3] = {};
+    if (!surface.pixel_at(4.0f, kHeaderHeight - 8.0f, band)) {
+        return failed("reading the header band", E_FAIL);
+    }
+    check(band[2] == ((kHeaderBand >> 16) & 0xFF) && band[1] == ((kHeaderBand >> 8) & 0xFF)
+              && band[0] == (kHeaderBand & 0xFF),
+          "the header band is the tone Theme.swift names");
+
+    BYTE under_header[3] = {};
+    BYTE canvas[3] = {};
+    if (!surface.pixel_at(4.0f, kHeaderHeight - 1.0f, under_header)
+        || !surface.pixel_at(4.0f, kHeaderHeight + 4.0f, canvas)) {
+        return failed("reading the rule under the header", E_FAIL);
+    }
+    check(under_header[2] < band[2], "a rule closes the header band");
+    check(canvas[2] == 0xFF, "the first row sits on the canvas, not on the band");
+
+    // Sampled past the last column, where no glyph can reach: banding runs the
+    // width of the view, and a check taken inside a cell would be answering
+    // about the text on top of it.
+    BYTE unbanded[3] = {};
+    BYTE banded[3] = {};
+    if (!surface.pixel_at(right + 20.0f, kHeaderHeight + 10.0f, unbanded)
+        || !surface.pixel_at(right + 20.0f, kHeaderHeight + kRowHeight + 10.0f, banded)) {
+        return failed("reading the banding", E_FAIL);
+    }
+    check(banded[2] < unbanded[2], "every other row is banded");
+
+    // On the boundary, and the pixel beside it, because a separator drawn at the
+    // wrong x is still a separator somewhere.
+    BYTE rule[3] = {};
+    BYTE beside[3] = {};
+    if (!surface.pixel_at(columns[0].width, kHeaderHeight + 10.0f, rule)
+        || !surface.pixel_at(columns[0].width + 3.0f, kHeaderHeight + 10.0f, beside)) {
+        return failed("reading a column separator", E_FAIL);
+    }
+    check(rule[2] < beside[2], "a separator stands on the column boundary");
     UINT header_ink = 0;
     if (!surface.ink_in(0.0f, 0.0f, right, kHeaderHeight, &header_ink)) {
         return failed("reading the header band", E_FAIL);
@@ -593,6 +815,39 @@ bool the_grid_draws_a_result() {
         return failed("reading the null cell", E_FAIL);
     }
     check(null_ink > 0, "the word NULL was drawn rather than left blank");
+
+    // And in the right tone. Drawing NULL with the value's brush puts the same
+    // pixels in the same cell, so the check above cannot see it; what separates
+    // them is that `Grid.nullText` never gets as dark as `Grid.text`.
+    BYTE null_darkest = 0xFF;
+    BYTE value_darkest = 0xFF;
+    if (!surface.darkest_in(columns[2].x, null_top, columns[2].x + columns[2].width,
+                            null_top + kRowHeight, &null_darkest)
+        || !surface.darkest_in(columns[2].x, kHeaderHeight, columns[2].x + columns[2].width,
+                               kHeaderHeight + kRowHeight, &value_darkest)) {
+        return failed("comparing the null cell with a value", E_FAIL);
+    }
+    check(null_darkest > value_darkest, "NULL is dimmer than the value above it");
+
+    // A number is read down its column by comparing magnitudes, which only works
+    // if the units line up — so the digits sit at the trailing edge and nothing
+    // is drawn in the half of the cell they left behind. The text column beside
+    // it answers the other way, which is what makes this about alignment rather
+    // than about one cell happening to be short.
+    UINT number_left = 0;
+    UINT number_right = 0;
+    UINT word_left = 0;
+    const float first_row = kHeaderHeight;
+    const float middle = columns[0].x + columns[0].width / 2.0f;
+    if (!surface.ink_in(columns[0].x, first_row, middle, first_row + kRowHeight, &number_left)
+        || !surface.ink_in(middle, first_row, columns[0].x + columns[0].width,
+                           first_row + kRowHeight, &number_right)
+        || !surface.ink_in(columns[1].x, first_row, columns[1].x + columns[1].width / 2.0f,
+                           first_row + kRowHeight, &word_left)) {
+        return failed("reading the halves of a cell", E_FAIL);
+    }
+    check(number_left == 0 && number_right > 0, "a number is drawn against the trailing edge");
+    check(word_left > 0, "a word is not");
 
     UINT total = 0;
     surface.ink_in(0.0f, 0.0f, static_cast<float>(kWidth), static_cast<float>(kHeight), &total);
@@ -712,8 +967,7 @@ struct Window {
     ComPtr<ID2D1Factory> d2d;
     ComPtr<IDWriteFactory> dwrite;
     ComPtr<ID2D1HwndRenderTarget> target;
-    ComPtr<ID2D1SolidColorBrush> ink;
-    ComPtr<ID2D1SolidColorBrush> faint;
+    Palette palette;
     Monospace font;
     std::vector<Column> columns;
 
@@ -752,15 +1006,7 @@ struct Window {
         const float dpi = static_cast<float>(GetDpiForWindow(hwnd));
         target->SetDpi(dpi, dpi);
 
-        hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &ink);
-        if (FAILED(hr)) {
-            return failed("CreateSolidColorBrush", hr);
-        }
-        hr = target->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.55f, 0.55f), &faint);
-        if (FAILED(hr)) {
-            return failed("CreateSolidColorBrush", hr);
-        }
-        return true;
+        return palette.open(target.Get());
     }
 
     void paint() {
@@ -768,12 +1014,11 @@ struct Window {
             return;
         }
         target->BeginDraw();
-        draw_grid(target.Get(), dwrite.Get(), font, columns, ink.Get(), faint.Get());
+        draw_grid(target.Get(), dwrite.Get(), font, columns, palette);
         const HRESULT hr = target->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
             target.Reset();
-            ink.Reset();
-            faint.Reset();
+            palette = Palette();
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (FAILED(hr)) {
             failed("ID2D1HwndRenderTarget::EndDraw", hr);

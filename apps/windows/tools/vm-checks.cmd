@@ -107,4 +107,9 @@ if errorlevel 1 (
 )
 
 :checks
+rem A window left open by `vm-shot.sh` still holds its own exe, and the link step
+rem below cannot replace a running one. Only the guest can be in this state — CI
+rem never opens a window — so the taskkill lives here rather than in checks.sh.
+taskkill /f /im dbclient.exe >nul 2>&1
+
 bash apps/windows/tools/checks.sh

@@ -49,22 +49,30 @@ echo "system libraries:$libs"
 #
 # `$libs` is unquoted on purpose: it is a list of libraries and has to split into
 # one argument each. Quoting it hands the linker one argument with spaces in it.
+#
+# Everything it writes goes under `target/`, which is where build output belongs
+# and, here, also what keeps it: `vm-build.sh` runs `git clean` between runs, and
+# an untracked exe at the root is swept away with everything else — or worse, is
+# still open in a window and cannot be, which stops the clean rather than the
+# exe. The object files go there for the same reason and are named apart, since
+# both programs have a `main.cpp`.
 build() {
     local source="$1"
-    local output="$2"
+    local name="$2"
     shift 2
     # shellcheck disable=SC2086
     cl -nologo -EHsc -MD -std:c++17 \
         -I apps/macos/Sources/CDbFfi/include \
         "$source" \
-        "-Fe:$output" \
+        "-Fo:target/$name.obj" \
+        "-Fe:target/$name.exe" \
         -link "-LIBPATH:target/$profile" dbffi.lib "$@" $libs
 }
 
-build apps/windows/ffi-check/main.cpp ffi-check.exe || exit 1
-./ffi-check.exe || exit 1
+build apps/windows/ffi-check/main.cpp ffi-check || exit 1
+./target/ffi-check.exe || exit 1
 
-build apps/windows/DbClient/main.cpp dbclient.exe \
+build apps/windows/DbClient/main.cpp dbclient \
     d2d1.lib dwrite.lib windowscodecs.lib ole32.lib || exit 1
-./dbclient.exe --verify-drivers || exit 1
-./dbclient.exe --verify-grid || exit 1
+./target/dbclient.exe --verify-drivers || exit 1
+./target/dbclient.exe --verify-grid || exit 1
