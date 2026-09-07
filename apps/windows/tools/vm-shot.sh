@@ -10,7 +10,15 @@
 #
 #   apps/windows/tools/vm-shot.sh                                  # the desktop as it is
 #   apps/windows/tools/vm-shot.sh --start 'C:\src\dbeaver\target\dbclient.exe'
+#   apps/windows/tools/vm-shot.sh --click 900,470                  # click there, then photograph
+#   apps/windows/tools/vm-shot.sh --click 900,470 --keys '{DOWN}{RIGHT}'
 #   apps/windows/tools/vm-shot.sh --wait 3 /tmp/grid.png           # slower; somewhere specific
+#
+# Points are in physical pixels, which is what the capture is in too — read one
+# off the last screenshot and it lands where it looked like it would. Several
+# points in one --click are separated by semicolons and pressed in order.
+# SendKeys notation for --keys: ^ is Ctrl, + is Shift, % is Alt, and the named
+# keys are {DOWN} {UP} {LEFT} {RIGHT} {ENTER} {ESC} {TAB}.
 #
 #   DBEAVER_VM=host   ssh host to use (default: macshot-vm)
 #
@@ -23,10 +31,12 @@
 # that somebody has to be logged in to the guest — a locked screen is not the
 # same thing, and the failure mode is an empty file rather than an error.
 #
-# Clicking, typing and dragging are deliberately not here. macshot's copy of
-# this script has all of it — ~/git/macshot/windows/tools/vm-shot.sh — and it is
-# worth taking wholesale the day this front end has something to click. Until
-# then it would be a hundred lines nothing calls.
+# Dragging, scrolling and held modifiers are not here. macshot's copy of this
+# script has all of it — ~/git/macshot/windows/tools/vm-shot.sh — and each piece
+# is worth taking the day this front end has something that needs it. The click
+# and the keys came over when the grid grew a selection, because a selection is
+# invisible until something points at it: a photograph of the window as it opens
+# says nothing about the feature it was taken to look at.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -37,6 +47,8 @@ TASK=dbeaver-vm-shot
 
 start=""
 wait_for=2
+click=""
+keys=""
 destination=""
 
 while [ $# -gt 0 ]; do
@@ -47,6 +59,17 @@ while [ $# -gt 0 ]; do
         ;;
     --wait)
         wait_for="$2"
+        shift 2
+        ;;
+    # Accumulated rather than replaced, so two presses can be asked for in one
+    # run. Between two runs the window would be started again and whatever the
+    # first press did would be gone.
+    --click)
+        click="${click:+$click;}$2"
+        shift 2
+        ;;
+    --keys)
+        keys="$2"
         shift 2
         ;;
     -*)
@@ -114,9 +137,16 @@ Add-Type -Namespace VmShot -Name Dpi -MemberDefinition @"
 $arguments = Get-Content (Join-Path $env:USERPROFILE "dbeaver-vm-shot.args") -ErrorAction SilentlyContinue
 $Start = if ($arguments.Count -ge 1) { $arguments[0] } else { "" }
 $Wait = if ($arguments.Count -ge 2 -and $arguments[1]) { [double]$arguments[1] } else { 2 }
+$Click = if ($arguments.Count -ge 3) { $arguments[2] } else { "" }
+$Keys = if ($arguments.Count -ge 4) { $arguments[3] } else { "" }
 
 Add-Type -Namespace VmShot -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+"@
+
+Add-Type -Namespace VmShot -Name Pointer -MemberDefinition @"
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint x, uint y, uint data, int extra);
 "@
 
 if ($Start) {
@@ -137,6 +167,27 @@ if ($Start) {
     if ($process.MainWindowHandle -ne 0) {
         [VmShot.Window]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
     }
+}
+
+if ($Click) {
+    # Moved, then given a moment, then pressed. A press sent in the same breath
+    # as the move arrives before the window has been told where the pointer is,
+    # and lands on wherever it was before.
+    foreach ($point in $Click.Split(";")) {
+        $at = $point.Split(",")
+        [VmShot.Pointer]::SetCursorPos([int]$at[0], [int]$at[1]) | Out-Null
+        Start-Sleep -Milliseconds 120
+        [VmShot.Pointer]::mouse_event(0x0002, 0, 0, 0, 0)
+        [VmShot.Pointer]::mouse_event(0x0004, 0, 0, 0, 0)
+        Start-Sleep -Milliseconds 200
+    }
+}
+
+# After the pointer, because a key reaches whatever has focus and the click is
+# what gives the window focus. Sent first it would go to whichever window the
+# guest happened to be showing.
+if ($Keys) {
+    [System.Windows.Forms.SendKeys]::SendWait($Keys)
 }
 
 Start-Sleep -Seconds $Wait
@@ -164,7 +215,8 @@ ssh "$VM" "MSYS_NO_PATHCONV=1 schtasks /create /tn $TASK \
     /tr 'powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"$windows_script\"' \
     /sc once /st 00:00 /it /f" >/dev/null
 
-ssh "$VM" "printf '%s\n%s\n' '$start' '$wait_for' > '$home/dbeaver-vm-shot.args'"
+ssh "$VM" "printf '%s\n%s\n%s\n%s\n' '$start' '$wait_for' '$click' '$keys' \
+    > '$home/dbeaver-vm-shot.args'"
 ssh "$VM" "rm -f '$remote_image'; MSYS_NO_PATHCONV=1 schtasks /run /tn $TASK" >/dev/null
 
 # Polled rather than slept for: the task is asynchronous, and a fixed sleep is

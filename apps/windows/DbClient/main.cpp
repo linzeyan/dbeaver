@@ -31,6 +31,11 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+// For GET_X_LPARAM. A click's coordinates are two signed shorts packed into one
+// LPARAM, and pulling them out with LOWORD gives the wrong answer for a negative
+// one — which a drag off the left edge produces.
+#include <windowsx.h>
+
 #include <d2d1.h>
 #include <dwrite.h>
 #include <wincodec.h>
@@ -99,6 +104,12 @@ constexpr UINT32 kMutedInk = 0x51607A;    // Grid.nullText, Text.dataMuted
 constexpr UINT32 kRule = 0x0F172A;
 constexpr float kBandingAlpha = 0.030f;
 constexpr float kSeparatorAlpha = 0.080f;
+// Accent.selection, at the two strengths Grid.selectedRow and Grid.selectedCell
+// use, and undiluted for Grid.cursor. Translucent so the value underneath stays
+// readable — which is also why the text is drawn after them.
+constexpr UINT32 kAccent = 0x4F46E5;
+constexpr float kSelectedRowAlpha = 0.180f;
+constexpr float kSelectedCellAlpha = 0.380f;
 
 // What counts as a glyph when the bitmap is read back. See `Surface::ink_in`.
 constexpr BYTE kInkThreshold = 0xB4;
@@ -420,6 +431,55 @@ struct Column {
     float width = 0.0f;
 };
 
+// Which cell the keyboard acts on, and how far a shift-held arrow has taken the
+// band away from it.
+//
+// The cursor stays a single cell even when many rows are selected.
+// `MetalGridView.swift` says why: the cell inspector, the scroll-into-view and
+// the keyboard all need one point to work from, and a range without a moving end
+// has nothing to extend.
+struct Selection {
+    int row = 0;
+    int column = 0;
+    // The row a shift-extended range grew from. Absent for a plain single-cell
+    // selection, which is what lets an unshifted arrow collapse the range by
+    // clearing it rather than by having to compute a new one.
+    bool anchored = false;
+    int anchor = 0;
+
+    int first_row() const { return anchored && anchor < row ? anchor : row; }
+    int last_row() const { return anchored && anchor > row ? anchor : row; }
+};
+
+// The cell under a point, in DIPs.
+//
+// Pure, and separate from the window, because this is the half of pointing at
+// something that can be checked without anything to point with. The window's
+// share is converting a click into these coordinates and asking.
+//
+// Three misses rather than a nearest-cell answer: the header band, the space
+// past the last column and the space below the last row are all places a click
+// lands often, and none of them is a cell. Snapping to the closest one would
+// move the selection somewhere the user did not point at.
+bool cell_at(float x, float y, const std::vector<Column>& columns, size_t rows, Selection* out) {
+    if (x < 0.0f || y < kHeaderHeight) {
+        return false;
+    }
+    const auto row = static_cast<size_t>((y - kHeaderHeight) / kRowHeight);
+    if (row >= rows) {
+        return false;
+    }
+    for (size_t c = 0; c < columns.size(); ++c) {
+        if (x >= columns[c].x && x < columns[c].x + columns[c].width) {
+            out->row = static_cast<int>(row);
+            out->column = static_cast<int>(c);
+            out->anchored = false;
+            return true;
+        }
+    }
+    return false;
+}
+
 // Arrow's `utf8`: offsets in `buffers[1]`, bytes packed end to end in
 // `buffers[2]` with no terminators.
 std::string utf8_at(const ArrowArray& array, int64_t i) {
@@ -561,6 +621,9 @@ struct Palette {
     ComPtr<ID2D1SolidColorBrush> header;
     ComPtr<ID2D1SolidColorBrush> banding;
     ComPtr<ID2D1SolidColorBrush> separator;
+    ComPtr<ID2D1SolidColorBrush> selected_row;
+    ComPtr<ID2D1SolidColorBrush> selected_cell;
+    ComPtr<ID2D1SolidColorBrush> cursor;
 
     bool open(ID2D1RenderTarget* target) {
         struct Wanted {
@@ -569,9 +632,15 @@ struct Palette {
             float alpha;
         };
         const Wanted wanted[] = {
-            {&ink, kInk, 1.0f},         {&muted, kMutedInk, 1.0f},
-            {&header_ink, kHeaderInk, 1.0f}, {&header, kHeaderBand, 1.0f},
-            {&banding, kRule, kBandingAlpha}, {&separator, kRule, kSeparatorAlpha},
+            {&ink, kInk, 1.0f},
+            {&muted, kMutedInk, 1.0f},
+            {&header_ink, kHeaderInk, 1.0f},
+            {&header, kHeaderBand, 1.0f},
+            {&banding, kRule, kBandingAlpha},
+            {&separator, kRule, kSeparatorAlpha},
+            {&selected_row, kAccent, kSelectedRowAlpha},
+            {&selected_cell, kAccent, kSelectedCellAlpha},
+            {&cursor, kAccent, 1.0f},
         };
         for (const Wanted& one : wanted) {
             const HRESULT hr = target->CreateSolidColorBrush(D2D1::ColorF(one.rgb, one.alpha),
@@ -652,7 +721,8 @@ bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
 // the window has to notice `D2DERR_RECREATE_TARGET` coming back from `EndDraw`
 // and the bitmap can never see it.
 void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
-               const std::vector<Column>& columns, const Palette& palette) {
+               const std::vector<Column>& columns, const Palette& palette,
+               const Selection* selection) {
     const D2D1_SIZE_F view = target->GetSize();
     size_t rows = 0;
     for (const Column& column : columns) {
@@ -669,6 +739,38 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
         const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight;
         target->FillRectangle(D2D1::RectF(0.0f, y, view.width, y + kRowHeight),
                               palette.banding.Get());
+    }
+
+    // Between the banding and the separators, so the band reads as continuous
+    // across the row and the grid lines stay on top of it — and under the text,
+    // which is what keeps a selected value readable. Both fills are translucent
+    // and the glyphs go on last; filling over them instead would put a wash on
+    // the one cell the user is looking at.
+    if (selection != nullptr) {
+        for (int r = selection->first_row(); r <= selection->last_row(); ++r) {
+            if (r < 0 || static_cast<size_t>(r) >= rows) {
+                continue;
+            }
+            const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight;
+            target->FillRectangle(D2D1::RectF(0.0f, y, view.width, y + kRowHeight),
+                                  palette.selected_row.Get());
+        }
+        if (selection->column >= 0 && static_cast<size_t>(selection->column) < columns.size()
+            && selection->row >= 0 && static_cast<size_t>(selection->row) < rows) {
+            const Column& column = columns[selection->column];
+            const float y = kHeaderHeight + static_cast<float>(selection->row) * kRowHeight;
+            // Apart from the band because within a multi-row selection this is
+            // the one cell the keyboard and the inspector act on, and it has to
+            // stay distinguishable from the rows around it.
+            target->FillRectangle(
+                D2D1::RectF(column.x, y, column.x + column.width, y + kRowHeight),
+                palette.selected_cell.Get());
+            // A one-DIP edge on the leading side, at full strength. The fill
+            // washes out over a dark value; this does not, so the cell stays
+            // findable when it does.
+            target->FillRectangle(D2D1::RectF(column.x, y, column.x + 1.0f, y + kRowHeight),
+                                  palette.cursor.Get());
+        }
     }
 
     // On the column's trailing edge, one DIP wide, and only between the columns
@@ -770,7 +872,7 @@ bool the_grid_draws_a_result() {
     }
 
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr);
     HRESULT hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw", hr);
@@ -939,6 +1041,95 @@ bool the_grid_draws_a_result() {
     }
     check(spill == 0, "and nothing is drawn past it");
 
+    // ------------------------------------------------------------------
+    // The selection: where a click lands, and what it looks like once it has
+    // ------------------------------------------------------------------
+
+    const size_t rows = columns[0].cells.size();
+    Selection under;
+    check(cell_at(columns[2].x + 4.0f, kHeaderHeight + kRowHeight + 4.0f, columns, rows, &under)
+              && under.row == 1 && under.column == 2,
+          "a point inside a cell finds that cell");
+    check(!cell_at(columns[2].x + 4.0f, 4.0f, columns, rows, &under),
+          "a point on the header finds none");
+    check(!cell_at(right + 4.0f, kHeaderHeight + 4.0f, columns, rows, &under),
+          "a point past the last column finds none");
+    check(!cell_at(4.0f, kHeaderHeight + static_cast<float>(rows) * kRowHeight + 4.0f, columns,
+                   rows, &under),
+          "a point below the last row finds none");
+
+    // The same pixel, from the drawing that had no selection in it. Row 1 is an
+    // odd row and therefore already banded, so this is the only honest control
+    // for the tint: a reading taken from an unbanded row would say the selection
+    // was visible when all that had been measured was the banding.
+    const float selected_y = kHeaderHeight + kRowHeight + 10.0f;
+    BYTE unselected[3] = {};
+    if (!surface.pixel_at(right + 20.0f, selected_y, unselected)) {
+        return failed("reading the row before it is selected", E_FAIL);
+    }
+
+    Selection selection;
+    selection.row = 1;
+    selection.column = 2;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)) {
+        return failed("ID2D1RenderTarget::EndDraw with a selection", hr);
+    }
+
+    const float unselected_y = kHeaderHeight + 2.0f * kRowHeight + 10.0f;
+    BYTE row_band[3] = {};
+    BYTE elsewhere[3] = {};
+    BYTE in_cell[3] = {};
+    // Past the last column for the two row samples, where no glyph can reach,
+    // and inside the cursor cell but clear of the four letters of NULL.
+    if (!surface.pixel_at(right + 20.0f, selected_y, row_band)
+        || !surface.pixel_at(right + 20.0f, unselected_y, elsewhere)
+        || !surface.pixel_at(columns[2].x + columns[2].width - 4.0f, selected_y, in_cell)) {
+        return failed("reading the selection", E_FAIL);
+    }
+    // Two questions, because either alone is answered by the banding that is
+    // already on this row. It darkened: red fell from 247 to 216, and it can
+    // only fall, since every fill here is translucent over white. And what
+    // darkened it was the accent rather than more of the same grey: the accent
+    // spends far more of the red than of the blue, so the gap between those two
+    // channels opened from 1 to 28, while the rule tone keeps them level.
+    check(row_band[2] < unselected[2]
+              && row_band[0] - row_band[2] > unselected[0] - unselected[2],
+          "the selected row is tinted with the accent");
+    check(elsewhere[0] == elsewhere[2], "and the row below it is not");
+    check(in_cell[2] < row_band[2], "the cursor cell is stronger than the rest of its row");
+
+    BYTE edge[3] = {};
+    if (!surface.pixel_at(columns[2].x, selected_y, edge)) {
+        return failed("reading the cursor edge", E_FAIL);
+    }
+    // Compared with its neighbours rather than against the accent, because there
+    // is no pixel here that holds the accent alone. A column is a whole number of
+    // characters wide and a character is 6.59765625 DIPs, so the boundary this
+    // edge stands on lands at 127.379 and a one-DIP line across it is shared
+    // between two pixels — plus the separator, which is drawn on the same
+    // boundary and afterwards, the order `GridRenderer.swift` uses. Measured, the
+    // red channel runs 113 at the edge, 164 through the cursor cell and 216
+    // across the rest of the selected row.
+    //
+    // That descent is the check. Without the edge this pixel is a blend of the
+    // two fills either side of it and sits above the cursor cell rather than
+    // below it, which is the mistake being ruled out.
+    check(edge[2] < in_cell[2] && edge[0] > edge[2],
+          "a full-strength edge marks the cursor's leading side");
+
+    // The value survives being selected. Filling over the text instead of under
+    // it leaves the cell tinted and empty, and every check above would still
+    // pass — the fills are what they are asking about.
+    UINT selected_ink = 0;
+    if (!surface.ink_in(columns[2].x, kHeaderHeight + kRowHeight, columns[2].x + columns[2].width,
+                        kHeaderHeight + 2.0f * kRowHeight, &selected_ink)) {
+        return failed("reading a selected cell", E_FAIL);
+    }
+    check(selected_ink > 0, "and the value under it is still drawn");
+
     UINT total = 0;
     surface.ink_in(0.0f, 0.0f, static_cast<float>(kWidth), static_cast<float>(kHeight), &total);
     std::string widths;
@@ -1064,6 +1255,52 @@ struct Window {
     Palette palette;
     Monospace font;
     std::vector<Column> columns;
+    Selection selection;
+    bool selected = false;
+
+    size_t rows() const { return columns.empty() ? 0 : columns[0].cells.size(); }
+
+    // Physical pixels, which is what a click carries once the process is
+    // per-monitor aware, divided into the DIPs everything else here is in. The
+    // same number `SetDpi` was given, and the reason the hit test can be written
+    // in the units the layout was.
+    float dips() const {
+        const UINT dpi = GetDpiForWindow(hwnd);
+        return dpi == 0 ? 1.0f : 96.0f / static_cast<float>(dpi);
+    }
+
+    // Moved and clamped rather than wrapped: an arrow at the edge of a result
+    // does nothing, which is what every grid does and what stops a keystroke
+    // from teleporting the cursor to the far corner.
+    void move(int rows_by, int columns_by, bool extend) {
+        const int last_row = static_cast<int>(rows()) - 1;
+        const int last_column = static_cast<int>(columns.size()) - 1;
+        if (last_row < 0 || last_column < 0) {
+            return;
+        }
+        // An arrow key with nothing selected acts from the first cell rather
+        // than doing nothing, which is what `AppController.swift` does when the
+        // renderer's selection is nil. Ignoring it instead would leave a click
+        // as the only way into the grid, and a result opened from the keyboard
+        // would have four keys that appeared not to work.
+        if (!selected) {
+            selection = Selection{};
+            selected = true;
+        }
+        // Taken before the move, so a shift-arrow from an unextended selection
+        // grows from where the cursor was rather than from where it lands.
+        if (extend && !selection.anchored) {
+            selection.anchored = true;
+            selection.anchor = selection.row;
+        } else if (!extend) {
+            selection.anchored = false;
+        }
+        const int row = selection.row + rows_by;
+        const int column = selection.column + columns_by;
+        selection.row = row < 0 ? 0 : (row > last_row ? last_row : row);
+        selection.column = column < 0 ? 0 : (column > last_column ? last_column : column);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
 
     // Built here rather than once at startup, because Direct2D can lose the
     // device underneath a living window — a driver update, a remote session, a
@@ -1108,7 +1345,8 @@ struct Window {
             return;
         }
         target->BeginDraw();
-        draw_grid(target.Get(), dwrite.Get(), font, columns, palette);
+        draw_grid(target.Get(), dwrite.Get(), font, columns, palette,
+                  selected ? &selection : nullptr);
         const HRESULT hr = target->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
             target.Reset();
@@ -1162,6 +1400,52 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_SIZE:
         window->resize();
         return 0;
+
+    case WM_LBUTTONDOWN: {
+        // The window takes focus on the way past. A grid that could be clicked
+        // but not then typed into would look broken in a way that has nothing to
+        // do with either the click or the key.
+        SetFocus(hwnd);
+        const float scale = window->dips();
+        Selection hit;
+        if (cell_at(static_cast<float>(GET_X_LPARAM(lparam)) * scale,
+                    static_cast<float>(GET_Y_LPARAM(lparam)) * scale, window->columns,
+                    window->rows(), &hit)) {
+            window->selection = hit;
+            window->selected = true;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+    }
+
+    // Claimed, so the arrows arrive here rather than being taken for dialog
+    // navigation. There is nothing to tab between yet, and the grid is the only
+    // thing in the window that an arrow key could mean anything to.
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+
+    case WM_KEYDOWN: {
+        const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        switch (wparam) {
+        case VK_UP:
+            window->move(-1, 0, extend);
+            return 0;
+        case VK_DOWN:
+            window->move(1, 0, extend);
+            return 0;
+        // Sideways never extends: the band is a range of rows, and shift-left
+        // has no range to grow. Passing `extend` here would collapse one that
+        // was already open, which is the opposite of what the key says.
+        case VK_LEFT:
+            window->move(0, -1, false);
+            return 0;
+        case VK_RIGHT:
+            window->move(0, 1, false);
+            return 0;
+        default:
+            return 0;
+        }
+    }
 
     // The window has moved to a display with a different scale. Windows offers a
     // rectangle for where it should now sit; taking it is what keeps the window
