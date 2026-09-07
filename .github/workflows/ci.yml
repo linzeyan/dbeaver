@@ -550,8 +550,10 @@ jobs:
       # the same gap macOS covers by naming `c++` in Package.swift. `--lib` is
       # not optional — the crate declares two crate types and `--crate-type` may
       # only narrow a single target, and without it cargo stops with "crate types
-      # to rustc can only be passed to one target". `natives.txt` rather than the
-      # teed log, because reading that from inside its own pipe races the flush.
+      # to rustc can only be passed to one target". A file rather than the teed
+      # log, because reading that from inside its own pipe races the flush — and
+      # under `target/` rather than beside it, because that directory is ignored
+      # and `vm-build.sh` runs `git clean` between the build and the checks.
       - name: Build the staticlib and ask for its link line
         shell: bash
         run: |
@@ -560,11 +562,11 @@ jobs:
           staticlib() {
             cargo build -p dbffi || return 1
             cargo rustc -p dbffi --lib --crate-type staticlib \
-              -- --print native-static-libs >natives.txt 2>&1 || {
-                cat natives.txt
+              -- --print native-static-libs >target/natives.txt 2>&1 || {
+                cat target/natives.txt
                 return 1
               }
-            cat natives.txt
+            cat target/natives.txt
           }
 
           staticlib 2>&1 | tee staticlib.log && exit 0
@@ -598,100 +600,30 @@ jobs:
       # extra operand`, which reads like a DuckDB problem and is a PATH problem.
       # Only `cl` needs what this sets up.
       - uses: ilammy/msvc-dev-cmd@v1
-      - name: Use the core from a plain C++ program
+      - name: Use the core from C++, and draw with it
         shell: bash
         run: |
           set -o pipefail
 
-          link() {
-            local libs
-            libs=$(grep -o 'native-static-libs:.*' natives.txt | head -1 | cut -d: -f2-)
-            # A notice rather than an echo, on a green run rather than a red one.
-            # Asking rustc for this list was only ever worth doing if the answer
-            # reaches the person starting the WinUI project, and an echo reaches
-            # the log — which takes rights that the annotations do not.
-            echo "::notice::Windows link line for dbffi.lib:$libs"
-
-            # `-` rather than `/` for every cl flag. Under Git Bash an argument
-            # that starts with a slash is rewritten as a Windows path, so
-            # `/nologo` would arrive as a filename; cl accepts both spellings and
-            # only one of them survives the shell.
-            #
-            # `-MD` because the list above ends in `/defaultlib:msvcrt`: that is
-            # the dynamic CRT, and it is also the answer to what the MSVC side of
-            # `.linkedLibrary("c++")` turns out to be — DuckDB's C++ arrives with
-            # the CRT rather than as a library of its own. cl defaults to `-MT`,
-            # the static one, and a program this small links anyway; a real front
-            # end linking two CRTs is where the duplicate symbols start. Asking
-            # for the right one here is what makes this check resemble the thing
-            # it stands in for.
-            #
-            # `$libs` is unquoted on purpose: it is a list of libraries and has
-            # to split into one argument each. Quoting it hands the linker a
-            # single argument with spaces in its name.
-            # shellcheck disable=SC2086
-            cl -nologo -EHsc -MD -std:c++17 \
-              -I apps/macos/Sources/CDbFfi/include \
-              apps/windows/ffi-check/main.cpp \
-              -Fe:ffi-check.exe \
-              -link -LIBPATH:target/debug dbffi.lib $libs || return 1
-            ./ffi-check.exe
-          }
-
-          # The same tail-as-annotation as the steps above, and for their reason:
-          # this one failed twice already with nothing but an exit code to show
-          # for it, on the one platform that cannot be reproduced here.
-          link 2>&1 | tee link.log && exit 0
-          python -c "import pathlib; \
-            print('::error::' + pathlib.Path('link.log').read_text()[-4000:] \
-              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
-          exit 1
-
-      # The front end, from the bottom. The plan is WinUI 3 with a Direct2D grid,
-      # and this is the Direct2D half — asked first because it is where the hard
-      # questions are, and because none of them need a window to be wrong.
-      #
-      # The checks run inside the real binary behind a flag, the way the macOS
-      # app's `--verify-*` do, and draw into a WIC bitmap rather than a swap
-      # chain. A runner has no display and no GPU; a check that quietly needed
-      # either would fail for a reason unrelated to the code. `--verify-drivers`
-      # is the rendering stack on its own; `--verify-grid` is the grid's layout,
-      # which needs the FFI as well and is the one that can regress.
-      #
-      # Everything it uses ships with the Windows SDK, so this stays on the `cl`
-      # line above rather than acquiring a project file and a NuGet restore. Those
-      # arrive with the XAML shell, and when they do their failures will be about
-      # themselves instead of about whether Direct2D works.
-      - name: Draw with the stack the grid will use
-        shell: bash
-        run: |
-          set -o pipefail
-
-          draw() {
-            local libs
-            libs=$(grep -o 'native-static-libs:.*' natives.txt | head -1 | cut -d: -f2-)
-            # shellcheck disable=SC2086
-            cl -nologo -EHsc -MD -std:c++17 \
-              -I apps/macos/Sources/CDbFfi/include \
-              apps/windows/DbClient/main.cpp \
-              -Fe:dbclient.exe \
-              -link -LIBPATH:target/debug dbffi.lib \
-              d2d1.lib dwrite.lib windowscodecs.lib ole32.lib $libs || return 1
-            ./dbclient.exe --verify-drivers || return 1
-            ./dbclient.exe --verify-grid
-          }
-
-          # The measurements are published on the way past, for the reason the
-          # link line above is: the check's whole argument is that a return code
-          # cannot tell you anything was painted, so accepting a return code as
-          # the only evidence it worked would be the same mistake one level up.
-          if draw 2>&1 | tee draw.log; then
-            grep -o '[0-9]* pixels painted.*' draw.log \
+          # The `cl` lines live in `apps/windows/tools/checks.sh` rather than
+          # here. This file opens by saying that a CI which reimplements the
+          # local commands drifts from them, and there is a second machine
+          # running these now — `vm-build.sh` drives a Windows VM so the
+          # compiler can answer in seconds instead of in a round trip. Two
+          # copies of one link line is precisely the drift that warning is about.
+          #
+          # What stays here is what is specific to being CI: the annotations.
+          # The script prints; this decides what a reader without log access
+          # gets to see.
+          if bash apps/windows/tools/checks.sh 2>&1 | tee checks.log; then
+            echo "::notice::Windows link line for dbffi.lib:$(
+              grep -o 'system libraries:.*' checks.log | head -1 | cut -d: -f2-)"
+            grep -o '[0-9]* pixels painted.*' checks.log \
               | while read -r line; do echo "::notice::Direct2D $line"; done
             exit 0
           fi
           python -c "import pathlib; \
-            print('::error::' + pathlib.Path('draw.log').read_text()[-4000:] \
+            print('::error::' + pathlib.Path('checks.log').read_text()[-4000:] \
               .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
           exit 1
 
