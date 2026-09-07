@@ -296,6 +296,7 @@ struct Surface {
 // would have to be recomputed per string.
 struct Monospace {
     ComPtr<IDWriteTextFormat> format;
+    ComPtr<IDWriteInlineObject> ellipsis;
     float advance = 0.0f;
     float line_height = 0.0f;
 
@@ -386,6 +387,13 @@ struct Monospace {
         if (FAILED(hr)) {
             return failed("CreateTextFormat", hr);
         }
+
+        // Made once, from the format, because every cell that overruns its
+        // column shows the same one.
+        hr = dwrite->CreateEllipsisTrimmingSign(format.Get(), &ellipsis);
+        if (FAILED(hr)) {
+            return failed("CreateEllipsisTrimmingSign", hr);
+        }
         return uniform;
     }
 };
@@ -444,7 +452,17 @@ bool read_columns(DbHandle* handle, std::vector<Column>* out) {
                               "SELECT i AS id,"
                               "       'driver-' || i AS name,"
                               "       CASE WHEN i = 1 THEN NULL"
-                              "            ELSE 'read ' || (i * 100) END AS note "
+                              "            ELSE 'read ' || (i * 100) END AS note,"
+                              // Long enough to be clamped to `kMaxColumnWidth`
+                              // and then to overrun that, which is the only way
+                              // to have anything to say about what happens to a
+                              // value the column cannot hold. With spaces in it,
+                              // because wrapping breaks at a space and trimming
+                              // does not — a value without any would be cut in
+                              // the same place either way and the check below
+                              // would not be able to tell them apart.
+                              "       'a value long enough to run past the widest"
+                              " column this grid allows ' || i AS wide "
                               "FROM range(3) t(i) ORDER BY i",
                               1000, &err, &position);
     if (query == nullptr) {
@@ -566,6 +584,48 @@ struct Palette {
     }
 };
 
+// One cell's text, laid out the way this grid lays out every cell.
+//
+// Its own function because a check needs to ask the layout two things the
+// bitmap cannot answer — whether it is one line, and whether that line was
+// trimmed — and a check that assembled its own layout would be asking them of a
+// copy that could drift from this one.
+//
+// One layout per cell, for now. The macOS grid draws from a glyph atlas instead,
+// because a grid draws the same ninety-five shapes tens of thousands of times a
+// frame — but that is a decision made against a measurement, and there is no
+// frame to measure here yet.
+bool make_layout(IDWriteFactory* dwrite, const Monospace& font, const std::wstring& text,
+                 float width, bool align_right, ComPtr<IDWriteTextLayout>* out) {
+    const HRESULT hr = font.format ? dwrite->CreateTextLayout(text.c_str(),
+                                                              static_cast<UINT32>(text.size()),
+                                                              font.format.Get(), width,
+                                                              kRowHeight, out->GetAddressOf())
+                                   : E_FAIL;
+    if (FAILED(hr)) {
+        return failed("CreateTextLayout", hr);
+    }
+    if (align_right) {
+        (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    }
+
+    // A cell is one line. Left to wrap, a value too wide for its column moves
+    // the rest of itself onto a second line that the row's height then clips —
+    // which is silent truncation with an extra step, and the part it hides is
+    // the middle of the value rather than its end.
+    (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+    // And what does not fit ends in an ellipsis rather than simply stopping.
+    // `GridRenderer.swift` calls this the worst failure the grid can have and it
+    // is right: `123456789` cut to `12345` does not look truncated, it looks
+    // like a different number. By character rather than by word, because a
+    // column is a fixed number of characters wide and giving back the last
+    // partial word would waste most of one.
+    const DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+    (*out)->SetTrimming(&trimming, font.ellipsis.Get());
+    return true;
+}
+
 bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
                const std::wstring& text, float x, float y, float width,
                ID2D1SolidColorBrush* brush, bool align_right) {
@@ -573,21 +633,8 @@ bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
         return true;
     }
     ComPtr<IDWriteTextLayout> layout;
-    // One layout per cell, for now. The macOS grid draws from a glyph atlas
-    // instead, because a grid draws the same ninety-five shapes tens of
-    // thousands of times a frame — but that is a decision made against a
-    // measurement, and there is no frame to measure here yet.
-    const HRESULT hr = font.format
-                           ? dwrite->CreateTextLayout(text.c_str(),
-                                                      static_cast<UINT32>(text.size()),
-                                                      font.format.Get(), width, kRowHeight,
-                                                      &layout)
-                           : E_FAIL;
-    if (FAILED(hr)) {
-        return failed("CreateTextLayout", hr);
-    }
-    if (align_right) {
-        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+    if (!make_layout(dwrite, font, text, width, align_right, &layout)) {
+        return false;
     }
     target->DrawTextLayout(D2D1::Point2F(x, y), layout.Get(), brush);
     return true;
@@ -686,8 +733,8 @@ bool the_grid_draws_a_result() {
         return false;
     }
 
-    check(columns.size() == 3, "the result has three columns");
-    if (columns.size() != 3) {
+    check(columns.size() == 4, "the result has four columns");
+    if (columns.size() != 4) {
         return false;
     }
     check(columns[2].nulls.size() == 3 && columns[2].nulls[1],
@@ -849,10 +896,57 @@ bool the_grid_draws_a_result() {
     check(number_left == 0 && number_right > 0, "a number is drawn against the trailing edge");
     check(word_left > 0, "a word is not");
 
+    // A value the column cannot hold. Asked of the layout the grid draws with
+    // rather than of the bitmap, because neither question has a pixel answer:
+    // a second line is clipped by the row rather than reported, and a line that
+    // stopped early looks the same as one that was trimmed.
+    const Column& wide = columns.back();
+    check(wide.width == kMaxColumnWidth, "a wide column is held to the maximum");
+    ComPtr<IDWriteTextLayout> overrun;
+    if (!make_layout(surface.dwrite.Get(), font, wide.cells[0],
+                     wide.width - kCellPadding * 2.0f, false, &overrun)) {
+        return false;
+    }
+    DWRITE_LINE_METRICS line{};
+    UINT32 lines = 0;
+    // E_NOT_SUFFICIENT_BUFFER when there is more than one line, and it fills in
+    // the count either way — which is the case being ruled out.
+    hr = overrun->GetLineMetrics(&line, 1, &lines);
+    check(lines == 1, "a value too wide for its column stays on one line");
+    check(SUCCEEDED(hr) && line.isTrimmed, "and is cut rather than carried over");
+
+    // And the cut reaches the edge. Wrapping breaks at the last space that
+    // fitted, which leaves the tail of the cell empty; trimming fills it and
+    // puts the ellipsis there. That is the difference between a value the user
+    // can see was shortened and one that just ends.
+    UINT tail_ink = 0;
+    const float tail = wide.x + wide.width - kCellPadding;
+    if (!surface.ink_in(tail - 3.0f * font.advance, kHeaderHeight, tail,
+                        kHeaderHeight + kRowHeight, &tail_ink)) {
+        return failed("reading the trailing edge of a trimmed cell", E_FAIL);
+    }
+    check(tail_ink > 0, "the cut value reaches the cell's trailing edge");
+
+    // And stops there. `DrawTextLayout` does not clip to the box it was given —
+    // a line that no longer wraps and is not trimmed is simply drawn past the
+    // end of it, over whatever column comes next. Here that is empty canvas,
+    // which is why this is asked of the last column: the damage is visible
+    // without a neighbour having to be sacrificed to show it.
+    UINT spill = 0;
+    if (!surface.ink_in(tail + 2.0f, kHeaderHeight, static_cast<float>(kWidth),
+                        kHeaderHeight + kRowHeight, &spill)) {
+        return failed("reading past a trimmed cell", E_FAIL);
+    }
+    check(spill == 0, "and nothing is drawn past it");
+
     UINT total = 0;
     surface.ink_in(0.0f, 0.0f, static_cast<float>(kWidth), static_cast<float>(kHeight), &total);
-    std::printf("      %u pixels painted, %.2f advance, columns %.0f %.0f %.0f\n", total,
-                font.advance, columns[0].width, columns[1].width, columns[2].width);
+    std::string widths;
+    for (const Column& column : columns) {
+        widths += " " + std::to_string(static_cast<int>(column.width));
+    }
+    std::printf("      %u pixels painted, %.2f advance, columns%s\n", total, font.advance,
+                widths.c_str());
     return failures == 0;
 }
 

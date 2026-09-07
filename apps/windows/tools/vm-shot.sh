@@ -115,8 +115,28 @@ $arguments = Get-Content (Join-Path $env:USERPROFILE "dbeaver-vm-shot.args") -Er
 $Start = if ($arguments.Count -ge 1) { $arguments[0] } else { "" }
 $Wait = if ($arguments.Count -ge 2 -and $arguments[1]) { [double]$arguments[1] } else { 2 }
 
+Add-Type -Namespace VmShot -Name Window -MemberDefinition @"
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
+"@
+
 if ($Start) {
-    Start-Process -FilePath $Start
+    # Brought to the front, because this guest is shared: another project's app
+    # lives on the same desktop, and a photograph of whatever happened to be on
+    # top is a photograph of that instead. Nothing is closed to make room — the
+    # other window is somebody's, and covering it is enough.
+    #
+    # Waited for by its window rather than by the process. Start-Process returns
+    # as soon as the process exists, which is before it has created anything
+    # worth photographing, and a fixed sleep here is a race on a slow boot.
+    $process = Start-Process -FilePath $Start -PassThru
+    foreach ($attempt in 1..40) {
+        Start-Sleep -Milliseconds 100
+        $process.Refresh()
+        if ($process.MainWindowHandle -ne 0) { break }
+    }
+    if ($process.MainWindowHandle -ne 0) {
+        [VmShot.Window]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
+    }
 }
 
 Start-Sleep -Seconds $Wait
