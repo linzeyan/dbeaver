@@ -1,23 +1,33 @@
 // The Windows front end, from the bottom.
 //
-// There is no window here yet, and that is the point of starting here. The plan
-// is WinUI 3 with a Direct2D grid, and of those two the XAML shell is the part
-// that is well understood and the part whose problems are somebody else's build
-// system. The grid is Direct2D and DirectWrite, it is where every hard question
-// lives — text metrics, DPI, how much can be drawn in a frame — and none of it
-// needs an HWND to be wrong. So this asks the rendering stack first, headless,
-// and the window comes next.
+// The plan is WinUI 3 with a Direct2D grid, and of those two the XAML shell is
+// the part that is well understood and the part whose problems are somebody
+// else's build system. The grid is Direct2D and DirectWrite, it is where every
+// hard question lives — text metrics, DPI, how much can be drawn in a frame —
+// and none of it needed an HWND to be wrong. So the rendering stack was asked
+// first, headless, and the window came second.
 //
-// The checks run inside the real binary behind a flag, the same arrangement the
-// macOS app uses, rather than in a test target that would have to reproduce this
-// link. They draw into a WIC bitmap instead of a swap chain, so they run on a
-// machine with no display and no GPU, which is what a CI runner is.
+// Run with no arguments it opens that window. `--verify-drivers` and
+// `--verify-grid` run the checks instead, inside the real binary behind a flag,
+// the same arrangement the macOS app uses rather than a test target that would
+// have to reproduce this link. They draw into a WIC bitmap instead of onto a
+// window, so they run on a machine with no display and no GPU, which is what a
+// CI runner is — and they draw it by calling `draw_grid`, which is also what the
+// window calls. That sharing is the only reason the checks still mean anything
+// now that there is a window: the parts CI cannot reach are the HWND and the
+// message loop, and everything the user actually looks at is on both paths.
 //
 // Built with `cl` directly, like `apps/windows/ffi-check` next door. No package
 // manager and no project file, because everything here ships with the Windows
 // SDK, and a first brick that needs a NuGet restore to say whether Direct2D
 // works is a brick that answers two questions and tells you neither.
 
+// Every Win32 call here is spelled with its `W` suffix, and this says so once so
+// the macros agree. Without it `IDC_ARROW` and its neighbours expand to their
+// ANSI form and are rejected by the `W` function they are passed to — a type
+// error about `LPSTR` in a file that never mentions one.
+#define UNICODE
+#define _UNICODE
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -423,8 +433,9 @@ void lay_out(std::vector<Column>* columns, float advance) {
     }
 }
 
-bool draw_text(const Surface& surface, const Monospace& font, const std::wstring& text, float x,
-               float y, float width, const ComPtr<ID2D1SolidColorBrush>& brush) {
+bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
+               const std::wstring& text, float x, float y, float width,
+               ID2D1SolidColorBrush* brush) {
     if (text.empty()) {
         return true;
     }
@@ -434,28 +445,63 @@ bool draw_text(const Surface& surface, const Monospace& font, const std::wstring
     // thousands of times a frame — but that is a decision made against a
     // measurement, and there is no frame to measure here yet.
     const HRESULT hr = font.format
-                           ? surface.dwrite->CreateTextLayout(text.c_str(),
-                                                              static_cast<UINT32>(text.size()),
-                                                              font.format.Get(), width,
-                                                              kRowHeight, &layout)
+                           ? dwrite->CreateTextLayout(text.c_str(),
+                                                      static_cast<UINT32>(text.size()),
+                                                      font.format.Get(), width, kRowHeight,
+                                                      &layout)
                            : E_FAIL;
     if (FAILED(hr)) {
         return failed("CreateTextLayout", hr);
     }
-    surface.target->DrawTextLayout(D2D1::Point2F(x, y), layout.Get(), brush.Get());
+    target->DrawTextLayout(D2D1::Point2F(x, y), layout.Get(), brush);
     return true;
 }
 
-bool the_grid_draws_a_result() {
+// One frame of the grid, between somebody else's `BeginDraw` and `EndDraw`.
+//
+// Taking an `ID2D1RenderTarget` rather than the `Surface` above is what lets the
+// check and the window draw through the same code: the check gives it a WIC
+// bitmap it can then count pixels in, the window gives it an HWND target. A
+// check that drew through its own copy of this would go on passing after the
+// window stopped agreeing with it, which is the failure it exists to prevent.
+//
+// Begin and end stay with the caller, because they are not the same call twice:
+// the window has to notice `D2DERR_RECREATE_TARGET` coming back from `EndDraw`
+// and the bitmap can never see it.
+void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
+               const std::vector<Column>& columns, ID2D1SolidColorBrush* ink,
+               ID2D1SolidColorBrush* faint) {
+    target->Clear(D2D1::ColorF(D2D1::ColorF::White));
+    const float text_inset = (kRowHeight - font.line_height) / 2.0f;
+    for (const Column& column : columns) {
+        draw_text(target, dwrite, font, column.heading, column.x + kCellPadding,
+                  kHeaderHeight - kRowHeight + text_inset, column.width, ink);
+        for (size_t r = 0; r < column.cells.size(); ++r) {
+            const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight + text_inset;
+            draw_text(target, dwrite, font, column.cells[r], column.x + kCellPadding, y,
+                      column.width, column.nulls[r] ? faint : ink);
+        }
+    }
+}
+
+// A connection, one result, and nothing left open. `read_columns` copies every
+// value it wants into `Column`, so the handle has no reason to outlive it, and a
+// window that held a live DuckDB connection for as long as it held a frame is a
+// shape worth not starting.
+bool load_grid(std::vector<Column>* out) {
     char* err = nullptr;
     DbHandle* handle = db_connect("duckdb://:memory:", nullptr, 10, &err);
     if (handle == nullptr) {
         return core_failed("db_connect", err);
     }
-    std::vector<Column> columns;
-    const bool read = read_columns(handle, &columns);
+    const bool read = read_columns(handle, out);
     db_free(handle);
-    if (!read) {
+    return read;
+}
+
+bool the_grid_draws_a_result() {
+    std::vector<Column> columns;
+    if (!load_grid(&columns)) {
         return false;
     }
 
@@ -501,17 +547,7 @@ bool the_grid_draws_a_result() {
     }
 
     surface.target->BeginDraw();
-    surface.target->Clear(D2D1::ColorF(D2D1::ColorF::White));
-    const float text_inset = (kRowHeight - font.line_height) / 2.0f;
-    for (const Column& column : columns) {
-        draw_text(surface, font, column.heading, column.x + kCellPadding,
-                  kHeaderHeight - kRowHeight + text_inset, column.width, ink);
-        for (size_t r = 0; r < column.cells.size(); ++r) {
-            const float y = kHeaderHeight + static_cast<float>(r) * kRowHeight + text_inset;
-            draw_text(surface, font, column.cells[r], column.x + kCellPadding, y, column.width,
-                      column.nulls[r] ? faint : ink);
-        }
-    }
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, ink.Get(), faint.Get());
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw", hr);
@@ -667,36 +703,265 @@ bool the_driver_list_draws() {
     return failures == 0;
 }
 
-}  // namespace
+// -------------------------------------------------------------------------
+// The window, drawing what the check above draws
+// -------------------------------------------------------------------------
 
-int main(int argc, char** argv) {
-    const std::string flag = argc > 1 ? argv[1] : "";
-    if (flag != "--verify-drivers" && flag != "--verify-grid") {
-        std::printf("nothing to run yet: pass --verify-drivers or --verify-grid\n");
-        return 2;
+struct Window {
+    HWND hwnd = nullptr;
+    ComPtr<ID2D1Factory> d2d;
+    ComPtr<IDWriteFactory> dwrite;
+    ComPtr<ID2D1HwndRenderTarget> target;
+    ComPtr<ID2D1SolidColorBrush> ink;
+    ComPtr<ID2D1SolidColorBrush> faint;
+    Monospace font;
+    std::vector<Column> columns;
+
+    // Built here rather than once at startup, because Direct2D can lose the
+    // device underneath a living window — a driver update, a remote session, a
+    // GPU reset — and says so by answering `EndDraw` with D2DERR_RECREATE_TARGET
+    // instead of by failing anything. Dropping the target there and coming back
+    // through here is the whole of the recovery. A window without it goes on
+    // running and stops drawing, after an event the user did not cause and
+    // cannot connect to what they see.
+    //
+    // The brushes are rebuilt alongside it and not before: a brush belongs to
+    // the target it was made from, and keeping one across a recreation is a use
+    // of a dead resource that Direct2D reports as a blank window.
+    bool ready() {
+        if (target) {
+            return true;
+        }
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        HRESULT hr = d2d->CreateHwndRenderTarget(
+            D2D1::RenderTargetProperties(),
+            D2D1::HwndRenderTargetProperties(
+                hwnd, D2D1::SizeU(static_cast<UINT32>(client.right - client.left),
+                                  static_cast<UINT32>(client.bottom - client.top))),
+            &target);
+        if (FAILED(hr)) {
+            return failed("CreateHwndRenderTarget", hr);
+        }
+
+        // The size above is in physical pixels — that is what a client rect is
+        // once the process is per-monitor aware — and this is what tells Direct2D
+        // how many of them a DIP is worth. Everything drawn afterwards is in
+        // DIPs, which is the unit every constant at the top of this file is in,
+        // so this one call is what makes a row twenty of anything at all.
+        const float dpi = static_cast<float>(GetDpiForWindow(hwnd));
+        target->SetDpi(dpi, dpi);
+
+        hr = target->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black), &ink);
+        if (FAILED(hr)) {
+            return failed("CreateSolidColorBrush", hr);
+        }
+        hr = target->CreateSolidColorBrush(D2D1::ColorF(0.55f, 0.55f, 0.55f), &faint);
+        if (FAILED(hr)) {
+            return failed("CreateSolidColorBrush", hr);
+        }
+        return true;
     }
 
-    // Apartment-threaded because WIC is instantiated here and the eventual
-    // window will need one anyway. Every call the core makes blocks, and none of
-    // them are made on this thread.
-    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    void paint() {
+        if (!ready()) {
+            return;
+        }
+        target->BeginDraw();
+        draw_grid(target.Get(), dwrite.Get(), font, columns, ink.Get(), faint.Get());
+        const HRESULT hr = target->EndDraw();
+        if (hr == D2DERR_RECREATE_TARGET) {
+            target.Reset();
+            ink.Reset();
+            faint.Reset();
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (FAILED(hr)) {
+            failed("ID2D1HwndRenderTarget::EndDraw", hr);
+        }
+    }
+
+    void resize() {
+        if (!target) {
+            return;
+        }
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        target->Resize(D2D1::SizeU(static_cast<UINT32>(client.right - client.left),
+                                   static_cast<UINT32>(client.bottom - client.top)));
+    }
+};
+
+LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_NCCREATE) {
+        auto* created = reinterpret_cast<CREATESTRUCTW*>(lparam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(created->lpCreateParams));
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    auto* window = reinterpret_cast<Window*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (window == nullptr) {
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    switch (message) {
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        BeginPaint(hwnd, &paint);
+        window->paint();
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+
+    // Claimed and ignored. The default handler fills the client area with the
+    // class brush first, and every frame would then be a flash of that colour
+    // before Direct2D clears over it — visible as flicker while resizing, which
+    // is the moment the redraws come fastest.
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_SIZE:
+        window->resize();
+        return 0;
+
+    // The window has moved to a display with a different scale. Windows offers a
+    // rectangle for where it should now sit; taking it is what keeps the window
+    // the same physical size across the move rather than the same pixel size.
+    // The target is told the new scale so the DIPs below it keep their meaning.
+    case WM_DPICHANGED: {
+        const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+        SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        if (window->target) {
+            const float dpi = static_cast<float>(HIWORD(wparam));
+            window->target->SetDpi(dpi, dpi);
+        }
+        return 0;
+    }
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+
+    default:
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+}
+
+int show_the_grid_in_a_window() {
+    // Before a window exists and before anything is asked how big it is. Without
+    // this Windows scales the whole window for a high-DPI display, and text that
+    // DirectWrite laid out from glyph metrics arrives through a bitmap scaler —
+    // soft, and off by whatever the rounding was. That is the one thing a grid
+    // whose entire argument is a measured advance must not have happen to it.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    Window window;
+    HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory),
+                                   reinterpret_cast<void**>(window.d2d.GetAddressOf()));
     if (FAILED(hr)) {
-        std::printf("FAIL  CoInitializeEx: hr=0x%08lx\n", static_cast<unsigned long>(hr));
+        failed("D2D1CreateFactory", hr);
+        return 1;
+    }
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                             reinterpret_cast<IUnknown**>(window.dwrite.GetAddressOf()));
+    if (FAILED(hr)) {
+        failed("DWriteCreateFactory", hr);
+        return 1;
+    }
+    if (!window.font.open(window.dwrite)) {
+        return 1;
+    }
+    if (!load_grid(&window.columns)) {
+        return 1;
+    }
+    lay_out(&window.columns, window.font.advance);
+
+    WNDCLASSEXW window_class{};
+    window_class.cbSize = sizeof(window_class);
+    window_class.lpfnWndProc = window_proc;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    window_class.lpszClassName = L"DbClientGrid";
+    if (RegisterClassExW(&window_class) == 0) {
+        failed("RegisterClassExW", HRESULT_FROM_WIN32(GetLastError()));
         return 1;
     }
 
-    if (flag == "--verify-drivers") {
-        the_driver_list_draws();
-    } else {
-        the_grid_draws_a_result();
+    // A size asked for in DIPs and converted, rather than in pixels, for the
+    // reason everything else here is in DIPs: on a 200% display a window given
+    // 900 pixels is half the window it was meant to be. `AdjustWindowRectEx`
+    // then turns the client area that is wanted into the outer size that
+    // produces it, which is what stops the title bar eating into the grid.
+    //
+    // Larger than the grid it holds, deliberately. This is not the shell — there
+    // is no tab bar, no sidebar and no editor yet — and a window sized to fit
+    // three columns exactly would look finished instead of looking like the one
+    // piece that is.
+    const UINT dpi = GetDpiForSystem();
+    RECT bounds{0, 0, MulDiv(900, static_cast<int>(dpi), 96),
+                MulDiv(600, static_cast<int>(dpi), 96)};
+    AdjustWindowRectExForDpi(&bounds, WS_OVERLAPPEDWINDOW, FALSE, 0, dpi);
+
+    window.hwnd = CreateWindowExW(0, window_class.lpszClassName, L"DBeaver", WS_OVERLAPPEDWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, bounds.right - bounds.left,
+                                  bounds.bottom - bounds.top, nullptr, nullptr,
+                                  window_class.hInstance, &window);
+    if (window.hwnd == nullptr) {
+        failed("CreateWindowExW", HRESULT_FROM_WIN32(GetLastError()));
+        return 1;
     }
+    ShowWindow(window.hwnd, SW_SHOWNORMAL);
 
-    CoUninitialize();
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    return failures == 0 ? 0 : 1;
+}
 
+int report() {
     if (failures != 0) {
         std::printf("\n%d check(s) failed\n", failures);
         return 1;
     }
     std::printf("\nevery check passed\n");
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const std::string flag = argc > 1 ? argv[1] : "";
+    if (!flag.empty() && flag != "--verify-drivers" && flag != "--verify-grid") {
+        std::printf("unknown option: %s\n", flag.c_str());
+        std::printf("run with no arguments for the window, or --verify-drivers/--verify-grid\n");
+        return 2;
+    }
+
+    // Apartment-threaded, which is what a window wants: COM delivers to it
+    // through the message loop this thread is about to run. WIC is instantiated
+    // on this thread too. Every call the core makes blocks, and none of them are
+    // made here.
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr)) {
+        std::printf("FAIL  CoInitializeEx: hr=0x%08lx\n", static_cast<unsigned long>(hr));
+        return 1;
+    }
+
+    int status = 0;
+    if (flag == "--verify-drivers") {
+        the_driver_list_draws();
+        status = report();
+    } else if (flag == "--verify-grid") {
+        the_grid_draws_a_result();
+        status = report();
+    } else {
+        status = show_the_grid_in_a_window();
+    }
+
+    CoUninitialize();
+    return status;
 }
