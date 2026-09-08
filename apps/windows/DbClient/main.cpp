@@ -100,6 +100,11 @@ constexpr float kCellTextY = 3.0f;
 // The floor on the thumb's length is the trade every platform makes. Sized
 // purely by proportion it disappears on a million rows, and at that point it has
 // stopped reporting how much there is and become something to take hold of.
+// How near a column boundary a press counts as aiming at it. `AppController`'s
+// number, and it is per side: the handle is eight DIPs wide across a line one
+// DIP thick.
+constexpr float kEdgeTolerance = 4.0f;
+
 constexpr float kScrollbarGutter = 12.0f;
 constexpr float kScrollbarThumb = 5.0f;
 constexpr float kMinThumbLength = 28.0f;
@@ -836,6 +841,32 @@ bool header_column_at(float x, float y, const std::vector<Column>& columns, int*
     return false;
 }
 
+// The column whose trailing edge a point is on, for the resize handles.
+//
+// In the header only, so a drag across the data is never taken for one — down
+// there the same x is the middle of a row somebody is selecting.
+//
+// The handle straddles the boundary rather than sitting inside the column: a
+// separator is one DIP and nobody can hit it, and a person aiming at a line
+// aims at the line rather than at one side of it. Four DIPs each way is
+// `AppController.swift`'s tolerance.
+//
+// The last column has one too. Its edge leads to nothing, but it is the edge of
+// that column, and a grid where the last column alone cannot be narrowed reads
+// as a bug in the column rather than as a rule about the edge.
+bool column_edge_at(float x, float y, const std::vector<Column>& columns, int* out) {
+    if (y < 0.0f || y >= kHeaderHeight) {
+        return false;
+    }
+    for (size_t c = 0; c < columns.size(); ++c) {
+        if (std::fabs(columns[c].x + columns[c].width - x) <= kEdgeTolerance) {
+            *out = static_cast<int>(c);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Arrow's `utf8`: offsets in `buffers[1]`, bytes packed end to end in
 // `buffers[2]` with no terminators.
 std::string utf8_at(const ArrowArray& array, int64_t i) {
@@ -963,12 +994,25 @@ bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column
     return true;
 }
 
+// Where the columns start, given how wide they are.
+//
+// Apart from the measuring below because the two stopped happening together the
+// moment a width could be dragged: a resize changes one width and every offset
+// after it, and re-measuring there would answer with the width the content
+// wants rather than the one the user just asked for.
+void place_columns(std::vector<Column>* columns) {
+    float x = 0.0f;
+    for (Column& column : *columns) {
+        column.x = x;
+        x += column.width;
+    }
+}
+
 // `GridRenderer.swift`'s rule, transcribed: the widest of the heading and the
 // cells, one character of slack so the longest value stays off the separator,
 // padding either side, clamped. NULL counts as four because it renders as the
 // word.
 void lay_out(std::vector<Column>* columns, float advance) {
-    float x = 0.0f;
     for (Column& column : *columns) {
         size_t chars = column.heading.size();
         for (const std::wstring& cell : column.cells) {
@@ -977,10 +1021,47 @@ void lay_out(std::vector<Column>* columns, float advance) {
         float width = kCellPadding * 2.0f + static_cast<float>(chars + 1) * advance;
         width = width < kMinColumnWidth ? kMinColumnWidth : width;
         width = width > kMaxColumnWidth ? kMaxColumnWidth : width;
-        column.x = x;
         column.width = width;
-        x += width;
     }
+    place_columns(columns);
+}
+
+// A dragged width, held to the same bounds the measured ones are.
+//
+// The clamp is `setColumnWidth`'s and it is what keeps a drag from producing a
+// column nobody can get back: dragged to nothing, a column has no edge left to
+// grab, and dragged past the maximum it pushes every column after it off the
+// side of a window that cannot scroll sideways yet.
+void set_column_width(std::vector<Column>* columns, size_t index, float width) {
+    if (index >= columns->size()) {
+        return;
+    }
+    width = width < kMinColumnWidth ? kMinColumnWidth : width;
+    (*columns)[index].width = width > kMaxColumnWidth ? kMaxColumnWidth : width;
+    place_columns(columns);
+}
+
+// Carries widths from one result onto the next, when they are the same columns.
+//
+// `reconcileColumnLayout` over there, and its argument is what makes a drag feel
+// like a setting rather than an accident: this grid re-runs its statement every
+// time a heading is clicked, and re-measuring the result would undo the drag on
+// the next sort. Different names are a different result and its widths mean
+// nothing, so the caller measures afresh — false says so.
+bool carry_widths(const std::vector<Column>& from, std::vector<Column>* to) {
+    if (from.size() != to->size()) {
+        return false;
+    }
+    for (size_t c = 0; c < from.size(); ++c) {
+        if (from[c].name != (*to)[c].name) {
+            return false;
+        }
+    }
+    for (size_t c = 0; c < from.size(); ++c) {
+        (*to)[c].width = from[c].width;
+    }
+    place_columns(to);
+    return true;
 }
 
 // The brushes the grid draws with, made from whichever target is drawing.
@@ -1913,6 +1994,95 @@ bool the_grid_draws_a_result() {
     check(marker_alone > 180, "and the marker's box is kept clear of the name it marks");
 
     // ------------------------------------------------------------------
+    // The resize handles: where a boundary can be taken hold of, and what
+    // happens to the layout when it moves
+    // ------------------------------------------------------------------
+
+    int handle = -1;
+    const float boundary = columns[0].x + columns[0].width;
+    check(column_edge_at(boundary, 4.0f, columns, &handle) && handle == 0,
+          "a point on a boundary finds the column to its left");
+    check(column_edge_at(boundary - kEdgeTolerance + 0.5f, 4.0f, columns, &handle) && handle == 0
+              && column_edge_at(boundary + kEdgeTolerance - 0.5f, 4.0f, columns, &handle)
+              && handle == 0,
+          "and the handle reaches both sides of it");
+    check(!column_edge_at(columns[0].x + columns[0].width / 2.0f, 4.0f, columns, &handle),
+          "the middle of a heading is not a handle");
+    // Otherwise the top row of the result would be eight DIPs of resize handle
+    // rather than eight DIPs of row, at four places across every column.
+    check(!column_edge_at(boundary, kHeaderHeight + 4.0f, columns, &handle),
+          "and a boundary below the band is not one either");
+    check(column_edge_at(right, 4.0f, columns, &handle)
+              && handle == static_cast<int>(columns.size()) - 1,
+          "the last column has a handle of its own");
+
+    std::vector<Column> resized = columns;
+    const float dragged = columns[0].width + 40.0f;
+    set_column_width(&resized, 0, dragged);
+    check(resized[0].width == dragged, "a dragged width is taken as it was given");
+    check(resized[1].x == columns[1].x + 40.0f && resized[2].x == columns[2].x + 40.0f,
+          "and every column after it moves by the same distance");
+    check(resized[1].width == columns[1].width && resized[2].width == columns[2].width,
+          "while their own widths are left alone");
+
+    // The same clamp the measured widths get. Dragged to nothing a column has
+    // no edge left to take hold of, and there is no other way to bring it back.
+    set_column_width(&resized, 0, 1.0f);
+    check(resized[0].width == kMinColumnWidth, "a column cannot be dragged away entirely");
+    set_column_width(&resized, 0, 10000.0f);
+    check(resized[0].width == kMaxColumnWidth, "nor past the width the layout allows");
+
+    // A drag has to survive the next statement, and every heading click is one.
+    set_column_width(&resized, 0, 120.0f);
+    std::vector<Column> again;
+    if (!load_grid(std::string(), &again)) {
+        return false;
+    }
+    lay_out(&again, font.advance);
+    std::vector<Column> carried = again;
+    check(carry_widths(resized, &carried) && carried[0].width == 120.0f
+              && carried[1].x == 120.0f,
+          "the same columns keep the widths they were dragged to");
+    // And a result that is not those columns does not inherit them — including
+    // not inheriting the first few, which is what a loop that copied as it
+    // compared would leave behind.
+    std::vector<Column> renamed = again;
+    renamed[1].name = "elsewhere";
+    check(!carry_widths(resized, &renamed) && renamed[0].width == again[0].width,
+          "a different result is measured afresh instead");
+
+    // And the drawing follows the width. Moving the offsets without moving the
+    // pixels is a resize the checks believe and the user cannot see, so this
+    // asks where the second heading is: at the start of its own column before
+    // the drag, and forty DIPs along afterwards.
+    std::vector<Column> wider = columns;
+    set_column_width(&wider, 0, columns[0].width + 40.0f);
+    const float probe = columns[1].x + kCellPadding;
+    UINT at_rest = 0;
+    UINT left_behind = 0;
+    UINT arrived = 0;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.ink_in(probe, 0.0f, probe + font.advance, kHeaderHeight, &at_rest)) {
+        return failed("reading a heading before a resize", FAILED(hr) ? hr : E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, wider, palette, nullptr, nullptr,
+              0.0f, false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.ink_in(probe, 0.0f, probe + font.advance, kHeaderHeight, &left_behind)
+        || !surface.ink_in(probe + 40.0f, 0.0f, probe + 40.0f + font.advance, kHeaderHeight,
+                           &arrived)) {
+        return failed("reading a heading after a resize", FAILED(hr) ? hr : E_FAIL);
+    }
+    check(at_rest > 0 && left_behind == 0, "a widened column takes its neighbour's name off");
+    check(arrived > 0, "and puts it where the new width says it goes");
+
+    // ------------------------------------------------------------------
     // The other appearance: the same drawing against the other column
     // ------------------------------------------------------------------
 
@@ -2150,6 +2320,14 @@ struct Window {
     // pointer instead of jumping its own leading edge there on the first move.
     bool dragging = false;
     float grab_offset = 0.0f;
+    // A header drag, from where it started rather than as a delta per move. The
+    // width follows the total distance from the press: accumulating each move
+    // instead would let the column drift away from the pointer over a long drag,
+    // once the clamp had swallowed part of one.
+    bool resizing = false;
+    size_t resize_column = 0;
+    float resize_from = 0.0f;
+    float resize_width = 0.0f;
     bool is_light = true;
 
     const Tones& tones() const { return is_light ? kLightTones : kDarkTones; }
@@ -2200,7 +2378,13 @@ struct Window {
         if (!load_grid(order_clause(wanted ? &next : nullptr, columns), &fresh)) {
             return;
         }
-        lay_out(&fresh, font.advance);
+        // The widths come across when the columns are the same columns, which
+        // they are for every sort: re-measuring here would undo a header drag
+        // on the next click, and a width that will not stay put is a width
+        // nobody will drag twice.
+        if (!carry_widths(columns, &fresh)) {
+            lay_out(&fresh, font.advance);
+        }
         columns = std::move(fresh);
         sort = next;
         sorted = wanted;
@@ -2222,6 +2406,11 @@ struct Window {
     // press.
     void drag_to(float y) {
         scroll_row = scroll_to_thumb(y - grab_offset, height(), rows());
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    void resize_to(float x) {
+        set_column_width(&columns, resize_column, resize_width + (x - resize_from));
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 
@@ -2409,6 +2598,21 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             return 0;
         }
 
+        // A boundary before the band it sits in, because here the two answers
+        // really do overlap and one of them has to win. The edge wins:
+        // `AppController.swift` asks in this order, and the handle is eight
+        // DIPs of a heading that is seventy-seven wide — a press on it is much
+        // more likely to be aimed at the line than at the name.
+        int edge = 0;
+        if (column_edge_at(x, y, window->columns, &edge)) {
+            window->resizing = true;
+            window->resize_column = static_cast<size_t>(edge);
+            window->resize_from = x;
+            window->resize_width = window->columns[static_cast<size_t>(edge)].width;
+            SetCapture(hwnd);
+            return 0;
+        }
+
         // The band sorts rather than selects, and it is asked first because the
         // two areas do not overlap: `cell_at` refuses everything above the
         // fold, so the order here is about which answer is looked for, not
@@ -2438,16 +2642,39 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_MOUSEMOVE:
         if (window->dragging) {
             window->drag_to(static_cast<float>(GET_Y_LPARAM(lparam)) * window->dips());
+        } else if (window->resizing) {
+            window->resize_to(static_cast<float>(GET_X_LPARAM(lparam)) * window->dips());
         }
         return 0;
+
+    // The pointer says what the press would do before it is made. Answered here
+    // rather than by the window class, because the class cursor is one cursor
+    // for the whole client area and this one changes with where it is.
+    //
+    // Only over the client area: `LOWORD(lparam)` is the hit-test code, and
+    // claiming the others would take the arrow off the window's own borders.
+    case WM_SETCURSOR:
+        if (LOWORD(lparam) == HTCLIENT) {
+            POINT at{};
+            int over = 0;
+            if (GetCursorPos(&at) && ScreenToClient(hwnd, &at)
+                && column_edge_at(static_cast<float>(at.x) * window->dips(),
+                                  static_cast<float>(at.y) * window->dips(), window->columns,
+                                  &over)) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                return TRUE;
+            }
+        }
+        return DefWindowProcW(hwnd, message, wparam, lparam);
 
     // The capture is released whichever way the button comes up, including the
     // one where another window takes it away — a drag left engaged would leave
     // the thumb dark and the grid following a pointer nobody is pressing.
     case WM_LBUTTONUP:
     case WM_CAPTURECHANGED:
-        if (window->dragging) {
+        if (window->dragging || window->resizing) {
             window->dragging = false;
+            window->resizing = false;
             if (message == WM_LBUTTONUP) {
                 ReleaseCapture();
             }

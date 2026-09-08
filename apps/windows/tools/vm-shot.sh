@@ -12,6 +12,7 @@
 #   apps/windows/tools/vm-shot.sh --start 'C:\src\dbeaver\target\dbclient.exe'
 #   apps/windows/tools/vm-shot.sh --click 900,470                  # click there, then photograph
 #   apps/windows/tools/vm-shot.sh --click 900,470 --keys '{DOWN}{RIGHT}'
+#   apps/windows/tools/vm-shot.sh --drag 700,250,900,250           # drag from here to there
 #   apps/windows/tools/vm-shot.sh --wait 3 /tmp/grid.png           # slower; somewhere specific
 #
 # Points are in physical pixels, which is what the capture is in too — read one
@@ -31,12 +32,14 @@
 # that somebody has to be logged in to the guest — a locked screen is not the
 # same thing, and the failure mode is an empty file rather than an error.
 #
-# Dragging, scrolling and held modifiers are not here. macshot's copy of this
-# script has all of it — ~/git/macshot/windows/tools/vm-shot.sh — and each piece
-# is worth taking the day this front end has something that needs it. The click
-# and the keys came over when the grid grew a selection, because a selection is
-# invisible until something points at it: a photograph of the window as it opens
-# says nothing about the feature it was taken to look at.
+# Scrolling and held modifiers are not here. macshot's copy of this script has
+# both — ~/git/macshot/windows/tools/vm-shot.sh — and each piece is worth taking
+# the day this front end has something that needs it. The click and the keys
+# came over when the grid grew a selection, because a selection is invisible
+# until something points at it: a photograph of the window as it opens says
+# nothing about the feature it was taken to look at. The drag came over when the
+# columns grew handles, for the same reason and more so: a column width is a
+# number that only a gesture can change.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -49,6 +52,7 @@ start=""
 wait_for=2
 click=""
 keys=""
+drag=""
 destination=""
 
 while [ $# -gt 0 ]; do
@@ -70,6 +74,13 @@ while [ $# -gt 0 ]; do
         ;;
     --keys)
         keys="$2"
+        shift 2
+        ;;
+    # from-x,from-y,to-x,to-y. One drag per run: the thing a drag changes is
+    # usually the thing being photographed, and a second one in the same run
+    # would be a picture of the second answer only.
+    --drag)
+        drag="$2"
         shift 2
         ;;
     -*)
@@ -139,6 +150,7 @@ $Start = if ($arguments.Count -ge 1) { $arguments[0] } else { "" }
 $Wait = if ($arguments.Count -ge 2 -and $arguments[1]) { [double]$arguments[1] } else { 2 }
 $Click = if ($arguments.Count -ge 3) { $arguments[2] } else { "" }
 $Keys = if ($arguments.Count -ge 4) { $arguments[3] } else { "" }
+$Drag = if ($arguments.Count -ge 5) { $arguments[4] } else { "" }
 
 Add-Type -Namespace VmShot -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
@@ -183,6 +195,45 @@ if ($Click) {
     }
 }
 
+if ($Drag) {
+    # In steps rather than one jump. A window that reads a drag as a series of
+    # moves — which is every window that resizes something while the button is
+    # down — never sees a press followed by one move to the far end as a drag at
+    # all, and the picture would show the feature failing when it was the test
+    # that was wrong.
+    $at = $Drag.Split(",")
+    $fromX = [int]$at[0]
+    $fromY = [int]$at[1]
+    $toX = [int]$at[2]
+    $toY = [int]$at[3]
+    $screen = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    [VmShot.Pointer]::SetCursorPos($fromX, $fromY) | Out-Null
+    Start-Sleep -Milliseconds 120
+    [VmShot.Pointer]::mouse_event(0x0002, 0, 0, 0, 0)
+    Start-Sleep -Milliseconds 200
+
+    foreach ($step in 1..20) {
+        # An injected move rather than SetCursorPos. SetCursorPos puts the
+        # cursor where it is asked and nothing more, so a window that never
+        # receives WM_MOUSEMOVE hears the press and loses every move after it.
+        # mouse_event goes through the input queue, which is what Windows
+        # synthesizes those messages from. Coordinates are the virtual desktop
+        # in 0..65535.
+        $stepX = $fromX + [int](($toX - $fromX) * $step / 20)
+        $stepY = $fromY + [int](($toY - $fromY) * $step / 20)
+        [VmShot.Pointer]::mouse_event(
+            0xC001,
+            [uint32](($stepX - $screen.Left) * 65535 / ($screen.Width - 1)),
+            [uint32](($stepY - $screen.Top) * 65535 / ($screen.Height - 1)),
+            0, 0)
+        Start-Sleep -Milliseconds 40
+    }
+
+    Start-Sleep -Milliseconds 200
+    [VmShot.Pointer]::mouse_event(0x0004, 0, 0, 0, 0)
+    Start-Sleep -Milliseconds 200
+}
+
 # After the pointer, because a key reaches whatever has focus and the click is
 # what gives the window focus. Sent first it would go to whichever window the
 # guest happened to be showing.
@@ -215,7 +266,7 @@ ssh "$VM" "MSYS_NO_PATHCONV=1 schtasks /create /tn $TASK \
     /tr 'powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"$windows_script\"' \
     /sc once /st 00:00 /it /f" >/dev/null
 
-ssh "$VM" "printf '%s\n%s\n%s\n%s\n' '$start' '$wait_for' '$click' '$keys' \
+ssh "$VM" "printf '%s\n%s\n%s\n%s\n%s\n' '$start' '$wait_for' '$click' '$keys' '$drag' \
     > '$home/dbeaver-vm-shot.args'"
 ssh "$VM" "rm -f '$remote_image'; MSYS_NO_PATHCONV=1 schtasks /run /tn $TASK" >/dev/null
 
