@@ -109,6 +109,12 @@ constexpr float kScrollbarGutter = 12.0f;
 constexpr float kScrollbarThumb = 5.0f;
 constexpr float kMinThumbLength = 28.0f;
 
+// Rows a wheel notch moves. `AppController.swift`'s multiplier, and it is the
+// distance sideways too: one row would be an accurate wheel and a useless one,
+// since a result is read in pages and a notch that moved a single line would
+// need forty of them to cross a screen.
+constexpr float kWheelRows = 3.0f;
+
 // `Theme.swift`'s values, under the names it gives them, resolved once per
 // appearance. Two tables rather than two ways of drawing: over there every one
 // of these is the same token read against `isLight`, and the whole of dark mode
@@ -641,51 +647,109 @@ struct Selection {
     int last_row() const { return anchored && anchor > row ? anchor : row; }
 };
 
-// How far down the result the view has been taken, counted in rows.
+// How far the view has been taken through the result, and how big the view is.
 //
-// Fractional, like `GridRenderer.swift`'s `scrollRow`. A wheel notch is a
+// `scroll_row` is fractional, like `GridRenderer.swift`'s. A wheel notch is a
 // distance rather than a row, and rounding one to whole rows turns a smooth
 // gesture into a series of jumps — on a trackpad, where the notches are small
-// and continuous, into a series of jumps that mostly do nothing.
+// and continuous, into a series of jumps that mostly do nothing. `scroll_x` is
+// in DIPs, because sideways there is no other unit: columns are not all one
+// width, so there is no "column" to count in.
 //
+// One struct rather than a growing parameter list, because the two axes stopped
+// being independent the moment the second one existed. The horizontal bar is
+// drawn over the last row, so having it takes a gutter off the rows that can be
+// scrolled to; the vertical bar takes a gutter off the horizontal one's track.
+// Every function here has to be able to ask about both axes to answer about
+// one, and six floats threaded through six of them is how the two answers start
+// disagreeing.
+struct View {
+    float width = 0.0f;
+    float height = 0.0f;
+    // The sum of the column widths: what the horizontal bar reports against and
+    // what a sideways scroll is held to.
+    float content_width = 0.0f;
+    size_t rows = 0;
+    float scroll_row = 0.0f;
+    float scroll_x = 0.0f;
+};
+
+float content_width_of(const std::vector<Column>& columns) {
+    return columns.empty() ? 0.0f : columns.back().x + columns.back().width;
+}
+
+// Which bars are there. Both at once and in this order, because the dependency
+// runs one way: whether the result is wider than the view is a fact about the
+// columns, while whether it is taller depends on the gutter the horizontal bar
+// takes. Asking the second question first is how a grid ends up with a bar it
+// decided it needed because of a bar it then decided it did not.
+struct Bars {
+    bool vertical = false;
+    bool horizontal = false;
+};
+
+// Rows that fit below the header and above the horizontal bar.
+//
+// The gutter comes off because the bar is drawn over the data rather than
+// beside it: without this, scrolling to the end parks the last row underneath
+// the bar, where it can be seen and not read. At least one, so a view shorter
+// than its own header still has somewhere to put the cursor.
+float visible_row_span(const View& view) {
+    const float horizontal = view.content_width > view.width ? kScrollbarGutter : 0.0f;
+    const float span = (view.height - kHeaderHeight - horizontal) / kRowHeight;
+    return span < 1.0f ? 1.0f : span;
+}
+
+Bars bars_of(const View& view) {
+    Bars bars;
+    bars.horizontal = view.content_width > view.width;
+    bars.vertical = static_cast<float>(view.rows) > visible_row_span(view);
+    return bars;
+}
+
 // Rows that the grid draws at a given scroll position. One more than fits,
 // because the first row on screen is usually only partly on it and so is the
 // last: drawing exactly as many as fit leaves a gap along the bottom edge at
 // every scroll position that is not a whole number of rows.
+//
+// Not `visible_row_span`, and the difference is deliberate: this one counts the
+// rows under the horizontal bar too. The bar is four percent of a tint drawn
+// over the data, so the row beneath it still has to be there.
 struct RowSpan {
     size_t first = 0;
     size_t last = 0;
 };
 
-RowSpan visible_rows(float scroll_row, float view_height, size_t rows) {
+RowSpan visible_rows(const View& view) {
     RowSpan span;
-    if (scroll_row > 0.0f) {
-        span.first = static_cast<size_t>(scroll_row);
+    if (view.scroll_row > 0.0f) {
+        span.first = static_cast<size_t>(view.scroll_row);
     }
-    const float usable = view_height - kHeaderHeight;
+    const float usable = view.height - kHeaderHeight;
     if (usable > 0.0f) {
         span.last = span.first + static_cast<size_t>(std::ceil(usable / kRowHeight)) + 1;
     }
-    return span.last > rows ? RowSpan{span.first, rows} : span;
+    return span.last > view.rows ? RowSpan{span.first, view.rows} : span;
 }
 
 // Whole rows the view can show at once, which is not the same quantity as the
-// fractional span below and is not interchangeable with it. This one answers
+// fractional span above and is not interchangeable with it. This one answers
 // "is that row on screen", so a row half under the bottom edge does not count.
-// At least one, so that a view shorter than its own header still has somewhere
-// to put the cursor.
-float whole_visible_rows(float view_height) {
-    const float span = std::floor((view_height - kHeaderHeight) / kRowHeight);
+float whole_visible_rows(const View& view) {
+    const float span = std::floor(visible_row_span(view));
     return span < 1.0f ? 1.0f : span;
 }
 
 // The largest scroll that still fills the view. Past it the grid would show
-// blank space under the last row, and a scrollbar built on it would reach the
-// end of its track before the result ran out.
-float max_scroll_row(float view_height, size_t rows) {
-    const float usable = view_height - kHeaderHeight;
-    const float span = usable > kRowHeight ? usable / kRowHeight : 1.0f;
-    const float most = static_cast<float>(rows) - span;
+// blank space after the last row or column, and a scrollbar built on it would
+// reach the end of its track before the result ran out.
+float max_scroll_row(const View& view) {
+    const float most = static_cast<float>(view.rows) - visible_row_span(view);
+    return most > 0.0f ? most : 0.0f;
+}
+
+float max_scroll_x(const View& view) {
+    const float most = view.content_width - view.width;
     return most > 0.0f ? most : 0.0f;
 }
 
@@ -693,29 +757,46 @@ float max_scroll_row(float view_height, size_t rows) {
 // the top row, below it the last whole one. `GridRenderer.swift` again — a grid
 // that centred the row instead would move the whole page for a one-row step,
 // and the user would lose their place on every arrow key.
-float scroll_to_visible(float scroll_row, int row, float view_height, size_t rows) {
+float scroll_to_visible(const View& view, int row) {
     const float target = static_cast<float>(row);
-    const float span = whole_visible_rows(view_height);
-    float next = scroll_row;
-    if (target < scroll_row) {
+    const float span = whole_visible_rows(view);
+    float next = view.scroll_row;
+    if (target < view.scroll_row) {
         next = target;
-    } else if (target >= scroll_row + span - 1.0f) {
+    } else if (target >= view.scroll_row + span - 1.0f) {
         next = target - span + 2.0f;
     }
-    const float most = max_scroll_row(view_height, rows);
+    const float most = max_scroll_row(view);
     if (next > most) {
         next = most;
     }
     return next < 0.0f ? 0.0f : next;
 }
 
-// Where the vertical scrollbar's track and thumb sit, in DIPs down the view.
-//
-// Only the vertical one. The horizontal bar in `GridRenderer.swift` shortens
-// this one's track and is subtracted from the row span, and neither applies
-// until this grid can scroll sideways — which it cannot, because every column
-// it draws still fits. Written for one axis rather than for two with one of
-// them permanently absent.
+// The same, sideways. In DIPs rather than in columns, and by the column's two
+// edges rather than by its index: a column wider than the view can only be
+// brought partly in, and this brings its leading edge, which is where the value
+// starts and — in a numeric column — is the end that gets cut off.
+float scroll_x_to_visible(const View& view, const std::vector<Column>& columns, int column) {
+    if (column < 0 || static_cast<size_t>(column) >= columns.size()) {
+        return view.scroll_x;
+    }
+    const float left = columns[static_cast<size_t>(column)].x;
+    const float width = columns[static_cast<size_t>(column)].width;
+    float next = view.scroll_x;
+    if (left < view.scroll_x) {
+        next = left;
+    } else if (left + width > view.scroll_x + view.width) {
+        next = left + width - view.width;
+    }
+    const float most = max_scroll_x(view);
+    if (next > most) {
+        next = most;
+    }
+    return next < 0.0f ? 0.0f : next;
+}
+
+// Where a scrollbar's track and thumb sit, along its own axis, in DIPs.
 struct Scrollbar {
     float track_start = 0.0f;
     float track_length = 0.0f;
@@ -723,20 +804,43 @@ struct Scrollbar {
     float thumb_length = 0.0f;
 };
 
-// Absent when the whole result already fits, which is the difference between a
-// grid with nothing below the fold and a grid whose bar is pinned full-length
-// and means nothing.
-bool scrollbar_of(float scroll_row, float view_height, size_t rows, Scrollbar* out) {
-    const float span = (view_height - kHeaderHeight) / kRowHeight;
-    if (span <= 0.0f || static_cast<float>(rows) <= span) {
+// Absent when the result already fits on that axis, which is the difference
+// between a grid with nothing past the edge and a grid whose bar is pinned
+// full-length and means nothing.
+bool scrollbar_of(bool horizontal, const View& view, Scrollbar* out) {
+    const Bars bars = bars_of(view);
+    float showing = 0.0f;
+    float total = 0.0f;
+    float progress = 0.0f;
+    if (horizontal) {
+        if (!bars.horizontal) {
+            return false;
+        }
+        out->track_start = 0.0f;
+        out->track_length = view.width - (bars.vertical ? kScrollbarGutter : 0.0f);
+        showing = view.width;
+        total = view.content_width;
+        const float most = max_scroll_x(view);
+        progress = most > 0.0f ? view.scroll_x / most : 0.0f;
+    } else {
+        if (!bars.vertical) {
+            return false;
+        }
+        out->track_start = kHeaderHeight;
+        out->track_length =
+            view.height - kHeaderHeight - (bars.horizontal ? kScrollbarGutter : 0.0f);
+        showing = visible_row_span(view);
+        total = static_cast<float>(view.rows);
+        const float most = max_scroll_row(view);
+        progress = most > 0.0f ? view.scroll_row / most : 0.0f;
+    }
+    if (out->track_length <= 0.0f) {
         return false;
     }
-    out->track_start = kHeaderHeight;
-    out->track_length = view_height - kHeaderHeight;
     // How much of the result is on screen, floored so it stays grabbable, and
     // capped at the track so a short result cannot ask for a thumb longer than
     // the space it runs in.
-    const float proportional = out->track_length * span / static_cast<float>(rows);
+    const float proportional = out->track_length * showing / total;
     out->thumb_length = proportional < kMinThumbLength ? kMinThumbLength : proportional;
     if (out->thumb_length > out->track_length) {
         out->thumb_length = out->track_length;
@@ -744,8 +848,6 @@ bool scrollbar_of(float scroll_row, float view_height, size_t rows, Scrollbar* o
     // Along the travel the thumb has, not along the track: at the end of the
     // scroll the thumb's trailing edge is on the track's, and a fraction taken
     // of the track instead would leave it a thumb's length short.
-    const float most = max_scroll_row(view_height, rows);
-    float progress = most > 0.0f ? scroll_row / most : 0.0f;
     progress = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
     out->thumb_start = out->track_start + (out->track_length - out->thumb_length) * progress;
     return true;
@@ -753,9 +855,9 @@ bool scrollbar_of(float scroll_row, float view_height, size_t rows, Scrollbar* o
 
 // The scroll that puts the thumb's leading edge at `thumb_start`. The inverse of
 // the line above, and the whole of what a drag does.
-float scroll_to_thumb(float thumb_start, float view_height, size_t rows) {
+float scroll_to_thumb(bool horizontal, float thumb_start, const View& view) {
     Scrollbar bar;
-    if (!scrollbar_of(0.0f, view_height, rows, &bar)) {
+    if (!scrollbar_of(horizontal, view, &bar)) {
         return 0.0f;
     }
     const float travel = bar.track_length - bar.thumb_length;
@@ -764,7 +866,23 @@ float scroll_to_thumb(float thumb_start, float view_height, size_t rows) {
     }
     float progress = (thumb_start - bar.track_start) / travel;
     progress = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
-    return progress * max_scroll_row(view_height, rows);
+    return progress * (horizontal ? max_scroll_x(view) : max_scroll_row(view));
+}
+
+// The gutter a point is in, if any. Both bars are drawn over the data, so this
+// has to be asked before anything else that a press could mean.
+bool scrollbar_axis_at(float x, float y, const View& view, bool* horizontal) {
+    Scrollbar bar;
+    if (scrollbar_of(false, view, &bar) && x >= view.width - kScrollbarGutter
+        && y >= kHeaderHeight) {
+        *horizontal = false;
+        return true;
+    }
+    if (scrollbar_of(true, view, &bar) && y >= view.height - kScrollbarGutter) {
+        *horizontal = true;
+        return true;
+    }
+    return false;
 }
 
 // Which appearance the user is in, asked of Windows rather than chosen here.
@@ -797,23 +915,25 @@ bool windows_is_light() {
 // past the last column and the space below the last row are all places a click
 // lands often, and none of them is a cell. Snapping to the closest one would
 // move the selection somewhere the user did not point at.
-bool cell_at(float x, float y, float scroll_row, const std::vector<Column>& columns, size_t rows,
+bool cell_at(float x, float y, const View& view, const std::vector<Column>& columns,
              Selection* out) {
     if (x < 0.0f || y < kHeaderHeight) {
         return false;
     }
-    // Through the same scroll the drawing used, so the answer is the row the
-    // user is looking at rather than the row that would be there unscrolled.
-    const float at = scroll_row + (y - kHeaderHeight) / kRowHeight;
+    // Through the same scroll the drawing used, on both axes, so the answer is
+    // the cell the user is looking at rather than the one that would be there
+    // unscrolled.
+    const float at = view.scroll_row + (y - kHeaderHeight) / kRowHeight;
     if (at < 0.0f) {
         return false;
     }
     const auto row = static_cast<size_t>(at);
-    if (row >= rows) {
+    if (row >= view.rows) {
         return false;
     }
+    const float column_x = x + view.scroll_x;
     for (size_t c = 0; c < columns.size(); ++c) {
-        if (x >= columns[c].x && x < columns[c].x + columns[c].width) {
+        if (column_x >= columns[c].x && column_x < columns[c].x + columns[c].width) {
             out->row = static_cast<int>(row);
             out->column = static_cast<int>(c);
             out->anchored = false;
@@ -828,12 +948,14 @@ bool cell_at(float x, float y, float scroll_row, const std::vector<Column>& colu
 // on a cell that happens to be above the first row: it sorts rather than
 // selects, and answering both from one function would mean one of the two
 // callers throwing away an answer it must not act on.
-bool header_column_at(float x, float y, const std::vector<Column>& columns, int* out) {
+bool header_column_at(float x, float y, float scroll_x, const std::vector<Column>& columns,
+                      int* out) {
     if (x < 0.0f || y < 0.0f || y >= kHeaderHeight) {
         return false;
     }
+    const float at = x + scroll_x;
     for (size_t c = 0; c < columns.size(); ++c) {
-        if (x >= columns[c].x && x < columns[c].x + columns[c].width) {
+        if (at >= columns[c].x && at < columns[c].x + columns[c].width) {
             *out = static_cast<int>(c);
             return true;
         }
@@ -854,12 +976,14 @@ bool header_column_at(float x, float y, const std::vector<Column>& columns, int*
 // The last column has one too. Its edge leads to nothing, but it is the edge of
 // that column, and a grid where the last column alone cannot be narrowed reads
 // as a bug in the column rather than as a rule about the edge.
-bool column_edge_at(float x, float y, const std::vector<Column>& columns, int* out) {
+bool column_edge_at(float x, float y, float scroll_x, const std::vector<Column>& columns,
+                    int* out) {
     if (y < 0.0f || y >= kHeaderHeight) {
         return false;
     }
+    const float at = x + scroll_x;
     for (size_t c = 0; c < columns.size(); ++c) {
-        if (std::fabs(columns[c].x + columns[c].width - x) <= kEdgeTolerance) {
+        if (std::fabs(columns[c].x + columns[c].width - at) <= kEdgeTolerance) {
             *out = static_cast<int>(c);
             return true;
         }
@@ -1193,14 +1317,20 @@ bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
 // and the bitmap can never see it.
 void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
                const std::vector<Column>& columns, const Palette& palette,
-               const Selection* selection, const Sort* sort, float scroll_row,
-               bool dragging_thumb) {
-    const D2D1_SIZE_F view = target->GetSize();
+               const Selection* selection, const Sort* sort, float scroll_row, float scroll_x,
+               Bars dragging) {
+    const D2D1_SIZE_F size = target->GetSize();
     size_t rows = 0;
     for (const Column& column : columns) {
         rows = column.cells.size() > rows ? column.cells.size() : rows;
     }
-    const RowSpan span = visible_rows(scroll_row, view.height, rows);
+    // Measured here rather than passed in. The view is the target's size and
+    // the columns' total width, both of which this function already has, and a
+    // caller that worked them out separately would be a second opinion about
+    // how big the grid is.
+    const View view{size.width, size.height, content_width_of(columns),
+                    rows,       scroll_row,  scroll_x};
+    const RowSpan span = visible_rows(view);
 
     // Every row's position comes from here, and it takes the row's own number
     // rather than its place on screen. Those are the same only at rest, and the
@@ -1210,6 +1340,10 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     const auto row_y = [scroll_row](size_t r) {
         return kHeaderHeight + (static_cast<float>(r) - scroll_row) * kRowHeight;
     };
+    // And every column's from here, for the same reason on the other axis. The
+    // banding and the selected row are not in it: they run the width of the
+    // view rather than the width of the content, so they do not move.
+    const auto column_x = [scroll_x](const Column& column) { return column.x - scroll_x; };
 
     target->Clear(D2D1::ColorF(palette.canvas));
 
@@ -1243,17 +1377,17 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
         if (selection->column >= 0 && static_cast<size_t>(selection->column) < columns.size()
             && selection->row >= 0 && static_cast<size_t>(selection->row) < rows) {
             const Column& column = columns[selection->column];
+            const float x = column_x(column);
             const float y = row_y(static_cast<size_t>(selection->row));
             // Apart from the band because within a multi-row selection this is
             // the one cell the keyboard and the inspector act on, and it has to
             // stay distinguishable from the rows around it.
-            target->FillRectangle(
-                D2D1::RectF(column.x, y, column.x + column.width, y + kRowHeight),
-                palette.selected_cell.Get());
+            target->FillRectangle(D2D1::RectF(x, y, x + column.width, y + kRowHeight),
+                                  palette.selected_cell.Get());
             // A one-DIP edge on the leading side, at full strength. The fill
             // washes out over a dark value; this does not, so the cell stays
             // findable when it does.
-            target->FillRectangle(D2D1::RectF(column.x, y, column.x + 1.0f, y + kRowHeight),
+            target->FillRectangle(D2D1::RectF(x, y, x + 1.0f, y + kRowHeight),
                                   palette.cursor.Get());
         }
     }
@@ -1263,14 +1397,14 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     // after it, because a line at the right of the last column would read as an
     // empty column beginning there.
     for (size_t c = 0; c + 1 < columns.size(); ++c) {
-        const float x = columns[c].x + columns[c].width;
-        target->FillRectangle(D2D1::RectF(x, kHeaderHeight, x + 1.0f, view.height),
+        const float x = column_x(columns[c]) + columns[c].width;
+        target->FillRectangle(D2D1::RectF(x, kHeaderHeight, x + 1.0f, size.height),
                               palette.separator.Get());
     }
 
-    target->FillRectangle(D2D1::RectF(0.0f, 0.0f, view.width, kHeaderHeight),
+    target->FillRectangle(D2D1::RectF(0.0f, 0.0f, size.width, kHeaderHeight),
                           palette.header.Get());
-    target->FillRectangle(D2D1::RectF(0.0f, kHeaderHeight - 1.0f, view.width, kHeaderHeight),
+    target->FillRectangle(D2D1::RectF(0.0f, kHeaderHeight - 1.0f, size.width, kHeaderHeight),
                           palette.separator.Get());
 
     // The text box is the cell inset by its padding on both sides, not the whole
@@ -1282,6 +1416,7 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     // name, and names read from the left even above a column of numbers.
     for (size_t c = 0; c < columns.size(); ++c) {
         const Column& column = columns[c];
+        const float x = column_x(column);
         const bool ordered = sort != nullptr && sort->column == static_cast<int>(c);
         if (ordered) {
             // On the trailing edge of the heading's line, at full accent
@@ -1290,7 +1425,7 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
             // than naming something.
             draw_text(target, dwrite, font,
                       sort->descending ? kSortDescending : kSortAscending,
-                      column.x + column.width - kCellPadding - font.advance, kHeaderNameY,
+                      x + column.width - kCellPadding - font.advance, kHeaderNameY,
                       font.advance, palette.cursor.Get(), false);
         }
         // The marker's character is taken out of the name's box rather than
@@ -1298,7 +1433,7 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
         // otherwise have the triangle sitting on its last letter, and the
         // column that is most likely to be sorted is the one whose name fills
         // its width.
-        draw_text(target, dwrite, font, column.heading, column.x + kCellPadding, kHeaderNameY,
+        draw_text(target, dwrite, font, column.heading, x + kCellPadding, kHeaderNameY,
                   column.width - kCellPadding * 2.0f - (ordered ? font.advance : 0.0f),
                   ordered ? palette.sorted_header_ink.Get() : palette.header_ink.Get(), false);
     }
@@ -1314,10 +1449,10 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     // rect and the same guard on the same rows, so the partial row's glyphs go
     // into the buffer after the band's quad. That looks like the artifact this
     // clip prevents rather than a decision, and it is worth a look on that side.
-    target->PushAxisAlignedClip(D2D1::RectF(0.0f, kHeaderHeight, view.width, view.height),
+    target->PushAxisAlignedClip(D2D1::RectF(0.0f, kHeaderHeight, size.width, size.height),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
     for (const Column& column : columns) {
-        const float x = column.x + kCellPadding;
+        const float x = column_x(column) + kCellPadding;
         const float width = column.width - kCellPadding * 2.0f;
         for (size_t r = span.first; r < span.last && r < column.cells.size(); ++r) {
             const float y = row_y(r) + kCellTextY;
@@ -1337,19 +1472,29 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     // in the result to say something about the four hundred of them that are not
     // on screen. Over the top, at four percent, it costs the trailing edge of the
     // widest column a tint and nothing else.
+    const float inset = (kScrollbarGutter - kScrollbarThumb) / 2.0f;
     Scrollbar bar;
-    if (scrollbar_of(scroll_row, view.height, rows, &bar)) {
-        const float x = view.width - kScrollbarGutter;
+    if (scrollbar_of(false, view, &bar)) {
+        const float x = size.width - kScrollbarGutter;
         target->FillRectangle(
-            D2D1::RectF(x, bar.track_start, view.width, bar.track_start + bar.track_length),
+            D2D1::RectF(x, bar.track_start, size.width, bar.track_start + bar.track_length),
             palette.scroll_track.Get());
         // Centred in the gutter it is grabbed by, which is what makes the target
         // wider than the paint without making the paint look misplaced.
-        const float inset = (kScrollbarGutter - kScrollbarThumb) / 2.0f;
         target->FillRectangle(
             D2D1::RectF(x + inset, bar.thumb_start, x + inset + kScrollbarThumb,
                         bar.thumb_start + bar.thumb_length),
-            dragging_thumb ? palette.scroll_thumb_active.Get() : palette.scroll_thumb.Get());
+            dragging.vertical ? palette.scroll_thumb_active.Get() : palette.scroll_thumb.Get());
+    }
+    if (scrollbar_of(true, view, &bar)) {
+        const float y = size.height - kScrollbarGutter;
+        target->FillRectangle(
+            D2D1::RectF(bar.track_start, y, bar.track_start + bar.track_length, size.height),
+            palette.scroll_track.Get());
+        target->FillRectangle(
+            D2D1::RectF(bar.thumb_start, y + inset, bar.thumb_start + bar.thumb_length,
+                        y + inset + kScrollbarThumb),
+            dragging.horizontal ? palette.scroll_thumb_active.Get() : palette.scroll_thumb.Get());
     }
 }
 
@@ -1418,13 +1563,27 @@ bool the_grid_draws_a_result() {
 
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              0.0f, false);
+              0.0f, 0.0f, Bars{});
     HRESULT hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw", hr);
     }
 
     const float right = columns.back().x + columns.back().width;
+
+    // The bitmap as the geometry sees it: the size it was made at, the columns
+    // laid out into it, and a scroll of nothing. Every question below about what
+    // is on screen is asked of one of these rather than of loose numbers,
+    // because the answers on the two axes depend on each other.
+    const View view{static_cast<float>(kWidth), static_cast<float>(kHeight),
+                    content_width_of(columns), rows,
+                    0.0f,                      0.0f};
+    const auto scrolled = [&view](float scroll_row, float scroll_x) {
+        View moved = view;
+        moved.scroll_row = scroll_row;
+        moved.scroll_x = scroll_x;
+        return moved;
+    };
 
     // ------------------------------------------------------------------
     // The chrome, asked of the pixels rather than of the code that drew it
@@ -1488,7 +1647,7 @@ bool the_grid_draws_a_result() {
     // left out too: the span deliberately reaches one row past the bottom edge,
     // and a row with only its first few pixels on the bitmap is a question
     // about the clamp in `ink_in` rather than about the grid.
-    const RowSpan visible = visible_rows(0.0f, static_cast<float>(kHeight), rows);
+    const RowSpan visible = visible_rows(view);
     bool every_row = true;
     for (size_t r = visible.first; r + 1 < visible.last; ++r) {
         const float top = kHeaderHeight + static_cast<float>(r) * kRowHeight;
@@ -1601,15 +1760,15 @@ bool the_grid_draws_a_result() {
     // ------------------------------------------------------------------
 
     Selection under;
-    check(cell_at(columns[2].x + 4.0f, kHeaderHeight + kRowHeight + 4.0f, 0.0f, columns, rows, &under)
+    check(cell_at(columns[2].x + 4.0f, kHeaderHeight + kRowHeight + 4.0f, view, columns, &under)
               && under.row == 1 && under.column == 2,
           "a point inside a cell finds that cell");
-    check(!cell_at(columns[2].x + 4.0f, 4.0f, 0.0f, columns, rows, &under),
+    check(!cell_at(columns[2].x + 4.0f, 4.0f, view, columns, &under),
           "a point on the header finds none");
-    check(!cell_at(right + 4.0f, kHeaderHeight + 4.0f, 0.0f, columns, rows, &under),
+    check(!cell_at(right + 4.0f, kHeaderHeight + 4.0f, view, columns, &under),
           "a point past the last column finds none");
-    check(!cell_at(4.0f, kHeaderHeight + static_cast<float>(rows) * kRowHeight + 4.0f, 0.0f,
-                   columns, rows, &under),
+    check(!cell_at(4.0f, kHeaderHeight + static_cast<float>(rows) * kRowHeight + 4.0f, view,
+                   columns, &under),
           "a point below the last row finds none");
 
     // The same pixel, from the drawing that had no selection in it. Row 1 is an
@@ -1627,7 +1786,7 @@ bool the_grid_draws_a_result() {
     selection.column = 2;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection,
-              nullptr, 0.0f, false);
+              nullptr, 0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw with a selection", hr);
@@ -1693,39 +1852,36 @@ bool the_grid_draws_a_result() {
     // Scrolling: which rows are on screen, and which row each one is
     // ------------------------------------------------------------------
 
-    const auto view_height = static_cast<float>(kHeight);
-    check(visible_rows(0.0f, view_height, rows).first == 0
-              && visible_rows(7.0f, view_height, rows).first == 7,
+    check(visible_rows(view).first == 0 && visible_rows(scrolled(7.0f, 0.0f)).first == 7,
           "the top row is the one the scroll is counted in");
     // One past the bottom edge, not one short of it. 640 minus the header is
     // 608, which is 30.4 rows: a grid that drew 30 would leave the last two
     // fifths of a row empty at every position that is not a whole number.
-    check(visible_rows(0.0f, view_height, rows).last == 32,
+    check(visible_rows(view).last == 32,
           "and the span reaches past the bottom edge rather than short of it");
-    check(visible_rows(38.0f, view_height, rows).last == rows,
+    check(visible_rows(scrolled(38.0f, 0.0f)).last == rows,
           "the span stops at the last row rather than past it");
 
     // 40 rows less the 30.4 that fit. Scrolling further would put blank canvas
     // under the last row, which is the thing that makes a grid feel like it has
     // lost the result.
-    const float most = max_scroll_row(view_height, rows);
+    const float most = max_scroll_row(view);
     check(most > 9.5f && most < 9.7f, "the scroll stops where the last row reaches the bottom");
 
     // The keyboard's half of scrolling, and the reason it is a separate
     // quantity: a row is visible only if all of it is, so the fold is at 30
     // whole rows rather than at 30.4.
-    check(scroll_to_visible(0.0f, 5, view_height, rows) == 0.0f,
-          "a row already on screen does not move the view");
-    check(scroll_to_visible(0.0f, 39, view_height, rows) == most,
-          "the last row brings the view to the end");
-    check(scroll_to_visible(20.0f, 3, view_height, rows) == 3.0f,
+    check(scroll_to_visible(view, 5) == 0.0f, "a row already on screen does not move the view");
+    check(scroll_to_visible(view, 39) == most, "the last row brings the view to the end");
+    check(scroll_to_visible(scrolled(20.0f, 0.0f), 3) == 3.0f,
           "a row above the fold becomes the top row");
 
     // And the hit test counts in the same rows the drawing does. A grid that
     // scrolled its pixels and not its arithmetic answers every click with the
     // row that used to be there, and the selection lands somewhere the user can
     // see they did not point at.
-    check(cell_at(4.0f, kHeaderHeight + 4.0f, 7.0f, columns, rows, &under) && under.row == 7,
+    check(cell_at(4.0f, kHeaderHeight + 4.0f, scrolled(7.0f, 0.0f), columns, &under)
+              && under.row == 7,
           "a click is measured from the scrolled position");
 
     // Drawn twice more, because the rest of this is about pixels. Row 1 is odd
@@ -1738,7 +1894,7 @@ bool the_grid_draws_a_result() {
     for (int step = 1; step <= 2; ++step) {
         surface.target->BeginDraw();
         draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr,
-                  nullptr, static_cast<float>(step), false);
+                  nullptr, static_cast<float>(step), 0.0f, Bars{});
         hr = surface.target->EndDraw();
         if (FAILED(hr)) {
             return failed("ID2D1RenderTarget::EndDraw scrolled", hr);
@@ -1758,7 +1914,7 @@ bool the_grid_draws_a_result() {
     // reach the column names.
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              0.5f, false);
+              0.5f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw part-scrolled", hr);
@@ -1777,29 +1933,33 @@ bool the_grid_draws_a_result() {
     // ------------------------------------------------------------------
 
     Scrollbar bar;
-    check(scrollbar_of(0.0f, view_height, rows, &bar), "a result taller than the view gets a bar");
+    check(scrollbar_of(false, view, &bar), "a result taller than the view gets a bar");
     // Four rows in a view that holds thirty. Nothing is below the fold, and a
     // bar pinned to its full length would be a control that cannot be used
     // saying there is somewhere to go.
+    View brief = view;
+    brief.rows = 4;
     Scrollbar unneeded;
-    check(!scrollbar_of(0.0f, view_height, 4, &unneeded), "and a result that fits gets none");
+    check(!scrollbar_of(false, brief, &unneeded), "and a result that fits gets none");
 
     // 608 of track for 30.4 rows out of 40, which is 462. The thumb is how much
     // of the result is on screen, and reading it is how anyone knows whether
     // they are looking at most of a table or at the first screen of a million.
-    check(bar.track_start == kHeaderHeight && bar.track_length == view_height - kHeaderHeight,
+    check(bar.track_start == kHeaderHeight && bar.track_length == view.height - kHeaderHeight,
           "the track runs from under the header to the foot of the view");
     check(bar.thumb_length > 461.0f && bar.thumb_length < 463.0f,
           "the thumb is as long a part of the track as the view is of the result");
     // A million rows would ask for a thumb a thousandth of the track, which is
     // half a DIP: too small to see and far too small to hit.
+    View million = view;
+    million.rows = 1000000;
     Scrollbar huge;
-    check(scrollbar_of(0.0f, view_height, 1000000, &huge) && huge.thumb_length == kMinThumbLength,
+    check(scrollbar_of(false, million, &huge) && huge.thumb_length == kMinThumbLength,
           "and never shorter than something that can be grabbed");
 
     check(bar.thumb_start == bar.track_start, "at rest the thumb is at the top of the track");
     Scrollbar ended;
-    check(scrollbar_of(most, view_height, rows, &ended)
+    check(scrollbar_of(false, scrolled(most, 0.0f), &ended)
               && ended.thumb_start + ended.thumb_length == ended.track_start + ended.track_length,
           "at the end of the scroll its trailing edge is on the track's");
 
@@ -1808,12 +1968,12 @@ bool the_grid_draws_a_result() {
     // it was. They are separate expressions, and it is the round trip that says
     // the second one is the first one backwards.
     Scrollbar midway;
-    check(scrollbar_of(4.0f, view_height, rows, &midway)
-              && scroll_to_thumb(midway.thumb_start, view_height, rows) > 3.99f
-              && scroll_to_thumb(midway.thumb_start, view_height, rows) < 4.01f,
+    check(scrollbar_of(false, scrolled(4.0f, 0.0f), &midway)
+              && scroll_to_thumb(false, midway.thumb_start, view) > 3.99f
+              && scroll_to_thumb(false, midway.thumb_start, view) < 4.01f,
           "dragging the thumb back to where it was leaves the scroll there");
-    check(scroll_to_thumb(-100.0f, view_height, rows) == 0.0f
-              && scroll_to_thumb(10000.0f, view_height, rows) == most,
+    check(scroll_to_thumb(false, -100.0f, view) == 0.0f
+              && scroll_to_thumb(false, 10000.0f, view) == most,
           "and a drag past either end of the track stops at the end of the result");
 
     // Drawn at both ends, and read where the thumb is not: the track is four
@@ -1824,14 +1984,14 @@ bool the_grid_draws_a_result() {
     BYTE track_top[3] = {};
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              0.0f, false);
+              0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.pixel_at(gutter_x, kHeaderHeight + 10.0f, thumb_top)) {
         return failed("reading the thumb at rest", FAILED(hr) ? hr : E_FAIL);
     }
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              most, false);
+              most, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.pixel_at(gutter_x, kHeaderHeight + 10.0f, track_top)) {
         return failed("reading the track at the end of the scroll", FAILED(hr) ? hr : E_FAIL);
@@ -1844,12 +2004,204 @@ bool the_grid_draws_a_result() {
     BYTE held[3] = {};
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              0.0f, true);
+              0.0f, 0.0f, Bars{true, false});
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.pixel_at(gutter_x, kHeaderHeight + 10.0f, held)) {
         return failed("reading a thumb being dragged", FAILED(hr) ? hr : E_FAIL);
     }
     check(held[2] < thumb_top[2], "and darkens while it is being dragged");
+
+    // ------------------------------------------------------------------
+    // Sideways: the second axis, and the room the first one has to give it
+    // ------------------------------------------------------------------
+
+    // 552 DIPs of columns in a 640-DIP view, so nothing here is off the side
+    // until the view is narrowed to less than the result — which is a window
+    // dragged in, and the state the grid was in until this brick.
+    View narrow = view;
+    narrow.width = 400.0f;
+    check(!bars_of(view).horizontal, "a result that fits across the view gets no bar");
+    check(bars_of(narrow).horizontal, "and one that does not gets one");
+
+    // The two bars are not independent, and that is the whole reason the
+    // geometry takes one view rather than a pair of numbers per axis. The
+    // horizontal bar is drawn over the last row, so having it costs the vertical
+    // scroll a gutter's worth of rows...
+    check(visible_row_span(narrow) < visible_row_span(view),
+          "the bar along the foot takes a row's worth of room off the vertical scroll");
+    Scrollbar shortened;
+    check(scrollbar_of(false, narrow, &shortened)
+              && shortened.track_length == bar.track_length - kScrollbarGutter,
+          "and the vertical track stops above it rather than running into it");
+    // ...and the vertical bar costs the horizontal one the same, at the corner
+    // where the two would otherwise be drawn on top of each other.
+    Scrollbar across;
+    check(scrollbar_of(true, narrow, &across) && across.track_start == 0.0f
+              && across.track_length == narrow.width - kScrollbarGutter,
+          "while the horizontal track stops short of the vertical bar for the same reason");
+
+    check(max_scroll_x(view) == 0.0f, "a result that fits cannot be scrolled sideways");
+    check(max_scroll_x(narrow) == content_width_of(columns) - narrow.width,
+          "and one that does not stops when its last column reaches the trailing edge");
+
+    // The keyboard's half of it. The last column is 340 wide in a 400 view, so
+    // it comes in by its trailing edge with room to spare; a column wider than
+    // the view would not fit either way, and the leading edge is the one kept,
+    // because that is where the value starts.
+    check(scroll_x_to_visible(narrow, columns, 0) == 0.0f,
+          "a column already on screen does not move the view sideways");
+    check(scroll_x_to_visible(narrow, columns, 3)
+              == columns[3].x + columns[3].width - narrow.width,
+          "a column past the trailing edge is brought in by that edge");
+    // Asked again of a middle column in a view too narrow to hold it, because
+    // the last column's answer is also what the clamp would give: brought in by
+    // its leading edge instead, that one lands on the same number and this one
+    // lands 78 DIPs further along, with the column back off the edge it was
+    // supposed to be brought inside.
+    View slim = narrow;
+    slim.width = 150.0f;
+    check(scroll_x_to_visible(slim, columns, 2) == columns[2].x + columns[2].width - slim.width,
+          "by that edge rather than by its leading one, where the two differ");
+    View scrolled_out = narrow;
+    scrolled_out.scroll_x = 200.0f;
+    check(scroll_x_to_visible(scrolled_out, columns, 0) == 0.0f,
+          "and one off the leading edge by its own");
+
+    // And the hit test counts across in the same DIPs the drawing does. Twenty
+    // in is the first column at rest and the second once the grid has moved
+    // forty, which is the sideways version of clicking the row that used to be
+    // where the pointer is.
+    check(cell_at(20.0f, kHeaderHeight + 4.0f, view, columns, &under) && under.column == 0
+              && cell_at(20.0f, kHeaderHeight + 4.0f, scrolled(0.0f, 40.0f), columns, &under)
+              && under.column == 1,
+          "a click across the grid is measured from the sideways scroll");
+
+    // The same round trip the vertical thumb gets, on the axis where the track
+    // is a different length and the travel is measured in DIPs rather than rows.
+    View sideways = narrow;
+    sideways.scroll_x = 100.0f;
+    Scrollbar grabbed;
+    check(scrollbar_of(true, sideways, &grabbed)
+              && scroll_to_thumb(true, grabbed.thumb_start, narrow) > 99.9f
+              && scroll_to_thumb(true, grabbed.thumb_start, narrow) < 100.1f,
+          "dragging the horizontal thumb back to where it was leaves the scroll there");
+
+    // Which bar a press belongs to. In the corner the gutters share, the
+    // vertical one: the horizontal track stops short of that corner, so a press
+    // there that scrolled sideways would be a press on track that is not drawn.
+    bool sideways_press = true;
+    check(scrollbar_axis_at(narrow.width - 2.0f, narrow.height - 2.0f, narrow, &sideways_press)
+              && !sideways_press,
+          "the corner where the two gutters meet belongs to the vertical bar");
+    check(scrollbar_axis_at(10.0f, narrow.height - 2.0f, narrow, &sideways_press)
+              && sideways_press,
+          "the rest of the gutter along the foot is the horizontal bar's");
+    check(!scrollbar_axis_at(10.0f, kHeaderHeight + 10.0f, narrow, &sideways_press),
+          "and a press on the data itself belongs to neither");
+
+    // And the drawing moves. Forty DIPs is most of a column here: the second
+    // heading leaves the place it was drawn at and arrives forty to the left of
+    // it, which is the difference between a grid that scrolls and one that
+    // scrolls its arithmetic and not its pixels.
+    const float heading_x = columns[1].x + kCellPadding;
+    // Where the first boundary arrives, which is empty canvas before the scroll:
+    // the column to its left is numeric, so its digits are forty DIPs further
+    // over. Read as the same pixel in two states rather than as two pixels in
+    // one, because every other x down here has a value drawn across it.
+    const float rule_x = columns[0].width - 40.0f;
+    // And where the banding is read: against the trailing edge of the view
+    // rather than past the last column. A band offset with the content would
+    // still cover a point in the middle of the view, and what it would leave
+    // bare is exactly this strip — the part of the row the result no longer
+    // reaches, which is where the eye notices the stripes have come loose.
+    const float band_x = static_cast<float>(kWidth) - kScrollbarGutter - 8.0f;
+    const float band_y = kHeaderHeight + kRowHeight + 10.0f;
+    UINT before_scroll = 0;
+    UINT after_scroll = 0;
+    UINT arrived_left = 0;
+    BYTE rule_before[3] = {};
+    BYTE rule_after[3] = {};
+    BYTE band_before[3] = {};
+    BYTE band_after[3] = {};
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.ink_in(heading_x, 0.0f, heading_x + font.advance, kHeaderHeight, &before_scroll)
+        || !surface.pixel_at(rule_x, kHeaderHeight + 10.0f, rule_before)
+        || !surface.pixel_at(band_x, band_y, band_before)) {
+        return failed("reading a heading before a sideways scroll", FAILED(hr) ? hr : E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, 40.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.ink_in(heading_x, 0.0f, heading_x + font.advance, kHeaderHeight, &after_scroll)
+        || !surface.ink_in(heading_x - 40.0f, 0.0f, heading_x - 40.0f + font.advance, kHeaderHeight,
+                           &arrived_left)
+        || !surface.pixel_at(rule_x, kHeaderHeight + 10.0f, rule_after)
+        || !surface.pixel_at(band_x, band_y, band_after)) {
+        return failed("reading a heading after a sideways scroll", FAILED(hr) ? hr : E_FAIL);
+    }
+    check(before_scroll > 0 && after_scroll == 0, "a sideways scroll takes the headings with it");
+    check(arrived_left > 0, "and puts them the distance to the left that was scrolled");
+    // The separators are a second line of code and go the same way. One left
+    // behind would draw the boundaries through the middle of the values.
+    check(rule_after[2] < rule_before[2], "and the separators with them");
+
+    // The banding does not move, and it is the one thing here that must not: it
+    // runs the width of the view rather than the width of the result, so a grid
+    // that offset the fills too would slide the stripes off the trailing edge
+    // and leave a bare strip where the view ran out of result. Paired with the
+    // reading being banded at all, or two pixels of canvas would agree.
+    check(band_before[2] < 0xFF && band_after[2] == band_before[2],
+          "while the banding stays with the view");
+
+    // The bar itself, which needs a result wider than the bitmap: the first
+    // column dragged to the maximum puts 836 DIPs of columns in a 640 view.
+    std::vector<Column> spread = columns;
+    set_column_width(&spread, 0, kMaxColumnWidth);
+    const float foot_y = static_cast<float>(kHeight) - kScrollbarGutter / 2.0f;
+    const float most_x = content_width_of(spread) - static_cast<float>(kWidth);
+    BYTE no_bar[3] = {};
+    BYTE foot_thumb[3] = {};
+    BYTE foot_track[3] = {};
+    BYTE foot_held[3] = {};
+    if (!surface.pixel_at(10.0f, foot_y, no_bar)) {
+        return failed("reading the foot of a grid that fits", E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, spread, palette, nullptr, nullptr,
+              0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(10.0f, foot_y, foot_thumb)) {
+        return failed("reading the bar along the foot", FAILED(hr) ? hr : E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, spread, palette, nullptr, nullptr,
+              0.0f, most_x, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(10.0f, foot_y, foot_track)) {
+        return failed("reading the foot at the end of a sideways scroll", FAILED(hr) ? hr : E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, spread, palette, nullptr, nullptr,
+              0.0f, 0.0f, Bars{false, true});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(10.0f, foot_y, foot_held)) {
+        return failed("reading the foot thumb being dragged", FAILED(hr) ? hr : E_FAIL);
+    }
+    check(foot_thumb[2] < no_bar[2], "a result wider than the view draws a bar along its foot");
+    // Both halves at one pixel: the thumb left it, and the track did not. A bar
+    // whose track was only as long as its thumb would pass the first of those
+    // and leave the gutter empty wherever the scroll is not.
+    check(foot_track[2] > foot_thumb[2] && foot_track[2] < no_bar[2],
+          "with the thumb where the sideways scroll says and the track running past it");
+    // Which also says the two bars read their own halves of the pair. Both
+    // reading `dragging.vertical` is a swap the vertical checks cannot see.
+    check(foot_held[2] < foot_thumb[2], "and it darkens while it is being dragged");
 
     // ------------------------------------------------------------------
     // The sort: what a heading click asks the server for, and what marks it
@@ -1886,12 +2238,17 @@ bool the_grid_draws_a_result() {
           "a quote inside a name is doubled rather than ending the identifier");
 
     int heading = -1;
-    check(header_column_at(columns[2].x + 4.0f, 4.0f, columns, &heading) && heading == 2,
+    check(header_column_at(columns[2].x + 4.0f, 4.0f, 0.0f, columns, &heading) && heading == 2,
           "a point on a heading finds that column");
-    check(!header_column_at(columns[2].x + 4.0f, kHeaderHeight + 4.0f, columns, &heading),
+    check(!header_column_at(columns[2].x + 4.0f, kHeaderHeight + 4.0f, 0.0f, columns, &heading),
           "a point below the band finds none");
-    check(!header_column_at(right + 4.0f, 4.0f, columns, &heading),
+    check(!header_column_at(right + 4.0f, 4.0f, 0.0f, columns, &heading),
           "a point past the last heading finds none");
+    // Twenty in is the first heading at rest and the second once the grid has
+    // been scrolled forty. Without this a click sorts by whichever column was
+    // under the pointer before the user scrolled it away.
+    check(header_column_at(20.0f, 4.0f, 40.0f, columns, &heading) && heading == 1,
+          "and a heading is found where it is drawn rather than where it was laid out");
 
     // The server sorts. Descending by `name` is a text order, so it answers
     // `driver-9` rather than `driver-39` — which is the whole point of asking
@@ -1926,7 +2283,7 @@ bool the_grid_draws_a_result() {
     BYTE plain_heading = 0xFF;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              0.0f, false);
+              0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)
         || !surface.bluest_in(marker_x, 0.0f, marker_x + font.advance, kHeaderHeight, &plain_tint)
@@ -1939,7 +2296,7 @@ bool the_grid_draws_a_result() {
     BYTE sorted_heading = 0xFF;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr,
-              &descending, 0.0f, false);
+              &descending, 0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)
         || !surface.bluest_in(marker_x, 0.0f, marker_x + font.advance, kHeaderHeight, &marker_tint)
@@ -1985,7 +2342,7 @@ bool the_grid_draws_a_result() {
     BYTE marker_alone = 0;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr,
-              &clamped_sort, 0.0f, false);
+              &clamped_sort, 0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.darkest_in(clamped_marker, 0.0f, clamped_marker + font.advance,
                                           kHeaderHeight, &marker_alone)) {
@@ -2000,21 +2357,28 @@ bool the_grid_draws_a_result() {
 
     int handle = -1;
     const float boundary = columns[0].x + columns[0].width;
-    check(column_edge_at(boundary, 4.0f, columns, &handle) && handle == 0,
+    check(column_edge_at(boundary, 4.0f, 0.0f, columns, &handle) && handle == 0,
           "a point on a boundary finds the column to its left");
-    check(column_edge_at(boundary - kEdgeTolerance + 0.5f, 4.0f, columns, &handle) && handle == 0
-              && column_edge_at(boundary + kEdgeTolerance - 0.5f, 4.0f, columns, &handle)
+    check(column_edge_at(boundary - kEdgeTolerance + 0.5f, 4.0f, 0.0f, columns, &handle)
+              && handle == 0
+              && column_edge_at(boundary + kEdgeTolerance - 0.5f, 4.0f, 0.0f, columns, &handle)
               && handle == 0,
           "and the handle reaches both sides of it");
-    check(!column_edge_at(columns[0].x + columns[0].width / 2.0f, 4.0f, columns, &handle),
+    check(!column_edge_at(columns[0].x + columns[0].width / 2.0f, 4.0f, 0.0f, columns, &handle),
           "the middle of a heading is not a handle");
     // Otherwise the top row of the result would be eight DIPs of resize handle
     // rather than eight DIPs of row, at four places across every column.
-    check(!column_edge_at(boundary, kHeaderHeight + 4.0f, columns, &handle),
+    check(!column_edge_at(boundary, kHeaderHeight + 4.0f, 0.0f, columns, &handle),
           "and a boundary below the band is not one either");
-    check(column_edge_at(right, 4.0f, columns, &handle)
+    check(column_edge_at(right, 4.0f, 0.0f, columns, &handle)
               && handle == static_cast<int>(columns.size()) - 1,
           "the last column has a handle of its own");
+    // And the handles move with the grid. This x is the middle of the first
+    // heading at rest and the boundary after it once the view has scrolled
+    // forty, so a handle that ignored the scroll would be four DIPs of resize
+    // in the middle of a name.
+    check(column_edge_at(boundary - 40.0f, 4.0f, 40.0f, columns, &handle) && handle == 0,
+          "and a handle is where the boundary is drawn rather than where it was laid out");
 
     std::vector<Column> resized = columns;
     const float dragged = columns[0].width + 40.0f;
@@ -2063,7 +2427,7 @@ bool the_grid_draws_a_result() {
     UINT arrived = 0;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
-              0.0f, false);
+              0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)
         || !surface.ink_in(probe, 0.0f, probe + font.advance, kHeaderHeight, &at_rest)) {
@@ -2071,7 +2435,7 @@ bool the_grid_draws_a_result() {
     }
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, wider, palette, nullptr, nullptr,
-              0.0f, false);
+              0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)
         || !surface.ink_in(probe, 0.0f, probe + font.advance, kHeaderHeight, &left_behind)
@@ -2115,7 +2479,7 @@ bool the_grid_draws_a_result() {
     surface.canvas = kDarkTones.canvas;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, dark, &selection, nullptr,
-              0.0f, false);
+              0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw in dark", hr);
@@ -2180,7 +2544,7 @@ bool the_grid_draws_a_result() {
     surface.canvas = kLightTones.canvas;
     surface.target->BeginDraw();
     draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection,
-              nullptr, 0.0f, false);
+              nullptr, 0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw back in light", hr);
@@ -2316,9 +2680,10 @@ struct Window {
     Sort sort;
     bool sorted = false;
     float scroll_row = 0.0f;
+    float scroll_x = 0.0f;
     // Where on the thumb the drag took hold, so the thumb stays under the
     // pointer instead of jumping its own leading edge there on the first move.
-    bool dragging = false;
+    Bars dragging;
     float grab_offset = 0.0f;
     // A header drag, from where it started rather than as a delta per move. The
     // width follows the total distance from the press: accumulating each move
@@ -2393,36 +2758,61 @@ struct Window {
         // one that was on screen, so an offset kept across the change points at
         // an arbitrary window of unrelated data.
         scroll_row = 0.0f;
+        // Sideways it stays, because the columns are the same columns in the
+        // same order and the place across the result still means what it meant.
+        // Only held to their total, in case the fallback above measured afresh.
+        hold_scroll_x();
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 
-    // The view in DIPs, which is what every scroll calculation is in.
-    float height() const { return target ? target->GetSize().height : 0.0f; }
-    float width() const { return target ? target->GetSize().width : 0.0f; }
+    // Everything the geometry needs, assembled the one way. In DIPs, which is
+    // what every scroll calculation is in.
+    View view() const {
+        const D2D1_SIZE_F size = target ? target->GetSize() : D2D1::SizeF(0.0f, 0.0f);
+        return View{size.width,  size.height, content_width_of(columns),
+                    rows(),      scroll_row,  scroll_x};
+    }
 
     // Moves the scroll so the thumb sits where the pointer has taken it. The
     // grab offset is what keeps the point of the thumb that was grabbed under
     // the pointer for the whole drag rather than only at the moment of the
     // press.
-    void drag_to(float y) {
-        scroll_row = scroll_to_thumb(y - grab_offset, height(), rows());
+    void drag_to(float along) {
+        const bool horizontal = dragging.horizontal;
+        const float to = scroll_to_thumb(horizontal, along - grab_offset, view());
+        if (horizontal) {
+            scroll_x = to;
+        } else {
+            scroll_row = to;
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    // The sideways scroll, held to the width the columns now add up to. Called
+    // by everything that changes those widths: the scroll was clamped against a
+    // total that no longer exists, and a grid left scrolled past its own content
+    // shows a strip of canvas where the last column used to be.
+    void hold_scroll_x() {
+        const float most = max_scroll_x(view());
+        if (scroll_x > most) {
+            scroll_x = most;
+        }
     }
 
     void resize_to(float x) {
         set_column_width(&columns, resize_column, resize_width + (x - resize_from));
+        hold_scroll_x();
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 
-    void scroll_by(float rows_by) {
-        const float most = max_scroll_row(height(), rows());
+    void scroll_by(float rows_by, float dips_by) {
+        const View at = view();
         scroll_row += rows_by;
-        if (scroll_row > most) {
-            scroll_row = most;
-        }
-        if (scroll_row < 0.0f) {
-            scroll_row = 0.0f;
-        }
+        const float most_row = max_scroll_row(at);
+        scroll_row = scroll_row > most_row ? most_row : (scroll_row < 0.0f ? 0.0f : scroll_row);
+        scroll_x += dips_by;
+        const float most_x = max_scroll_x(at);
+        scroll_x = scroll_x > most_x ? most_x : (scroll_x < 0.0f ? 0.0f : scroll_x);
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 
@@ -2465,10 +2855,13 @@ struct Window {
         const int column = selection.column + columns_by;
         selection.row = row < 0 ? 0 : (row > last_row ? last_row : row);
         selection.column = column < 0 ? 0 : (column > last_column ? last_column : column);
-        // The cursor takes the view with it. A grid that let the cursor leave
-        // the screen would answer every further arrow key by moving something
-        // the user cannot see, and the only way back would be to guess how far.
-        scroll_row = scroll_to_visible(scroll_row, selection.row, height(), rows());
+        // The cursor takes the view with it, on whichever axis it moved. A grid
+        // that let the cursor leave the screen would answer every further arrow
+        // key by moving something the user cannot see, and the only way back
+        // would be to guess how far.
+        const View at = view();
+        scroll_row = scroll_to_visible(at, selection.row);
+        scroll_x = scroll_x_to_visible(at, columns, selection.column);
         InvalidateRect(hwnd, nullptr, FALSE);
     }
 
@@ -2516,7 +2909,8 @@ struct Window {
         }
         target->BeginDraw();
         draw_grid(target.Get(), dwrite.Get(), font, columns, palette,
-                  selected ? &selection : nullptr, sorted ? &sort : nullptr, scroll_row, dragging);
+                  selected ? &selection : nullptr, sorted ? &sort : nullptr, scroll_row, scroll_x,
+                  dragging);
         const HRESULT hr = target->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
             target.Reset();
@@ -2580,21 +2974,26 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         const float x = static_cast<float>(GET_X_LPARAM(lparam)) * scale;
         const float y = static_cast<float>(GET_Y_LPARAM(lparam)) * scale;
 
-        // Before the cell, and returning: a press in the gutter is for the bar,
-        // and must not also land on whatever row is underneath it.
+        // Before the cell, and returning: a press in a gutter is for that bar,
+        // and must not also land on whatever row is underneath it. Both bars
+        // are asked at once, because in the corner where the two gutters meet
+        // only one of them can have the press.
+        const View at = window->view();
+        bool horizontal = false;
         Scrollbar bar;
-        if (x >= window->width() - kScrollbarGutter && y >= kHeaderHeight
-            && scrollbar_of(window->scroll_row, window->height(), window->rows(), &bar)) {
-            const bool on_thumb = y >= bar.thumb_start && y <= bar.thumb_start + bar.thumb_length;
+        if (scrollbar_axis_at(x, y, at, &horizontal) && scrollbar_of(horizontal, at, &bar)) {
+            const float along = horizontal ? x : y;
+            const bool on_thumb =
+                along >= bar.thumb_start && along <= bar.thumb_start + bar.thumb_length;
             // A press on the track goes where it points rather than paging
             // towards it. On four hundred thousand rows, paging there is an
             // afternoon's work with the mouse button held down.
-            window->grab_offset = on_thumb ? y - bar.thumb_start : bar.thumb_length / 2.0f;
-            window->dragging = true;
+            window->grab_offset = on_thumb ? along - bar.thumb_start : bar.thumb_length / 2.0f;
+            window->dragging = horizontal ? Bars{false, true} : Bars{true, false};
             // Captured, so a drag that wanders off the side of the window keeps
             // scrolling instead of stopping at the edge and letting go silently.
             SetCapture(hwnd);
-            window->drag_to(y);
+            window->drag_to(along);
             return 0;
         }
 
@@ -2604,7 +3003,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         // DIPs of a heading that is seventy-seven wide — a press on it is much
         // more likely to be aimed at the line than at the name.
         int edge = 0;
-        if (column_edge_at(x, y, window->columns, &edge)) {
+        if (column_edge_at(x, y, window->scroll_x, window->columns, &edge)) {
             window->resizing = true;
             window->resize_column = static_cast<size_t>(edge);
             window->resize_from = x;
@@ -2618,13 +3017,13 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         // fold, so the order here is about which answer is looked for, not
         // about which one wins.
         int heading = 0;
-        if (header_column_at(x, y, window->columns, &heading)) {
+        if (header_column_at(x, y, window->scroll_x, window->columns, &heading)) {
             window->sort_by(heading);
             return 0;
         }
 
         Selection hit;
-        if (cell_at(x, y, window->scroll_row, window->columns, window->rows(), &hit)) {
+        if (cell_at(x, y, at, window->columns, &hit)) {
             window->selection = hit;
             window->selected = true;
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -2640,8 +3039,10 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     // trackpad — which sends many small deltas rather than a few whole notches —
     // scrolls smoothly instead of standing still until the deltas add up to one.
     case WM_MOUSEMOVE:
-        if (window->dragging) {
+        if (window->dragging.vertical) {
             window->drag_to(static_cast<float>(GET_Y_LPARAM(lparam)) * window->dips());
+        } else if (window->dragging.horizontal) {
+            window->drag_to(static_cast<float>(GET_X_LPARAM(lparam)) * window->dips());
         } else if (window->resizing) {
             window->resize_to(static_cast<float>(GET_X_LPARAM(lparam)) * window->dips());
         }
@@ -2659,8 +3060,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             int over = 0;
             if (GetCursorPos(&at) && ScreenToClient(hwnd, &at)
                 && column_edge_at(static_cast<float>(at.x) * window->dips(),
-                                  static_cast<float>(at.y) * window->dips(), window->columns,
-                                  &over)) {
+                                  static_cast<float>(at.y) * window->dips(), window->scroll_x,
+                                  window->columns, &over)) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
                 return TRUE;
             }
@@ -2672,8 +3073,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     // the thumb dark and the grid following a pointer nobody is pressing.
     case WM_LBUTTONUP:
     case WM_CAPTURECHANGED:
-        if (window->dragging || window->resizing) {
-            window->dragging = false;
+        if (window->dragging.vertical || window->dragging.horizontal || window->resizing) {
+            window->dragging = Bars{};
             window->resizing = false;
             if (message == WM_LBUTTONUP) {
                 ReleaseCapture();
@@ -2682,9 +3083,29 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
 
-    case WM_MOUSEWHEEL:
-        window->scroll_by(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam))
-                          / static_cast<float>(WHEEL_DELTA) * 3.0f);
+    case WM_MOUSEWHEEL: {
+        const float notches = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam))
+                              / static_cast<float>(WHEEL_DELTA);
+        // Shift turns the wheel sideways, which is what a Windows control with
+        // a horizontal bar does and the only way across for a mouse with one
+        // wheel. `AppController.swift` has no equivalent because a trackpad
+        // hands it both axes; here the tilt wheel that would is `WM_MOUSEHWHEEL`
+        // below, and most mice do not have one.
+        if ((GetKeyState(VK_SHIFT) & 0x8000) != 0) {
+            window->scroll_by(0.0f, -notches * kWheelRows * kRowHeight);
+        } else {
+            window->scroll_by(-notches * kWheelRows, 0.0f);
+        }
+        return 0;
+    }
+
+    // A notch sideways covers the same distance a notch down does, so the two
+    // axes feel like one gesture. There is no natural unit here the way there
+    // is vertically — sideways a notch is not a column, because columns are not
+    // all one width.
+    case WM_MOUSEHWHEEL:
+        window->scroll_by(0.0f, static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam))
+                                    / static_cast<float>(WHEEL_DELTA) * kWheelRows * kRowHeight);
         return 0;
 
     // Claimed, so the arrows arrive here rather than being taken for dialog
