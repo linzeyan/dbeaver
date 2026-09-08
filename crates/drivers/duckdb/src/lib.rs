@@ -36,6 +36,7 @@
 mod arrow_map;
 mod driver;
 mod metadata;
+mod type_name;
 
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
@@ -1035,7 +1036,10 @@ fn read(
             .map_err(|e| statement_failed(e, sql))?,
     );
 
-    let layout = Layout::of(&stmt.schema())?;
+    // Read off the statement before the schema, because both are answers about
+    // the same execution and only the statement can be asked for the second one.
+    let declared = type_name::declared_types(&stmt);
+    let layout = Layout::of(&stmt.schema(), &declared)?;
     let schema = layout.schema();
     let sent = schema_tx
         .take()

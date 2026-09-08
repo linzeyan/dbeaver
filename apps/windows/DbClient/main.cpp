@@ -45,6 +45,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cwchar>
 #include <string>
 #include <vector>
@@ -83,14 +84,19 @@ constexpr float kFontSize = 12.0f;
 // than the other one — a disagreement about what a row looks like, arrived at
 // for no better reason than that it was the easier thing to work out.
 //
-// The header's second line, the declared type at 15, is not here. It needs the
-// type the server declared, which travels beside the result rather than in the
-// Arrow schema, and the Arrow kind is only its fallback. Anything invented to
-// fill the gap would be this grid stating a type a column may not have, which
-// `GridRenderer.swift` calls the one outcome worse than saying nothing. The band
-// is 32 tall because that line is coming.
+// Two lines in the header, which is what the band is 32 tall for: the column's
+// name, and under it the type its values were declared with. A type appended to
+// the name would compete for width in a column already sized to its own content,
+// and the loser would be the name — the thing the grid is navigated by.
 constexpr float kHeaderNameY = 2.0f;
+constexpr float kHeaderTypeY = 15.0f;
 constexpr float kCellTextY = 3.0f;
+
+// How much of a say the type gets in how wide its column is. It has to be
+// recognisable, not complete: a declared type is routinely longer than every
+// value under it, and letting it size the column would push real data off the
+// screen to spell out a label.
+constexpr size_t kMaxTypeChars = 13;
 
 // The scrollbar's gutter is the target, not the paint. Twelve DIPs to hit and
 // five to see: a thumb drawn at the width it can be grabbed at would be a bar
@@ -557,6 +563,10 @@ struct Column {
     // identifier the server has to match exactly.
     std::string name;
     std::wstring heading;
+    // What the server called this column's type, drawn under its name. Empty
+    // where the driver had no answer to give, which is a state with its own
+    // meaning rather than a blank to fill in.
+    std::wstring type_name;
     std::vector<std::wstring> cells;
     std::vector<bool> nulls;
     // A property of the type, not of any value in it. A column of numbers is
@@ -1010,6 +1020,57 @@ bool valid_at(const ArrowArray& array, int64_t i) {
     return (bitmap[at / 8] & (1u << (at % 8))) != 0;
 }
 
+// The key `dbconn::DECLARED_TYPE` writes the server's own type name under.
+//
+// Spelled out here as well as there because the C data interface carries no
+// shared header: the string is the contract, and a rename on the Rust side that
+// only its symbol followed would compile, pass, and quietly stop reaching this
+// grid. `ArrowTable.swift` holds the same pair of strings for the same reason.
+constexpr const char* kDeclaredType = "dbclient.declared_type";
+
+// One key's value out of a field's metadata, or empty where it is not there.
+//
+// The C data interface counts its lengths rather than terminating them, so the
+// buffer may hold NUL bytes and reading it as a C string would stop at the first
+// one: an int32 pair count, then per pair an int32 key length, the key, an int32
+// value length, the value. None of it is promised to be aligned, hence the
+// copies rather than casts.
+//
+// A count or a length below zero answers empty rather than trapping — this is
+// memory another language handed over, and a grid that crashed on it would be a
+// worse failure than a column with no type under its name. A buffer that lies
+// about a length in the other direction cannot be caught here: the format
+// carries no total size to check one against.
+std::string metadata_value(const char* metadata, const char* key) {
+    if (metadata == nullptr) {
+        return std::string();
+    }
+    const char* cursor = metadata;
+    int32_t pairs = 0;
+    std::memcpy(&pairs, cursor, sizeof(pairs));
+    cursor += sizeof(pairs);
+    const std::string wanted(key);
+    for (int32_t p = 0; p < pairs; ++p) {
+        std::string taken[2];
+        for (std::string& into : taken) {
+            int32_t length = 0;
+            std::memcpy(&length, cursor, sizeof(length));
+            if (length < 0) {
+                return std::string();
+            }
+            cursor += sizeof(length);
+            into.assign(cursor, static_cast<size_t>(length));
+            cursor += length;
+        }
+        // The first match wins. A second entry under one key is not something
+        // the writer can produce.
+        if (taken[0] == wanted) {
+            return taken[1];
+        }
+    }
+    return std::string();
+}
+
 // Int64 and utf8 only, which is what the query below produces.
 //
 // A real grid needs every type the drivers can return, and the macOS side has
@@ -1078,6 +1139,7 @@ bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column
         Column column;
         column.name = field.name;
         column.heading = widen(field.name);
+        column.type_name = widen(metadata_value(field.metadata, kDeclaredType));
         column.numeric = format == "l";
         for (int64_t r = 0; r < batch.length; ++r) {
             const bool present = valid_at(values, r);
@@ -1139,6 +1201,12 @@ void place_columns(std::vector<Column>* columns) {
 void lay_out(std::vector<Column>* columns, float advance) {
     for (Column& column : *columns) {
         size_t chars = column.heading.size();
+        // The type gets a say, bounded at `kMaxTypeChars`. Enough that a narrow
+        // column of small numbers does not cut `TIMESTAMP` down to `TIME`, which
+        // is a different type and would read as one.
+        const size_t type = column.type_name.size();
+        const size_t said = type > kMaxTypeChars ? kMaxTypeChars : type;
+        chars = said > chars ? said : chars;
         for (const std::wstring& cell : column.cells) {
             chars = cell.size() > chars ? cell.size() : chars;
         }
@@ -1436,6 +1504,13 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
         draw_text(target, dwrite, font, column.heading, x + kCellPadding, kHeaderNameY,
                   column.width - kCellPadding * 2.0f - (ordered ? font.advance : 0.0f),
                   ordered ? palette.sorted_header_ink.Get() : palette.header_ink.Get(), false);
+        // The type underneath, and across the full width unlike the name: the
+        // sort marker is on the name's line, so there is nothing on this one to
+        // keep clear of. In `Grid.nullText`'s tone, which is `Text.dataMuted` —
+        // the same rung as the word NULL, because both are content somebody
+        // reads rather than chrome, and neither is the value.
+        draw_text(target, dwrite, font, column.type_name, x + kCellPadding, kHeaderTypeY,
+                  column.width - kCellPadding * 2.0f, palette.muted.Get(), false);
     }
 
     // The values are clipped to below the band; the headings above are not.
@@ -1551,7 +1626,6 @@ bool the_grid_draws_a_result() {
         }
     }
     check(rising, "each column starts to the right of the one before it");
-    check(columns[0].width >= kMinColumnWidth, "a narrow column is held to the minimum");
 
     check(columns[0].numeric, "the id column is read as a number");
     check(!columns[1].numeric, "the name column is not");
@@ -1818,8 +1892,9 @@ bool the_grid_draws_a_result() {
     // Half a DIP in, which is the middle of the one-DIP line rather than its
     // left edge. A column is a whole number of characters wide and a character
     // is 6.59765625 DIPs, so a column boundary almost never lands on a pixel
-    // boundary: this one is at 133.977, and the pixel `columns[2].x` names holds
-    // two percent of the line and ninety-eight percent of the column before it.
+    // boundary: this one is at 136.16, and the pixel `columns[2].x` names holds
+    // sixteen percent of the line and eighty-four percent of the column before
+    // it.
     // The middle of the line is the only point that is inside it whatever the
     // fraction turns out to be.
     BYTE edge[3] = {};
@@ -2103,6 +2178,10 @@ bool the_grid_draws_a_result() {
     // heading leaves the place it was drawn at and arrives forty to the left of
     // it, which is the difference between a grid that scrolls and one that
     // scrolls its arithmetic and not its pixels.
+    //
+    // Read on the name's line only. The type underneath runs the full width of
+    // the column rather than stopping where the marker would, so a strip taken
+    // over the whole band would find `VARCHAR` where the name is not.
     const float heading_x = columns[1].x + kCellPadding;
     // Where the first boundary arrives, which is empty canvas before the scroll:
     // the column to its left is numeric, so its digits are forty DIPs further
@@ -2128,7 +2207,8 @@ bool the_grid_draws_a_result() {
               0.0f, 0.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)
-        || !surface.ink_in(heading_x, 0.0f, heading_x + font.advance, kHeaderHeight, &before_scroll)
+        || !surface.ink_in(heading_x, 0.0f, heading_x + font.advance, kHeaderTypeY,
+                           &before_scroll)
         || !surface.pixel_at(rule_x, kHeaderHeight + 10.0f, rule_before)
         || !surface.pixel_at(band_x, band_y, band_before)) {
         return failed("reading a heading before a sideways scroll", FAILED(hr) ? hr : E_FAIL);
@@ -2138,8 +2218,8 @@ bool the_grid_draws_a_result() {
               0.0f, 40.0f, Bars{});
     hr = surface.target->EndDraw();
     if (FAILED(hr)
-        || !surface.ink_in(heading_x, 0.0f, heading_x + font.advance, kHeaderHeight, &after_scroll)
-        || !surface.ink_in(heading_x - 40.0f, 0.0f, heading_x - 40.0f + font.advance, kHeaderHeight,
+        || !surface.ink_in(heading_x, 0.0f, heading_x + font.advance, kHeaderTypeY, &after_scroll)
+        || !surface.ink_in(heading_x - 40.0f, 0.0f, heading_x - 40.0f + font.advance, kHeaderTypeY,
                            &arrived_left)
         || !surface.pixel_at(rule_x, kHeaderHeight + 10.0f, rule_after)
         || !surface.pixel_at(band_x, band_y, band_after)) {
@@ -2445,6 +2525,98 @@ bool the_grid_draws_a_result() {
     }
     check(at_rest > 0 && left_behind == 0, "a widened column takes its neighbour's name off");
     check(arrived > 0, "and puts it where the new width says it goes");
+
+    // ------------------------------------------------------------------
+    // The type line: what the server called the column, under its name
+    // ------------------------------------------------------------------
+
+    // DuckDB's spelling, not Arrow's. The first column arrives as `l` and the
+    // second as `u`, and a grid that read the type off the format string would
+    // say `int64` and `utf8` — true about the buffers, silent about the columns,
+    // and unable to tell this `VARCHAR` from a `JSON` or an `ENUM`, which arrive
+    // as the same `u`.
+    check(columns[0].type_name == L"BIGINT" && columns[1].type_name == L"VARCHAR",
+          "every column carries the type the server declared it with");
+
+    // The same columns with nothing declared, which is the state a driver that
+    // cannot answer leaves them in — and the control for everything below.
+    std::vector<Column> untyped = columns;
+    for (Column& column : untyped) {
+        column.type_name.clear();
+    }
+    lay_out(&untyped, font.advance);
+
+    // Two DIPs of heading and six characters of `BIGINT`: without a say in the
+    // width this column is the minimum, and the type under it would be cut to
+    // `BIGI…`. A type shortened past recognition is worse than the space it
+    // saves — `TIMESTAMP` cut to `TIME` is a different type, not a shorter word.
+    check(untyped[0].width == kMinColumnWidth, "a narrow column is held to the minimum");
+    check(columns[0].width > untyped[0].width,
+          "and one too narrow for its own type name is widened to hold it");
+    // But only so far. A type is routinely longer than every value beneath it,
+    // and a column sized to spell one out is a column of data pushed off screen.
+    std::vector<Column> shouted = untyped;
+    std::vector<Column> bounded = untyped;
+    shouted[0].type_name = std::wstring(kMaxTypeChars * 2, L'X');
+    bounded[0].type_name = std::wstring(kMaxTypeChars, L'X');
+    lay_out(&shouted, font.advance);
+    lay_out(&bounded, font.advance);
+    check(bounded[0].width > columns[0].width && shouted[0].width == bounded[0].width,
+          "and a longer one stops widening it at thirteen characters");
+
+    // Drawn on its own line rather than instead of the name. Read over one
+    // column, and over the second: `name` and `note` have no descender between
+    // them, where the last heading is full of them and would put ink below the
+    // fold that came from the line above.
+    //
+    // The control keeps the widths it was measured with and loses only the
+    // types, so the two drawings differ in the one thing being asked about. Laid
+    // out afresh the columns would sit two DIPs to the left, the glyphs would
+    // land on different fractions of a pixel, and the name's ink would differ
+    // between them for a reason that has nothing to do with the type line.
+    std::vector<Column> undeclared = columns;
+    for (Column& column : undeclared) {
+        column.type_name.clear();
+    }
+    const Column& typed = columns[1];
+    UINT name_ink = 0;
+    UINT type_ink = 0;
+    UINT untyped_name_ink = 0;
+    UINT untyped_type_ink = 0;
+    BYTE name_darkest = 0xFF;
+    BYTE type_darkest = 0xFF;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.ink_in(typed.x, 0.0f, typed.x + typed.width, kHeaderTypeY, &name_ink)
+        || !surface.ink_in(typed.x, kHeaderTypeY, typed.x + typed.width, kHeaderHeight - 1.0f,
+                           &type_ink)
+        || !surface.darkest_in(typed.x, 0.0f, typed.x + typed.width, kHeaderTypeY, &name_darkest)
+        || !surface.darkest_in(typed.x, kHeaderTypeY, typed.x + typed.width, kHeaderHeight - 1.0f,
+                               &type_darkest)) {
+        return failed("reading a header with a type under it", FAILED(hr) ? hr : E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, undeclared, palette, nullptr,
+              nullptr, 0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.ink_in(typed.x, 0.0f, typed.x + typed.width, kHeaderTypeY, &untyped_name_ink)
+        || !surface.ink_in(typed.x, kHeaderTypeY, typed.x + typed.width, kHeaderHeight - 1.0f,
+                           &untyped_type_ink)) {
+        return failed("reading a header with nothing declared", FAILED(hr) ? hr : E_FAIL);
+    }
+    check(type_ink > 0 && untyped_type_ink == 0, "the declared type is drawn under the name");
+    // Paired with the line above staying put, because "under" is the whole
+    // claim: a type drawn at the name's y would satisfy the first half and
+    // overwrite the thing the grid is navigated by.
+    check(name_ink > 0 && name_ink == untyped_name_ink, "and the name above it is untouched");
+    // In `Text.dataMuted`, the rung the word NULL is on. A type in the name's
+    // own tone reads as a second name and doubles what the eye has to sort
+    // through in a band that is mostly names.
+    check(type_darkest > name_darkest, "in a dimmer tone than the name");
 
     // ------------------------------------------------------------------
     // The other appearance: the same drawing against the other column

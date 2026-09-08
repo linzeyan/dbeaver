@@ -326,6 +326,64 @@ async fn a_rendered_column_still_says_what_the_database_declared() {
 }
 
 #[tokio::test]
+async fn a_result_carries_what_the_database_called_each_column() {
+    // The same fact as the test above, on the path a query pane can use. A
+    // catalogue lookup answers for a relation's columns, and a result's columns
+    // need not be any relation's — here they are, so the two can be compared,
+    // and it is the expression below that could not have been looked up.
+    let fixture = Fixture::new(TYPES);
+    let src = fixture.connect().await;
+    let stream = src
+        .query(
+            "SELECT v_dec, v_uuid, v_json, v_timetz, v_enum, v_list, \
+             upper(v_varchar) AS shouted FROM types_all",
+            10,
+        )
+        .await
+        .unwrap();
+    let schema = stream.schema();
+    let declared = |name: &str| {
+        schema
+            .field_with_name(name)
+            .unwrap_or_else(|_| panic!("{name} missing"))
+            .metadata()
+            .get(dbconn::DECLARED_TYPE)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // The three Arrow cannot tell apart: `JSON` and `VARCHAR` are both `Utf8`,
+    // and `UUID` is a fixed-size binary that says nothing about being one.
+    assert_eq!(declared("v_json"), "JSON");
+    assert_eq!(declared("v_uuid"), "UUID");
+    assert_eq!(declared("shouted"), "VARCHAR");
+    // With the parameters, which is the part of a decimal that decides how it
+    // compares.
+    assert_eq!(declared("v_dec"), "DECIMAL(18,6)");
+    assert_eq!(declared("v_timetz"), "TIME WITH TIME ZONE");
+    // And where the catalogue says `status`, the result says only `ENUM`:
+    // DuckDB does not hand a named enum's own name to the C API. The two paths
+    // answer with different amounts about this column, which is the reason a
+    // front end holding both should prefer the catalogue's.
+    assert_eq!(declared("v_enum"), "ENUM");
+    // A container says its family and stops, which here is less than the
+    // catalogue's `INTEGER[]`. It is also a column this driver rendered to text
+    // on the way out, so both records of what it used to be sit on the one
+    // field — and neither of them says `Utf8`, which is all the field itself
+    // now claims.
+    assert_eq!(declared("v_list"), "LIST");
+    let list = schema.field_with_name("v_list").unwrap();
+    assert_eq!(list.data_type(), &DataType::Utf8);
+    assert!(
+        list.metadata()
+            .get("duckdb.rendered_from")
+            .is_some_and(|from| from.starts_with("List")),
+        "the rendered column kept its Arrow shape: {:?}",
+        list.metadata()
+    );
+}
+
+#[tokio::test]
 async fn a_variant_column_fails_with_something_to_do_about_it() {
     // Refused by the binding rather than by DuckDB, before a row moves, with a
     // message naming a Rust type. Restated so the user is told what to write

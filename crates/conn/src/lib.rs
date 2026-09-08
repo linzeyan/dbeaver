@@ -101,6 +101,34 @@ pub const VALUE_SHAPE: &str = "dbclient.value_shape";
 /// agree on it and only one of them is in this language.
 pub const SHAPE_JSON: &str = "json";
 
+/// Field metadata naming the type a column was declared with, spelled the way
+/// the server spells it.
+///
+/// On the field rather than beside the result, which is the whole point of it.
+/// A relation's declared types are already reachable through `ColumnInfo`, and
+/// that answers a browse — but a browse is `SELECT *` of something the
+/// catalogue knows, and a result is not required to be one. A query pane's
+/// columns can be expressions, aliases and joins across three relations, and a
+/// front end with no navigator has nothing to ask in the first place. Riding on
+/// the field is what makes the answer arrive with the columns it describes,
+/// once, for every result there is.
+///
+/// Never Arrow's name for the buffer the values came in. `Utf8` is true about
+/// the bytes and says nothing about the column: it cannot tell `text` from
+/// `varchar(64)`, or either from `jsonb`, and `numeric(12,2)` — the declaration
+/// that decides whether two values compare exactly — arrives as `Decimal128`
+/// with the parameters that matter dropped. A label that states a type the
+/// column was never declared with is the one outcome worse than no label.
+///
+/// Absent where the driver has no answer to give, and absent is a real state
+/// rather than an empty string: a computed column has no declaration, and not
+/// every protocol carries one. The reader falls back to what arrived, which is
+/// a different claim honestly made.
+///
+/// Not namespaced per driver, for the reason the two above are not: the reader
+/// is the grid, and one fact should not need a spelling per database.
+pub const DECLARED_TYPE: &str = "dbclient.declared_type";
+
 /// A failure, reduced to what a front end acts on.
 ///
 /// Three fields, because there are three questions: what to show, where to put
@@ -1133,22 +1161,24 @@ pub trait CursorCancel: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::{Browse, DECLARED_NOT_NULL, SHAPE_JSON, ServerInfo, VALUE_SHAPE};
+    use super::{Browse, DECLARED_NOT_NULL, DECLARED_TYPE, SHAPE_JSON, ServerInfo, VALUE_SHAPE};
 
-    /// The three strings that are the FFI contract, written out.
+    /// The four strings that are the FFI contract, written out.
     ///
     /// Asserted against literals rather than against each other because the
-    /// other end of each is in Swift, where they are literals too
-    /// (`ArrowTable.declaredNotNullKey`, `.valueShapeKey`, `.jsonShape`, pinned
-    /// by `--verify-schema-metadata`). The C data interface carries no shared
-    /// header, so nothing but a pair of tests spelling the same characters holds
-    /// the two languages together — and a rename on this side that only the
-    /// symbol followed would compile, pass, and quietly stop reaching the grid.
+    /// other end of each is in another language, where they are literals too:
+    /// `ArrowTable.declaredNotNullKey`, `.valueShapeKey` and `.jsonShape` in
+    /// Swift, pinned by `--verify-schema-metadata`, and `kDeclaredType` in the
+    /// Windows client's `main.cpp`. The C data interface carries no shared
+    /// header, so nothing but tests spelling the same characters holds the
+    /// languages together — and a rename on this side that only the symbol
+    /// followed would compile, pass, and quietly stop reaching the grid.
     #[test]
     fn the_field_declarations_are_spelled_the_way_the_reader_spells_them() {
         assert_eq!(DECLARED_NOT_NULL, "dbclient.declared_not_null");
         assert_eq!(VALUE_SHAPE, "dbclient.value_shape");
         assert_eq!(SHAPE_JSON, "json");
+        assert_eq!(DECLARED_TYPE, "dbclient.declared_type");
     }
 
     fn browse<'a>(

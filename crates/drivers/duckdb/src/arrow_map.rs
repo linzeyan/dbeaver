@@ -51,6 +51,7 @@
 use arrow::array::{Array, ArrayRef, RecordBatch, StringBuilder, new_empty_array};
 use arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow::util::display::{ArrayFormatter, FormatOptions};
+use dbconn::DECLARED_TYPE;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -99,18 +100,39 @@ pub struct Layout {
 impl Layout {
     /// Reads `schema` and settles what each column becomes.
     ///
+    /// `declared` is what DuckDB calls each column's type, indexed with the
+    /// schema, and may be empty where the caller has none to give — the tests
+    /// below, and nothing else. It travels here rather than being stitched on
+    /// afterwards because the front end is handed one schema and the batches
+    /// carry the same one: a second pass that added metadata to the announced
+    /// copy alone would be two schemas disagreeing about the same columns.
+    ///
     /// Fails only where a column has to be rendered to text and arrow-rs cannot
     /// render it — today that is a `UNION` containing a zoned timestamp, which is
     /// checked here with an empty array rather than discovered on the first
     /// batch.
-    pub fn of(schema: &Schema) -> Result<Self, DuckError> {
+    pub fn of(schema: &Schema, declared: &[String]) -> Result<Self, DuckError> {
         let mut fields: Vec<FieldRef> = Vec::with_capacity(schema.fields().len());
         let mut as_text = Vec::with_capacity(schema.fields().len());
         let mut any_text = false;
 
-        for field in schema.fields() {
+        for (i, field) in schema.fields().iter().enumerate() {
+            // Merged into whatever the field already carries rather than
+            // replacing it: `with_metadata` takes the whole map, and DuckDB puts
+            // its own keys on some fields.
+            let mut metadata = field.metadata().clone();
+            match declared.get(i) {
+                Some(name) if !name.is_empty() => {
+                    metadata.insert(DECLARED_TYPE.to_string(), name.clone());
+                }
+                _ => {}
+            }
             if !reaches_the_grid_through_children(field.data_type()) {
-                fields.push(Arc::clone(field));
+                fields.push(if metadata == *field.metadata() {
+                    Arc::clone(field)
+                } else {
+                    Arc::new(field.as_ref().clone().with_metadata(metadata))
+                });
                 as_text.push(false);
                 continue;
             }
@@ -124,10 +146,10 @@ impl Layout {
             }
             any_text = true;
             as_text.push(true);
+            metadata.insert(RENDERED_FROM.to_string(), format!("{}", field.data_type()));
             fields.push(Arc::new(
-                Field::new(field.name(), DataType::Utf8, field.is_nullable()).with_metadata(
-                    [(RENDERED_FROM.to_string(), format!("{}", field.data_type()))].into(),
-                ),
+                Field::new(field.name(), DataType::Utf8, field.is_nullable())
+                    .with_metadata(metadata),
             ));
         }
 
@@ -331,7 +353,7 @@ mod tests {
             ),
         ]);
         let schema = Schema::new(vec![field("v", inner.data_type().clone())]);
-        let layout = Layout::of(&schema).unwrap();
+        let layout = Layout::of(&schema, &[]).unwrap();
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(inner)]).unwrap();
 
         let out = layout.apply(batch).unwrap();
@@ -351,7 +373,7 @@ mod tests {
             "v",
             DataType::List(Arc::new(field("l", DataType::Int32))),
         )]);
-        let layout = Layout::of(&schema).unwrap();
+        let layout = Layout::of(&schema, &[]).unwrap();
         let metadata = layout.schema().field(0).metadata().clone();
         // A schema that said `Utf8` and nothing else would be claiming DuckDB
         // returned a string.
@@ -367,7 +389,7 @@ mod tests {
         let list = builder.finish();
 
         let schema = Schema::new(vec![field("v", list.data_type().clone())]);
-        let layout = Layout::of(&schema).unwrap();
+        let layout = Layout::of(&schema, &[]).unwrap();
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(list)]).unwrap();
         let out = layout.apply(batch).unwrap();
 
@@ -387,7 +409,7 @@ mod tests {
             Arc::new(zoned) as ArrayRef,
         )]);
         let schema = Schema::new(vec![field("v", inner.data_type().clone())]);
-        let layout = Layout::of(&schema).unwrap();
+        let layout = Layout::of(&schema, &[]).unwrap();
         let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(inner)]).unwrap();
 
         // arrow-rs cannot format a named zone without chrono-tz, so the zone is
@@ -420,7 +442,7 @@ mod tests {
             .unwrap(),
             UnionMode::Sparse,
         );
-        let err = Layout::of(&Schema::new(vec![field("v", union)]))
+        let err = Layout::of(&Schema::new(vec![field("v", union)]), &[])
             .err()
             .expect("a column the grid could not be given");
         let message = err.to_string();
@@ -434,7 +456,7 @@ mod tests {
     #[test]
     fn a_result_with_nothing_nested_in_it_is_not_copied() {
         let schema = Arc::new(Schema::new(vec![field("id", DataType::Int64)]));
-        let layout = Layout::of(&schema).unwrap();
+        let layout = Layout::of(&schema, &[]).unwrap();
         assert_eq!(layout.schema().as_ref(), schema.as_ref());
 
         let column: ArrayRef = Arc::new(arrow::array::Int64Array::from(vec![1, 2, 3]));
