@@ -121,7 +121,11 @@ struct Tones {
     UINT32 header_band;  // Grid.header, Surface.raised
     UINT32 ink;          // Grid.text
     UINT32 header_ink;   // Grid.headerText, Text.secondary
-    UINT32 muted_ink;    // Grid.nullText, Text.dataMuted
+    // Grid.sortedHeaderText, Text.primary. The ordered column's name is darker
+    // than the others as well as marked, so which way the result is sorted is
+    // legible without resolving a six-point triangle.
+    UINT32 sorted_header_ink;
+    UINT32 muted_ink;  // Grid.nullText, Text.dataMuted
     UINT32 rule;
     float banding_alpha;
     float separator_alpha;
@@ -141,11 +145,11 @@ struct Tones {
 };
 
 constexpr Tones kLightTones = {
-    0xFFFFFF, 0xF1F5F9, 0x1E293B, 0x475569, 0x51607A, 0x0F172A, 0.030f, 0.080f,
+    0xFFFFFF, 0xF1F5F9, 0x1E293B, 0x475569, 0x0F172A, 0x51607A, 0x0F172A, 0.030f, 0.080f,
     0x4F46E5, 0.040f,   0.180f,   0.320f,
 };
 constexpr Tones kDarkTones = {
-    0x0F172A, 0x1E293B, 0xE2E8F0, 0x94A3B8, 0x7C8AA0, 0xFFFFFF, 0.022f, 0.060f,
+    0x0F172A, 0x1E293B, 0xE2E8F0, 0x94A3B8, 0xF8FAFC, 0x7C8AA0, 0xFFFFFF, 0.022f, 0.060f,
     0x6366F1, 0.035f,   0.220f,   0.380f,
 };
 
@@ -314,6 +318,28 @@ struct Surface {
         return read;
     }
 
+    // The strongest tint towards blue in a rectangle: blue minus red, at the
+    // pixel where that difference is widest.
+    //
+    // Whether an accent-coloured mark is there, which neither of the two above
+    // can answer. `ink_in` wants every channel to have left the canvas and the
+    // accent's blue is 26 from white, so it counts the sort marker as nothing at
+    // all; `darkest_in` sees it but cannot tell it from `Grid.headerText`, which
+    // is eight away in its darkest channel. What separates them is the hue, and
+    // that is what this reads. Taken as the widest difference over a region
+    // rather than from one pixel because a triangle six DIPs across has few
+    // pixels that are entirely its own — and picking which one to sample is the
+    // trap this file fell into once already, over the cursor's edge.
+    bool bluest_in(float x0, float y0, float x1, float y1, int* out) const {
+        int widest = 0;
+        const bool read = each_pixel(x0, y0, x1, y1, [&widest](const BYTE* px) {
+            const int tint = static_cast<int>(px[0]) - static_cast<int>(px[2]);
+            widest = tint > widest ? tint : widest;
+        });
+        *out = widest;
+        return read;
+    }
+
     // One pixel, as B, G, R — for the fills, which are flat and can be compared
     // against the tone they were asked for rather than merely against each other.
     bool pixel_at(float x, float y, BYTE* bgr) const {
@@ -436,6 +462,30 @@ struct Monospace {
             return failed("the face reports no em size", E_FAIL);
         }
 
+        // And the two shapes outside ASCII that the grid draws. DirectWrite
+        // answers a missing glyph by falling back to another family rather than
+        // by failing, so a face without these would put a triangle from some
+        // other font in the header and nothing would say so. Glyph zero is the
+        // face's own way of saying it does not have the character.
+        //
+        // Their advance is asked for as well, because the header gives the
+        // marker a box exactly one character wide: a face that drew its
+        // triangles double-width — several do, for the look of it — would have
+        // that box trim the marker away to an ellipsis, which is a sorted column
+        // marked with the truncation sign.
+        const UINT32 markers[2] = {0x25B2, 0x25BC};
+        UINT16 marker_glyphs[2] = {};
+        DWRITE_GLYPH_METRICS marker_metrics[2] = {};
+        hr = face->GetGlyphIndices(markers, 2, marker_glyphs);
+        if (SUCCEEDED(hr)) {
+            hr = face->GetDesignGlyphMetrics(marker_glyphs, 2, marker_metrics);
+        }
+        check(SUCCEEDED(hr) && marker_glyphs[0] != 0 && marker_glyphs[1] != 0,
+              "the face has both sort markers of its own");
+        check(marker_metrics[0].advanceWidth == metrics[0].advanceWidth
+                  && marker_metrics[1].advanceWidth == metrics[0].advanceWidth,
+              "and draws them in one character's width");
+
         bool uniform = true;
         for (UINT32 i = 1; i < 95; ++i) {
             if (metrics[i].advanceWidth != metrics[0].advanceWidth) {
@@ -483,7 +533,18 @@ struct Monospace {
 // the column for exactly that reason.
 constexpr const wchar_t* kNullText = L"NULL";
 
+// The sort markers `GlyphAtlas.swift` bakes, by codepoint rather than as
+// literals: this file is compiled without `/utf-8`, so a triangle typed into the
+// source would arrive as whatever the compiler guessed the encoding was.
+constexpr const wchar_t* kSortAscending = L"\u25B2";   // BLACK UP-POINTING TRIANGLE
+constexpr const wchar_t* kSortDescending = L"\u25BC";  // BLACK DOWN-POINTING TRIANGLE
+
 struct Column {
+    // As the server spelled it, for the ORDER BY. `heading` is the same name
+    // widened for drawing, and it is deliberately not the one that goes into
+    // SQL: a round trip through UTF-16 and back is a chance to change an
+    // identifier the server has to match exactly.
+    std::string name;
     std::wstring heading;
     std::vector<std::wstring> cells;
     std::vector<bool> nulls;
@@ -494,6 +555,66 @@ struct Column {
     float x = 0.0f;
     float width = 0.0f;
 };
+
+// Which column the result is ordered by, and which way. `GridSort` over there.
+struct Sort {
+    int column = 0;
+    bool descending = false;
+};
+
+// A click on a heading, as the three states `AppModel.toggleSort` cycles
+// through: unsorted becomes ascending, ascending becomes descending, and
+// descending clears — false here, which is why this answers with a bool rather
+// than always producing a sort.
+//
+// Three states rather than two because the unsorted result is a state worth
+// being able to get back to: it is the order the server chose, and on a browse
+// that is the order the rows are stored in. A two-state toggle can only ever
+// offer a user who sorted by mistake some other sort.
+//
+// A click on a different column always starts at ascending, whichever way the
+// previous one was pointing. Carrying the direction across would make the same
+// click mean two different things depending on where the last one landed.
+bool next_sort(const Sort* current, int column, Sort* out) {
+    if (current != nullptr && current->column == column) {
+        if (current->descending) {
+            return false;
+        }
+        *out = Sort{column, true};
+        return true;
+    }
+    *out = Sort{column, false};
+    return true;
+}
+
+// The ORDER BY the sort asks the server for.
+//
+// The server sorts, not this. A grid holding a page of a million rows can only
+// order the page it has, and a page ordered by itself is a lie told in the one
+// place the user is most likely to believe it — the rows would be sorted and
+// still be the wrong rows.
+//
+// By name rather than by ordinal, because a name survives a change to the
+// select list and an ordinal does not. Quoted, so a column called `order` or
+// one with a capital in it still resolves; an embedded quote is doubled, which
+// is how both DuckDB and PostgreSQL spell one inside an identifier. (The Swift
+// side wraps the name without doubling, and a column named with a quote in it
+// breaks the statement there — worth fixing on that side.)
+std::string order_clause(const Sort* sort, const std::vector<Column>& columns) {
+    if (sort == nullptr || sort->column < 0
+        || static_cast<size_t>(sort->column) >= columns.size()) {
+        return std::string();
+    }
+    std::string quoted = "\"";
+    for (const char c : columns[sort->column].name) {
+        quoted += c;
+        if (c == '"') {
+            quoted += c;
+        }
+    }
+    quoted += "\"";
+    return sort->descending ? quoted + " DESC" : quoted;
+}
 
 // Which cell the keyboard acts on, and how far a shift-held arrow has taken the
 // band away from it.
@@ -697,6 +818,24 @@ bool cell_at(float x, float y, float scroll_row, const std::vector<Column>& colu
     return false;
 }
 
+// The heading under a point, which is the other half of the same question and
+// deliberately not folded into `cell_at`. A click on the header is not a click
+// on a cell that happens to be above the first row: it sorts rather than
+// selects, and answering both from one function would mean one of the two
+// callers throwing away an answer it must not act on.
+bool header_column_at(float x, float y, const std::vector<Column>& columns, int* out) {
+    if (x < 0.0f || y < 0.0f || y >= kHeaderHeight) {
+        return false;
+    }
+    for (size_t c = 0; c < columns.size(); ++c) {
+        if (x >= columns[c].x && x < columns[c].x + columns[c].width) {
+            *out = static_cast<int>(c);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Arrow's `utf8`: offsets in `buffers[1]`, bytes packed end to end in
 // `buffers[2]` with no terminators.
 std::string utf8_at(const ArrowArray& array, int64_t i) {
@@ -722,30 +861,45 @@ bool valid_at(const ArrowArray& array, int64_t i) {
 // that; putting it here now would be writing a second copy of it against a
 // surface with no window on it. This is the first brick, and what it has to
 // prove is the geometry.
-bool read_columns(DbHandle* handle, std::vector<Column>* out) {
+//
+// `order` is the ORDER BY the sort asked for, or empty for the result as it
+// arrives. The base order is `i` rather than nothing at all so that the checks
+// below have a fixed starting point to compare a sorted read against — DuckDB
+// is free to hand back an unordered scan in any order it likes, and a check
+// that assumed otherwise would be measuring the planner's mood.
+bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column>* out) {
     char* err = nullptr;
     int position = 0;
-    DbQuery* query = db_query(handle,
-                              "SELECT i AS id,"
-                              "       'driver-' || i AS name,"
-                              "       CASE WHEN i = 1 THEN NULL"
-                              "            ELSE 'read ' || (i * 100) END AS note,"
-                              // Long enough to be clamped to `kMaxColumnWidth`
-                              // and then to overrun that, which is the only way
-                              // to have anything to say about what happens to a
-                              // value the column cannot hold. With spaces in it,
-                              // because wrapping breaks at a space and trimming
-                              // does not — a value without any would be cut in
-                              // the same place either way and the check below
-                              // would not be able to tell them apart.
-                              "       'a value long enough to run past the widest"
-                              " column this grid allows ' || i AS wide "
-                              // More rows than the check's bitmap can show, so
-                              // that scrolling has somewhere to go and so that
-                              // "draws every row" and "draws the rows in view"
-                              // stop being the same statement.
-                              "FROM range(40) t(i) ORDER BY i",
-                              1000, &err, &position);
+    const std::string statement =
+        std::string("SELECT i AS id,"
+                    "       'driver-' || i AS name,"
+                    "       CASE WHEN i = 1 THEN NULL"
+                    "            ELSE 'read ' || (i * 100) END AS note,"
+                    // Long enough to be clamped to `kMaxColumnWidth` and then to
+                    // overrun that, which is the only way to have anything to
+                    // say about what happens to a value the column cannot hold.
+                    // With spaces in it, because wrapping breaks at a space and
+                    // trimming does not — a value without any would be cut in
+                    // the same place either way and the check below would not be
+                    // able to tell them apart.
+                    //
+                    // Its name is long for a second reason. Every column is laid
+                    // out one character wider than its widest content, so a
+                    // heading can only reach its own trailing edge in a column
+                    // that was clamped — and the trailing edge is where the sort
+                    // marker goes. This is the only column in which "the marker
+                    // is drawn beside the name" and "the marker is drawn on top
+                    // of it" look different.
+                    "       'a value long enough to run past the widest"
+                    " column this grid allows ' || i"
+                    " AS \"a heading long enough to be cut by the column it names\" "
+                    // More rows than the check's bitmap can show, so that
+                    // scrolling has somewhere to go and so that "draws every
+                    // row" and "draws the rows in view" stop being the same
+                    // statement.
+                    "FROM range(40) t(i) ORDER BY ")
+        + (order.empty() ? std::string("i") : order);
+    DbQuery* query = db_query(handle, statement.c_str(), 1000, &err, &position);
     if (query == nullptr) {
         return core_failed("db_query", err);
     }
@@ -767,6 +921,7 @@ bool read_columns(DbHandle* handle, std::vector<Column>* out) {
         const ArrowArray& values = *batch.children[c];
         const std::string format(field.format);
         Column column;
+        column.name = field.name;
         column.heading = widen(field.name);
         column.numeric = format == "l";
         for (int64_t r = 0; r < batch.length; ++r) {
@@ -839,6 +994,7 @@ struct Palette {
     ComPtr<ID2D1SolidColorBrush> ink;
     ComPtr<ID2D1SolidColorBrush> muted;
     ComPtr<ID2D1SolidColorBrush> header_ink;
+    ComPtr<ID2D1SolidColorBrush> sorted_header_ink;
     ComPtr<ID2D1SolidColorBrush> header;
     ComPtr<ID2D1SolidColorBrush> banding;
     ComPtr<ID2D1SolidColorBrush> separator;
@@ -865,6 +1021,7 @@ struct Palette {
             {&ink, tones.ink, 1.0f},
             {&muted, tones.muted_ink, 1.0f},
             {&header_ink, tones.header_ink, 1.0f},
+            {&sorted_header_ink, tones.sorted_header_ink, 1.0f},
             {&header, tones.header_band, 1.0f},
             {&banding, tones.rule, tones.banding_alpha},
             {&separator, tones.rule, tones.separator_alpha},
@@ -955,7 +1112,8 @@ bool draw_text(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
 // and the bitmap can never see it.
 void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospace& font,
                const std::vector<Column>& columns, const Palette& palette,
-               const Selection* selection, float scroll_row, bool dragging_thumb) {
+               const Selection* selection, const Sort* sort, float scroll_row,
+               bool dragging_thumb) {
     const D2D1_SIZE_F view = target->GetSize();
     size_t rows = 0;
     for (const Column& column : columns) {
@@ -1041,9 +1199,27 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
     //
     // Headers are left-aligned whichever way their column is. A heading is a
     // name, and names read from the left even above a column of numbers.
-    for (const Column& column : columns) {
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const Column& column = columns[c];
+        const bool ordered = sort != nullptr && sort->column == static_cast<int>(c);
+        if (ordered) {
+            // On the trailing edge of the heading's line, at full accent
+            // strength — this is `Grid.cursor` rather than a header tone,
+            // because it is the one mark in the band that reports state rather
+            // than naming something.
+            draw_text(target, dwrite, font,
+                      sort->descending ? kSortDescending : kSortAscending,
+                      column.x + column.width - kCellPadding - font.advance, kHeaderNameY,
+                      font.advance, palette.cursor.Get(), false);
+        }
+        // The marker's character is taken out of the name's box rather than
+        // drawn over it. A heading that reached the trailing edge would
+        // otherwise have the triangle sitting on its last letter, and the
+        // column that is most likely to be sorted is the one whose name fills
+        // its width.
         draw_text(target, dwrite, font, column.heading, column.x + kCellPadding, kHeaderNameY,
-                  column.width - kCellPadding * 2.0f, palette.header_ink.Get(), false);
+                  column.width - kCellPadding * 2.0f - (ordered ? font.advance : 0.0f),
+                  ordered ? palette.sorted_header_ink.Get() : palette.header_ink.Get(), false);
     }
 
     // The values are clipped to below the band; the headings above are not.
@@ -1100,20 +1276,26 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
 // value it wants into `Column`, so the handle has no reason to outlive it, and a
 // window that held a live DuckDB connection for as long as it held a frame is a
 // shape worth not starting.
-bool load_grid(std::vector<Column>* out) {
+//
+// Which is also why a sort comes back through here rather than reaching for a
+// connection somebody kept: sorting is a new statement, and a new statement is a
+// connection, a result and a close. On this fixture that costs a few
+// milliseconds against an in-memory database; a real client would be reusing a
+// pooled connection, and nothing above this line would change.
+bool load_grid(const std::string& order, std::vector<Column>* out) {
     char* err = nullptr;
     DbHandle* handle = db_connect("duckdb://:memory:", nullptr, 10, &err);
     if (handle == nullptr) {
         return core_failed("db_connect", err);
     }
-    const bool read = read_columns(handle, out);
+    const bool read = read_columns(handle, order, out);
     db_free(handle);
     return read;
 }
 
 bool the_grid_draws_a_result() {
     std::vector<Column> columns;
-    if (!load_grid(&columns)) {
+    if (!load_grid(std::string(), &columns)) {
         return false;
     }
 
@@ -1154,8 +1336,8 @@ bool the_grid_draws_a_result() {
     }
 
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, 0.0f,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, false);
     HRESULT hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw", hr);
@@ -1363,8 +1545,8 @@ bool the_grid_draws_a_result() {
     selection.row = 1;
     selection.column = 2;
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection, 0.0f,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection,
+              nullptr, 0.0f, false);
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw with a selection", hr);
@@ -1475,7 +1657,7 @@ bool the_grid_draws_a_result() {
     for (int step = 1; step <= 2; ++step) {
         surface.target->BeginDraw();
         draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr,
-                  static_cast<float>(step), false);
+                  nullptr, static_cast<float>(step), false);
         hr = surface.target->EndDraw();
         if (FAILED(hr)) {
             return failed("ID2D1RenderTarget::EndDraw scrolled", hr);
@@ -1494,8 +1676,8 @@ bool the_grid_draws_a_result() {
     // row on its way out from under the header is the one thing that can still
     // reach the column names.
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, 0.5f,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.5f, false);
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw part-scrolled", hr);
@@ -1560,15 +1742,15 @@ bool the_grid_draws_a_result() {
     BYTE thumb_top[3] = {};
     BYTE track_top[3] = {};
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, 0.0f,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, false);
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.pixel_at(gutter_x, kHeaderHeight + 10.0f, thumb_top)) {
         return failed("reading the thumb at rest", FAILED(hr) ? hr : E_FAIL);
     }
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, most,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              most, false);
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.pixel_at(gutter_x, kHeaderHeight + 10.0f, track_top)) {
         return failed("reading the track at the end of the scroll", FAILED(hr) ? hr : E_FAIL);
@@ -1580,13 +1762,155 @@ bool the_grid_draws_a_result() {
     // a thumb that never acknowledges the press reads as a bar that was missed.
     BYTE held[3] = {};
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, 0.0f,
-              true);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, true);
     hr = surface.target->EndDraw();
     if (FAILED(hr) || !surface.pixel_at(gutter_x, kHeaderHeight + 10.0f, held)) {
         return failed("reading a thumb being dragged", FAILED(hr) ? hr : E_FAIL);
     }
     check(held[2] < thumb_top[2], "and darkens while it is being dragged");
+
+    // ------------------------------------------------------------------
+    // The sort: what a heading click asks the server for, and what marks it
+    // ------------------------------------------------------------------
+
+    // The three states, in the order a repeated click walks through them.
+    Sort ascending;
+    Sort descending;
+    Sort cleared;
+    check(next_sort(nullptr, 1, &ascending) && ascending.column == 1 && !ascending.descending,
+          "a heading that carried no sort becomes ascending");
+    check(next_sort(&ascending, 1, &descending) && descending.descending,
+          "the same heading again reverses it");
+    check(!next_sort(&descending, 1, &cleared),
+          "and a third click clears it rather than starting over");
+    // The state that a two-state toggle cannot offer: a user who sorted by
+    // mistake can put the result back the way the server sent it.
+    Sort another;
+    check(next_sort(&descending, 2, &another) && another.column == 2 && !another.descending,
+          "a different heading starts ascending whichever way the last one pointed");
+
+    check(order_clause(nullptr, columns).empty(), "an unsorted grid asks for no order at all");
+    check(order_clause(&ascending, columns) == "\"name\"", "a sort asks for its column by name");
+    check(order_clause(&descending, columns) == "\"name\" DESC", "and says which way");
+    // Quoted rather than pasted, and a quote inside the name doubled. Neither
+    // matters for `name`; both matter for the first column somebody selects
+    // called `order`, or the first one with a quote in it — and an identifier
+    // that broke the statement would arrive as a failed query rather than as a
+    // grid that looks wrong.
+    std::vector<Column> awkward(1);
+    awkward[0].name = "a\"b";
+    const Sort odd;
+    check(order_clause(&odd, awkward) == "\"a\"\"b\"",
+          "a quote inside a name is doubled rather than ending the identifier");
+
+    int heading = -1;
+    check(header_column_at(columns[2].x + 4.0f, 4.0f, columns, &heading) && heading == 2,
+          "a point on a heading finds that column");
+    check(!header_column_at(columns[2].x + 4.0f, kHeaderHeight + 4.0f, columns, &heading),
+          "a point below the band finds none");
+    check(!header_column_at(right + 4.0f, 4.0f, columns, &heading),
+          "a point past the last heading finds none");
+
+    // The server sorts. Descending by `name` is a text order, so it answers
+    // `driver-9` rather than `driver-39` — which is the whole point of asking
+    // it: a grid that reordered its own page by the number it can see in the
+    // string would answer the other way, and so would one that sorted the
+    // column instead of the row.
+    check(columns[0].cells[0] == L"0" && columns[1].cells[0] == L"driver-0",
+          "the unsorted result starts where the base order does");
+    std::vector<Column> reordered;
+    if (!load_grid(order_clause(&descending, columns), &reordered)) {
+        return false;
+    }
+    check(reordered.size() == columns.size() && reordered[0].cells.size() == rows,
+          "sorting returns the same result rather than a different one");
+    check(reordered[1].cells[0] == L"driver-9", "and in the order the sort asked for");
+    check(reordered[0].cells[0] == L"9", "with the whole row moved, not one column of it");
+
+    // What the sorted column looks like. Asked of the hue rather than of
+    // `ink_in`, and not by choice: `ink_in` counts a pixel only when all three
+    // of its channels have left the canvas, and the accent's blue is 229 — 26
+    // from white, well inside the tolerance. It cannot see this mark at all.
+    // Written the other way round the check would have been a green line over a
+    // header with no marker in it, which is how it first came out.
+    //
+    // So one measure answers both halves: in this band the marker is the only
+    // blue thing there is, and "was anything drawn" and "was it the accent" are
+    // the same question. Splitting them would be two checks with one answer.
+    const Column& marked = columns[1];
+    const float marker_x = marked.x + marked.width - kCellPadding - font.advance;
+    const float name_x = marked.x + kCellPadding;
+    int plain_tint = 0;
+    BYTE plain_heading = 0xFF;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.bluest_in(marker_x, 0.0f, marker_x + font.advance, kHeaderHeight, &plain_tint)
+        || !surface.darkest_in(name_x, 0.0f, marker_x, kHeaderHeight, &plain_heading)) {
+        return failed("reading an unsorted heading", FAILED(hr) ? hr : E_FAIL);
+    }
+    check(plain_tint < 20, "an unsorted heading carries no marker");
+
+    int marker_tint = 0;
+    BYTE sorted_heading = 0xFF;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr,
+              &descending, 0.0f, false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)
+        || !surface.bluest_in(marker_x, 0.0f, marker_x + font.advance, kHeaderHeight, &marker_tint)
+        || !surface.darkest_in(name_x, 0.0f, marker_x, kHeaderHeight, &sorted_heading)) {
+        return failed("reading a sorted heading", FAILED(hr) ? hr : E_FAIL);
+    }
+    // Blue runs 150 ahead of red in the accent, 34 ahead in `Grid.headerText`
+    // and 8 ahead in the band itself, so a partly covered pixel still lands on
+    // the right side of this — which matters for a triangle six DIPs across,
+    // where few pixels are entirely its own.
+    check(marker_tint > 60, "a sorted one carries the accent-coloured marker");
+    // And the name beside it darkens. A six-DIP triangle is a small thing to
+    // have to find; the column reads as sorted from across the window because
+    // its name is the one heading in `Text.primary`.
+    check(sorted_heading < plain_heading, "and the column's name darkens with it");
+
+    // Nothing else in the band moved. The marker is drawn per column, and the
+    // failure that costs is one drawn for every column — which the checks above
+    // cannot see, because they only ever look at the column that is supposed to
+    // have it.
+    int neighbour_tint = 0;
+    const Column& unmarked = columns[2];
+    const float neighbour_x = unmarked.x + unmarked.width - kCellPadding - font.advance;
+    if (!surface.bluest_in(neighbour_x, 0.0f, neighbour_x + font.advance, kHeaderHeight,
+                           &neighbour_tint)) {
+        return failed("reading an unsorted heading beside a sorted one", E_FAIL);
+    }
+    check(neighbour_tint < 20, "and the headings beside it carry none");
+
+    // And the marker's box holds the marker rather than the last letters of the
+    // name. This is the only column where the two can collide: `lay_out` gives
+    // every column a character more than its widest content, so a heading only
+    // reaches its own trailing edge where the width was clamped.
+    //
+    // Read as darkness, not as hue. What would be there is `Grid.headerText`,
+    // whose lightest channel is 105, against an accent whose lightest is 229
+    // over a band at 249 — the two answer the hue question the same way and the
+    // darkness question 120 apart.
+    const Column& clamped = columns.back();
+    const float clamped_marker = clamped.x + clamped.width - kCellPadding - font.advance;
+    Sort clamped_sort;
+    clamped_sort.column = static_cast<int>(columns.size()) - 1;
+    BYTE marker_alone = 0;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr,
+              &clamped_sort, 0.0f, false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.darkest_in(clamped_marker, 0.0f, clamped_marker + font.advance,
+                                          kHeaderHeight, &marker_alone)) {
+        return failed("reading the marker on a clamped column", FAILED(hr) ? hr : E_FAIL);
+    }
+    check(marker_alone > 180, "and the marker's box is kept clear of the name it marks");
 
     // ------------------------------------------------------------------
     // The other appearance: the same drawing against the other column
@@ -1600,6 +1924,7 @@ bool the_grid_draws_a_result() {
               && kLightTones.header_band != kDarkTones.header_band
               && kLightTones.ink != kDarkTones.ink
               && kLightTones.header_ink != kDarkTones.header_ink
+              && kLightTones.sorted_header_ink != kDarkTones.sorted_header_ink
               && kLightTones.muted_ink != kDarkTones.muted_ink
               && kLightTones.rule != kDarkTones.rule
               && kLightTones.accent != kDarkTones.accent,
@@ -1619,8 +1944,8 @@ bool the_grid_draws_a_result() {
     }
     surface.canvas = kDarkTones.canvas;
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, dark, &selection, 0.0f,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, dark, &selection, nullptr,
+              0.0f, false);
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw in dark", hr);
@@ -1684,8 +2009,8 @@ bool the_grid_draws_a_result() {
     // wrong canvas a dark grid answers with nearly every pixel it has.
     surface.canvas = kLightTones.canvas;
     surface.target->BeginDraw();
-    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection, 0.0f,
-              false);
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection,
+              nullptr, 0.0f, false);
     hr = surface.target->EndDraw();
     if (FAILED(hr)) {
         return failed("ID2D1RenderTarget::EndDraw back in light", hr);
@@ -1818,6 +2143,8 @@ struct Window {
     std::vector<Column> columns;
     Selection selection;
     bool selected = false;
+    Sort sort;
+    bool sorted = false;
     float scroll_row = 0.0f;
     // Where on the thumb the drag took hold, so the thumb stays under the
     // pointer instead of jumping its own leading edge there on the first move.
@@ -1857,6 +2184,33 @@ struct Window {
     }
 
     size_t rows() const { return columns.empty() ? 0 : columns[0].cells.size(); }
+
+    // A heading was clicked. The result is asked for again in the new order,
+    // which is what makes the marker true: a grid that reordered the page it
+    // already had would put an ascending triangle over the forty rows the
+    // server happened to send first.
+    //
+    // Read into a second vector and swapped in only once it arrives, so a
+    // statement that fails leaves the grid showing what it was showing rather
+    // than emptying it. `load_grid` has already said what went wrong.
+    void sort_by(int column) {
+        Sort next;
+        const bool wanted = next_sort(sorted ? &sort : nullptr, column, &next);
+        std::vector<Column> fresh;
+        if (!load_grid(order_clause(wanted ? &next : nullptr, columns), &fresh)) {
+            return;
+        }
+        lay_out(&fresh, font.advance);
+        columns = std::move(fresh);
+        sort = next;
+        sorted = wanted;
+        // Back to the top, for `MetalGridView.swift`'s reason: row four of the
+        // result that has just arrived is a different row from row four of the
+        // one that was on screen, so an offset kept across the change points at
+        // an arbitrary window of unrelated data.
+        scroll_row = 0.0f;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
 
     // The view in DIPs, which is what every scroll calculation is in.
     float height() const { return target ? target->GetSize().height : 0.0f; }
@@ -1973,7 +2327,7 @@ struct Window {
         }
         target->BeginDraw();
         draw_grid(target.Get(), dwrite.Get(), font, columns, palette,
-                  selected ? &selection : nullptr, scroll_row, dragging);
+                  selected ? &selection : nullptr, sorted ? &sort : nullptr, scroll_row, dragging);
         const HRESULT hr = target->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
             target.Reset();
@@ -2052,6 +2406,16 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             // scrolling instead of stopping at the edge and letting go silently.
             SetCapture(hwnd);
             window->drag_to(y);
+            return 0;
+        }
+
+        // The band sorts rather than selects, and it is asked first because the
+        // two areas do not overlap: `cell_at` refuses everything above the
+        // fold, so the order here is about which answer is looked for, not
+        // about which one wins.
+        int heading = 0;
+        if (header_column_at(x, y, window->columns, &heading)) {
+            window->sort_by(heading);
             return 0;
         }
 
@@ -2197,7 +2561,7 @@ int show_the_grid_in_a_window() {
     if (!window.font.open(window.dwrite)) {
         return 1;
     }
-    if (!load_grid(&window.columns)) {
+    if (!load_grid(std::string(), &window.columns)) {
         return 1;
     }
     lay_out(&window.columns, window.font.advance);
