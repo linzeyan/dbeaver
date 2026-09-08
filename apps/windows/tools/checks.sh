@@ -73,6 +73,6 @@ build apps/windows/ffi-check/main.cpp ffi-check || exit 1
 ./target/ffi-check.exe || exit 1
 
 build apps/windows/DbClient/main.cpp dbclient \
-    d2d1.lib dwrite.lib windowscodecs.lib ole32.lib || exit 1
+    d2d1.lib dwrite.lib windowscodecs.lib ole32.lib dwmapi.lib || exit 1
 ./target/dbclient.exe --verify-drivers || exit 1
 ./target/dbclient.exe --verify-grid || exit 1

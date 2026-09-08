@@ -37,12 +37,15 @@
 #include <windowsx.h>
 
 #include <d2d1.h>
+#include <dwmapi.h>
 #include <dwrite.h>
 #include <wincodec.h>
 #include <wrl/client.h>
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -101,37 +104,58 @@ constexpr float kScrollbarGutter = 12.0f;
 constexpr float kScrollbarThumb = 5.0f;
 constexpr float kMinThumbLength = 28.0f;
 
-// `Theme.swift`'s light values, under the names it gives them. Dark mode is a
-// separate question — it begins by asking Windows which one the user is in, not
-// by writing a second set of numbers — and a front end that guessed at these
-// would be a front end that looks nearly like the other one.
+// `Theme.swift`'s values, under the names it gives them, resolved once per
+// appearance. Two tables rather than two ways of drawing: over there every one
+// of these is the same token read against `isLight`, and the whole of dark mode
+// is which column of numbers the same code reads.
 //
-// `banding` and `separator` are one colour at two alphas rather than two
-// colours: they are the ramp's direction at low strength, which is what keeps
-// them correct over whatever they land on.
-constexpr UINT32 kCanvas = 0xFFFFFF;      // Grid.background, Surface.canvas
-constexpr UINT32 kHeaderBand = 0xF1F5F9;  // Grid.header, Surface.raised
-constexpr UINT32 kInk = 0x1E293B;         // Grid.text
-constexpr UINT32 kHeaderInk = 0x475569;   // Grid.headerText, Text.secondary
-constexpr UINT32 kMutedInk = 0x51607A;    // Grid.nullText, Text.dataMuted
-constexpr UINT32 kRule = 0x0F172A;
-constexpr float kBandingAlpha = 0.030f;
-constexpr float kSeparatorAlpha = 0.080f;
-// Accent.selection, at the two strengths Grid.selectedRow and Grid.selectedCell
-// use, and undiluted for Grid.cursor. Translucent so the value underneath stays
-// readable — which is also why the text is drawn after them.
-constexpr UINT32 kAccent = 0x4F46E5;
+// `rule` is the ramp's direction — black over a light surface, white over a
+// dark one — and it is one colour at several alphas rather than several
+// colours, which is what keeps banding, the separators and the scrollbar
+// correct over whatever they land on. The alphas are not the same in both
+// columns: black at 0.022 over white is a step nobody can see, so the light
+// side is a shade stronger than its dark counterpart rather than the same
+// number.
+struct Tones {
+    UINT32 canvas;       // Grid.background, Surface.canvas
+    UINT32 header_band;  // Grid.header, Surface.raised
+    UINT32 ink;          // Grid.text
+    UINT32 header_ink;   // Grid.headerText, Text.secondary
+    UINT32 muted_ink;    // Grid.nullText, Text.dataMuted
+    UINT32 rule;
+    float banding_alpha;
+    float separator_alpha;
+    // Accent.selection, at the two strengths Grid.selectedRow and
+    // Grid.selectedCell use, and undiluted for Grid.cursor. Translucent so the
+    // value underneath stays readable — which is also why the text is drawn
+    // after them. The strengths do not change with the appearance; the accent
+    // itself lightens, because a hue that reads over white is not the one that
+    // reads over near-black.
+    UINT32 accent;
+    // Grid.scrollTrack, Grid.scrollThumb and Grid.scrollThumbActive: `rule`
+    // again, at three strengths. The bar sits over the data rather than beside
+    // it, so the track is barely there and the thumb carries the whole signal.
+    float scroll_track_alpha;
+    float scroll_thumb_alpha;
+    float scroll_thumb_active_alpha;
+};
+
+constexpr Tones kLightTones = {
+    0xFFFFFF, 0xF1F5F9, 0x1E293B, 0x475569, 0x51607A, 0x0F172A, 0.030f, 0.080f,
+    0x4F46E5, 0.040f,   0.180f,   0.320f,
+};
+constexpr Tones kDarkTones = {
+    0x0F172A, 0x1E293B, 0xE2E8F0, 0x94A3B8, 0x7C8AA0, 0xFFFFFF, 0.022f, 0.060f,
+    0x6366F1, 0.035f,   0.220f,   0.380f,
+};
+
 constexpr float kSelectedRowAlpha = 0.180f;
 constexpr float kSelectedCellAlpha = 0.380f;
-// Grid.scrollTrack, Grid.scrollThumb and Grid.scrollThumbActive — `kRule` again,
-// at three strengths. The bar sits over the data rather than beside it, so the
-// track is barely there and the thumb carries the whole signal.
-constexpr float kScrollTrackAlpha = 0.040f;
-constexpr float kScrollThumbAlpha = 0.180f;
-constexpr float kScrollThumbActiveAlpha = 0.320f;
 
-// What counts as a glyph when the bitmap is read back. See `Surface::ink_in`.
-constexpr BYTE kInkThreshold = 0xB4;
+// How far from the canvas a channel has to move to count as a glyph when the
+// bitmap is read back. 0xFF minus the 0xB4 this was written as when the canvas
+// was always white, so light-mode readings are unchanged. See `Surface::ink_in`.
+constexpr int kInkDistance = 0x4B;
 
 int failures = 0;
 
@@ -179,6 +203,11 @@ struct Surface {
     ComPtr<IWICImagingFactory> wic;
     ComPtr<IWICBitmap> bitmap;
     ComPtr<ID2D1RenderTarget> target;
+    // What the last drawing cleared to, which is what `ink_in` measures
+    // distance from. Carried on the surface rather than passed to every read,
+    // because a bitmap holds one appearance at a time and every measurement of
+    // it is about that one.
+    UINT32 canvas = kLightTones.canvas;
 
     bool open() {
         HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory),
@@ -223,8 +252,8 @@ struct Surface {
     // drawn" and "something was drawn *there*" are different questions, and only
     // the second one notices a grid that painted every row on top of the first.
     //
-    // Dark pixels rather than pixels that differ from the background, which is
-    // what this counted before the grid had any chrome. A banded, ruled,
+    // Far from the canvas rather than merely different from it, which is what
+    // this counted before the grid had any chrome. A banded, ruled,
     // header-banded grid differs from its background almost everywhere, so that
     // test now answers yes for a grid with no text written on it at all.
     //
@@ -235,24 +264,40 @@ struct Surface {
     // a region to be *empty* — which is the shape the rest of them should grow
     // towards.
     //
-    // The threshold has room on both sides: the lightest thing this grid writes
-    // is `Grid.nullText`, whose lightest channel is 0x7A, and the darkest thing
-    // it fills is a separator over the header band, which lands near 0xE0.
+    // Distance from `canvas` rather than darkness, so the question means the
+    // same thing in both appearances: on a dark canvas the text is the light
+    // thing, and a measure that counted dark pixels would report an unpainted
+    // dark grid as painted from edge to edge. On white the two are the same
+    // predicate — every case in this file lands identically either way.
+    //
+    // The threshold has room on both sides: the faintest thing this grid writes
+    // is `Grid.nullText`, which is 133 from the canvas at its nearest channel,
+    // and the boldest thing it fills is a separator over the header band, which
+    // gets to 31.
     bool ink_in(float x0, float y0, float x1, float y1, UINT* out) const {
+        const int want[3] = {static_cast<int>(canvas & 0xFF), static_cast<int>((canvas >> 8) & 0xFF),
+                             static_cast<int>((canvas >> 16) & 0xFF)};
         UINT painted = 0;
-        const bool read = each_pixel(x0, y0, x1, y1, [&painted](const BYTE* px) {
+        const bool read = each_pixel(x0, y0, x1, y1, [&painted, &want](const BYTE* px) {
             // BGRA, premultiplied over an opaque clear, so the channels are the
-            // colour. A glyph is the only thing here dark enough to put all
-            // three under the threshold.
-            if (px[0] < kInkThreshold && px[1] < kInkThreshold && px[2] < kInkThreshold) {
-                painted += 1;
+            // colour. A glyph is the only thing here that moves all three of
+            // them this far from the surface it is written on.
+            for (int c = 0; c < 3; ++c) {
+                if (std::abs(static_cast<int>(px[c]) - want[c]) <= kInkDistance) {
+                    return;
+                }
             }
+            painted += 1;
         });
         *out = painted;
         return read;
     }
 
     // The darkest pixel in a rectangle, as its lightest channel.
+    //
+    // Toward black, which is the direction that separates one text tone from
+    // another on a light canvas. A dark-canvas comparison wants the other end,
+    // and every caller of this is a light-appearance check.
     //
     // What separates one text tone from another. `ink_in` above answers whether
     // anything was written; this answers which brush wrote it, which is the only
@@ -596,6 +641,26 @@ float scroll_to_thumb(float thumb_start, float view_height, size_t rows) {
     return progress * max_scroll_row(view_height, rows);
 }
 
+// Which appearance the user is in, asked of Windows rather than chosen here.
+//
+// The registry rather than `UISettings`: this is one DWORD, and the WinRT route
+// wants an apartment and a package identity to answer the same question. The
+// value is what the personalisation page writes, and it is the one Explorer and
+// the common controls read, so an app that follows it changes when everything
+// else on the desktop does.
+//
+// Absent means light. It only exists once somebody has been to that page, and
+// Windows treats its absence the same way.
+bool windows_is_light() {
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    const LSTATUS status =
+        RegGetValueW(HKEY_CURRENT_USER,
+                     L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                     L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+    return status != ERROR_SUCCESS || value != 0;
+}
+
 // The cell under a point, in DIPs.
 //
 // Pure, and separate from the window, because this is the half of pointing at
@@ -783,26 +848,32 @@ struct Palette {
     ComPtr<ID2D1SolidColorBrush> scroll_track;
     ComPtr<ID2D1SolidColorBrush> scroll_thumb;
     ComPtr<ID2D1SolidColorBrush> scroll_thumb_active;
+    // The one tone nothing draws with. `Clear` takes a colour rather than a
+    // brush, and keeping it here is what lets the appearance travel as a single
+    // thing: a palette is every colour resolved for one target, and the surface
+    // under them is one of those colours.
+    UINT32 canvas = kLightTones.canvas;
 
-    bool open(ID2D1RenderTarget* target) {
+    bool open(ID2D1RenderTarget* target, const Tones& tones) {
+        canvas = tones.canvas;
         struct Wanted {
             ComPtr<ID2D1SolidColorBrush>* into;
             UINT32 rgb;
             float alpha;
         };
         const Wanted wanted[] = {
-            {&ink, kInk, 1.0f},
-            {&muted, kMutedInk, 1.0f},
-            {&header_ink, kHeaderInk, 1.0f},
-            {&header, kHeaderBand, 1.0f},
-            {&banding, kRule, kBandingAlpha},
-            {&separator, kRule, kSeparatorAlpha},
-            {&selected_row, kAccent, kSelectedRowAlpha},
-            {&selected_cell, kAccent, kSelectedCellAlpha},
-            {&cursor, kAccent, 1.0f},
-            {&scroll_track, kRule, kScrollTrackAlpha},
-            {&scroll_thumb, kRule, kScrollThumbAlpha},
-            {&scroll_thumb_active, kRule, kScrollThumbActiveAlpha},
+            {&ink, tones.ink, 1.0f},
+            {&muted, tones.muted_ink, 1.0f},
+            {&header_ink, tones.header_ink, 1.0f},
+            {&header, tones.header_band, 1.0f},
+            {&banding, tones.rule, tones.banding_alpha},
+            {&separator, tones.rule, tones.separator_alpha},
+            {&selected_row, tones.accent, kSelectedRowAlpha},
+            {&selected_cell, tones.accent, kSelectedCellAlpha},
+            {&cursor, tones.accent, 1.0f},
+            {&scroll_track, tones.rule, tones.scroll_track_alpha},
+            {&scroll_thumb, tones.rule, tones.scroll_thumb_alpha},
+            {&scroll_thumb_active, tones.rule, tones.scroll_thumb_active_alpha},
         };
         for (const Wanted& one : wanted) {
             const HRESULT hr = target->CreateSolidColorBrush(D2D1::ColorF(one.rgb, one.alpha),
@@ -901,7 +972,7 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
         return kHeaderHeight + (static_cast<float>(r) - scroll_row) * kRowHeight;
     };
 
-    target->Clear(D2D1::ColorF(kCanvas));
+    target->Clear(D2D1::ColorF(palette.canvas));
 
     // The order is `GridRenderer.swift`'s, and it is the order rather than a
     // set of layers: banding first so text lands on top of it, separators next,
@@ -1078,7 +1149,7 @@ bool the_grid_draws_a_result() {
     check(!columns[1].numeric, "the name column is not");
 
     Palette palette;
-    if (!palette.open(surface.target.Get())) {
+    if (!palette.open(surface.target.Get(), kLightTones)) {
         return false;
     }
 
@@ -1104,8 +1175,9 @@ bool the_grid_draws_a_result() {
     if (!surface.pixel_at(4.0f, kHeaderHeight - 8.0f, band)) {
         return failed("reading the header band", E_FAIL);
     }
-    check(band[2] == ((kHeaderBand >> 16) & 0xFF) && band[1] == ((kHeaderBand >> 8) & 0xFF)
-              && band[0] == (kHeaderBand & 0xFF),
+    check(band[2] == ((kLightTones.header_band >> 16) & 0xFF)
+              && band[1] == ((kLightTones.header_band >> 8) & 0xFF)
+              && band[0] == (kLightTones.header_band & 0xFF),
           "the header band is the tone Theme.swift names");
 
     BYTE under_header[3] = {};
@@ -1332,8 +1404,8 @@ bool the_grid_draws_a_result() {
     if (!surface.pixel_at(columns[2].x + 0.5f, selected_y, edge)) {
         return failed("reading the cursor edge", E_FAIL);
     }
-    // Measured there, the pixel is 74/67/214 — `kAccent` at 79/70/229 with the
-    // eight percent of the separator that is drawn over it, the order
+    // Measured there, the pixel is 74/67/214 — the light accent at 79/70/229 with
+    // the eight percent of the separator drawn over it, the order
     // `GridRenderer.swift` uses. The cursor cell beside it is 164/161/238 and
     // the rest of the selected row is 216/216/244.
     //
@@ -1516,6 +1588,109 @@ bool the_grid_draws_a_result() {
     }
     check(held[2] < thumb_top[2], "and darkens while it is being dragged");
 
+    // ------------------------------------------------------------------
+    // The other appearance: the same drawing against the other column
+    // ------------------------------------------------------------------
+
+    // Every tone moved. This is the failure the two tables invite — a name added
+    // to one column and left out of the other reads as a grid that is nearly in
+    // dark mode, which is worse than one that is not in it at all, because the
+    // one wrong tone is the one the eye goes to.
+    check(kLightTones.canvas != kDarkTones.canvas
+              && kLightTones.header_band != kDarkTones.header_band
+              && kLightTones.ink != kDarkTones.ink
+              && kLightTones.header_ink != kDarkTones.header_ink
+              && kLightTones.muted_ink != kDarkTones.muted_ink
+              && kLightTones.rule != kDarkTones.rule
+              && kLightTones.accent != kDarkTones.accent,
+          "every colour in the table has an answer for both appearances");
+    // And every alpha, which is the part that looks safe to copy across. Black
+    // at 0.022 over white is a step nobody can see, so the light side is a shade
+    // stronger than its dark counterpart rather than the same number.
+    check(kLightTones.banding_alpha > kDarkTones.banding_alpha
+              && kLightTones.separator_alpha > kDarkTones.separator_alpha
+              && kLightTones.scroll_track_alpha > kDarkTones.scroll_track_alpha
+              && kLightTones.scroll_thumb_alpha < kDarkTones.scroll_thumb_alpha,
+          "and the strengths are the appearance's own rather than copied across");
+
+    Palette dark;
+    if (!dark.open(surface.target.Get(), kDarkTones)) {
+        return false;
+    }
+    surface.canvas = kDarkTones.canvas;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, dark, &selection, 0.0f,
+              false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)) {
+        return failed("ID2D1RenderTarget::EndDraw in dark", hr);
+    }
+
+    BYTE dark_canvas[3] = {};
+    BYTE dark_band[3] = {};
+    BYTE dark_row[3] = {};
+    if (!surface.pixel_at(right + 20.0f, kHeaderHeight + 10.0f, dark_canvas)
+        || !surface.pixel_at(right + 20.0f, 10.0f, dark_band)
+        || !surface.pixel_at(right + 20.0f, kHeaderHeight + kRowHeight + 10.0f, dark_row)) {
+        return failed("reading a dark grid", E_FAIL);
+    }
+    check(dark_canvas[2] < 0x40 && dark_canvas[1] < 0x40 && dark_canvas[0] < 0x60,
+          "the dark canvas is the near-black Surface.canvas names");
+    // Above the canvas, not below it. `Surface.raised` is the surface a thing
+    // sits on top of, and on a dark background "raised" means lighter — the one
+    // relation that inverts, and the reason a second table beats a filter over
+    // the first.
+    check(dark_band[2] > dark_canvas[2] && dark_band[1] > dark_canvas[1]
+              && dark_band[0] > dark_canvas[0],
+          "and the header band is above it rather than below it");
+    // Row 1 is banded. On white the banding darkens; here it has to lighten, or
+    // it is the light table's rule colour laid on the wrong end of the ramp,
+    // which draws nothing at all.
+    check(dark_row[2] > dark_canvas[2] && dark_row[0] > dark_canvas[0],
+          "and the banding lightens the row instead of darkening it");
+
+    // The measure follows the canvas, so this asks the same question the light
+    // checks ask: did the glyphs reach the bitmap.
+    UINT dark_ink = 0;
+    UINT dark_blank = 0;
+    if (!surface.ink_in(0.0f, kHeaderHeight, right, kHeaderHeight + kRowHeight, &dark_ink)
+        || !surface.ink_in(right + 4.0f, kHeaderHeight, static_cast<float>(kWidth)
+                                                           - kScrollbarGutter,
+                           kHeaderHeight + 4.0f * kRowHeight, &dark_blank)) {
+        return failed("reading dark text", E_FAIL);
+    }
+    check(dark_ink > 0, "the values are drawn against the dark canvas");
+    // Paired with the emptiness beside them, because on this canvas the first
+    // question alone is answered by the canvas. A measure that counted dark
+    // pixels instead of distance reports a dark grid as painted edge to edge
+    // and passes the line above for a grid with nothing written on it at all —
+    // measured, by putting that measure back: every other check here stays
+    // green and only this one turns.
+    check(dark_blank == 0, "and the space past the last column is not");
+    // The cursor cell still stands out, which is the thing a translucent accent
+    // over a near-black surface is least likely to manage. Read as blue rising
+    // rather than red falling: over black a tint can only add light, which is
+    // the opposite of the direction the light-mode check reads.
+    BYTE dark_cell[3] = {};
+    if (!surface.pixel_at(columns[2].x + columns[2].width - 4.0f,
+                          kHeaderHeight + kRowHeight + 10.0f, dark_cell)) {
+        return failed("reading a dark cursor cell", E_FAIL);
+    }
+    check(dark_cell[0] > dark_row[0] && dark_cell[0] > dark_cell[2],
+          "and the cursor cell is brighter than its row rather than darker");
+
+    // Back to the appearance the rest of this file measures in, bitmap and all:
+    // the count below is over whatever was drawn last, and read against the
+    // wrong canvas a dark grid answers with nearly every pixel it has.
+    surface.canvas = kLightTones.canvas;
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &selection, 0.0f,
+              false);
+    hr = surface.target->EndDraw();
+    if (FAILED(hr)) {
+        return failed("ID2D1RenderTarget::EndDraw back in light", hr);
+    }
+
     UINT total = 0;
     surface.ink_in(0.0f, 0.0f, static_cast<float>(kWidth), static_cast<float>(kHeight), &total);
     std::string widths;
@@ -1648,6 +1823,38 @@ struct Window {
     // pointer instead of jumping its own leading edge there on the first move.
     bool dragging = false;
     float grab_offset = 0.0f;
+    bool is_light = true;
+
+    const Tones& tones() const { return is_light ? kLightTones : kDarkTones; }
+
+    // The frame as well as the client area. Windows draws the title bar itself,
+    // and a dark grid under a white caption is the half-done version of this
+    // that reads as a bug rather than as a choice.
+    //
+    // Attribute 20, which is what Windows 11 and Windows 10 20H1 onwards use.
+    // Earlier builds took 19 for the same thing; the call simply fails there,
+    // and a light caption on a build that old is the correct outcome anyway.
+    void follow_frame() {
+        const BOOL dark = is_light ? FALSE : TRUE;
+        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    }
+
+    // Windows changed appearance under a running window. The brushes hold their
+    // colours, so they are rebuilt rather than re-tinted — the palette is the
+    // only place these numbers exist once drawing has started.
+    void follow_appearance() {
+        const bool light = windows_is_light();
+        if (light == is_light) {
+            return;
+        }
+        is_light = light;
+        follow_frame();
+        if (target) {
+            palette = Palette();
+            palette.open(target.Get(), tones());
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
 
     size_t rows() const { return columns.empty() ? 0 : columns[0].cells.size(); }
 
@@ -1757,7 +1964,7 @@ struct Window {
         const float dpi = static_cast<float>(GetDpiForWindow(hwnd));
         target->SetDpi(dpi, dpi);
 
-        return palette.open(target.Get());
+        return palette.open(target.Get(), tones());
     }
 
     void paint() {
@@ -1895,6 +2102,17 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     case WM_GETDLGCODE:
         return DLGC_WANTARROWS;
 
+    // Windows announces every setting the same way, so the string is the only
+    // thing that says this one is about colours. Broadcast to every window on
+    // the desktop, which is why the handler re-reads rather than assuming the
+    // appearance is the one that changed.
+    case WM_SETTINGCHANGE:
+        if (lparam != 0
+            && wcscmp(reinterpret_cast<const wchar_t*>(lparam), L"ImmersiveColorSet") == 0) {
+            window->follow_appearance();
+        }
+        return 0;
+
     case WM_KEYDOWN: {
         const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         switch (wparam) {
@@ -2018,6 +2236,10 @@ int show_the_grid_in_a_window() {
         failed("CreateWindowExW", HRESULT_FROM_WIN32(GetLastError()));
         return 1;
     }
+    // Before it is shown, so the caption is the right colour the first time it
+    // is drawn rather than repainting a moment after the window appears.
+    window.is_light = windows_is_light();
+    window.follow_frame();
     ShowWindow(window.hwnd, SW_SHOWNORMAL);
 
     MSG message{};
