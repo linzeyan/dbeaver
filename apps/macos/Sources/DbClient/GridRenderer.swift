@@ -212,46 +212,85 @@ final class GridRenderer {
     }
 
     /// Resolves what each column's header calls its type.
-    ///
-    /// The declared type wins wherever there is one. `numeric(12,2)` and
-    /// `character varying(64)` say what the column was created as — which is
-    /// what decides whether two values compare exactly — and the Arrow schema
-    /// cannot tell `text` from `varchar`, or either from `jsonb`, at all. The
-    /// Arrow kind is the fallback rather than a blank, because a computed column
-    /// has no declaration to show and "what actually arrived" is still a true
-    /// answer. Neither branch can state a type the column does not have, which
-    /// is the only outcome worse than saying nothing.
     private func rebuildTypeLabels(for table: ArrowTable) {
         typeLabels = table.columns.map { column in
-            declaredTypes[column.name].map(Self.shortened) ?? column.kind.label
+            Self.typeLabel(
+                catalogue: declaredTypes[column.name], declared: column.declaredType,
+                kind: column.kind)
         }
     }
 
-    /// PostgreSQL's own short spelling for a declared type.
+    /// One column's type label, from the three sources that can answer, in the
+    /// order they are believed.
     ///
-    /// `format_type` renders the SQL-standard names, and two of those differ
-    /// only past the width a grid column has: `timestamp without time zone` and
-    /// `timestamp with time zone` both truncate to `timestam…`, which is exactly
-    /// the distinction a type label exists to draw. Every rewrite here is an
-    /// alias the server itself accepts — `varchar(64)` and `character
-    /// varying(64)` declare the same column — not an abbreviation invented here.
+    /// **The catalogue first.** A browse is `SELECT *` of a relation, so the
+    /// relation's own declaration describes every column on screen, and it is the
+    /// fuller answer where both exist: DuckDB's `information_schema` says
+    /// `INTEGER[3]`, `STRUCT(qty INTEGER, unit VARCHAR)` and `status` for the
+    /// three columns whose result-side answer is `ARRAY`, `STRUCT` and `ENUM` —
+    /// DuckDB hands a named type's own name to SQL and not to its C API.
+    ///
+    /// **Then what the result declared for itself**, which is the half the
+    /// catalogue cannot reach: a query pane's columns can be expressions, aliases
+    /// and joins across three relations, and no `information_schema` row
+    /// describes them. Before this arrived they fell straight through to the
+    /// Arrow kind, so a `jsonb` column and a `varchar(64)` one both read `utf8`.
+    ///
+    /// **The Arrow kind last**, and as a fallback rather than a blank: a computed
+    /// column has no declaration anywhere, and "what actually arrived" is still a
+    /// true answer about it. What none of the three may do is state a type the
+    /// column does not have, which is the only outcome worse than saying nothing.
+    static func typeLabel(catalogue: String?, declared: String, kind: ArrowTable.Kind) -> String {
+        // Empty is absent. A catalogue that answered with a blank has told us
+        // nothing, and treating it as an answer would put an empty line under a
+        // column name that has a type to show one line further down.
+        if let catalogue, !catalogue.isEmpty { return shortened(catalogue) }
+        if !declared.isEmpty { return shortened(declared) }
+        return kind.label
+    }
+
+    /// A server's own short spelling for a declared type.
+    ///
+    /// The SQL-standard names are what both a catalogue and a result hand over,
+    /// and two of those differ only past the width a grid column has:
+    /// `timestamp without time zone` and `timestamp with time zone` both truncate
+    /// to `timestam…`, which is exactly the distinction a type label exists to
+    /// draw. Every rewrite here is an alias the server itself accepts —
+    /// `varchar(64)` and `character varying(64)` declare the same column — not an
+    /// abbreviation invented here.
+    ///
+    /// Matched without regard to case, and answering in the case it was asked in,
+    /// because the two sources spell the same type differently: PostgreSQL's
+    /// `format_type` renders `timestamp with time zone` and DuckDB's C API
+    /// `TIMESTAMP WITH TIME ZONE`. A rule that read only one of them would leave
+    /// the other truncated — and `TIMESTAMPtz` in a header of `VARCHAR` and
+    /// `DECIMAL` would look like a bug in the shortening rather than a type name.
     private static func shortened(_ declared: String) -> String {
+        let asked = declared.lowercased()
         // The length modifier can sit in the middle of the SQL spelling, as in
         // `timestamp(3) with time zone`, so the suffix is stripped and the base
         // word rewritten around whatever it left behind.
         for (suffix, alias) in [(" without time zone", ""), (" with time zone", "tz")]
-        where declared.hasSuffix(suffix) {
+        where asked.hasSuffix(suffix) {
             let head = String(declared.dropLast(suffix.count))
             guard !alias.isEmpty else { return head }
-            guard let paren = head.firstIndex(of: "(") else { return head + alias }
-            return String(head[..<paren]) + alias + String(head[paren...])
+            let spelled = shouted(head) ? alias.uppercased() : alias
+            guard let paren = head.firstIndex(of: "(") else { return head + spelled }
+            return String(head[..<paren]) + spelled + String(head[paren...])
         }
         for (sql, alias) in [
             ("character varying", "varchar"), ("bit varying", "varbit"), ("character", "char")
-        ] where declared.hasPrefix(sql) {
-            return alias + declared.dropFirst(sql.count)
+        ] where asked.hasPrefix(sql) {
+            let head = declared.prefix(sql.count)
+            return (shouted(head) ? alias.uppercased() : alias) + declared.dropFirst(sql.count)
         }
         return declared
+    }
+
+    /// Whether the part being rewritten was written in capitals, which is what
+    /// the alias replacing it then follows.
+    private static func shouted(_ text: some StringProtocol) -> Bool {
+        text.uppercased() == text
     }
 
     func setColumnWidth(_ width: Float, at index: Int) {

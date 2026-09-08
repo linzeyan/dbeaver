@@ -28,6 +28,16 @@ final class ArrowTable {
         /// for nearly every column, which is why it is a string rather than an
         /// enum — the reader compares it and does not switch on it.
         let valueShape: String
+        /// The type the server declared this column with, or "" where the driver
+        /// had none to give.
+        ///
+        /// The result's own answer, which is the half a catalogue lookup cannot
+        /// reach: a query pane's columns can be expressions and aliases across
+        /// three relations, and no `information_schema` row describes them. Where
+        /// there is a catalogue answer as well it is the better one, for the
+        /// reason `GridRenderer.typeLabel` gives; this is what the header falls
+        /// back to instead of to the name of the buffer the values arrived in.
+        let declaredType: String
         /// Cached per-batch accessors, indexed by batch.
         fileprivate var batches: [ColumnBatch] = []
     }
@@ -201,17 +211,19 @@ final class ArrowTable {
             let declared = Self.declarations(child.pointee.metadata)
             return Column(
                 name: name, kind: Self.kind(of: child),
-                declaredNotNull: declared.notNull, valueShape: declared.valueShape)
+                declaredNotNull: declared.notNull, valueShape: declared.valueShape,
+                declaredType: declared.declaredType)
         }
     }
 
     /// The keys the core writes its field declarations under.
     ///
-    /// Spelled here as well as in `dbconn::DECLARED_NOT_NULL` and
-    /// `dbconn::VALUE_SHAPE` because the C data interface carries no shared
-    /// header for them — the string is the contract.
+    /// Spelled here as well as in `dbconn::DECLARED_NOT_NULL`, `VALUE_SHAPE` and
+    /// `DECLARED_TYPE` because the C data interface carries no shared header for
+    /// them — the string is the contract.
     static let declaredNotNullKey = "dbclient.declared_not_null"
     static let valueShapeKey = "dbclient.value_shape"
+    static let declaredTypeKey = "dbclient.declared_type"
 
     /// The value `valueShapeKey` takes for a column of JSON documents. Matches
     /// `dbconn::SHAPE_JSON`.
@@ -223,6 +235,8 @@ final class ArrowTable {
         var notNull = false
         /// The shape its text values are written in, or "" for no claim.
         var valueShape = ""
+        /// The type it was declared with, or "" for no claim.
+        var declaredType = ""
     }
 
     /// Reads those declarations out of a field's metadata.
@@ -242,8 +256,8 @@ final class ArrowTable {
     /// truncated buffer is corrupt whichever way it is read, and the entries
     /// before the damage were whole.
     ///
-    /// One walk for both keys rather than one per key. The buffer is walked with
-    /// unaligned loads over counted strings, and a second reader of it is a
+    /// One walk for all three keys rather than one per key. The buffer is walked
+    /// with unaligned loads over counted strings, and a second reader of it is a
     /// second chance to mis-step by four bytes and answer a plausible default.
     static func declarations(_ metadata: UnsafePointer<CChar>?) -> Declarations {
         var found = Declarations()
@@ -254,6 +268,7 @@ final class ArrowTable {
         cursor += MemoryLayout<Int32>.size
         var seenNotNull = false
         var seenShape = false
+        var seenType = false
         for _ in 0..<pairs {
             guard let key = takeString(&cursor), let value = takeString(&cursor) else {
                 return found
@@ -267,6 +282,9 @@ final class ArrowTable {
             case valueShapeKey where !seenShape:
                 found.valueShape = value
                 seenShape = true
+            case declaredTypeKey where !seenType:
+                found.declaredType = value
+                seenType = true
             default:
                 continue
             }
