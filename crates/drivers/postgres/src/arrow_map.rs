@@ -13,6 +13,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
+use dbconn::DECLARED_TYPE;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use std::sync::Arc;
@@ -90,18 +91,16 @@ pub struct ColumnType {
     pub modifier: i32,
 }
 
-/// Decimal layout for a NUMERIC column, read from its type modifier.
+/// The precision and scale a NUMERIC column was declared with, or `None` where
+/// it was declared without either.
 ///
-/// `numeric` with no declared precision arrives as -1 and has no scale to read.
-/// A declared layout is used only where Arrow and `rust_decimal` can both
-/// represent it: rescaling below runs through `rust_decimal`, whose own limit
-/// is 28 fractional digits, and PostgreSQL 15 and later allow scales this
-/// cannot express at all (`numeric(10,-2)` rounds to hundreds). Anything
-/// outside that keeps the normalized layout, where the value is still exact.
-fn numeric_layout(modifier: i32) -> (u8, i8) {
-    let normalized = (NUMERIC_PRECISION, NUMERIC_SCALE);
+/// Read once and used for two different answers: the Arrow layout below, which
+/// has to be one this build can hold, and the type name the grid shows, which
+/// has to be what the column actually says. `numeric(10,-2)` is the pair that
+/// pulls them apart — legal to declare, impossible to rescale to.
+fn declared_numeric(modifier: i32) -> Option<(i32, i32)> {
     if modifier < VARHDRSZ {
-        return normalized;
+        return None;
     }
     let packed = modifier - VARHDRSZ;
     let precision = (packed >> 16) & 0xffff;
@@ -113,6 +112,22 @@ fn numeric_layout(modifier: i32) -> (u8, i8) {
     } else {
         raw_scale
     };
+    Some((precision, scale))
+}
+
+/// Decimal layout for a NUMERIC column, read from its type modifier.
+///
+/// `numeric` with no declared precision arrives as -1 and has no scale to read.
+/// A declared layout is used only where Arrow and `rust_decimal` can both
+/// represent it: rescaling below runs through `rust_decimal`, whose own limit
+/// is 28 fractional digits, and PostgreSQL 15 and later allow scales this
+/// cannot express at all (`numeric(10,-2)` rounds to hundreds). Anything
+/// outside that keeps the normalized layout, where the value is still exact.
+fn numeric_layout(modifier: i32) -> (u8, i8) {
+    let normalized = (NUMERIC_PRECISION, NUMERIC_SCALE);
+    let Some((precision, scale)) = declared_numeric(modifier) else {
+        return normalized;
+    };
     let representable = (1..=NUMERIC_PRECISION as i32).contains(&precision)
         && (0..=28).contains(&scale)
         && scale <= precision;
@@ -120,6 +135,46 @@ fn numeric_layout(modifier: i32) -> (u8, i8) {
         (precision as u8, scale as i8)
     } else {
         normalized
+    }
+}
+
+/// What PostgreSQL calls this column's type, for `dbconn::DECLARED_TYPE`.
+///
+/// `pg_type.typname` and not `format_type`'s SQL spelling, because this is the
+/// name the driver has: the result carries an OID and a modifier, and asking
+/// the server to render the pair would be a round trip per statement for a line
+/// of header text. The two disagree on eight of PostgreSQL's built-ins —
+/// `int4` for `integer`, `bpchar` for `character` — so a browse tab and a query
+/// pane can name the same column differently. That is the catalogue being the
+/// better answer where there is one, which is why the grid prefers it; every
+/// name here is still one the server accepts in a cast.
+///
+/// The modifier is where the type is at its most specific, and it is the reason
+/// this is worth carrying at all: `varchar` and `varchar(64)` are one `Utf8` to
+/// Arrow, and the length is the whole of what a person reads the line for.
+pub fn sql_name(column: &ColumnType) -> String {
+    let name = column.pg_type.name();
+    match column.pg_type {
+        // A length subtracted the same way it was added. Both of these can also
+        // arrive undeclared — `varchar` with no length is legal — and then the
+        // modifier is -1 and there is nothing to put in the parentheses.
+        Type::VARCHAR | Type::BPCHAR if column.modifier >= VARHDRSZ => {
+            format!("{name}({})", column.modifier - VARHDRSZ)
+        }
+        Type::NUMERIC => match declared_numeric(column.modifier) {
+            // As declared rather than as laid out: a column declared
+            // `numeric(10,-2)` is stored at scale 10 here, and naming it
+            // `numeric(38,10)` would report this build's fallback as the
+            // server's declaration.
+            Some((precision, scale)) => format!("{name}({precision},{scale})"),
+            None => name.to_string(),
+        },
+        // These carry a fractional-second precision, which is not a length and
+        // so is not offset: `timestamptz(3)` arrives as a plain 3.
+        Type::TIME | Type::TIMESTAMP | Type::TIMESTAMPTZ if column.modifier >= 0 => {
+            format!("{name}({})", column.modifier)
+        }
+        _ => name.to_string(),
     }
 }
 
@@ -156,7 +211,8 @@ pub fn arrow_field(name: &str, column: &ColumnType) -> Result<Field, PgError> {
     };
     // Every column is nullable: PostgreSQL NOT NULL is a constraint we have not
     // read at this point, and claiming non-null wrongly corrupts Arrow buffers.
-    Ok(Field::new(name, dt, true))
+    Ok(Field::new(name, dt, true)
+        .with_metadata([(DECLARED_TYPE.to_string(), sql_name(column))].into()))
 }
 
 /// One builder per column. An enum rather than `Box<dyn ArrayBuilder>` so the
@@ -477,6 +533,89 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f.data_type(), &DataType::Decimal128(12, 2));
+    }
+
+    #[test]
+    fn a_column_carries_what_postgresql_calls_its_type() {
+        // The name a query pane has nothing else to show. Every one of these is
+        // `Utf8` or `Binary` to Arrow, which is what the header said before the
+        // field started carrying this.
+        for (pg, expected) in [
+            (Type::TEXT, "text"),
+            (Type::JSONB, "jsonb"),
+            (Type::JSON, "json"),
+            (Type::UUID, "uuid"),
+            (Type::BYTEA, "bytea"),
+            (Type::VARCHAR, "varchar"),
+            (Type::INT4, "int4"),
+            (Type::TIMESTAMPTZ, "timestamptz"),
+        ] {
+            let field = arrow_field("c", &bare(pg)).unwrap();
+            assert_eq!(
+                field.metadata().get(DECLARED_TYPE).map(String::as_str),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_length_is_part_of_the_name() {
+        // These inputs are derived from the formula, not read off a server, so
+        // this pins the shape of the answer and not the encoding. What holds the
+        // encoding is `a_declared_length_reaches_the_result_as_the_server_packed_it`
+        // in the integration tests, where PostgreSQL does the packing.
+        let cases = [
+            (Type::VARCHAR, 68, "varchar(64)"),
+            (Type::BPCHAR, 14, "bpchar(10)"),
+            // Undeclared length, which is legal for both and is not the same
+            // statement as a length of zero.
+            (Type::VARCHAR, -1, "varchar"),
+            (Type::BPCHAR, -1, "bpchar"),
+        ];
+        for (pg, modifier, expected) in cases {
+            let column = ColumnType {
+                pg_type: pg,
+                modifier,
+            };
+            assert_eq!(sql_name(&column), expected);
+        }
+    }
+
+    #[test]
+    fn a_numeric_is_named_as_declared_and_not_as_laid_out() {
+        // numeric(10,-2) rounds to hundreds, so the Arrow column falls back to
+        // (38,10) — and the name must still say what the column says. This is
+        // the one case where the two answers built from this modifier differ,
+        // which is why they are read through the same unpacking and decided
+        // separately.
+        let column = ColumnType {
+            pg_type: Type::NUMERIC,
+            modifier: 657_410,
+        };
+        assert_eq!(sql_name(&column), "numeric(10,-2)");
+        assert_eq!(numeric_layout(column.modifier), (38, 10));
+
+        let declared = ColumnType {
+            pg_type: Type::NUMERIC,
+            modifier: 786_438,
+        };
+        assert_eq!(sql_name(&declared), "numeric(12,2)");
+        assert_eq!(sql_name(&bare(Type::NUMERIC)), "numeric");
+    }
+
+    #[test]
+    fn a_fractional_second_precision_is_not_offset_like_a_length() {
+        // A time modifier is the precision itself, where a varchar's is the
+        // length plus a header word. Subtracting four here would name
+        // `timestamptz(3)` as `timestamptz(-1)`.
+        for pg in [Type::TIMESTAMP, Type::TIMESTAMPTZ, Type::TIME] {
+            let column = ColumnType {
+                pg_type: pg.clone(),
+                modifier: 3,
+            };
+            assert_eq!(sql_name(&column), format!("{}(3)", pg.name()));
+            assert_eq!(sql_name(&bare(pg.clone())), pg.name());
+        }
     }
 
     #[test]

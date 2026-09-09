@@ -86,6 +86,105 @@ async fn schema_maps_every_column_type() {
     }
 }
 
+/// Every column says what PostgreSQL calls it, which is most of what a query
+/// pane's header has to go on.
+///
+/// Six of these twenty columns are `Utf8` or `Binary` to Arrow — text, hashes,
+/// JSON, a UUID and bytes — so before the field carried this the header called
+/// them all the same thing. The name is `pg_type.typname` and so is the
+/// server's internal spelling: `int4`, not the `integer` a catalogue lookup
+/// answers with. The grid prefers the catalogue where it has one, and this is
+/// what a statement's own columns have instead.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn every_column_says_what_postgresql_calls_it() {
+    let batch = first_rows(1).await;
+    let schema = batch.schema();
+
+    let expected = [
+        ("id", "int4"),
+        ("big_val", "int8"),
+        ("small_val", "int2"),
+        // Declared in the seed and carried through CREATE TABLE AS, which is
+        // also what makes this column `Decimal128(18,4)` above.
+        ("num_val", "numeric(18,4)"),
+        ("real_val", "float4"),
+        ("dbl_val", "float8"),
+        ("flag", "bool"),
+        ("name", "text"),
+        ("hash_hex", "text"),
+        ("uuid_val", "uuid"),
+        ("json_val", "jsonb"),
+        ("bytes_val", "bytea"),
+        ("created_at", "timestamp"),
+        ("created_on", "date"),
+        ("created_time", "time"),
+    ];
+
+    for (name, declared) in expected {
+        let field = schema.field_with_name(name).expect("column missing");
+        assert_eq!(
+            field
+                .metadata()
+                .get(dbconn::DECLARED_TYPE)
+                .map(String::as_str),
+            Some(declared),
+            "declared type for {name}"
+        );
+    }
+}
+
+/// And a declared length or precision comes back as the server packed it.
+///
+/// The modifier encoding is the part of this that can be wrong quietly: a
+/// length carries a four-byte header word that a fractional-second precision
+/// does not, so a single rule for both names `varchar(64)` correctly and
+/// `timestamptz(3)` as `timestamptz(-1)`. The unit tests build their modifiers
+/// from the same formula they check, which cannot catch that — here PostgreSQL
+/// packs them.
+#[tokio::test]
+#[ignore = "requires the benchmark database"]
+async fn a_declared_length_reaches_the_result_as_the_server_packed_it() {
+    let src = connect().await;
+    let stream = src
+        .query(
+            "SELECT 'x'::varchar(64) AS label, \
+             'x'::char(10) AS code, \
+             1.5::numeric(12,2) AS amount, \
+             now()::timestamptz(3) AS seen_at, \
+             now()::timestamp(0) AS logged_at, \
+             'x'::varchar AS unbounded",
+            8192,
+        )
+        .await
+        .expect("query failed");
+
+    let schema = stream.schema();
+    let expected = [
+        ("label", "varchar(64)"),
+        // `char(n)` is SQL's spelling; the server's own name for the type is
+        // `bpchar`, and that is what the result carries.
+        ("code", "bpchar(10)"),
+        ("amount", "numeric(12,2)"),
+        ("seen_at", "timestamptz(3)"),
+        // Zero is a precision somebody asked for, and has to survive as one
+        // rather than reading as the absence below.
+        ("logged_at", "timestamp(0)"),
+        ("unbounded", "varchar"),
+    ];
+    for (name, declared) in expected {
+        let field = schema.field_with_name(name).expect("column missing");
+        assert_eq!(
+            field
+                .metadata()
+                .get(dbconn::DECLARED_TYPE)
+                .map(String::as_str),
+            Some(declared),
+            "declared type for {name}"
+        );
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires the benchmark database"]
 async fn integer_and_text_values_round_trip() {
