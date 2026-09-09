@@ -117,10 +117,10 @@ enum ColumnValueChecks {
     /// the fraction lost.
     @MainActor private static func checkADurationIsWrittenAsASpanAndNotAClock() {
         let spans: [Int64] = [
-            -(838 * 3600 + 59 * 60 + 59) * 1_000_000,
-            (13 * 3600 + 45 * 60 + 56) * 1_000_000 + 123_456,
+            -span(838, 59, 59),
+            span(13, 45, 56, micros: 123_456),
             0,
-            25 * 3600 * 1_000_000,
+            span(25, 0, 0),
             -500_000
         ]
         let table = read(format: "tDu", values: spans)
@@ -147,6 +147,20 @@ enum ColumnValueChecks {
         // column is a plain int32 with no bitmap, which is Arrow for "all
         // present".
         expect(table.isNull(row: 0, column: 1), false, "an ordinary column beside it")
+    }
+
+    /// A span written the way it is read — `838:59:59`, and a fraction where
+    /// there is one — in the microseconds a duration column counts.
+    ///
+    /// A function rather than the arithmetic inline, because an array literal of
+    /// those products cannot be type-checked in reasonable time by the compiler
+    /// on the CI runner: the local toolchain compiles it and the gate does not,
+    /// which is the failure this project keeps CI for. It reads better besides —
+    /// the sum is what the case is about, and nobody should have to do it.
+    private static func span(_ hours: Int64, _ minutes: Int64, _ seconds: Int64, micros: Int64 = 0)
+        -> Int64
+    {
+        (hours * 3600 + minutes * 60 + seconds) * 1_000_000 + micros
     }
 
     // MARK: - Harness
