@@ -732,7 +732,12 @@ enum NestedValueChecks {
 /// what it built would have worse memory discipline than the code it is about.
 /// The one exception is the batch handed to `ArrowTable`, which owns and
 /// deallocates it from the moment it is appended.
-private final class Arena {
+///
+/// Shared with `ColumnValueChecks`, which asks the same reader about the other
+/// half of its job — the values in a column's own buffers rather than the walk
+/// into its children. Two copies of a pointer arena is two places to get the
+/// stride of a buffer wrong.
+final class Arena {
     private var schemas: [UnsafeMutablePointer<ArrowSchema>] = []
     private var arrays: [UnsafeMutablePointer<ArrowArray>] = []
     private var blocks: [UnsafeMutableRawPointer] = []

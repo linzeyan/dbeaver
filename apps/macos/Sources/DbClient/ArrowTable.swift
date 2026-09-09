@@ -43,8 +43,18 @@ final class ArrowTable {
     }
 
     enum Kind {
-        case bool, int16, int32, int64, float32, float64
+        case bool, int8, int16, int32, int64, float32, float64
+        /// The unsigned widths, which are not the signed ones read differently:
+        /// a `BIGINT UNSIGNED` runs to twice `Int64.max`, and reading its top
+        /// half as a signed integer prints a negative number for a column that
+        /// cannot hold one.
+        case uint8, uint16, uint32, uint64
         case utf8, binary
+        /// A span of time rather than a reading on a clock — see `durationText`.
+        case duration
+        /// A column of nothing but NULL. Arrow's null type has no buffers at
+        /// all, which is why `isNull` answers for it by its kind.
+        case null
         case decimal128(precision: Int32, scale: Int32)
         case timestamp(tz: Bool)
         case date32, time64
@@ -58,9 +68,15 @@ final class ArrowTable {
         /// column does.
         var isNumeric: Bool {
             switch self {
-            case .int16, .int32, .int64, .float32, .float64, .decimal128:
+            case .int8, .int16, .int32, .int64, .float32, .float64, .decimal128:
                 return true
-            case .bool, .utf8, .binary, .timestamp, .date32, .time64, .nested, .unsupported:
+            case .uint8, .uint16, .uint32, .uint64:
+                return true
+            // A duration is a magnitude, and it is still not one of these: it is
+            // drawn as `838:59:59`, where lining up the last digits would line
+            // up seconds against minutes.
+            case .bool, .utf8, .binary, .timestamp, .date32, .time64, .duration, .null, .nested,
+                .unsupported:
                 return false
             }
         }
@@ -87,13 +103,20 @@ final class ArrowTable {
         var label: String {
             switch self {
             case .bool: return "bool"
+            case .int8: return "int8"
             case .int16: return "int16"
             case .int32: return "int32"
             case .int64: return "int64"
+            case .uint8: return "uint8"
+            case .uint16: return "uint16"
+            case .uint32: return "uint32"
+            case .uint64: return "uint64"
             case .float32: return "float32"
             case .float64: return "float64"
             case .utf8: return "utf8"
             case .binary: return "binary"
+            case .duration: return "duration"
+            case .null: return "null"
             case .decimal128(let precision, let scale):
                 // The normalized pair is the driver saying it could not read the
                 // declared scale. Printing it would state a precision this
@@ -568,15 +591,26 @@ final class ArrowTable {
     private static func kind(fromFormat f: String) -> Kind {
         switch f {
         case "b": return .bool
+        case "c": return .int8
         case "s": return .int16
         case "i": return .int32
         case "l": return .int64
+        // Arrow spells the unsigned widths as the capitals of the signed ones.
+        case "C": return .uint8
+        case "S": return .uint16
+        case "I": return .uint32
+        case "L": return .uint64
         case "f": return .float32
         case "g": return .float64
         case "u", "U": return .utf8
         case "z", "Z": return .binary
         case "tdD": return .date32
         case "ttu": return .time64
+        // Microseconds only, which is the one unit any driver here sends. The
+        // other three spellings reach `unsupported` and say so, rather than
+        // being read as microseconds and drawn a thousandfold wrong.
+        case "tDu": return .duration
+        case "n": return .null
         default:
             if f.hasPrefix("d:") {
                 // "d:precision,scale" — or "d:precision,scale,bitWidth", which
@@ -674,6 +708,11 @@ private struct ColumnBatch {
     }
 
     func isNull(_ i: Int) -> Bool {
+        // A null column holds nothing else, and it carries no validity buffer to
+        // say so: Arrow's null type has no buffers at all. Read by the rule
+        // below it would report every row as present and draw a blank cell,
+        // which is a value — an empty string — rather than the absence of one.
+        if case .null = kind { return true }
         guard let validity else { return false }
         let bit = offset + i
         return (validity[bit / 8] >> UInt8(bit % 8)) & 1 == 0
@@ -686,8 +725,25 @@ private struct ColumnBatch {
         case .bool:
             guard let b = buffer1?.assumingMemoryBound(to: UInt8.self) else { return "" }
             return (b[idx / 8] >> UInt8(idx % 8)) & 1 == 1 ? "true" : "false"
+        case .int8:
+            return String(load(Int8.self, idx))
         case .int16:
             return String(load(Int16.self, idx))
+        case .uint8:
+            return String(load(UInt8.self, idx))
+        case .uint16:
+            return String(load(UInt16.self, idx))
+        case .uint32:
+            return String(load(UInt32.self, idx))
+        case .uint64:
+            return String(load(UInt64.self, idx))
+        case .duration:
+            return Self.durationText(micros: load(Int64.self, idx))
+        case .null:
+            // Unreachable: every row of a null column is null and `isNull`
+            // above has already answered. Here so that a kind added to the
+            // enum cannot quietly fall into another case's reading.
+            return ""
         case .int32, .date32:
             let v = load(Int32.self, idx)
             if case .date32 = kind { return Self.dateText(days: v) }
@@ -913,7 +969,13 @@ private struct ColumnBatch {
     /// double and lose the exactness the column was declared for.
     private func scalarJSON(at i: Int) -> String {
         switch kind {
-        case .bool, .int16, .int32, .int64:
+        case .bool, .int8, .int16, .int32, .int64:
+            return text(at: i)
+        // Bare like the signed widths. A `uint64` past `Int64.max` is written
+        // out in full, which is a number JSON's grammar takes and a reader
+        // parsing into a signed 64-bit integer will refuse — the honest failure,
+        // against a quoted string that every reader would take as text.
+        case .uint8, .uint16, .uint32, .uint64:
             return text(at: i)
         case .float32, .float64:
             let written = text(at: i)
@@ -986,6 +1048,32 @@ private struct ColumnBatch {
     private static func timeText(micros: Int64) -> String {
         let s = micros / 1_000_000
         return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+    }
+
+    /// A span of time, which is not a reading on a clock.
+    ///
+    /// MySQL's `TIME` is what reaches here: a signed interval running to
+    /// ±838:59:59 — `TIMEDIFF()` returns one — which is why the driver maps it
+    /// to a duration and not to `time64`, elapsed time since midnight, with no
+    /// sign and nothing past 24 hours. So the hours are neither taken modulo a
+    /// day nor capped at two digits: the third digit is the value, and the minus
+    /// sign is a direction rather than a defect.
+    ///
+    /// The fraction is written only when there is one. A `TIME(6)` column of
+    /// whole seconds would otherwise be six columns of zeros in every row,
+    /// pushing the part that differs off the width the values need.
+    private static func durationText(micros: Int64) -> String {
+        // Magnitude rather than `abs`, which traps on `Int64.min` — a value no
+        // server sends and every buffer can hold.
+        let total = micros.magnitude
+        let seconds = total / 1_000_000
+        let span =
+            (micros < 0 ? "-" : "")
+            + String(
+                format: "%02llu:%02llu:%02llu",
+                seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+        let fraction = total % 1_000_000
+        return fraction == 0 ? span : span + String(format: ".%06llu", fraction)
     }
 
     private static func timestampText(micros: Int64) -> String {

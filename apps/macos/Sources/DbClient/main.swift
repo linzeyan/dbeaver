@@ -75,7 +75,8 @@ let reconnectTo = argument("--reconnect")
 // `--verify-browse-state`, `--verify-history`, `--verify-progressive`,
 // `--verify-filter-rows`,
 // `--verify-metadata`,
-// `--verify-schema-metadata`, `--verify-nested`, `--verify-import`, `--verify-fk-nav`,
+// `--verify-schema-metadata`, `--verify-nested`, `--verify-column-values`,
+// `--verify-import`, `--verify-fk-nav`,
 // `--verify-grid-find`, `--verify-processes`, `--verify-variables`,
 // `--verify-login-info`,
 // `--verify-relation-change`, `--verify-database-change`, `--verify-new-table`,
@@ -134,6 +135,9 @@ if CommandLine.arguments.contains("--verify-schema-metadata") {
 }
 if CommandLine.arguments.contains("--verify-nested") {
     exit(NestedValueChecks.run() ? 0 : 1)
+}
+if CommandLine.arguments.contains("--verify-column-values") {
+    exit(ColumnValueChecks.run() ? 0 : 1)
 }
 if CommandLine.arguments.contains("--verify-fk-nav") {
     exit(FKNavigationChecks.run() ? 0 : 1)
