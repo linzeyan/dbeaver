@@ -66,10 +66,11 @@ use arrow::datatypes::{DataType, Field, TimeUnit, i256};
 use chrono::{Datelike, NaiveDate};
 use mysql_async::Value;
 use mysql_async::consts::{ColumnFlags, ColumnType as WireType};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::MySqlError;
-use dbconn::DECLARED_NOT_NULL;
+use dbconn::{DECLARED_NOT_NULL, DECLARED_TYPE};
 
 /// The `binary` character set. The documented way to tell `BINARY` from `CHAR`,
 /// `VARBINARY` from `VARCHAR` and the `BLOB` family from the `TEXT` family,
@@ -143,6 +144,150 @@ fn decimal_layout(column: &ColumnType) -> (u8, i8) {
     // disagreed with the arithmetic above would otherwise take the whole result
     // down at builder construction rather than at the one cell involved.
     (precision.max(scale), scale as i8)
+}
+
+/// The largest a `TINYTEXT` or `TINYBLOB` can be, in characters.
+const TINY_MAX: u32 = 255;
+/// And a `TEXT` or `BLOB`.
+const TEXT_MAX: u32 = 65_535;
+/// And a `MEDIUMTEXT` or `MEDIUMBLOB`. Anything above is the `LONG` member.
+const MEDIUM_MAX: u32 = 16_777_215;
+
+/// The most bytes any character set can spend on one character, which is
+/// `utf8mb4`'s four.
+const MAX_CHAR_BYTES: u32 = 4;
+
+/// What MySQL calls this column's type, for `dbconn::DECLARED_TYPE`.
+///
+/// Rebuilt from the column definition rather than asked for, because the wire
+/// carries no type name — `MYSQL_TYPE_STRING` is `CHAR`, `BINARY`, `ENUM` and
+/// `SET`, and which one it is comes from the flags and the character set. Every
+/// name here is one the server accepts in a `CREATE TABLE`.
+///
+/// Worth carrying for a reason the other drivers do not have: `UNSIGNED` is a
+/// property of the *column* and Arrow has no way to say it about a result whose
+/// values all fit in the signed half. A `BIGINT UNSIGNED` id column reads as
+/// `uint64` only once a row over `i64::MAX` arrives, and until then the header
+/// is the only place the declaration exists.
+fn sql_name(column: &ColumnType) -> String {
+    let unsigned = if column.is_unsigned() {
+        " UNSIGNED"
+    } else {
+        ""
+    };
+    match column.wire {
+        WireType::MYSQL_TYPE_NULL => "NULL".to_string(),
+
+        WireType::MYSQL_TYPE_TINY => format!("TINYINT{unsigned}"),
+        WireType::MYSQL_TYPE_SHORT => format!("SMALLINT{unsigned}"),
+        WireType::MYSQL_TYPE_INT24 => format!("MEDIUMINT{unsigned}"),
+        WireType::MYSQL_TYPE_LONG => format!("INT{unsigned}"),
+        WireType::MYSQL_TYPE_LONGLONG => format!("BIGINT{unsigned}"),
+        // The display width `column_length` carries for the integers above is
+        // not part of the type: MySQL 8.0.17 deprecated it and 8.4 no longer
+        // shows it, so `INT(11)` would name a spelling the server has stopped
+        // using for a column declared `INT`.
+
+        // Reported with the unsigned flag set, and neither takes the keyword:
+        // `YEAR UNSIGNED` and `BIT(8) UNSIGNED` are not types.
+        WireType::MYSQL_TYPE_YEAR => "YEAR".to_string(),
+        WireType::MYSQL_TYPE_BIT => format!("BIT({})", column.length),
+
+        // `decimals` is 31 here, MySQL's way of saying the column declared no
+        // scale, so there is nothing to put in parentheses.
+        WireType::MYSQL_TYPE_FLOAT => format!("FLOAT{unsigned}"),
+        WireType::MYSQL_TYPE_DOUBLE => format!("DOUBLE{unsigned}"),
+
+        WireType::MYSQL_TYPE_NEWDECIMAL | WireType::MYSQL_TYPE_DECIMAL => {
+            let (precision, scale) = decimal_layout(column);
+            format!("DECIMAL({precision},{scale}){unsigned}")
+        }
+
+        WireType::MYSQL_TYPE_DATE | WireType::MYSQL_TYPE_NEWDATE => "DATE".to_string(),
+        WireType::MYSQL_TYPE_DATETIME | WireType::MYSQL_TYPE_DATETIME2 => {
+            with_fraction("DATETIME", column)
+        }
+        WireType::MYSQL_TYPE_TIMESTAMP | WireType::MYSQL_TYPE_TIMESTAMP2 => {
+            with_fraction("TIMESTAMP", column)
+        }
+        WireType::MYSQL_TYPE_TIME | WireType::MYSQL_TYPE_TIME2 => with_fraction("TIME", column),
+
+        // Both arrive as strings with a flag set. The members are not on the
+        // wire — only in the catalog, which is where a browse reads them — so
+        // this says the family and the grid prefers the catalogue's fuller
+        // answer wherever there is one.
+        WireType::MYSQL_TYPE_ENUM => "ENUM".to_string(),
+        WireType::MYSQL_TYPE_SET => "SET".to_string(),
+        WireType::MYSQL_TYPE_STRING if column.flags.contains(ColumnFlags::ENUM_FLAG) => {
+            "ENUM".to_string()
+        }
+        WireType::MYSQL_TYPE_STRING if column.flags.contains(ColumnFlags::SET_FLAG) => {
+            "SET".to_string()
+        }
+
+        WireType::MYSQL_TYPE_STRING => sized(column, "BINARY", "CHAR"),
+        WireType::MYSQL_TYPE_VAR_STRING | WireType::MYSQL_TYPE_VARCHAR => {
+            sized(column, "VARBINARY", "VARCHAR")
+        }
+
+        WireType::MYSQL_TYPE_TINY_BLOB
+        | WireType::MYSQL_TYPE_MEDIUM_BLOB
+        | WireType::MYSQL_TYPE_LONG_BLOB
+        | WireType::MYSQL_TYPE_BLOB => blob_family(column),
+
+        WireType::MYSQL_TYPE_JSON => "JSON".to_string(),
+        // One wire type for `POINT`, `POLYGON` and the rest; the definition does
+        // not say which, so neither does this.
+        WireType::MYSQL_TYPE_GEOMETRY => "GEOMETRY".to_string(),
+
+        // Reached only by a type `arrow_field` refuses below, which fails the
+        // whole result rather than reaching a header.
+        _ => String::new(),
+    }
+}
+
+/// A temporal type with the fractional-second precision it declared, if any.
+fn with_fraction(name: &str, column: &ColumnType) -> String {
+    if column.decimals == 0 {
+        name.to_string()
+    } else {
+        format!("{name}({})", column.decimals)
+    }
+}
+
+/// `CHAR`/`VARCHAR`, or their binary counterparts with the length they declared.
+///
+/// The length is printed only for the binary pair, and the reason is measured:
+/// `column_length` is a byte count *after* conversion to the connection's
+/// character set, so a `VARCHAR(64)` on a `utf8mb4` connection reports 256 —
+/// and a column declared `CHARACTER SET latin1` reports 256 as well, because
+/// the server converts it on the way out. Dividing by four would be right for
+/// both of those and wrong on a connection that negotiated anything else, so
+/// the length is left to the catalogue, which has the declaration itself.
+/// `binary` spends one byte per character, so there the number is the
+/// declaration.
+fn sized(column: &ColumnType, binary: &str, text: &str) -> String {
+    if column.is_binary() {
+        format!("{binary}({})", column.length)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Which of the four sizes of `TEXT` or `BLOB` this is.
+///
+/// They share one wire type and differ only in `column_length`, which is a byte
+/// count that may have been multiplied by up to four on the way out. A byte
+/// count can only have come from the smallest family whose maximum could hold
+/// it at four bytes per character: the four maxima are far enough apart that no
+/// multiple of one reaches the next.
+fn blob_family(column: &ColumnType) -> String {
+    let member = [(TINY_MAX, "TINY"), (TEXT_MAX, ""), (MEDIUM_MAX, "MEDIUM")]
+        .into_iter()
+        .find(|(max, _)| column.length <= max.saturating_mul(MAX_CHAR_BYTES))
+        .map_or("LONG", |(_, member)| member);
+    let family = if column.is_binary() { "BLOB" } else { "TEXT" };
+    format!("{member}{family}")
 }
 
 pub fn arrow_field(name: &str, column: &ColumnType) -> Result<Field, MySqlError> {
@@ -240,11 +385,11 @@ pub fn arrow_field(name: &str, column: &ColumnType) -> Result<Field, MySqlError>
     // rather than merely optimistic. The declaration still has to reach the
     // grid, which draws a substituted NULL differently from a real one, so it
     // travels beside the buffer instead of in it.
-    let field = Field::new(name, dt, true);
+    let mut metadata = HashMap::from([(DECLARED_TYPE.to_string(), sql_name(column))]);
     if column.flags.contains(ColumnFlags::NOT_NULL_FLAG) {
-        return Ok(field.with_metadata([(DECLARED_NOT_NULL.to_string(), "1".to_string())].into()));
+        metadata.insert(DECLARED_NOT_NULL.to_string(), "1".to_string());
     }
-    Ok(field)
+    Ok(Field::new(name, dt, true).with_metadata(metadata))
 }
 
 fn int(column: &ColumnType, signed: DataType, unsigned: DataType) -> DataType {
@@ -923,7 +1068,138 @@ mod tests {
         );
 
         let nullable = column(WireType::MYSQL_TYPE_LONG, 0, 63, 11, 0);
-        assert!(arrow_field("c", &nullable).unwrap().metadata().is_empty());
+        assert!(
+            arrow_field("c", &nullable)
+                .unwrap()
+                .metadata()
+                .get(DECLARED_NOT_NULL)
+                .is_none()
+        );
+    }
+
+    /// Every column says what MySQL calls it, rebuilt from a definition that
+    /// carries no name.
+    ///
+    /// The lengths and flags here are what MySQL 8.4 actually sent for a table
+    /// declared with these types — read off the wire once and written down —
+    /// because every one of them is a number this file has to interpret rather
+    /// than repeat.
+    #[test]
+    fn a_column_is_named_the_way_mysql_declares_it() {
+        let cases = [
+            // `UNSIGNED` is the fact this carries that Arrow cannot: a BIGINT
+            // UNSIGNED column of small values is an int64 like any other.
+            (
+                column(WireType::MYSQL_TYPE_LONGLONG, UNSIGNED, 63, 20, 0),
+                "BIGINT UNSIGNED",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_TINY, UNSIGNED, 63, 3, 0),
+                "TINYINT UNSIGNED",
+            ),
+            (column(WireType::MYSQL_TYPE_LONG, 0, 63, 11, 0), "INT"),
+            (column(WireType::MYSQL_TYPE_INT24, 0, 63, 9, 0), "MEDIUMINT"),
+            // Both arrive with the unsigned flag set and neither takes the word.
+            (
+                column(WireType::MYSQL_TYPE_YEAR, UNSIGNED, 63, 4, 0),
+                "YEAR",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_BIT, UNSIGNED, 63, 8, 0),
+                "BIT(8)",
+            ),
+            // 31 decimals is MySQL for "no scale was declared".
+            (column(WireType::MYSQL_TYPE_FLOAT, 0, 63, 12, 31), "FLOAT"),
+            (
+                column(WireType::MYSQL_TYPE_NEWDECIMAL, 0, 63, 12, 2),
+                "DECIMAL(10,2)",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_DATETIME, 0, 63, 23, 3),
+                "DATETIME(3)",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_DATETIME, 0, 63, 19, 0),
+                "DATETIME",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_TIMESTAMP, 0, 63, 26, 6),
+                "TIMESTAMP(6)",
+            ),
+            (column(WireType::MYSQL_TYPE_TIME, 0, 63, 13, 2), "TIME(2)"),
+            // One wire type for four SQL types; the flags and the character set
+            // are what tell them apart.
+            (
+                column(WireType::MYSQL_TYPE_STRING, ENUM, UTF8MB4, 4, 0),
+                "ENUM",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_STRING, SET, UTF8MB4, 12, 0),
+                "SET",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_STRING, 0, UTF8MB4, 40, 0),
+                "CHAR",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_STRING, 0, 63, 16, 0),
+                "BINARY(16)",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_VAR_STRING, 0, UTF8MB4, 256, 0),
+                "VARCHAR",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_VAR_STRING, 0, 63, 255, 0),
+                "VARBINARY(255)",
+            ),
+            (
+                column(WireType::MYSQL_TYPE_JSON, 0, 63, u32::MAX, 0),
+                "JSON",
+            ),
+            (plain(WireType::MYSQL_TYPE_GEOMETRY), "GEOMETRY"),
+            (plain(WireType::MYSQL_TYPE_NULL), "NULL"),
+        ];
+        for (column, expected) in cases {
+            assert_eq!(
+                arrow_field("c", &column)
+                    .unwrap()
+                    .metadata()
+                    .get(DECLARED_TYPE)
+                    .map(String::as_str),
+                Some(expected),
+                "{column:?}"
+            );
+        }
+    }
+
+    /// The four sizes of TEXT and BLOB share a wire type and are told apart by
+    /// a byte count that has already been multiplied by the character set.
+    ///
+    /// The lengths are again MySQL 8.4's own, and the two columns of this table
+    /// are the same four families read through a four-byte character set and
+    /// through `binary`. A rule that divided by four would name `BLOB`, whose
+    /// 65535 bytes are 65535 bytes, a `TINYBLOB`.
+    #[test]
+    fn the_size_of_a_text_or_blob_is_read_back_out_of_its_byte_count() {
+        let cases = [
+            (UTF8MB4, 1020_u32, "TINYTEXT"),
+            (UTF8MB4, 262_140, "TEXT"),
+            (UTF8MB4, 67_108_860, "MEDIUMTEXT"),
+            (UTF8MB4, u32::MAX, "LONGTEXT"),
+            (BINARY_CHARSET, 255, "TINYBLOB"),
+            (BINARY_CHARSET, 65_535, "BLOB"),
+            (BINARY_CHARSET, 16_777_215, "MEDIUMBLOB"),
+            (BINARY_CHARSET, u32::MAX, "LONGBLOB"),
+        ];
+        for (charset, length, expected) in cases {
+            let c = column(WireType::MYSQL_TYPE_BLOB, 0, charset, length, 0);
+            assert_eq!(
+                sql_name(&c),
+                expected,
+                "{length} bytes in charset {charset}"
+            );
+        }
     }
 
     #[test]

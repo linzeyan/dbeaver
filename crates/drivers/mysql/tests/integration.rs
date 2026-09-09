@@ -1242,6 +1242,83 @@ async fn every_column_arrives_as_the_arrow_type_it_was_mapped_to() {
     assert_eq!(of("t_geom"), DataType::Binary);
 }
 
+/// And every column says what MySQL declared it, rebuilt from a definition
+/// packet that carries no type name.
+///
+/// This is where the numbers the unit tests are written against come from. Each
+/// of them — a decimal's printed width, a fractional-second precision, a byte
+/// count already multiplied by the character set — is a field this driver has to
+/// interpret rather than repeat, and a rule built on the wrong reading of one
+/// would still produce a plausible name. Only the server can say which reading
+/// is right.
+#[tokio::test]
+#[ignore = "requires a MySQL server"]
+async fn every_column_says_what_mysql_declared_it() {
+    let source = source().await;
+    let (schema, _) = types(&source).await;
+    let declared = |name: &str| {
+        schema
+            .field_with_name(name)
+            .unwrap_or_else(|_| panic!("{name} should be in the result"))
+            .metadata()
+            .get(dbconn::DECLARED_TYPE)
+            .cloned()
+            .unwrap_or_default()
+    };
+
+    // The fact Arrow cannot carry: these are int64 columns until a row above
+    // i64::MAX arrives, and the declaration is where the difference lives.
+    assert_eq!(declared("t_bigint"), "BIGINT");
+    assert_eq!(declared("t_bigint_u"), "BIGINT UNSIGNED");
+    assert_eq!(declared("t_mediumint_u"), "MEDIUMINT UNSIGNED");
+    assert_eq!(declared("t_int"), "INT");
+    // BOOL is a synonym MySQL does not keep: the column is a TINYINT, and the
+    // display width the two of these were declared with is not part of the type.
+    assert_eq!(declared("t_bool"), "TINYINT");
+    assert_eq!(declared("t_tinyint1"), "TINYINT");
+
+    assert_eq!(declared("t_float"), "FLOAT");
+    assert_eq!(declared("t_dec_small"), "DECIMAL(10,2)");
+    assert_eq!(declared("t_dec_wide"), "DECIMAL(65,30)");
+    assert_eq!(declared("t_dec_zero"), "DECIMAL(12,0)");
+    assert_eq!(declared("t_dec_u"), "DECIMAL(9,3) UNSIGNED");
+
+    assert_eq!(declared("t_date"), "DATE");
+    assert_eq!(declared("t_datetime"), "DATETIME");
+    assert_eq!(declared("t_datetime6"), "DATETIME(6)");
+    assert_eq!(declared("t_timestamp6"), "TIMESTAMP(6)");
+    assert_eq!(declared("t_time6"), "TIME(6)");
+    // Both arrive with the unsigned flag set, and neither takes the keyword.
+    assert_eq!(declared("t_year"), "YEAR");
+    assert_eq!(declared("t_bit17"), "BIT(17)");
+
+    // A length printed only where the wire's byte count is the declared one.
+    // `t_varchar` is VARCHAR(100) and reports 400 bytes on a utf8mb4
+    // connection — and would report 400 for a latin1 column too, because the
+    // server converts on the way out.
+    assert_eq!(declared("t_char"), "CHAR");
+    assert_eq!(declared("t_varchar"), "VARCHAR");
+    assert_eq!(declared("t_binary"), "BINARY(8)");
+    assert_eq!(declared("t_varbinary"), "VARBINARY(100)");
+
+    // Four sizes behind one wire type, told apart by that same byte count.
+    assert_eq!(declared("t_tinytext"), "TINYTEXT");
+    assert_eq!(declared("t_text"), "TEXT");
+    assert_eq!(declared("t_mediumtext"), "MEDIUMTEXT");
+    assert_eq!(declared("t_longtext"), "LONGTEXT");
+    assert_eq!(declared("t_tinyblob"), "TINYBLOB");
+    assert_eq!(declared("t_blob"), "BLOB");
+    assert_eq!(declared("t_mediumblob"), "MEDIUMBLOB");
+    assert_eq!(declared("t_longblob"), "LONGBLOB");
+
+    // The flag word again: both of these are MYSQL_TYPE_STRING like t_char.
+    assert_eq!(declared("t_enum"), "ENUM");
+    assert_eq!(declared("t_set"), "SET");
+
+    assert_eq!(declared("t_json"), "JSON");
+    assert_eq!(declared("t_geom"), "GEOMETRY");
+}
+
 #[tokio::test]
 #[ignore = "requires a MySQL server"]
 async fn the_values_at_the_extremes_arrive_intact() {
