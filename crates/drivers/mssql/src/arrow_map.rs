@@ -31,6 +31,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, TimeUnit};
 use arrow::temporal_conversions::{date32_to_datetime, time64us_to_time, timestamp_us_to_datetime};
+use dbconn::DECLARED_TYPE;
 use std::sync::Arc;
 use tiberius::numeric::Numeric;
 use tiberius::time::{Date, DateTime, DateTime2, SmallDateTime, Time};
@@ -85,6 +86,9 @@ pub struct ColumnLayout {
     pub decimal: Option<(u8, i8)>,
     /// The CLR type name, for a `Udt` column only.
     pub udt: Option<String>,
+    /// What the server calls this column's type, for `dbconn::DECLARED_TYPE`.
+    /// Absent for a statement the server would not describe.
+    pub declared: Option<String>,
 }
 
 impl ColumnLayout {
@@ -187,7 +191,23 @@ pub fn arrow_field(name: &str, column: &ColumnLayout) -> Result<Field, MsSqlErro
     };
     // Every field is nullable. NOT NULL is a constraint this path has not read,
     // and claiming non-null without it corrupts Arrow's validity buffers.
-    Ok(Field::new(name, dt, true))
+    let field = Field::new(name, dt, true);
+    // The declaration passed through as the server spells it, including the
+    // names this mapping deliberately does not follow: `rowversion` describes as
+    // `timestamp`, which it is not — but that is what a `CAST` here would have to
+    // be written with, and correcting the server's vocabulary would put a word in
+    // the header that no statement against this database can use.
+    //
+    // A name of no characters is no name: the key is left out, so that a reader
+    // asking whether the column was declared gets "no" rather than an answer of
+    // zero length. One place decides that, here, rather than at each site that
+    // could hand one over.
+    Ok(match column.declared.as_deref().filter(|d| !d.is_empty()) {
+        Some(declared) => {
+            field.with_metadata([(DECLARED_TYPE.to_string(), declared.to_string())].into())
+        }
+        None => field,
+    })
 }
 
 /// One builder per column. An enum rather than `Box<dyn ArrayBuilder>` so the
@@ -649,6 +669,7 @@ mod tests {
             column_type,
             decimal: None,
             udt: None,
+            declared: None,
         }
     }
 
@@ -869,6 +890,7 @@ mod tests {
             column_type: ColumnType::Decimaln,
             decimal: Some((18, 4)),
             udt: None,
+            declared: None,
         };
         assert_eq!(
             arrow_field("credit_limit", &declared).unwrap().data_type(),
@@ -884,6 +906,66 @@ mod tests {
                 .data_type(),
             &DataType::Decimal128(NUMERIC_PRECISION, NUMERIC_SCALE)
         );
+    }
+
+    /// The name the server gave, carried through untouched.
+    ///
+    /// Untouched is the decision: every one of these is a spelling this mapping
+    /// does not itself use — `nvarchar` and `varchar` share one Arrow type,
+    /// `timestamp` is what `rowversion` describes as and is not a time at all,
+    /// and `sql_variant` has no single type by definition. Rewriting any of them
+    /// into what the column became would replace the declaration with this
+    /// file's reading of it, and the declaration is the half a reader cannot get
+    /// anywhere else.
+    #[test]
+    fn the_field_carries_what_the_server_calls_the_column() {
+        for (column_type, declared) in [
+            (ColumnType::NVarchar, "nvarchar(100)"),
+            (ColumnType::BigVarChar, "varchar(16)"),
+            (ColumnType::Decimaln, "decimal(18,4)"),
+            (ColumnType::BigBinary, "timestamp"),
+            (ColumnType::SSVariant, "sql_variant"),
+        ] {
+            let field = arrow_field(
+                "c",
+                &ColumnLayout {
+                    column_type,
+                    decimal: Some((18, 4)),
+                    udt: None,
+                    declared: Some(declared.to_string()),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                field.metadata().get(DECLARED_TYPE),
+                Some(&declared.to_string())
+            );
+        }
+    }
+
+    /// A statement the server would not describe has no declaration to state,
+    /// and the key is absent rather than present and empty.
+    ///
+    /// An empty value is a label: it reaches the grid as an answer and draws a
+    /// blank type row, which claims the column was declared with no type. Absent
+    /// is what makes the reader fall back to what actually arrived. A name of no
+    /// characters is the same nothing arriving by a different route, and is
+    /// turned into the same absence here.
+    #[test]
+    fn an_undescribed_column_states_no_type_at_all() {
+        for declared in [None, Some(String::new())] {
+            let field = arrow_field(
+                "c",
+                &ColumnLayout {
+                    column_type: ColumnType::Int4,
+                    decimal: None,
+                    udt: None,
+                    declared,
+                },
+            )
+            .unwrap();
+            assert!(field.metadata().get(DECLARED_TYPE).is_none());
+        }
     }
 
     #[test]
@@ -902,6 +984,7 @@ mod tests {
             column_type: ColumnType::Udt,
             decimal: None,
             udt: Some(type_name.to_string()),
+            declared: None,
         }
     }
 

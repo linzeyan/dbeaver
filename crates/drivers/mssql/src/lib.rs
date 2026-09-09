@@ -1047,8 +1047,9 @@ impl MsSqlSource {
 
 /// What the server said about a statement before it ran.
 ///
-/// Two questions in one round trip: what precision does each decimal column
-/// have, and does the statement produce a result set at all.
+/// Three questions in one round trip: what precision does each decimal column
+/// have, what does the server call each column's type, and does the statement
+/// produce a result set at all.
 enum Described {
     Columns(Vec<DescribedColumn>),
     /// The server would not analyse the statement. That is ordinary — a batch
@@ -1058,11 +1059,17 @@ enum Described {
     Unknown,
 }
 
-/// One column of a described statement. Only the decimal layout is kept — every
-/// other question about a column is answered by `COLMETADATA`, which describes
-/// the result that actually arrived rather than the one the server predicted.
+/// One column of a described statement: the decimal layout, and what the server
+/// calls the column's type.
+///
+/// Nothing else is kept — every other question about a column is answered by
+/// `COLMETADATA`, which describes the result that actually arrived rather than
+/// the one the server predicted.
 struct DescribedColumn {
     decimal: Option<(u8, i8)>,
+    /// `system_type_name`, which is SQL Server's own spelling of the
+    /// declaration: `nvarchar(100)`, `decimal(18,4)`, `varbinary(max)`.
+    declared: Option<String>,
 }
 
 /// Asks the server to describe a statement without running it.
@@ -1072,6 +1079,12 @@ struct DescribedColumn {
 /// before the first row arrives. This is where they come from. It also answers
 /// whether the statement returns rows at all, which decides whether the count
 /// reported afterwards is rows changed or rows produced.
+///
+/// And it is where the type name comes from, for the reason it is worth a column
+/// in a query already being sent: `system_type_name` is the server spelling out
+/// the declaration — `nvarchar(100)` rather than the `NVarchar` token tiberius
+/// carries, which says neither the length nor which of `char`, `varchar`,
+/// `nchar` and `nvarchar` was written down.
 ///
 /// A statement the server declines to analyse — a batch that builds a temp table
 /// and selects from it is the common case — answers `Unknown`, and so does a
@@ -1089,7 +1102,7 @@ async fn describe_statement(client: &mut Tds, sql: &str) -> Described {
     // No `is_hidden` filter: browse information is off, so the server adds no
     // hidden columns, and a `WHERE` here would also drop the rows that carry the
     // error number this has to see.
-    let query = "SELECT r.precision, r.scale, r.error_number \
+    let query = "SELECT r.precision, r.scale, r.error_number, r.system_type_name \
                  FROM sys.dm_exec_describe_first_result_set(@P1, NULL, 0) AS r \
                  ORDER BY r.column_ordinal";
     let Ok(stream) = client.query(query, &[&sql]).await else {
@@ -1117,6 +1130,7 @@ async fn describe_statement(client: &mut Tds, sql: &str) -> Described {
         let scale: Option<u8> = row.get(1);
         columns.push(DescribedColumn {
             decimal: decimal_layout(precision, scale),
+            declared: row.get::<&str, _>(3).map(str::to_string),
         });
     }
     Described::Columns(columns)
@@ -1147,11 +1161,18 @@ impl Described {
         }
     }
 
-    /// The declared decimal layout of each column, by position.
-    fn decimals(&self) -> Vec<Option<(u8, i8)>> {
+    /// What the server said about each column, by position — and nothing at all
+    /// unless it described exactly as many columns as arrived.
+    ///
+    /// The count is the only check available that the two views are of the same
+    /// result. A batch describes only its first result set, so
+    /// `SELECT id FROM t; SELECT name, code FROM t` is described as one column
+    /// wide; position 0 of that answer is `id`, and reading it as `name` would
+    /// name an `nvarchar` column `int` and hand a scale to the wrong decimal.
+    fn per_column(&self, arrived: usize) -> &[DescribedColumn] {
         match self {
-            Described::Columns(columns) => columns.iter().map(|c| c.decimal).collect(),
-            Described::Unknown => Vec::new(),
+            Described::Columns(columns) if columns.len() == arrived => columns,
+            _ => &[],
         }
     }
 }
@@ -1238,22 +1259,27 @@ async fn read(
         return Ok(());
     }
 
-    let decimals = described.decimals();
     let mut stream = session.client.simple_query(sql).await?;
     let columns = stream.columns().await?.unwrap_or_default().to_vec();
+    let described = described.per_column(columns.len());
     let layouts: Vec<ColumnLayout> = columns
         .iter()
         .enumerate()
         .map(|(i, c)| ColumnLayout {
             column_type: c.column_type(),
-            // Only decimals need it, and only where the describe agreed about
-            // how many columns there are. A mismatch means the two views of the
-            // statement disagree, and the fallback layout is better than reading
-            // a scale off the wrong column.
+            // Only decimals need the layout, and nothing needs it where the
+            // describe and the result disagree — the fallback layout is better
+            // than reading a scale off the wrong column.
             decimal: match c.column_type() {
-                ColumnType::Decimaln | ColumnType::Numericn => decimals.get(i).copied().flatten(),
+                ColumnType::Decimaln | ColumnType::Numericn => {
+                    described.get(i).and_then(|d| d.decimal)
+                }
                 _ => None,
             },
+            // What the server calls this column's type. Absent where it would
+            // not describe the statement, which is a statement that has no
+            // declaration to state rather than one whose columns are untyped.
+            declared: described.get(i).and_then(|d| d.declared.clone()),
             // Which CLR type a `Udt` column holds. It comes from `COLMETADATA`
             // rather than from the describe above, because it is the only thing
             // separating a geography from a hierarchyid and it has to be right
@@ -1468,6 +1494,33 @@ fn classify(inflight: &Inflight, ticket: u64, e: MsSqlError, sql: &str) -> MsSql
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A description of a different number of columns is not used at all.
+    ///
+    /// Pinned here rather than against a server because the disagreement is
+    /// hard to produce on purpose and trivial to hit by accident: the describe
+    /// answers for the first result set of the batch, and any statement whose
+    /// first result set is not the one being read leaves the two lists lined up
+    /// by position and describing different columns. Taking `nvarchar(100)` off
+    /// position 0 of the wrong answer states a type the column does not have,
+    /// which is worse than the header saying nothing.
+    #[test]
+    fn a_description_of_another_result_set_is_not_read_by_position() {
+        let described = Described::Columns(vec![
+            DescribedColumn {
+                decimal: Some((18, 4)),
+                declared: Some("decimal(18,4)".to_string()),
+            },
+            DescribedColumn {
+                decimal: None,
+                declared: Some("nvarchar(100)".to_string()),
+            },
+        ]);
+        assert_eq!(described.per_column(2).len(), 2, "same shape, same columns");
+        assert!(described.per_column(3).is_empty(), "one column too many");
+        assert!(described.per_column(1).is_empty(), "one column too few");
+        assert!(Described::Unknown.per_column(2).is_empty());
+    }
 
     /// Needs no database — it needs the absence of one, which is why it can run
     /// in the unit suite. Port 1 is reserved and nothing listens there.

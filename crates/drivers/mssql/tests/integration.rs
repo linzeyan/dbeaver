@@ -33,7 +33,7 @@ use arrow::array::{
     StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::{Computed, ConstraintKind, DbError, Driver, RelationKind, TxStep};
+use dbconn::{Computed, ConstraintKind, DECLARED_TYPE, DbError, Driver, RelationKind, TxStep};
 use driver_mssql::MsSqlSource;
 use std::collections::HashSet;
 use tiberius::{Client, Config};
@@ -771,6 +771,65 @@ async fn the_types_this_database_is_used_for_arrive_as_themselves() {
     assert_eq!(ext.value(0), stated.value(0));
 }
 
+/// Every column says what SQL Server calls it, spelled as the server spells it.
+///
+/// This is the half of the header the Arrow type cannot carry, and this fixture
+/// is where it shows: five of these columns are `Utf8` and one of them is a
+/// `uniqueidentifier`, `money` and `smallmoney` are one `Decimal128(19,4)`
+/// because tiberius cannot tell them apart, `tinyint` arrives as `Int16`, and
+/// `avatar` and `row_ver` are both `Binary` while one is an image and the other
+/// is a row-change counter.
+///
+/// The values are the server's own words rather than this file's: they come from
+/// `system_type_name`, and the two the mapping would have written differently —
+/// `timestamp` for the rowversion, `nvarchar(119)` for a computed column whose
+/// width is the sum of the declarations it concatenates — are the proof that
+/// nothing here is being rewritten on the way through.
+#[tokio::test]
+#[ignore = "requires a SQL Server"]
+async fn every_column_says_what_sql_server_calls_it() {
+    let driver = source().await;
+    let stream = driver
+        .query("SELECT * FROM sales.customer ORDER BY customer_id", 10)
+        .await
+        .expect("query failed");
+    let schema = stream.schema();
+    let declared = |name: &str| {
+        schema
+            .field_with_name(name)
+            .unwrap()
+            .metadata()
+            .get(DECLARED_TYPE)
+            .cloned()
+    };
+
+    for (column, name) in [
+        ("customer_id", "int"),
+        ("ext_id", "uniqueidentifier"),
+        ("name", "nvarchar(100)"),
+        ("code", "varchar(16)"),
+        ("notes", "nvarchar(max)"),
+        ("credit_limit", "decimal(18,4)"),
+        ("balance", "money"),
+        ("petty", "smallmoney"),
+        ("tier", "tinyint"),
+        ("active", "bit"),
+        ("created_at", "datetime2(7)"),
+        ("created_tz", "datetimeoffset(7)"),
+        ("legacy_ts", "datetime"),
+        ("coarse_ts", "smalldatetime"),
+        ("born", "date"),
+        ("opens_at", "time(3)"),
+        ("avatar", "varbinary(max)"),
+        ("doc", "xml"),
+        ("row_ver", "timestamp"),
+        ("display_name", "nvarchar(119)"),
+        ("tier_doubled", "int"),
+    ] {
+        assert_eq!(declared(column).as_deref(), Some(name), "{column}");
+    }
+}
+
 /// A batch the server will not describe still runs, and its decimals fall back.
 ///
 /// Building a temp table and selecting from it is ordinary SQL Server work, and
@@ -801,6 +860,19 @@ async fn a_batch_the_server_will_not_describe_is_still_run() {
         &DataType::Decimal128(38, 10),
         "with no description there is no declared scale to use"
     );
+    // And no type name either, on a column that has one written down two
+    // statements earlier. The key is absent rather than empty: `int` and
+    // `decimal(9,2)` are in the batch, but the answer here has to come from the
+    // server describing the statement, and it would not. Filling it in from the
+    // TDS token would put `decimal` in the header of a column whose declared
+    // scale this driver just admitted it does not know.
+    for field in schema.fields() {
+        assert!(
+            field.metadata().get(DECLARED_TYPE).is_none(),
+            "{} states a type nothing described",
+            field.name()
+        );
+    }
 
     let batch = stream.next_batch().await.unwrap().expect("two rows");
     let b = batch.column(1);
