@@ -29,7 +29,7 @@
 
 use arrow::array::{Array, Date32Array, Decimal128Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, TimeUnit};
-use dbconn::RelationKind;
+use dbconn::{DECLARED_TYPE, RelationKind};
 use driver_clickhouse::ChSource;
 use std::time::Duration;
 
@@ -202,9 +202,67 @@ fn kind_of(batch: &RecordBatch, column: &str) -> DataType {
     batch.schema().field(at).data_type().clone()
 }
 
+fn declared_of(batch: &RecordBatch, column: &str) -> Option<String> {
+    let at = batch.schema().index_of(column).expect("no such column");
+    batch
+        .schema()
+        .field(at)
+        .metadata()
+        .get(DECLARED_TYPE)
+        .cloned()
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+
+/// Every column carries what ClickHouse declared it as, through a projection
+/// that changed what it arrives as.
+///
+/// This driver rewrites the statement, so the Arrow type of a result says what
+/// the cast produced and not what the column is: six of the ten below arrive as
+/// `Utf8` and one as a decimal, and a header drawn from that alone would call a
+/// UUID, an enum, two arrays, a map and a fixed string the same thing.
+///
+/// The named tuple is here rather than only in the unit suite because the line
+/// break is the server's doing: `DESCRIBE` prints that type across three lines,
+/// and no fixture written by hand can prove it still does.
+#[tokio::test]
+#[ignore = "requires a ClickHouse server"]
+async fn every_column_carries_the_type_clickhouse_declared() {
+    let source = source().await;
+    let batch = read_all(
+        &source,
+        "SELECT uid, u64, e8, lc_nullable, arr_nested, tup_named, dt_dt64_9_tz, d32, fs, map_si \
+         FROM bench.types_all ORDER BY id",
+    )
+    .await;
+
+    for (column, declared) in [
+        ("uid", "UUID"),
+        ("u64", "UInt64"),
+        ("e8", "Enum8('draft' = -1, 'live' = 0, 'archived' = 1)"),
+        ("lc_nullable", "LowCardinality(Nullable(String))"),
+        ("arr_nested", "Array(Array(String))"),
+        ("tup_named", "Tuple(qty Int32, unit String)"),
+        ("dt_dt64_9_tz", "DateTime64(9, 'Asia/Taipei')"),
+        ("d32", "Decimal(9, 4)"),
+        ("fs", "FixedString(8)"),
+        ("map_si", "Map(String, Array(Int64))"),
+    ] {
+        assert_eq!(
+            declared_of(&batch, column).as_deref(),
+            Some(declared),
+            "{column}"
+        );
+    }
+
+    // What they arrive as, which is why the line above is not redundant.
+    assert_eq!(kind_of(&batch, "uid"), DataType::Utf8);
+    assert_eq!(kind_of(&batch, "e8"), DataType::Utf8);
+    assert_eq!(kind_of(&batch, "tup_named"), DataType::Utf8);
+    assert_eq!(kind_of(&batch, "u64"), DataType::Decimal128(20, 0));
+}
 
 /// The finding that decided this driver's shape.
 ///

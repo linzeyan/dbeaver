@@ -36,6 +36,7 @@
 //! property `DESCRIBE` was going to be needed for anyway.
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use dbconn::DECLARED_TYPE;
 use std::sync::Arc;
 
 /// The Arrow type a projected column arrives in, and how to ask for it.
@@ -124,7 +125,23 @@ pub(crate) fn plan(columns: &[(String, String)], server_tz: &str, sanitize: bool
         if sanitize && mapping.arrow == DataType::Utf8 {
             mapping.cast = Some(Cast::ValidText);
         }
-        fields.push(Field::new(name, mapping.arrow, mapping.nullable));
+        // What ClickHouse calls the column, which is worth more here than in any
+        // other driver because this one rewrites the statement before sending
+        // it. After the projection the Arrow type is the cast's type and not the
+        // column's: a `UUID` arrives as `Utf8` because it was asked for through
+        // `toString`, a `UInt64` as `Decimal(20, 0)`, an `Enum8` as its labels,
+        // an `Array(Int32)` as text. This key is the only place the column's own
+        // type still exists by the time a header is drawn.
+        //
+        // Whole, wrappers and all. `LowCardinality(Nullable(String))` is what
+        // the DDL says and what a `CAST` here has to be written with, and
+        // `String` is a different type — peeling the wrappers off would be this
+        // driver reporting its own reading of the declaration in place of the
+        // declaration.
+        fields.push(
+            Field::new(name, mapping.arrow, mapping.nullable)
+                .with_metadata([(DECLARED_TYPE.to_string(), one_line(declared))].into()),
+        );
 
         let quoted = quote_identifier(name);
         match &mapping.cast {
@@ -250,6 +267,46 @@ pub(crate) fn map(declared: &str, server_tz: &str) -> Mapping {
         arrow,
         nullable,
     }
+}
+
+/// The declared type on one line, spaced the way it would be typed.
+///
+/// `DESCRIBE` pretty-prints a named tuple across several lines — the server
+/// answers `Tuple(\n    qty Int32,\n    unit String)` — and the header it is
+/// bound for is one line tall, so the break would draw as a box glyph and take
+/// the rest of the type off the row with it. Every other type the server spells
+/// arrives on one line already and comes through here unchanged.
+///
+/// Quotes are honoured for the reason `top_level` honours them: an `Enum8`
+/// label is a string literal, and reflowing the space inside one would rename
+/// the value the column holds.
+fn one_line(declared: &str) -> String {
+    let mut out = String::with_capacity(declared.len());
+    let (mut quoted, mut escaped, mut gap) = (false, false, false);
+    for c in declared.chars() {
+        if quoted {
+            out.push(c);
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '\'') => quoted = false,
+                _ => {}
+            }
+        } else if c.is_whitespace() {
+            gap = !out.is_empty();
+        } else {
+            // No space after an opening parenthesis, which is where the
+            // pretty-printer puts its first break and where nobody writing the
+            // type would put anything.
+            if gap && !out.ends_with('(') {
+                out.push(' ');
+            }
+            gap = false;
+            quoted = c == '\'';
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Whether a declared type admits NULL.
@@ -566,6 +623,93 @@ mod tests {
         assert_eq!(
             second.select_list.as_deref(),
             Some("`id`, toValidUTF8(toString(`s`)) AS `s`")
+        );
+    }
+
+    /// Every column says what ClickHouse declared it as, and the projection is
+    /// exactly why it has to.
+    ///
+    /// Each of these arrives in an Arrow type that is the cast's and not the
+    /// column's: the `UUID` was asked for through `toString`, the `UInt64`
+    /// through `CAST(… AS Decimal(20, 0))`, the `Enum8` and the `Array` render
+    /// themselves. A header drawn from the Arrow type alone calls three of them
+    /// `utf8` and the fourth a decimal.
+    #[test]
+    fn every_field_says_what_clickhouse_calls_it() {
+        let columns = [
+            ("uid", "UUID"),
+            ("n", "UInt64"),
+            ("state", "Enum8('draft' = -1, 'live' = 0)"),
+            ("tags", "Array(LowCardinality(String))"),
+            // Kept whole: the wrappers are part of the type here, and a column
+            // declared `LowCardinality(Nullable(String))` is not a `String`.
+            ("label", "LowCardinality(Nullable(String))"),
+            ("at", "DateTime64(3, 'Asia/Taipei')"),
+        ];
+        let plan = plan(
+            &columns
+                .iter()
+                .map(|(n, t)| (n.to_string(), t.to_string()))
+                .collect::<Vec<_>>(),
+            "UTC",
+            false,
+        );
+        for (at, (name, declared)) in columns.iter().enumerate() {
+            let field = plan.schema.field(at);
+            assert_eq!(
+                field.metadata().get(DECLARED_TYPE),
+                Some(&declared.to_string()),
+                "{name}"
+            );
+        }
+        // And the Arrow types they arrive in are not those, which is the whole
+        // reason the key exists.
+        assert_eq!(plan.schema.field(0).data_type(), &DataType::Utf8);
+        assert_eq!(
+            plan.schema.field(1).data_type(),
+            &DataType::Decimal128(20, 0)
+        );
+    }
+
+    /// A named tuple is printed across lines by the server and drawn on one line
+    /// by the grid.
+    ///
+    /// The spacing is put back the way the type would be typed rather than
+    /// merely made printable: a header reading `Tuple( qty Int32, unit String)`
+    /// is a type nobody wrote and the server did not send either.
+    #[test]
+    fn a_type_the_server_printed_across_lines_arrives_on_one() {
+        assert_eq!(
+            one_line("Tuple(\n    qty Int32,\n    unit String)"),
+            "Tuple(qty Int32, unit String)"
+        );
+        // Already one line, and every character of it is the server's.
+        for declared in [
+            "Decimal(9, 4)",
+            "DateTime64(9, 'Asia/Taipei')",
+            "Map(String, Array(Int64))",
+            "LowCardinality(Nullable(String))",
+        ] {
+            assert_eq!(one_line(declared), declared);
+        }
+    }
+
+    /// Spacing inside a label belongs to the label.
+    ///
+    /// `Enum8('two  spaces' = 1)` names a value that is not `'two spaces'`, and
+    /// a column whose header renames its own values is worse than one with no
+    /// header at all.
+    #[test]
+    fn the_space_inside_a_label_is_part_of_the_value() {
+        assert_eq!(
+            one_line("Enum8('two  spaces' = 1, 'tab\tin it' = 2)"),
+            "Enum8('two  spaces' = 1, 'tab\tin it' = 2)"
+        );
+        // An escaped quote does not end the label, so the run after it is still
+        // inside one.
+        assert_eq!(
+            one_line("Enum8('it\\'s  here' = 1)"),
+            "Enum8('it\\'s  here' = 1)"
         );
     }
 
