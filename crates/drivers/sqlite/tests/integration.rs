@@ -123,6 +123,60 @@ async fn a_declared_column_is_typed_by_its_declaration_and_the_rest_by_their_val
     assert_eq!(col::<Int64Array>(&batch, "loose").value(0), 7);
 }
 
+/// And each column carries the declaration it was made with, which says more
+/// than the type that declaration resolved to.
+///
+/// SQLite is where the two differ most: a declaration is free text and gives a
+/// column an affinity at most, so `DATETIME` and `BOOLEAN` resolve by their
+/// first value and arrive as text and an integer — while the table plainly says
+/// `DATETIME` and `BOOLEAN`. Both statements are true, and the header shows the
+/// declaration because it is the one a person wrote.
+#[tokio::test]
+async fn a_column_carries_the_declaration_it_was_made_with() {
+    let fixture = Fixture::new(
+        "CREATE TABLE declared (
+             id INTEGER PRIMARY KEY,
+             label VARCHAR(64),
+             moment DATETIME,
+             flag BOOLEAN,
+             loose
+         );
+         INSERT INTO declared VALUES (1, 'first', '2024-01-01', 1, 7);",
+    );
+    let src = fixture.connect().await;
+    let stream = src
+        .query("SELECT *, id + 1 AS computed FROM declared", 100)
+        .await
+        .unwrap();
+
+    let expected = [
+        ("id", Some("INTEGER")),
+        // As written, parentheses and all: this driver reads an affinity out of
+        // a declaration and refuses to read anything else into it.
+        ("label", Some("VARCHAR(64)")),
+        ("moment", Some("DATETIME")),
+        ("flag", Some("BOOLEAN")),
+        // A column declared with no type at all, and an expression that has no
+        // declaration to have. Absent rather than empty: the grid falls back to
+        // what arrived, which is the honest answer for both.
+        ("loose", None),
+        ("computed", None),
+    ];
+    let schema = stream.schema();
+    assert_eq!(schema.fields().len(), expected.len());
+    for (name, declared) in expected {
+        let field = schema.field_with_name(name).expect("column missing");
+        assert_eq!(
+            field
+                .metadata()
+                .get(dbconn::DECLARED_TYPE)
+                .map(String::as_str),
+            declared,
+            "declaration of {name}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_expression_column_is_typed_from_its_first_value() {
     // A prepared statement can describe a table column's declaration and nothing

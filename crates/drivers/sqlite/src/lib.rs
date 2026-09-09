@@ -758,7 +758,8 @@ fn read(
         let fields: Vec<Field> = names
             .iter()
             .zip(&types)
-            .map(|(name, t)| Field::new(name, t.data_type(), true))
+            .zip(&declared)
+            .map(|((name, t), decl)| arrow_map::field(name, *t, decl.as_deref()))
             .collect();
         let schema: SchemaRef = Arc::new(Schema::new(fields));
         let mut builders = new_builders(&types, batch_rows);

@@ -21,7 +21,8 @@
 //! `SELECT count(*)` is an integer, not text.
 
 use arrow::array::{ArrayRef, BinaryBuilder, Float64Builder, Int64Builder, StringBuilder};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field};
+use dbconn::DECLARED_TYPE;
 use rusqlite::Row;
 use rusqlite::types::ValueRef;
 use std::borrow::Cow;
@@ -87,6 +88,39 @@ pub fn affinity(declared: &str) -> Option<ColumnType> {
     } else {
         // NUMERIC affinity, which decides nothing. See the module comment.
         None
+    }
+}
+
+/// One result column's field, carrying the declaration it came from.
+///
+/// The declaration is passed on as written — `VARCHAR(64)`, `BOOLEAN`, `DATE`,
+/// or anything else somebody typed, because SQLite accepts anything. This file
+/// already refuses to read more into a declaration than an affinity, and the
+/// grid is where a person reads it; normalising it here would replace what the
+/// table says with what this driver made of it.
+///
+/// It says more than the Arrow type does and it is the one place the two can
+/// honestly disagree. A column declared `DATE` or `BOOLEAN` has NUMERIC
+/// affinity, which decides nothing, so the column above is settled by its first
+/// value and reads as text or an integer — while the table plainly says `DATE`.
+/// Both are true of a SQLite column: one is what it was declared as, the other
+/// is what came back. The header shows the declaration and falls back to the
+/// other, which is the order every driver here answers in.
+///
+/// Absent for an expression, a subquery column or a literal, where SQLite has no
+/// declaration to give. That is the state the key exists to be able to leave
+/// empty — a driver that filled it in with the storage class would be reporting
+/// this file's decision as the database's.
+pub fn field(name: &str, column: ColumnType, declared: Option<&str>) -> Field {
+    let field = Field::new(name, column.data_type(), true);
+    // An empty declaration is not one. SQLite answers `None` for a column
+    // declared without a type, but a key written with nothing behind it would
+    // read as an answer somewhere that only checks whether it is there.
+    match declared.filter(|d| !d.is_empty()) {
+        Some(declared) => {
+            field.with_metadata([(DECLARED_TYPE.to_string(), declared.to_string())].into())
+        }
+        None => field,
     }
 }
 
@@ -256,6 +290,29 @@ fn as_blob<'a>(name: &str, value: ValueRef<'a>) -> Result<&'a [u8], SqliteError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The declaration goes on the field as written, and nothing goes on it
+    /// where there was no declaration.
+    #[test]
+    fn a_field_carries_its_declaration_or_says_nothing() {
+        let declared = field("label", ColumnType::Utf8, Some("VARCHAR(64)"));
+        assert_eq!(
+            declared.metadata().get(DECLARED_TYPE).map(String::as_str),
+            Some("VARCHAR(64)"),
+            "spelled the way the table spells it"
+        );
+
+        // An expression column. The key has to be missing rather than empty:
+        // the grid reads its absence as "nothing was declared" and falls back
+        // to what arrived, which is the only true thing left to say.
+        let computed = field("computed", ColumnType::Int64, None);
+        assert!(computed.metadata().get(DECLARED_TYPE).is_none());
+
+        // And a declaration that is there but says nothing is treated as the
+        // absence it is, rather than written down as an answer.
+        let empty = field("odd", ColumnType::Utf8, Some(""));
+        assert!(empty.metadata().get(DECLARED_TYPE).is_none());
+    }
 
     #[test]
     fn affinity_follows_sqlites_own_rules_in_order() {
