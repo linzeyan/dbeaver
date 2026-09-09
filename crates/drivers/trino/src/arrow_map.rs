@@ -64,6 +64,7 @@ use arrow::datatypes::{
 };
 use arrow::error::ArrowError;
 use base64::Engine;
+use dbconn::DECLARED_TYPE;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -180,7 +181,18 @@ impl Plan {
             // Nullable throughout, and not from asking the catalog: this is a
             // result and not a table, and an outer join over a column declared
             // `NOT NULL` produces nulls in it.
-            .map(|(column, cell)| Field::new(&column.name, cell.arrow(), true))
+            //
+            // The type Trino named, carried beside the one it arrives in. Every
+            // composite and half the scalars in this mapping are `Utf8` by the
+            // decisions above — a `row`, a `map`, a `uuid`, an `ipaddress`, a
+            // zoned timestamp and a `timestamp(9)` are all text by the time they
+            // reach the grid — so the Arrow type alone cannot tell any of them
+            // apart, and the display string tells all of them apart for free:
+            // the server sends it with every result.
+            .map(|(column, cell)| {
+                Field::new(&column.name, cell.arrow(), true)
+                    .with_metadata([(DECLARED_TYPE.to_string(), column.declared.clone())].into())
+            })
             .collect();
         Plan {
             schema: Arc::new(Schema::new(fields)),
@@ -458,6 +470,10 @@ mod tests {
     fn column(name: &str, raw: &str, arguments: Vec<i64>) -> Column {
         Column {
             name: name.to_string(),
+            // What the server would print for a type with no arguments, which
+            // every case using this helper has; the cases about the display
+            // string spell it out for themselves.
+            declared: raw.to_string(),
             signature: TypeSignature {
                 raw_type: raw.to_string(),
                 arguments: arguments
@@ -468,6 +484,55 @@ mod tests {
                     })
                     .collect(),
             },
+        }
+    }
+
+    /// Every field carries the type Trino printed, whatever it arrives as.
+    ///
+    /// Six of these seven are `Utf8` after the mapping: a row, a map, a uuid, an
+    /// ipaddress, a zoned timestamp and a `timestamp(9)` are all text by the
+    /// time they reach the grid. The Arrow type cannot tell any of them apart
+    /// and the display string tells all of them apart, which is the whole
+    /// argument for reading a field the mapping itself has no use for.
+    #[test]
+    fn every_field_carries_the_type_trino_printed() {
+        // The arguments are the display string's own, because that is the only
+        // shape a server sends: a fixture whose signature says one precision and
+        // whose printed type says another describes nothing that exists.
+        let columns: Vec<Column> = [
+            ("r", "row", vec![], "row(qty integer, unit varchar)"),
+            ("m", "map", vec![], "map(varchar(1), array(integer))"),
+            ("u", "uuid", vec![], "uuid"),
+            ("ip", "ipaddress", vec![], "ipaddress"),
+            (
+                "tstz",
+                "timestamp with time zone",
+                vec![6],
+                "timestamp(6) with time zone",
+            ),
+            ("ts9", "timestamp", vec![9], "timestamp(9)"),
+            ("v", "varchar", vec![16], "varchar(16)"),
+        ]
+        .into_iter()
+        .map(|(name, raw, arguments, declared)| Column {
+            declared: declared.to_string(),
+            ..column(name, raw, arguments)
+        })
+        .collect();
+
+        let plan = Plan::of(&columns);
+        for (at, column) in columns.iter().enumerate() {
+            let field = plan.schema.field(at);
+            assert_eq!(
+                field.metadata().get(DECLARED_TYPE),
+                Some(&column.declared),
+                "{}",
+                column.name
+            );
+        }
+        // And all but the last of them arrived as the same Arrow type.
+        for at in 0..6 {
+            assert_eq!(plan.schema.field(at).data_type(), &DataType::Utf8);
         }
     }
 

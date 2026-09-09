@@ -33,7 +33,7 @@ use arrow::array::{
 };
 use arrow::datatypes::DataType;
 use bytes::Bytes;
-use dbconn::{Browse, DbError, Driver, RelationKind, TxStep};
+use dbconn::{Browse, DECLARED_TYPE, DbError, Driver, RelationKind, TxStep};
 use driver_trino::TrinoSource;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
@@ -322,6 +322,60 @@ async fn each_kind_of_value_arrives_as_the_type_that_was_decided_for_it() {
             "{no_arrow_home} should be text"
         );
     }
+}
+
+/// And every one of them says what Trino called it, which is the half the Arrow
+/// type above cannot carry.
+///
+/// Twelve of these twenty-eight arrive as `Utf8` and four more as one of two
+/// integer widths, so the type row drawn from the Arrow type alone would say
+/// `utf8` over a uuid, a json, two intervals, an array, a map and a row alike.
+/// The string is the server's own — `INTERVAL DAY TO SECOND` is shouted where
+/// every other name is not, and it is passed through as sent rather than tidied,
+/// because that is the spelling a statement against this server has to use.
+#[tokio::test]
+#[ignore = "requires a Trino coordinator"]
+async fn every_column_says_what_trino_called_it() {
+    let src = source().await;
+    let batch = read_all(&src, KINDS).await;
+    let declared = |column: &str| {
+        batch
+            .schema()
+            .field_with_name(column)
+            .unwrap_or_else(|_| panic!("no column called {column}"))
+            .metadata()
+            .get(DECLARED_TYPE)
+            .cloned()
+    };
+
+    for (column, name) in [
+        ("c_tinyint", "tinyint"),
+        ("c_smallint", "smallint"),
+        ("c_decimal", "decimal(18, 2)"),
+        ("c_varchar", "varchar"),
+        ("c_char", "char(5)"),
+        ("c_time6", "time(6)"),
+        ("c_time9", "time(9)"),
+        ("c_timetz", "time(6) with time zone"),
+        ("c_ts6", "timestamp(6)"),
+        ("c_ts9", "timestamp(9)"),
+        ("c_tstz", "timestamp(3) with time zone"),
+        ("c_int_ym", "INTERVAL YEAR TO MONTH"),
+        ("c_int_ds", "INTERVAL DAY TO SECOND"),
+        ("c_array", "array(integer)"),
+        ("c_map", "map(varchar(1), integer)"),
+        ("c_row", "row(n integer, w varchar)"),
+        ("c_json", "json"),
+        ("c_uuid", "uuid"),
+        ("c_ip", "ipaddress"),
+    ] {
+        assert_eq!(declared(column).as_deref(), Some(name), "{column}");
+    }
+
+    // The two whose Arrow types are equal and whose declarations are not, which
+    // is the case the header exists for: `tinyint` and `smallint` are both
+    // `Int16`, and five of the names above are all `Utf8`.
+    assert_eq!(kind_of(&batch, "c_tinyint"), kind_of(&batch, "c_smallint"));
 }
 
 /// The values themselves, for the ones whose rendering had to be decided rather

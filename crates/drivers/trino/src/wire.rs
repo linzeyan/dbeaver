@@ -72,16 +72,22 @@ pub(crate) struct Answer {
 #[derive(Debug, Deserialize)]
 pub(crate) struct Column {
     pub name: String,
-    /// The type taken apart. The answer also carries a `type` field holding the
-    /// same thing as a display string — `row(n integer, w varchar)` — and
-    /// nothing reads it: the mapping needs the parts, and the *declared* type a
-    /// structure pane shows comes from `information_schema.columns`, which is
-    /// about the table rather than about one result.
+    /// The type as Trino writes it: `row(qty integer, unit varchar)`,
+    /// `timestamp(6) with time zone`, `varchar(16)`. Carried to the grid as the
+    /// column's declared type, which is the one question a display string
+    /// answers better than the parsed form — the words are what a person reads
+    /// and what a `CAST` here would be written with.
+    #[serde(rename = "type")]
+    pub declared: String,
+    /// The same type taken apart, which is what the mapping matches on: the
+    /// parts are already separated, and the display name of a
+    /// `map(varchar(1), array(row(a integer)))` would need a parser to get back
+    /// to them.
     #[serde(rename = "typeSignature")]
     pub signature: TypeSignature,
 }
 
-/// A type taken apart, which is the form worth reading.
+/// A type taken apart, which is the form worth deciding from.
 ///
 /// `type` is a display string and parsing it back means writing a parser for
 /// `map(varchar(1), array(row(a integer)))`. `typeSignature` is the same type
