@@ -1386,3 +1386,37 @@ async fn rows(source: &FlightSqlSource, sql: &str) -> usize {
     }
     seen
 }
+
+/// This server states no type names of its own, and the driver says so by
+/// leaving the key out.
+///
+/// One of the file's claims-about-the-server tests, and the reason `relabelled`
+/// cannot be proven end to end here: Flight SQL defines
+/// `ARROW:FLIGHT:SQL:TYPE_NAME` for a column's type at the source, this server
+/// attaches no field metadata at all, and the header therefore falls back to
+/// the Arrow type — which for this driver is the truth rather than a guess,
+/// since the Arrow type is what the server chose to send the values as. The day
+/// this server starts stating them, this fails and the fallback in the grid
+/// stops being what a Flight SQL user sees.
+#[tokio::test]
+#[ignore = "requires a Flight SQL server"]
+async fn the_server_states_no_type_names_of_its_own() {
+    let _turn = dbfixture::exclusive(ONE_AT_A_TIME).await;
+    let src = source().await;
+    let rows = src
+        .query(
+            "SELECT CAST(1 AS TINYINT) AS a, CAST('x' AS VARCHAR(16)) AS b, \
+             CAST(1.5 AS DECIMAL(18,4)) AS c, CAST('2024-01-01' AS DATE) AS d",
+            10,
+        )
+        .await
+        .expect("query failed");
+    for field in rows.schema().fields() {
+        assert!(
+            field.metadata().is_empty(),
+            "{} arrived carrying {:?}",
+            field.name(),
+            field.metadata()
+        );
+    }
+}

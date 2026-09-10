@@ -63,7 +63,7 @@ use crate::{FlightSqlError, FlightSqlSource, Rows, Stop};
 /// answer to a question the Arrow type only approximates — a `Utf8` that is a
 /// `VARCHAR(64)` is a fact the structure pane wants and the Arrow schema has
 /// thrown away.
-const TYPE_NAME: &str = "ARROW:FLIGHT:SQL:TYPE_NAME";
+pub(crate) const TYPE_NAME: &str = "ARROW:FLIGHT:SQL:TYPE_NAME";
 
 /// How the protocol numbers a referential action, from `FlightSql.proto`.
 ///

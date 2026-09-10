@@ -122,12 +122,12 @@ mod metadata;
 
 use arrow::array::RecordBatch;
 use arrow::buffer::Buffer;
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow_flight::sql::client::FlightSqlServiceClient;
 use arrow_flight::sql::{ActionBeginSavepointRequest, ActionEndSavepointRequest, ProstMessageExt};
 use arrow_flight::{Action, FlightData, FlightInfo, Ticket};
 use bytes::Bytes;
-use dbconn::TxStep;
+use dbconn::{DECLARED_TYPE, TxStep};
 use prost::Message;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -844,7 +844,7 @@ impl Rows {
                 let ipc = message
                     .header_as_schema()
                     .ok_or_else(|| ArrowError::IpcError("a schema that is not one".to_string()))?;
-                let schema = Arc::new(arrow::ipc::convert::fb_to_schema(ipc));
+                let schema = Arc::new(relabelled(arrow::ipc::convert::fb_to_schema(ipc)));
                 // Every endpoint of one result describes the same columns, and a
                 // caller was promised the schema before the first row. A second
                 // endpoint that disagreed would silently change the grid under
@@ -968,6 +968,49 @@ impl Rows {
     }
 }
 
+/// The server's schema, with the type names it stated republished under the key
+/// the grid reads.
+///
+/// Flight SQL defines `ARROW:FLIGHT:SQL:TYPE_NAME` for exactly the question
+/// `dbconn::DECLARED_TYPE` asks — the source's own name for a column's type —
+/// and the reader at the far end of the FFI cannot be taught one key per
+/// protocol. So the value is copied across under the name every driver here
+/// uses, and the server's own keys are left where they are: they are the
+/// server's message, not this driver's to edit.
+///
+/// The catalog side already reads the same key (`metadata::columns`), and this
+/// is the result side of it. Neither has anything to read on the example server
+/// these tests run against, which attaches no metadata at all — measured, and
+/// pinned by `the_server_states_no_type_names_of_its_own`. There the header
+/// falls back to the Arrow type, and for this driver that fallback is the truth
+/// rather than a guess: the Arrow type is what the server chose to send the
+/// values as.
+fn relabelled(schema: Schema) -> Schema {
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            // Absent and empty are the same nothing, for the reason
+            // `DECLARED_TYPE` gives: a key present with no value is an answer.
+            let declared = field
+                .metadata()
+                .get(metadata::TYPE_NAME)
+                .cloned()
+                .filter(|name| !name.is_empty());
+            let field = field.as_ref().clone();
+            match declared {
+                None => field,
+                Some(declared) => {
+                    let mut carried = field.metadata().clone();
+                    carried.insert(DECLARED_TYPE.to_string(), declared);
+                    field.with_metadata(carried)
+                }
+            }
+        })
+        .collect();
+    Schema::new_with_metadata(fields, schema.metadata().clone())
+}
+
 /// Stops the read one result is running.
 #[derive(Clone)]
 pub struct RowsCancel {
@@ -986,6 +1029,85 @@ impl RowsCancel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A type name the server stated is republished, and a column without one is
+    /// left exactly as it arrived.
+    ///
+    /// The pair matters more than either half: the fallback is what every column
+    /// of the server in these tests takes, so a version of this that stamped
+    /// something onto a field with no `TYPE_NAME` would put a label on every
+    /// column of every Flight SQL result — and the empty case is the one that
+    /// says the label came from the server rather than from here.
+    #[test]
+    fn a_type_name_the_server_stated_reaches_the_key_the_grid_reads() {
+        use arrow::datatypes::DataType;
+        let stated = Field::new("v", DataType::Utf8, true)
+            .with_metadata([(metadata::TYPE_NAME.to_string(), "VARCHAR(64)".to_string())].into());
+        let silent = Field::new("n", DataType::Int32, true);
+        let empty = Field::new("e", DataType::Int32, true)
+            .with_metadata([(metadata::TYPE_NAME.to_string(), String::new())].into());
+
+        let schema = relabelled(Schema::new(vec![stated, silent, empty]));
+        assert_eq!(
+            schema.field(0).metadata().get(DECLARED_TYPE),
+            Some(&"VARCHAR(64)".to_string())
+        );
+        // And the server's own key is still there: the message is relayed, not
+        // rewritten.
+        assert_eq!(
+            schema.field(0).metadata().get(metadata::TYPE_NAME),
+            Some(&"VARCHAR(64)".to_string())
+        );
+        assert!(schema.field(1).metadata().get(DECLARED_TYPE).is_none());
+        assert!(schema.field(2).metadata().get(DECLARED_TYPE).is_none());
+    }
+
+    /// And the schema message the server actually sends goes through it.
+    ///
+    /// The half the live suite cannot reach: the server these tests run against
+    /// states no type names, so every test there passes whether this is wired in
+    /// or not. A schema message built here and pushed through `decode` is the
+    /// one way to ask, and it needs no server — `connect_lazy` hands back a
+    /// channel that has not connected to anything, which is enough because a
+    /// message that is already in hand is never fetched.
+    #[tokio::test]
+    async fn a_schema_message_arrives_with_its_type_names_republished() {
+        use arrow::datatypes::DataType;
+        use arrow::ipc::writer::IpcWriteOptions;
+        use arrow_flight::SchemaAsIpc;
+
+        let schema = Schema::new(vec![Field::new("v", DataType::Utf8, true).with_metadata(
+            [(metadata::TYPE_NAME.to_string(), "VARCHAR(64)".to_string())].into(),
+        )]);
+        let message = FlightData::from(SchemaAsIpc::new(&schema, &IpcWriteOptions::default()));
+
+        let mut rows = Rows {
+            client: FlightSqlServiceClient::new(
+                Channel::from_static("http://127.0.0.1:1").connect_lazy(),
+            ),
+            schema: Arc::new(Schema::empty()),
+            tickets: VecDeque::new(),
+            stream: None,
+            dictionaries: HashMap::new(),
+            carry: VecDeque::new(),
+            held: 0,
+            delivered_from: None,
+            batch_rows: 1,
+            delivered: 0,
+            drained: false,
+            stop: Arc::new(Stop::default()),
+            since: 0,
+        };
+
+        assert!(
+            rows.decode(message).expect("a schema decodes").is_none(),
+            "a schema message carries no rows"
+        );
+        assert_eq!(
+            rows.schema.field(0).metadata().get(DECLARED_TYPE),
+            Some(&"VARCHAR(64)".to_string())
+        );
+    }
 
     /// Needs no server — it needs the absence of one. Port 1 is reserved and
     /// nothing on a developer machine or a CI runner listens there.
