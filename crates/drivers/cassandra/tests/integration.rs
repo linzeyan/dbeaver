@@ -292,6 +292,81 @@ async fn each_kind_of_value_arrives_as_the_type_that_was_decided_for_it() {
     }
 }
 
+/// What every column of `kinds` says it was declared as, against the server
+/// that was told the declarations.
+///
+/// The name is rebuilt from a type id and its parameters — the protocol never
+/// sends the text — so only a real server can say whether the reconstruction is
+/// the same string CQL was given. Asserted as one map rather than a line per
+/// column because the mistakes this shape of code makes are per family: an
+/// integer width read off by one, or every composite named by its outer type
+/// alone, is a wrong answer in several columns at once and the whole list shows
+/// it in one failure. Keyed by name rather than positional, since the order
+/// `SELECT *` returns is a different fact with its own test.
+#[tokio::test]
+#[ignore = "requires a Cassandra server"]
+async fn each_column_says_the_name_the_table_declared_it_with() {
+    let src = fixture().await;
+    let stream = src
+        .query(&format!("SELECT * FROM {KEYSPACE}.kinds"), 10)
+        .await
+        .expect("query");
+    let schema = stream.schema();
+    let declared: std::collections::BTreeMap<String, String> = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            (
+                field.name().clone(),
+                field
+                    .metadata()
+                    .get(dbconn::DECLARED_TYPE)
+                    .cloned()
+                    // Every CQL column has a type, so an absent key here is a
+                    // gap in the mapping and not a column without a
+                    // declaration. Spelled so that it reads as one in a diff.
+                    .unwrap_or_else(|| "<none>".to_string()),
+            )
+        })
+        .collect();
+
+    let expected: std::collections::BTreeMap<String, String> = [
+        ("id", "int"),
+        ("flag", "boolean"),
+        ("tiny", "tinyint"),
+        ("small", "smallint"),
+        ("medium", "int"),
+        ("big", "bigint"),
+        ("single", "float"),
+        ("dbl", "double"),
+        ("words", "text"),
+        ("plain", "ascii"),
+        ("raw", "blob"),
+        ("uid", "uuid"),
+        ("tid", "timeuuid"),
+        ("ip", "inet"),
+        ("huge", "varint"),
+        ("money", "decimal"),
+        ("span", "duration"),
+        ("day", "date"),
+        ("clock", "time"),
+        ("moment", "timestamp"),
+        ("tags", "list<text>"),
+        ("names", "set<text>"),
+        ("props", "map<text, int>"),
+        // Declared `frozen<tuple<int, text>>`, and the result frame has no room
+        // for the wrapper — see `arrow_map`. The catalog is where `frozen`
+        // survives, and the reader prefers the catalog wherever it has an
+        // answer.
+        ("pair", "tuple<int, text>"),
+    ]
+    .into_iter()
+    .map(|(name, typ)| (name.to_string(), typ.to_string()))
+    .collect();
+
+    assert_eq!(declared, expected);
+}
+
 /// The values themselves, for the four whose rendering had to be written rather
 /// than borrowed: a bignum, a decimal point, nanoseconds, and JSON.
 #[tokio::test]

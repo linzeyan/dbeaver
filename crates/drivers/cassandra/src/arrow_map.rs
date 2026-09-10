@@ -40,6 +40,29 @@
 //! biased by 2^31, which is precisely Arrow's `Date32` shifted — the whole range
 //! maps with nothing to spare and nothing lost. A CQL timestamp is milliseconds
 //! and the reader wants microseconds, which is a multiplication.
+//!
+//! **The declaration travels beside the type it arrives as.** Every decision
+//! above collapses distinctions: nine native types and all six composites land
+//! in `Utf8`, so a `uuid`, an `inet`, a `decimal`, a `time`, a `list<text>` and
+//! a user-defined type are one type by the time they reach the grid; `tinyint`
+//! and `smallint` share an `Int16`, and `bigint` and `counter` share an `Int64`.
+//! CQL's own spelling separates all of them, and it costs nothing — the column
+//! metadata that decides the mapping is the same metadata that names the type.
+//!
+//! It is **rebuilt rather than forwarded**, because the protocol sends a type id
+//! and its parameters and never the text. Which is also why `frozen` is not
+//! written: a result frame has nowhere to put it, and `scylla` fills the field
+//! with `false` for every column it decodes. `system_schema` does carry it, so
+//! the catalog says `frozen<tuple<int, text>>` where a result says
+//! `tuple<int, text>` — and the reader prefers the catalog wherever it has an
+//! answer, which is exactly where the two can differ. Writing the wrapper here
+//! would be inventing a flag nobody sent.
+//!
+//! Two more places where the name is the server's and not the declaration's:
+//! `varchar` is an alias for `text` and only `text` has an id, so a column
+//! declared `varchar` says `text` on both paths; and a user-defined type is
+//! named without its keyspace, which is how CQL writes one — a UDT and the
+//! table using it always live in the same keyspace.
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Date32Builder, Float32Builder, Float64Builder,
@@ -48,7 +71,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::error::ArrowError;
-use scylla::frame::response::result::{ColumnType, NativeType};
+use dbconn::DECLARED_TYPE;
+use scylla::frame::response::result::{CollectionType, ColumnType, NativeType};
 use scylla::response::query_result::ColumnSpecs;
 use scylla::value::{CqlDate, CqlDecimal, CqlDuration, CqlTime, CqlTimestamp, CqlValue, Row};
 use std::sync::Arc;
@@ -140,6 +164,89 @@ pub(crate) fn cell_of(typ: &ColumnType<'_>) -> Cell {
     }
 }
 
+/// One column type as CQL declares it.
+///
+/// `None` where any part of it is something this driver has no name for, which
+/// is the `#[non_exhaustive]` case both these enums carry: a later protocol
+/// revision may add a type, and `list<?>` is not a declaration anyone could
+/// write. That is why the recursion propagates the `None` rather than filling
+/// the hole — an outer name built over an inner unknown would be a declaration
+/// the column does not have, and `dbconn::DECLARED_TYPE` would rather say
+/// nothing.
+///
+/// **No `None` is reachable today** and no test can make one: every type the
+/// protocol describes is named below, and `#[non_exhaustive]` is precisely what
+/// stops a test in this crate from constructing a variant that is not.
+/// `every_type_can_say_what_it_was_declared_as_and_no_two_say_the_same` is the
+/// standing assertion that the set is still complete. So the arms returning
+/// `None`, and the one place that acts on one, are written to the contract
+/// rather than to a check — a mutation that fills them with an empty string
+/// survives this crate's whole suite, and would reach the grid as a column
+/// declaring itself to have no type.
+pub(crate) fn cql_name(typ: &ColumnType<'_>) -> Option<String> {
+    let name = match typ {
+        ColumnType::Native(native) => native_name(native)?.to_string(),
+        // `frozen` is deliberately not read here — see the module comment.
+        ColumnType::Collection { typ, .. } => match typ {
+            CollectionType::List(item) => format!("list<{}>", cql_name(item)?),
+            CollectionType::Set(item) => format!("set<{}>", cql_name(item)?),
+            CollectionType::Map(key, value) => {
+                format!("map<{}, {}>", cql_name(key)?, cql_name(value)?)
+            }
+            _ => return None,
+        },
+        // The dimension count is part of the declaration and not a detail of the
+        // value: `vector<float, 3>` and `vector<float, 512>` are different types
+        // to the server, and an embedding column's width is most of what a
+        // person reading that header wants to know.
+        ColumnType::Vector { typ, dimensions } => {
+            format!("vector<{}, {dimensions}>", cql_name(typ)?)
+        }
+        ColumnType::UserDefinedType { definition, .. } => definition.name.to_string(),
+        ColumnType::Tuple(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                parts.push(cql_name(item)?);
+            }
+            format!("tuple<{}>", parts.join(", "))
+        }
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// One native type's name, spelled the way CQL spells it.
+///
+/// The separator inside a composite is `, ` rather than `,` to match what
+/// `system_schema` stores and what `cqlsh` prints, so that the two halves of a
+/// `map<text, int>` header agree on more than the type.
+fn native_name(native: &NativeType) -> Option<&'static str> {
+    let name = match native {
+        NativeType::Ascii => "ascii",
+        NativeType::Boolean => "boolean",
+        NativeType::Blob => "blob",
+        NativeType::Counter => "counter",
+        NativeType::Date => "date",
+        NativeType::Decimal => "decimal",
+        NativeType::Double => "double",
+        NativeType::Duration => "duration",
+        NativeType::Float => "float",
+        NativeType::Int => "int",
+        NativeType::BigInt => "bigint",
+        NativeType::Text => "text",
+        NativeType::Timestamp => "timestamp",
+        NativeType::Inet => "inet",
+        NativeType::SmallInt => "smallint",
+        NativeType::TinyInt => "tinyint",
+        NativeType::Time => "time",
+        NativeType::Timeuuid => "timeuuid",
+        NativeType::Uuid => "uuid",
+        NativeType::Varint => "varint",
+        _ => return None,
+    };
+    Some(name)
+}
+
 /// What one statement's result looks like, settled before any row is handed
 /// over.
 #[derive(Debug, Clone)]
@@ -160,7 +267,15 @@ impl Plan {
             // not a table: a `SELECT max(id)` over no rows produces a null in a
             // column that cannot hold one, and a schema promising otherwise
             // would be a promise about the wrong thing.
-            .map(|(spec, cell)| Field::new(spec.name(), cell.arrow(), true))
+            .map(|(spec, cell)| {
+                let field = Field::new(spec.name(), cell.arrow(), true);
+                match cql_name(spec.typ()) {
+                    Some(declared) => {
+                        field.with_metadata([(DECLARED_TYPE.to_string(), declared)].into())
+                    }
+                    None => field,
+                }
+            })
             .collect();
         Plan {
             schema: Arc::new(Schema::new(fields)),
@@ -566,25 +681,27 @@ mod tests {
         ColumnType::Native(typ)
     }
 
-    /// The rule this module exists to keep. Every CQL type has to land in the
-    /// set the reader on the other side of the FFI has a format string for; a
-    /// column that arrives as anything else is drawn as `<+l>` in every cell.
-    #[test]
-    fn every_type_lands_somewhere_the_grid_can_draw() {
-        use scylla::frame::response::result::CollectionType;
+    /// A user-defined type, for the two checks that have one.
+    fn udt() -> ColumnType<'static> {
+        ColumnType::UserDefinedType {
+            frozen: false,
+            definition: Arc::new(scylla::frame::response::result::UserDefinedType {
+                name: "address".into(),
+                keyspace: "bench".into(),
+                field_types: vec![
+                    ("street".into(), native(NativeType::Text)),
+                    ("number".into(), native(NativeType::Int)),
+                ],
+            }),
+        }
+    }
 
-        let readable = [
-            DataType::Boolean,
-            DataType::Int16,
-            DataType::Int32,
-            DataType::Int64,
-            DataType::Float32,
-            DataType::Float64,
-            DataType::Utf8,
-            DataType::Binary,
-            DataType::Date32,
-            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-        ];
+    /// Every type the protocol can describe a column with, in one list.
+    ///
+    /// Shared by the two checks that have to hold for all of them — where a
+    /// value lands, and what the column is called — so that a type added to CQL
+    /// is added here once rather than in one check and forgotten in the other.
+    fn every_cql_type() -> Vec<ColumnType<'static>> {
         let mut types: Vec<ColumnType<'static>> = [
             NativeType::Ascii,
             NativeType::Boolean,
@@ -633,14 +750,192 @@ mod tests {
             typ: Box::new(native(NativeType::Float)),
             dimensions: 3,
         });
+        types.push(udt());
+        types
+    }
 
-        for typ in types {
+    /// The rule this module exists to keep. Every CQL type has to land in the
+    /// set the reader on the other side of the FFI has a format string for; a
+    /// column that arrives as anything else is drawn as `<+l>` in every cell.
+    #[test]
+    fn every_type_lands_somewhere_the_grid_can_draw() {
+        let readable = [
+            DataType::Boolean,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Utf8,
+            DataType::Binary,
+            DataType::Date32,
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+        ];
+
+        for typ in every_cql_type() {
             let arrow = cell_of(&typ).arrow();
             assert!(
                 readable.contains(&arrow),
                 "{typ:?} would arrive as {arrow:?}, which the grid draws as a format string"
             );
         }
+    }
+
+    /// The other half of the rule above. Landing everything the grid can draw
+    /// costs the distinctions between them, so every type also has to be able
+    /// to say what it was — and no two of them may say the same thing, or the
+    /// header would separate fewer columns than the mapping merged.
+    #[test]
+    fn every_type_can_say_what_it_was_declared_as_and_no_two_say_the_same() {
+        let mut seen: Vec<(String, DataType)> = Vec::new();
+        for typ in every_cql_type() {
+            let name = cql_name(&typ).unwrap_or_else(|| panic!("{typ:?} has no CQL name"));
+            assert!(
+                !seen.iter().any(|(other, _)| *other == name),
+                "{typ:?} and an earlier type both call themselves {name}"
+            );
+            seen.push((name, cell_of(&typ).arrow()));
+        }
+
+        // The merges this is here to undo, stated rather than left implied: nine
+        // native types and all six composites are one Arrow type between them,
+        // and two more pairs share an integer width.
+        let flattened = seen
+            .iter()
+            .filter(|(_, arrow)| *arrow == DataType::Utf8)
+            .count();
+        assert_eq!(flattened, 15, "the columns the grid cannot tell apart");
+        assert_eq!(
+            cell_of(&native(NativeType::TinyInt)).arrow(),
+            DataType::Int16
+        );
+        assert_eq!(
+            cell_of(&native(NativeType::SmallInt)).arrow(),
+            DataType::Int16
+        );
+        assert_eq!(
+            cell_of(&native(NativeType::BigInt)).arrow(),
+            DataType::Int64
+        );
+        assert_eq!(
+            cell_of(&native(NativeType::Counter)).arrow(),
+            DataType::Int64
+        );
+    }
+
+    /// The spelling itself, for the shapes with parameters — a name built from
+    /// only the outer type would be a different declaration, and `list<text>`
+    /// and `list<int>` are not interchangeable in any statement.
+    #[test]
+    fn a_composite_is_named_all_the_way_down() {
+        let name = |typ: &ColumnType<'_>| cql_name(typ).expect("a name");
+
+        assert_eq!(
+            name(&ColumnType::Collection {
+                frozen: false,
+                typ: CollectionType::List(Box::new(native(NativeType::Text))),
+            }),
+            "list<text>"
+        );
+        assert_eq!(
+            name(&ColumnType::Collection {
+                frozen: false,
+                typ: CollectionType::Map(
+                    Box::new(native(NativeType::Text)),
+                    Box::new(native(NativeType::Int)),
+                ),
+            }),
+            "map<text, int>"
+        );
+        assert_eq!(
+            name(&ColumnType::Tuple(vec![
+                native(NativeType::Int),
+                native(NativeType::Text),
+            ])),
+            "tuple<int, text>"
+        );
+        // The dimension count is part of the type, not a property of the value.
+        assert_eq!(
+            name(&ColumnType::Vector {
+                typ: Box::new(native(NativeType::Float)),
+                dimensions: 512,
+            }),
+            "vector<float, 512>"
+        );
+        // A UDT by its own name and not its keyspace's: that is how CQL writes
+        // one, and a UDT always lives in the keyspace of the table using it.
+        assert_eq!(name(&udt()), "address");
+
+        // Nesting, which is the case a single level of naming gets right by
+        // accident: a `list` of tuples has to name the tuple's elements too.
+        assert_eq!(
+            name(&ColumnType::Collection {
+                frozen: false,
+                typ: CollectionType::Set(Box::new(ColumnType::Tuple(vec![
+                    native(NativeType::Int),
+                    udt(),
+                ]))),
+            }),
+            "set<tuple<int, address>>"
+        );
+    }
+
+    /// A result frame has no room for `frozen` and `scylla` fills the field with
+    /// `false` for every column it decodes, so the flag on hand is not the
+    /// column's — it is a default. Writing it would put a word in the header
+    /// that says something about the declaration nobody sent.
+    #[test]
+    fn a_result_never_claims_a_column_is_frozen() {
+        let of = |frozen| {
+            cql_name(&ColumnType::Collection {
+                frozen,
+                typ: CollectionType::Map(
+                    Box::new(native(NativeType::Text)),
+                    Box::new(native(NativeType::Int)),
+                ),
+            })
+        };
+        assert_eq!(of(true), of(false));
+        assert_eq!(of(true).expect("a name"), "map<text, int>");
+    }
+
+    /// The wiring. Naming a type is worth nothing until the name is on the field
+    /// the reader reads, and the failure shape of a missing hop is invisible:
+    /// the grid falls back to the Arrow type, which is what it showed before
+    /// this existed at all.
+    #[test]
+    fn the_declaration_reaches_the_field_the_reader_looks_at() {
+        use scylla::frame::response::result::{ColumnSpec, TableSpec};
+        use scylla::response::query_result::ColumnSpecs;
+
+        let table = TableSpec::borrowed("bench", "kinds");
+        let specs = [
+            ColumnSpec::borrowed("id", native(NativeType::Int), table.clone()),
+            ColumnSpec::borrowed("uid", native(NativeType::Uuid), table.clone()),
+            ColumnSpec::borrowed(
+                "tags",
+                ColumnType::Collection {
+                    frozen: false,
+                    typ: CollectionType::List(Box::new(native(NativeType::Text))),
+                },
+                table,
+            ),
+        ];
+        let schema = Plan::of(ColumnSpecs::new(&specs)).schema();
+        let declared = |name: &str| {
+            schema
+                .field_with_name(name)
+                .expect(name)
+                .metadata()
+                .get(DECLARED_TYPE)
+                .cloned()
+        };
+
+        assert_eq!(declared("id").as_deref(), Some("int"));
+        // The two that arrive indistinguishable: a `uuid` and a `list<text>` are
+        // both `Utf8` on the field itself.
+        assert_eq!(declared("uid").as_deref(), Some("uuid"));
+        assert_eq!(declared("tags").as_deref(), Some("list<text>"));
     }
 
     /// The two ends of CQL's date range, which is exactly Arrow's once the bias
