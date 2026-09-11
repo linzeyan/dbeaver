@@ -15,6 +15,13 @@
 //! JSON type to read a value out of; there is a string to parse, and the column
 //! says how.
 //!
+//! **Every column also says what Snowflake calls its type**, under
+//! `dbconn::DECLARED_TYPE`, and it has to for the reason above: six of
+//! Snowflake's types reach the grid as `Utf8` — `VARIANT`, `OBJECT`, `ARRAY`,
+//! `GEOGRAPHY`, `GEOMETRY` and `VECTOR` — and so does every `TIMESTAMP_TZ` and
+//! any datetime finer than microseconds. `declared_type` is also the one place
+//! that knows a result and the catalog spell Snowflake's types differently.
+//!
 //! No account has answered any of this. Four decisions below are the ones most
 //! likely to be wrong, and each says so where it is made: the `+1440` on a
 //! `TIMESTAMP_TZ` offset, the spelling of a `FLOAT` that is not a number, the
@@ -31,6 +38,7 @@ use arrow::array::{
 use arrow::compute::kernels::cast_utils::parse_decimal;
 use arrow::datatypes::{DataType, Decimal128Type, Field, Schema, SchemaRef, TimeUnit};
 use arrow::error::ArrowError;
+use dbconn::DECLARED_TYPE;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -159,6 +167,63 @@ pub(crate) fn cell_of(column: &Column) -> Cell {
     }
 }
 
+/// What Snowflake calls one result column's type, for the grid's type row.
+///
+/// **The result and the catalog do not use the same words**, and this is where
+/// the two are reconciled. A `rowType` entry says `fixed`, `real`, `text`;
+/// `INFORMATION_SCHEMA.COLUMNS` says `NUMBER`, `FLOAT`, `TEXT` for the same
+/// three columns, and `SHOW COLUMNS` says `FIXED`, `REAL`, `TEXT` — Snowflake
+/// spells its own types three ways across its own surfaces. The catalog's
+/// spelling wins here because `metadata::columns` already publishes it, and one
+/// column called `NUMBER` in the structure pane and `FIXED` in a query pane is
+/// two answers to one question. The remaining thirteen names are the catalog's
+/// word already, in lower case.
+///
+/// A name this driver has never met is **absent rather than upper-cased**.
+/// Thirteen of sixteen would come out right that way and the fourteenth is
+/// `fixed`, which is the one that matters most; guessing is how a column gets
+/// labelled with a type nobody declared, which `DECLARED_TYPE` calls worse than
+/// no label at all.
+///
+/// Parenthesised through `metadata::declared`, so a result and a browse compose
+/// the name identically. `NUMBER` is the only type the catalog puts numbers on
+/// out of what a `rowType` carries: a `TIMESTAMP_NTZ(9)` has its digits in
+/// `scale` here and in `DATETIME_PRECISION` there, which `metadata::columns`
+/// does not select — so both say the bare word, and neither is guessing.
+pub(crate) fn declared_type(column: &Column) -> Option<String> {
+    let name = match column.kind.as_str() {
+        "fixed" => "NUMBER",
+        "real" => "FLOAT",
+        "text" => "TEXT",
+        "binary" => "BINARY",
+        "boolean" => "BOOLEAN",
+        "date" => "DATE",
+        "time" => "TIME",
+        "timestamp_ntz" => "TIMESTAMP_NTZ",
+        "timestamp_ltz" => "TIMESTAMP_LTZ",
+        "timestamp_tz" => "TIMESTAMP_TZ",
+        "variant" => "VARIANT",
+        "object" => "OBJECT",
+        "array" => "ARRAY",
+        "geography" => "GEOGRAPHY",
+        "geometry" => "GEOMETRY",
+        "vector" => "VECTOR",
+        _ => return None,
+    };
+    // Only a `NUMBER` carries its digits into the name, and only when its own
+    // metadata describes one — the same range `cell_of` checks before it trusts
+    // the two numbers for a `Decimal128`.
+    let (precision, scale) = match (column.kind.as_str(), column.precision, column.scale) {
+        ("fixed", Some(precision), Some(scale))
+            if (1..=38).contains(&precision) && (0..=precision).contains(&scale) =>
+        {
+            (precision.to_string(), scale.to_string())
+        }
+        _ => (String::new(), String::new()),
+    };
+    Some(crate::metadata::declared(name, &precision, &scale, ""))
+}
+
 /// A result's columns and how to read their values.
 pub(crate) struct Plan {
     schema: SchemaRef,
@@ -174,7 +239,15 @@ impl Plan {
             // Nullable throughout, and not from asking the catalog: this is a
             // result and not a table, and an outer join over a column declared
             // `NOT NULL` produces nulls in it.
-            .map(|(column, cell)| Field::new(&column.name, cell.arrow(), true))
+            .map(|(column, cell)| {
+                let field = Field::new(&column.name, cell.arrow(), true);
+                match declared_type(column) {
+                    None => field,
+                    Some(declared) => {
+                        field.with_metadata([(DECLARED_TYPE.to_string(), declared)].into())
+                    }
+                }
+            })
             .collect();
         Plan {
             schema: Arc::new(Schema::new(fields)),
@@ -780,6 +853,119 @@ mod tests {
         assert_eq!(
             plan.schema().field(1).data_type(),
             &DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+    }
+
+    /// The three names a result and the catalog disagree about. Getting these
+    /// wrong is not a broken column — it is a grid that calls the same type
+    /// `FIXED` in one pane and `NUMBER` in another, which is the kind of wrong
+    /// nobody files a bug about and everybody has to remember.
+    #[test]
+    fn a_result_names_its_types_the_way_the_catalog_does() {
+        assert_eq!(
+            declared_type(&column("n", "fixed", None, None)).as_deref(),
+            Some("NUMBER")
+        );
+        assert_eq!(
+            declared_type(&column("f", "real", None, None)).as_deref(),
+            Some("FLOAT")
+        );
+        assert_eq!(
+            declared_type(&column("s", "text", None, None)).as_deref(),
+            Some("TEXT")
+        );
+    }
+
+    /// The six that arrive as `Utf8` and one another's neighbours in the grid
+    /// unless something says otherwise.
+    #[test]
+    fn the_types_that_share_a_utf8_buffer_still_say_which_they_are() {
+        for (kind, name) in [
+            ("variant", "VARIANT"),
+            ("object", "OBJECT"),
+            ("array", "ARRAY"),
+            ("geography", "GEOGRAPHY"),
+            ("geometry", "GEOMETRY"),
+            ("vector", "VECTOR"),
+        ] {
+            let field = Plan::of(&[column("c", kind, None, None)])
+                .schema()
+                .field(0)
+                .clone();
+            assert_eq!(field.data_type(), &DataType::Utf8, "{kind}");
+            assert_eq!(
+                field.metadata().get(DECLARED_TYPE).map(String::as_str),
+                Some(name),
+                "{kind}"
+            );
+        }
+    }
+
+    /// A `NUMBER` is the one type whose digits decide whether two values compare
+    /// exactly, and the one the catalog puts numbers on — so both paths compose
+    /// the same string out of the same function.
+    #[test]
+    fn a_number_carries_the_digits_it_was_declared_with() {
+        assert_eq!(
+            declared_type(&column("n", "fixed", Some(18), Some(2))).as_deref(),
+            Some("NUMBER(18,2)")
+        );
+        // Scale zero is dropped, because that is what `metadata::declared` does
+        // with the catalog's own `NUMERIC_SCALE` — and the two must agree.
+        assert_eq!(
+            declared_type(&column("n", "fixed", Some(38), Some(0))).as_deref(),
+            Some("NUMBER(38)")
+        );
+        // Metadata that cannot describe a `NUMBER` leaves the bare word rather
+        // than printing it — the same fallback `cell_of` makes for the same
+        // input, where it gives up on `Decimal128`.
+        assert_eq!(
+            declared_type(&column("n", "fixed", Some(39), Some(0))).as_deref(),
+            Some("NUMBER")
+        );
+        assert_eq!(
+            declared_type(&column("n", "fixed", None, Some(0))).as_deref(),
+            Some("NUMBER")
+        );
+    }
+
+    /// A datetime says its type and not its precision, because the catalog does
+    /// not select `DATETIME_PRECISION` and a result saying `TIMESTAMP_NTZ(9)`
+    /// beside a browse saying `TIMESTAMP_NTZ` is the disagreement this whole
+    /// function exists to prevent.
+    #[test]
+    fn a_datetime_says_which_timestamp_it_is_and_leaves_the_digits_alone() {
+        for kind in ["timestamp_ntz", "timestamp_ltz", "timestamp_tz"] {
+            assert_eq!(
+                declared_type(&column("t", kind, None, Some(9))).as_deref(),
+                Some(kind.to_uppercase().as_str()),
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            declared_type(&column("t", "time", None, Some(9))).as_deref(),
+            Some("TIME")
+        );
+    }
+
+    /// A type this driver has never met carries no label. Upper-casing the wire
+    /// name would be right thirteen times out of sixteen and would put `FIXED`
+    /// on every number in the workspace, which is a word no Snowflake user has
+    /// written.
+    #[test]
+    fn a_type_this_driver_does_not_know_is_left_unnamed() {
+        assert_eq!(
+            declared_type(&column("c", "a type from next year", None, None)),
+            None
+        );
+        assert_eq!(declared_type(&column("c", "", None, None)), None);
+        assert!(
+            Plan::of(&[column("c", "a type from next year", None, None)])
+                .schema()
+                .field(0)
+                .metadata()
+                .get(DECLARED_TYPE)
+                .is_none()
         );
     }
 

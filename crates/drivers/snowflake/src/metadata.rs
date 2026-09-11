@@ -459,7 +459,12 @@ impl SnowflakeSource {
 /// type, which is why this is a function with tests rather than a `format!` at
 /// the call site: a `TEXT` has a length and no precision, a `NUMBER` has both
 /// precision and scale, and a `BOOLEAN` has none of the three.
-fn declared(data_type: &str, precision: &str, scale: &str, length: &str) -> String {
+///
+/// Shared with `arrow_map::declared_type`, which composes the same name out of a
+/// *result's* metadata rather than a table's. One function rather than two, so
+/// that the same column cannot be called `NUMBER(18)` in the structure pane and
+/// `NUMBER(18,0)` in the grid depending on which one it was opened from.
+pub(crate) fn declared(data_type: &str, precision: &str, scale: &str, length: &str) -> String {
     if !precision.is_empty() {
         return match scale {
             "" | "0" => format!("{data_type}({precision})"),

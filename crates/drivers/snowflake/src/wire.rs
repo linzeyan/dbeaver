@@ -96,9 +96,10 @@ pub(crate) struct ResultSetMetadata {
 pub(crate) struct Column {
     pub name: String,
     /// Snowflake's own type name, lower case: `fixed`, `text`, `timestamp_ltz`.
-    /// Not the declared type a structure pane shows — that comes from
-    /// `information_schema.columns`, which is about the table rather than about
-    /// one result.
+    /// Not the word a structure pane shows — that one comes from
+    /// `information_schema.columns`, which spells the same three types `NUMBER`,
+    /// `TEXT` and `TIMESTAMP_LTZ`. `arrow_map::declared_type` reconciles the two
+    /// vocabularies, so one type is one word whichever pane a column is read in.
     #[serde(rename = "type")]
     pub kind: String,
     pub precision: Option<i64>,
