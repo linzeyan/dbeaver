@@ -233,6 +233,20 @@ std::wstring widen(const std::string& utf8) {
     return wide;
 }
 
+// The other way, for the one thing that goes back: a value the grid is showing,
+// on its way into a statement the server will read.
+std::string narrow(const std::wstring& wide) {
+    if (wide.empty()) {
+        return std::string();
+    }
+    const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                           nullptr, 0, nullptr, nullptr);
+    std::string utf8(static_cast<size_t>(needed), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(),
+                        needed, nullptr, nullptr);
+    return utf8;
+}
+
 // -------------------------------------------------------------------------
 // The device, kept together because every check needs all of it
 // -------------------------------------------------------------------------
@@ -643,20 +657,134 @@ bool next_sort(const Sort* current, int column, Sort* out) {
 // is how both DuckDB and PostgreSQL spell one inside an identifier. (The Swift
 // side wraps the name without doubling, and a column named with a quote in it
 // breaks the statement there — worth fixing on that side.)
-std::string order_clause(const Sort* sort, const std::vector<Column>& columns) {
-    if (sort == nullptr || sort->column < 0
-        || static_cast<size_t>(sort->column) >= columns.size()) {
-        return std::string();
-    }
+std::string quoted_identifier(const std::string& name) {
     std::string quoted = "\"";
-    for (const char c : columns[sort->column].name) {
+    for (const char c : name) {
         quoted += c;
         if (c == '"') {
             quoted += c;
         }
     }
-    quoted += "\"";
+    return quoted + "\"";
+}
+
+std::string order_clause(const Sort* sort, const std::vector<Column>& columns) {
+    if (sort == nullptr || sort->column < 0
+        || static_cast<size_t>(sort->column) >= columns.size()) {
+        return std::string();
+    }
+    const std::string quoted = quoted_identifier(columns[sort->column].name);
     return sort->descending ? quoted + " DESC" : quoted;
+}
+
+// The four questions the menu asks about a cell.
+enum class Filter { Equals, NotEquals, IsNull, IsNotNull };
+
+// A value the server will read back as a value rather than as SQL. The same
+// doubling as an identifier, on the other quote.
+//
+// This is the only place in this front end where something a server sent goes
+// back to it inside a statement, which is the whole reason the doubling is here
+// and not left to the caller to remember.
+std::string quoted_text(const std::string& value) {
+    std::string quoted = "'";
+    for (const char c : value) {
+        quoted += c;
+        if (c == '\'') {
+            quoted += c;
+        }
+    }
+    return quoted + "'";
+}
+
+// What one menu item means as SQL, about one cell.
+//
+// Equals on an absent value is `IS NULL` rather than `= NULL`, which is never
+// true: an item called "Equals This Value" that always emptied the grid would
+// be reporting a fact about three-valued logic instead of doing what it says.
+// `AppController.swift` carries the same distinction as a nil value and lets
+// the core spell it; there is no core in this statement's path, so it is spelled
+// here.
+//
+// By name rather than by position, for `order_clause`'s reason: a name survives
+// a change to the select list.
+std::string cell_predicate(const Column& column, int row, Filter op) {
+    const std::string name = quoted_identifier(column.name);
+    const size_t at = static_cast<size_t>(row);
+    const bool absent = row < 0 || at >= column.nulls.size() || column.nulls[at];
+    switch (op) {
+    case Filter::IsNull:
+        return name + " IS NULL";
+    case Filter::IsNotNull:
+        return name + " IS NOT NULL";
+    case Filter::Equals:
+        return absent ? name + " IS NULL"
+                      : name + " = " + quoted_text(narrow(column.cells[at]));
+    case Filter::NotEquals:
+        return absent ? name + " IS NOT NULL"
+                      : name + " <> " + quoted_text(narrow(column.cells[at]));
+    }
+    return std::string();
+}
+
+// The stack of them, in the order they were added. ANDed, because that is what
+// adding one to another means — each answer narrows what the last one left.
+std::string where_clause(const std::vector<std::string>& filters) {
+    std::string clause;
+    for (const std::string& one : filters) {
+        if (!clause.empty()) {
+            clause += " AND ";
+        }
+        clause += one;
+    }
+    return clause;
+}
+
+// The context menu's items. Numbered from one because `TrackPopupMenu` answers
+// nought for a menu that was dismissed, so an item with that id could never be
+// told from somebody pressing Escape.
+//
+// Up here with the clauses rather than down with the window, because which item
+// was chosen is a question that can be asked without one — and until the filters
+// arrived, nothing had ever asked it.
+constexpr UINT kCopyValue = 1;
+constexpr UINT kCopyRows = 2;
+constexpr UINT kCopyRowsAsCsv = 3;
+constexpr UINT kClearFilter = 4;
+
+// The four filters, twice over: once replacing whatever is on and once adding to
+// it. Encoded rather than named eight times, because `TrackPopupMenu` hands back
+// one number and eight constants would be eight things to keep in step with the
+// four entries the submenu is built from.
+constexpr UINT kFilterFirst = 8;
+constexpr UINT kFilterOps = 4;
+
+bool filter_chosen(int id, Filter* op, bool* extend) {
+    const int at = id - static_cast<int>(kFilterFirst);
+    if (at < 0 || at >= static_cast<int>(kFilterOps) * 2) {
+        return false;
+    }
+    *op = static_cast<Filter>(at % static_cast<int>(kFilterOps));
+    *extend = at >= static_cast<int>(kFilterOps);
+    return true;
+}
+
+// One submenu of four, built twice over.
+//
+// The two NULL entries are spelled the way SQL spells them, which is what
+// `AppController.swift` says about its own: the item is naming the predicate it
+// produces, and somebody reading it is reading SQL rather than this menu.
+HMENU filter_submenu(bool extend) {
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return nullptr;
+    }
+    const wchar_t* const names[kFilterOps] = {L"Equals This Value", L"Does Not Equal This Value",
+                                              L"IS NULL", L"IS NOT NULL"};
+    for (UINT at = 0; at < kFilterOps; ++at) {
+        AppendMenuW(menu, MF_STRING, kFilterFirst + at + (extend ? kFilterOps : 0), names[at]);
+    }
+    return menu;
 }
 
 // Which cell the keyboard acts on, and how far a shift-held arrow has taken the
@@ -1492,10 +1620,16 @@ std::string metadata_value(const char* metadata, const char* key) {
 // below have a fixed starting point to compare a sorted read against — DuckDB
 // is free to hand back an unordered scan in any order it likes, and a check
 // that assumed otherwise would be measuring the planner's mood.
-bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column>* out) {
+//
+// `where` is the filter menu's stack of predicates, or empty for all of them.
+// It wraps rather than joining the select below: the predicates name the columns
+// the grid is showing, which are projections, and a statement reading them where
+// they are made is one that depends on DuckDB letting a WHERE see an alias.
+bool read_columns(DbHandle* handle, const std::string& order, const std::string& where,
+                  std::vector<Column>* out) {
     char* err = nullptr;
     int position = 0;
-    const std::string statement =
+    const std::string select =
         std::string("SELECT i AS id,"
                     "       'driver-' || i AS name,"
                     "       CASE WHEN i = 1 THEN NULL"
@@ -1522,8 +1656,14 @@ bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column
                     // scrolling has somewhere to go and so that "draws every
                     // row" and "draws the rows in view" stop being the same
                     // statement.
-                    "FROM range(40) t(i) ORDER BY ")
-        + (order.empty() ? std::string("i") : order);
+                    "FROM range(40) t(i)");
+    // The base order names the projected column rather than the one it was made
+    // from: a filter wraps this select in another, and `i` exists only inside.
+    const std::string ordered = std::string(" ORDER BY ")
+                                + (order.empty() ? std::string("\"id\"") : order);
+    const std::string statement = where.empty()
+                                      ? select + ordered
+                                      : "SELECT * FROM (" + select + ") WHERE " + where + ordered;
     DbQuery* query = db_query(handle, statement.c_str(), 1000, &err, &position);
     if (query == nullptr) {
         return core_failed("db_query", err);
@@ -1534,33 +1674,39 @@ bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column
         db_query_free(query);
         return core_failed("db_query_schema", err);
     }
+    // Nought rather than one is a result with no rows in it, which a filter that
+    // matched nothing produces and which is not a failure. The columns are still
+    // known — the schema arrived before this call — so an empty result is the
+    // headings over nothing, rather than a grid that has lost its columns and
+    // cannot say what it was showing.
     ArrowArray batch{};
-    if (db_query_next(query, &batch, &err) != 1) {
+    const int arrived = db_query_next(query, &batch, &err);
+    if (arrived < 0) {
         schema.release(&schema);
         db_query_free(query);
         return core_failed("db_query_next", err);
     }
 
-    for (int64_t c = 0; c < batch.n_children; ++c) {
+    for (int64_t c = 0; c < schema.n_children; ++c) {
         const ArrowSchema& field = *schema.children[c];
-        const ArrowArray& values = *batch.children[c];
         const std::string format(field.format);
         Column column;
         column.name = field.name;
         column.heading = widen(field.name);
         column.type_name = widen(metadata_value(field.metadata, kDeclaredType));
         column.numeric = format == "l";
-        for (int64_t r = 0; r < batch.length; ++r) {
-            const bool present = valid_at(values, r);
+        const ArrowArray* values = arrived == 1 ? batch.children[c] : nullptr;
+        for (int64_t r = 0; values != nullptr && r < batch.length; ++r) {
+            const bool present = valid_at(*values, r);
             column.nulls.push_back(!present);
             column.edited.push_back(false);
             if (!present) {
                 column.cells.push_back(kNullText);
             } else if (format == "u") {
-                column.cells.push_back(widen(utf8_at(values, r)));
+                column.cells.push_back(widen(utf8_at(*values, r)));
             } else if (format == "l") {
-                const auto* numbers = static_cast<const int64_t*>(values.buffers[1]);
-                column.cells.push_back(std::to_wstring(numbers[values.offset + r]));
+                const auto* numbers = static_cast<const int64_t*>(values->buffers[1]);
+                column.cells.push_back(std::to_wstring(numbers[values->offset + r]));
             } else {
                 // Named rather than read anyway. Reading an `i` as an `l` is not
                 // a crash, it is two columns of plausible-looking numbers, and
@@ -1574,7 +1720,9 @@ bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column
         out->push_back(std::move(column));
     }
 
-    batch.release(&batch);
+    if (arrived == 1) {
+        batch.release(&batch);
+    }
     schema.release(&schema);
 
     // A statement has to be pulled to exhaustion; the header says so, and it is
@@ -2014,20 +2162,20 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
 // connection, a result and a close. On this fixture that costs a few
 // milliseconds against an in-memory database; a real client would be reusing a
 // pooled connection, and nothing above this line would change.
-bool load_grid(const std::string& order, std::vector<Column>* out) {
+bool load_grid(const std::string& order, const std::string& where, std::vector<Column>* out) {
     char* err = nullptr;
     DbHandle* handle = db_connect("duckdb://:memory:", nullptr, 10, &err);
     if (handle == nullptr) {
         return core_failed("db_connect", err);
     }
-    const bool read = read_columns(handle, order, out);
+    const bool read = read_columns(handle, order, where, out);
     db_free(handle);
     return read;
 }
 
 bool the_grid_draws_a_result() {
     std::vector<Column> columns;
-    if (!load_grid(std::string(), &columns)) {
+    if (!load_grid(std::string(), std::string(), &columns)) {
         return false;
     }
 
@@ -2702,6 +2850,118 @@ bool the_grid_draws_a_result() {
     check(marked_ink > 0, "with the value under the two of them still drawn");
 
     // ------------------------------------------------------------------
+    // The filter submenu: the SQL each item means, and what it leaves
+    // ------------------------------------------------------------------
+
+    check(cell_predicate(columns[1], 2, Filter::Equals) == "\"name\" = 'driver-2'",
+          "Equals This Value names the column and quotes the value");
+    check(cell_predicate(columns[0], 3, Filter::NotEquals) == "\"id\" <> '3'",
+          "and its opposite is the same clause the other way round");
+    // Row 1's note is the null one. `= NULL` is never true, so the item would
+    // empty the grid every time it was chosen on an absent value — a fact about
+    // three-valued logic reported as a filter.
+    check(cell_predicate(columns[2], 1, Filter::Equals) == "\"note\" IS NULL",
+          "on an absent value it asks IS NULL rather than = NULL");
+    check(cell_predicate(columns[2], 1, Filter::NotEquals) == "\"note\" IS NOT NULL",
+          "and the opposite item mirrors that");
+    // The two NULL items ask about the column whatever the cell holds, which is
+    // what tells them apart from the two above.
+    check(cell_predicate(columns[2], 2, Filter::IsNull) == "\"note\" IS NULL"
+              && cell_predicate(columns[2], 2, Filter::IsNotNull) == "\"note\" IS NOT NULL",
+          "the two NULL items ignore the value under the pointer");
+    // This fixture's fourth column is the one that makes quoting compulsory
+    // rather than careful: its name is a sentence with spaces in it.
+    check(cell_predicate(columns[3], 0, Filter::IsNull)
+              == "\"a heading long enough to be cut by the column it names\" IS NULL",
+          "a column named with spaces in it survives as one name");
+    // And the other quote, which is the one a value can carry. Asked of a column
+    // made here, because nothing the fixture query returns has an apostrophe in
+    // it and giving one a value that does would change the widths every check
+    // above measures.
+    Column apostrophe;
+    apostrophe.name = "it's";
+    apostrophe.cells = {L"O'Hara"};
+    apostrophe.nulls = {false};
+    check(cell_predicate(apostrophe, 0, Filter::Equals) == "\"it's\" = 'O''Hara'",
+          "a quote inside a value is doubled rather than ending the literal");
+
+    check(where_clause(std::vector<std::string>()).empty(), "no filters is no clause at all");
+    check(where_clause({"a", "b"}) == "a AND b",
+          "and several are ANDed in the order they were chosen");
+
+    Filter chose = Filter::IsNull;
+    bool extending = true;
+    check(filter_chosen(static_cast<int>(kFilterFirst), &chose, &extending)
+              && chose == Filter::Equals && !extending,
+          "the first item of the first submenu is Equals, replacing");
+    check(filter_chosen(static_cast<int>(kFilterFirst + kFilterOps + 1), &chose, &extending)
+              && chose == Filter::NotEquals && extending,
+          "and the second of the second is Does Not Equal, adding");
+    // The copy items share the menu with these, and nought is what a dismissed
+    // menu answers: either taken for a filter would run one nobody chose.
+    check(!filter_chosen(static_cast<int>(kCopyValue), &chose, &extending)
+              && !filter_chosen(0, &chose, &extending),
+          "a copy item and a dismissed menu are neither of them filters");
+
+    // The ids the submenus really carry, read back off the menus and decoded.
+    // The two checks above test the halves separately and would both go on
+    // passing if the building and the decoding stopped agreeing: two submenus
+    // built with one set of ids read as one menu, and *Add to Filter* would
+    // quietly replace instead of narrowing. A menu needs no window, so this can
+    // be asked here.
+    for (int adding = 0; adding < 2; ++adding) {
+        HMENU built = filter_submenu(adding == 1);
+        bool agrees = built != nullptr
+                      && GetMenuItemCount(built) == static_cast<int>(kFilterOps);
+        for (int item = 0; built != nullptr && item < static_cast<int>(kFilterOps); ++item) {
+            Filter carried = Filter::IsNull;
+            bool extends = adding == 0;
+            agrees = agrees
+                     && filter_chosen(static_cast<int>(GetMenuItemID(built, item)), &carried,
+                                      &extends)
+                     && carried == static_cast<Filter>(item) && extends == (adding == 1);
+        }
+        DestroyMenu(built);
+        check(agrees, adding == 1 ? "the adding submenu's four ids decode to its four items"
+                                  : "and the replacing submenu's to its own");
+    }
+
+    // Against the server, because everything above is about text and none of it
+    // says DuckDB will take it.
+    std::vector<Column> filtered;
+    if (!load_grid(std::string(), cell_predicate(columns[2], 1, Filter::IsNull), &filtered)) {
+        return false;
+    }
+    check(filtered.size() == 4 && filtered[0].cells.size() == 1 && filtered[0].cells[0] == L"1",
+          "the clause the menu builds runs, and leaves the row it was built from");
+    // The wrap is the risk: the predicates name projections, so the statement
+    // puts the whole select inside another one, and a declared type that did not
+    // come out through that would take the second header line with it.
+    check(filtered[0].type_name == columns[0].type_name
+              && filtered[3].type_name == columns[3].type_name,
+          "and the declared types come out through the wrap");
+
+    std::vector<Column> narrowed;
+    if (!load_grid(std::string(),
+                   where_clause({cell_predicate(columns[1], 2, Filter::Equals),
+                                 cell_predicate(columns[0], 2, Filter::Equals)}),
+                   &narrowed)) {
+        return false;
+    }
+    check(narrowed[0].cells.size() == 1 && narrowed[0].cells[0] == L"2",
+          "two of them leave what both are true of");
+
+    // Nothing matched is an answer, not a failure. It is also the one state this
+    // menu can put the grid into that it cannot get out of by itself, which is
+    // why the window offers Clear Filter on an empty result.
+    std::vector<Column> nothing;
+    if (!load_grid(std::string(), cell_predicate(columns[0], 0, Filter::IsNull), &nothing)) {
+        return false;
+    }
+    check(nothing.size() == 4 && nothing[0].cells.empty(),
+          "a filter that matches nothing keeps the columns and loses the rows");
+
+    // ------------------------------------------------------------------
     // Scrolling: which rows are on screen, and which row each one is
     // ------------------------------------------------------------------
 
@@ -3116,7 +3376,7 @@ bool the_grid_draws_a_result() {
     check(columns[0].cells[0] == L"0" && columns[1].cells[0] == L"driver-0",
           "the unsorted result starts where the base order does");
     std::vector<Column> reordered;
-    if (!load_grid(order_clause(&descending, columns), &reordered)) {
+    if (!load_grid(order_clause(&descending, columns), std::string(), &reordered)) {
         return false;
     }
     check(reordered.size() == columns.size() && reordered[0].cells.size() == rows,
@@ -3257,7 +3517,7 @@ bool the_grid_draws_a_result() {
     // A drag has to survive the next statement, and every heading click is one.
     set_column_width(&resized, 0, 120.0f);
     std::vector<Column> again;
-    if (!load_grid(std::string(), &again)) {
+    if (!load_grid(std::string(), std::string(), &again)) {
         return false;
     }
     lay_out(&again, font.advance);
@@ -3618,13 +3878,6 @@ bool the_driver_list_draws() {
 // The window, drawing what the check above draws
 // -------------------------------------------------------------------------
 
-// The context menu's items. Numbered from one because `TrackPopupMenu` answers
-// nought for a menu that was dismissed, so an item with that id could never be
-// told from somebody pressing Escape.
-constexpr UINT kCopyValue = 1;
-constexpr UINT kCopyRows = 2;
-constexpr UINT kCopyRowsAsCsv = 3;
-
 // The `EDIT` class's own procedure, kept so the one below can hand back
 // everything it does not answer. One copy for the process: every field this grid
 // opens is an `EDIT`, and they all share it.
@@ -3669,6 +3922,10 @@ struct Window {
     bool ending = false;
     HFONT editor_font = nullptr;
     HBRUSH editor_brush = nullptr;
+    // What the filter menu has narrowed the result to, in the order the items
+    // were chosen. Kept as the predicates rather than as the clause so that
+    // *Filter on* can throw away what came before and *Add to Filter* cannot.
+    std::vector<std::string> filters;
 
     const Tones& tones() const { return is_light ? kLightTones : kDarkTones; }
 
@@ -3731,7 +3988,11 @@ struct Window {
         Sort next;
         const bool wanted = next_sort(sorted ? &sort : nullptr, column, &next);
         std::vector<Column> fresh;
-        if (!load_grid(order_clause(wanted ? &next : nullptr, columns), &fresh)) {
+        // Under whatever the filter menu has narrowed the result to. A sort that
+        // dropped the filter would answer a click on a heading by putting rows
+        // back that somebody had asked to be rid of.
+        if (!load_grid(order_clause(wanted ? &next : nullptr, columns), where_clause(filters),
+                       &fresh)) {
             return;
         }
         // The widths come across when the columns are the same columns, which
@@ -3752,6 +4013,60 @@ struct Window {
         // Sideways it stays, because the columns are the same columns in the
         // same order and the place across the result still means what it meant.
         // Only held to their total, in case the fallback above measured afresh.
+        hold_scroll_x();
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    // A filter the menu asked for, or the end of all of them.
+    //
+    // `extend` is the difference between the two parent items: *Filter on* is a
+    // fresh question about this column and *Add to Filter* narrows what is
+    // already there. Replacing is safe because the stack is the only thing that
+    // holds a filter — there is no field here for somebody to have typed
+    // something into that this would overwrite, which is what
+    // `AppModel.filterByCell` had to be careful about.
+    void filter_by(Filter op, bool extend, const Selection& on) {
+        const size_t at = static_cast<size_t>(on.column);
+        if (on.column < 0 || at >= columns.size()) {
+            return;
+        }
+        std::vector<std::string> wanted = extend ? filters : std::vector<std::string>();
+        wanted.push_back(cell_predicate(columns[at], on.row, op));
+        apply_filters(wanted);
+    }
+
+    void clear_filters() {
+        if (filters.empty()) {
+            return;
+        }
+        apply_filters(std::vector<std::string>());
+    }
+
+    // The result, read again under a different set of predicates.
+    //
+    // Into a second vector and swapped in only once it arrives, for `sort_by`'s
+    // reason: a statement that fails leaves the grid showing what it was
+    // showing. A filter is the more likely of the two to fail — it carries a
+    // value back to the server — and an empty grid is exactly what a working
+    // filter can also look like, so the two must not be confusable.
+    void apply_filters(const std::vector<std::string>& wanted) {
+        std::vector<Column> fresh;
+        if (!load_grid(order_clause(sorted ? &sort : nullptr, columns), where_clause(wanted),
+                       &fresh)) {
+            return;
+        }
+        if (!carry_widths(columns, &fresh)) {
+            lay_out(&fresh, font.advance);
+        }
+        columns = std::move(fresh);
+        filters = wanted;
+        // The cursor goes, rather than being clamped into range. These are
+        // different rows: row four of a filtered result is not row four of the
+        // one before it, and a selection kept across the change points at a row
+        // nobody chose. The edit marks go with them for the same reason — they
+        // were recorded against where a row sat.
+        selected = false;
+        scroll_row = 0.0f;
         hold_scroll_x();
         InvalidateRect(hwnd, nullptr, FALSE);
     }
@@ -4057,11 +4372,37 @@ struct Window {
         AppendMenuW(menu, MF_STRING, kCopyValue, L"Copy Value");
         AppendMenuW(menu, MF_STRING, kCopyRows, (L"Copy " + rows).c_str());
         AppendMenuW(menu, MF_STRING, kCopyRowsAsCsv, (L"Copy " + rows + L" as CSV").c_str());
+
+        // Under a separator, because the three above copy what is on screen and
+        // these change what is on screen. Named after the column rather than
+        // after the value: the value is under the pointer, and the column is the
+        // thing the item is about that the click does not already say.
+        const size_t at = static_cast<size_t>(on.column);
+        if (at < columns.size()) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(filter_submenu(false)),
+                        (L"Filter on " + columns[at].heading).c_str());
+            AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(filter_submenu(true)),
+                        L"Add to Filter");
+        }
+        // Only where there is one to take off. An item that does nothing is a
+        // question the reader has to answer for themselves every time they open
+        // the menu.
+        if (!filters.empty()) {
+            AppendMenuW(menu, MF_STRING, kClearFilter, L"Clear Filter");
+        }
+
         const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y,
                                           0, hwnd, nullptr);
+        // Which takes the two submenus with it: they were attached to this one.
         DestroyMenu(menu);
 
-        const size_t at = static_cast<size_t>(on.column);
+        Filter op = Filter::Equals;
+        bool extend = false;
+        if (filter_chosen(chosen, &op, &extend)) {
+            filter_by(op, extend, on);
+            return;
+        }
         switch (chosen) {
         case kCopyValue:
             // The cursor's own row rather than the band's first, because this
@@ -4076,12 +4417,38 @@ struct Window {
         case kCopyRowsAsCsv:
             put_on_clipboard(hwnd, csv_rows(columns, on.first_row(), on.last_row()));
             break;
+        case kClearFilter:
+            clear_filters();
+            break;
         default:
             // Dismissed. Not an error and not a copy — the clipboard keeps
             // whatever was on it.
             break;
         }
     }
+
+    // The way back out of a filter that matched nothing.
+    //
+    // Every other menu here opens on a cell, and a result with no rows has none:
+    // the filter that emptied the grid would be the one thing that could not be
+    // taken off, which is a trap this feature would otherwise build. So an empty
+    // result answers the right button with the single item that ends it.
+    void show_filter_exit(POINT screen) {
+        HMENU menu = CreatePopupMenu();
+        if (menu == nullptr) {
+            failed("CreatePopupMenu", HRESULT_FROM_WIN32(GetLastError()));
+            return;
+        }
+        AppendMenuW(menu, MF_STRING, kClearFilter, L"Clear Filter");
+        const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y,
+                                          0, hwnd, nullptr);
+        DestroyMenu(menu);
+        if (chosen == static_cast<int>(kClearFilter)) {
+            clear_filters();
+        }
+    }
+
+    bool is_empty_and_filtered() const { return rows() == 0 && !filters.empty(); }
 
     // Where the cursor's cell is on screen, for a menu asked for with the
     // keyboard. It opens at the cell rather than at the pointer, which may be
@@ -4477,6 +4844,11 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if (screen.x == -1 && screen.y == -1) {
             if (window->selected) {
                 window->show_menu(window->menu_point_of(window->selection), window->selection);
+            } else if (window->is_empty_and_filtered()) {
+                // From the top corner, there being no cell to open it on.
+                POINT corner{0, 0};
+                ClientToScreen(hwnd, &corner);
+                window->show_filter_exit(corner);
             }
             return 0;
         }
@@ -4489,6 +4861,9 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
                        window->view(), window->columns,
                        window->selected ? &window->selection : nullptr,
                        (GetKeyState(VK_SHIFT) & 0x8000) != 0, &on)) {
+            if (window->is_empty_and_filtered()) {
+                window->show_filter_exit(screen);
+            }
             return 0;
         }
         SetFocus(hwnd);
@@ -4623,7 +4998,7 @@ int show_the_grid_in_a_window() {
     if (!window.font.open(window.dwrite)) {
         return 1;
     }
-    if (!load_grid(std::string(), &window.columns)) {
+    if (!load_grid(std::string(), std::string(), &window.columns)) {
         return 1;
     }
     lay_out(&window.columns, window.font.advance);

@@ -21,7 +21,9 @@
 # points in one --click are separated by semicolons and pressed in order.
 # SendKeys notation for --keys: ^ is Ctrl, + is Shift, % is Alt, and the named
 # keys are {DOWN} {UP} {LEFT} {RIGHT} {PGUP} {PGDN} {HOME} {END} {ENTER} {ESC}
-# {TAB}.
+# {TAB} {F10}. The last one is how a menu is opened without the pointer: +{F10}
+# reaches DefWindowProc through WM_KEYUP, which is why the grid claiming every
+# WM_KEYDOWN does not swallow it.
 #
 #   DBEAVER_VM=host   ssh host to use (default: macshot-vm)
 #
