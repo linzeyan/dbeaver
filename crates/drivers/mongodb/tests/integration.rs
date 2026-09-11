@@ -214,9 +214,12 @@ async fn each_kind_of_value_arrives_as_the_type_that_was_decided_for_it() {
     assert_eq!(of("real"), DataType::Float64);
     assert_eq!(of("text"), DataType::Utf8);
     assert_eq!(of("blob"), DataType::Binary);
+    // Microseconds, though a BSON date is milliseconds: `tsu:` is the only
+    // timestamp the reader has a case for, and a column in any other unit draws
+    // its own format string in every cell instead of a date.
     assert_eq!(
         of("when"),
-        DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
     );
     // The deliberate flattening: the front end's Arrow reader handles no nested
     // types, so a document and an array are text rather than Struct and List.

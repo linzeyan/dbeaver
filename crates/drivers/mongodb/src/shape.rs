@@ -64,7 +64,7 @@
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
-    RecordBatch, StringBuilder, TimestampMillisecondBuilder,
+    RecordBatch, StringBuilder, TimestampMicrosecondBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use bson::{Bson, Document};
@@ -91,8 +91,10 @@ pub enum ColumnType {
     Int32,
     Int64,
     Float64,
-    /// Milliseconds since the epoch, UTC. BSON's date is exactly this and
-    /// carries no zone of its own.
+    /// An instant, UTC. BSON's date is milliseconds since the epoch and carries
+    /// no zone of its own; the column is microseconds, because `tsu:` is the one
+    /// timestamp the reader has a case for. See `column` for the multiplication
+    /// and for the one value it cannot carry.
     DateTime,
     Binary,
     /// A field whose values are nested — a document or an array — as the JSON a
@@ -138,7 +140,7 @@ impl ColumnType {
             ColumnType::Int32 => DataType::Int32,
             ColumnType::Int64 => DataType::Int64,
             ColumnType::Float64 => DataType::Float64,
-            ColumnType::DateTime => DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+            ColumnType::DateTime => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
             ColumnType::Binary => DataType::Binary,
             ColumnType::Document | ColumnType::ObjectId | ColumnType::Text => DataType::Utf8,
         }
@@ -357,6 +359,20 @@ fn plain_json(value: &Bson) -> serde_json::Value {
     }
 }
 
+/// A BSON date as the microseconds its column holds.
+///
+/// A BSON date is milliseconds and the column is microseconds, because `tsu:`
+/// is the one timestamp spelling the Swift reader has a case for — the same
+/// multiplication the Cassandra driver does, for the same reason. `None` past
+/// year 294247, where milliseconds still reach and microseconds do not.
+///
+/// One function rather than the arithmetic written twice, because `fits` and
+/// `column` disagreeing about this is precisely the silent loss the rule below
+/// exists to prevent.
+fn micros_of(value: bson::DateTime) -> Option<i64> {
+    value.timestamp_millis().checked_mul(1_000)
+}
+
 /// Whether `column` will actually store this value in a column of that type.
 ///
 /// Mirrors the match arms in `column`, and has to stay in step with them: a
@@ -374,7 +390,11 @@ fn fits(value: &Bson, ty: ColumnType) -> bool {
         (ColumnType::Int32, Bson::Int32(_)) => true,
         (ColumnType::Int64, Bson::Int64(_) | Bson::Int32(_)) => true,
         (ColumnType::Float64, Bson::Double(_) | Bson::Int32(_)) => true,
-        (ColumnType::DateTime, Bson::DateTime(_)) => true,
+        // The one scalar that can fail to fit. See `micros_of`: past year 294247
+        // there is no microsecond for the instant, so the value goes to `_extra`
+        // rather than becoming an empty cell — which is what the rule above this
+        // function is for.
+        (ColumnType::DateTime, Bson::DateTime(d)) => micros_of(*d).is_some(),
         (ColumnType::Binary, Bson::Binary(_)) => true,
         // Narrower than `Text` on purpose. A string in a column that declares
         // itself JSON would be a document the viewer then failed to parse, so it
@@ -616,10 +636,18 @@ impl Shape {
                 // UTC stated rather than left off: BSON's date is an absolute
                 // instant with no zone of its own, and a timestamp column with
                 // no timezone means local time to every consumer of Arrow.
-                let mut b = TimestampMillisecondBuilder::with_capacity(rows).with_timezone("UTC");
+                let mut b = TimestampMicrosecondBuilder::with_capacity(rows).with_timezone("UTC");
                 for v in values {
                     match v {
-                        Some(Bson::DateTime(x)) => b.append_value(x.timestamp_millis()),
+                        // Microseconds, because the reader has a case for `tsu:`
+                        // and for no other timestamp spelling — sending `tsm:`
+                        // left every date column drawing `<tsm:UTC>` in every
+                        // cell. A date `micros_of` cannot convert is null here
+                        // and kept in `_extra`, which `fits` is what arranges.
+                        Some(Bson::DateTime(x)) => match micros_of(*x) {
+                            Some(micros) => b.append_value(micros),
+                            None => b.append_null(),
+                        },
                         _ => b.append_null(),
                     }
                 }
@@ -1028,6 +1056,80 @@ mod tests {
             .expect("batch");
         let b = batch.column_by_name("b").expect("b");
         assert!(b.is_null(0) && b.is_null(1));
+    }
+
+    /// A date arrives in the one unit the reader can draw, with its instant
+    /// intact.
+    ///
+    /// The unit is the point. A BSON date is milliseconds and this column is
+    /// microseconds, because the Swift reader has a case for `tsu:` and for no
+    /// other timestamp spelling — a column sent as `tsm:` drew `<tsm:UTC>` in
+    /// every cell, which is the format string itself where a date should be.
+    /// Nothing pinned the unit before, which is how it went unnoticed: the
+    /// column was the right shape, the values were the right numbers, and the
+    /// grid could not read any of it.
+    #[test]
+    fn a_date_arrives_in_the_only_unit_the_reader_can_draw() {
+        use arrow::array::TimestampMicrosecondArray;
+
+        // 2023-11-14T22:13:20Z, which is 1_700_000_000_000 ms.
+        let docs = vec![doc! { "at": bson::DateTime::from_millis(1_700_000_000_000) }];
+        let shape = shape_of(&docs);
+        assert_eq!(
+            shape
+                .schema()
+                .field_with_name("at")
+                .expect("at")
+                .data_type(),
+            &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+        let batch = shape.batch(&docs).expect("batch");
+        let at = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("a microsecond column");
+        // The instant, not the number: read back as microseconds it has to be
+        // the same moment, so the multiplication is part of the claim.
+        assert_eq!(at.value(0), 1_700_000_000_000_000);
+    }
+
+    /// The one date that cannot make the trip is kept rather than dropped.
+    ///
+    /// Milliseconds reach year 292 million and microseconds only 292 thousand,
+    /// so the top of BSON's range has no microsecond to land on. A wrap would
+    /// put a plausible wrong date in the cell; a bare null would lose the value
+    /// silently, which is the single failure this file exists to prevent — so it
+    /// goes to `_extra` like any other value its column cannot hold. `fits` and
+    /// `column` agreeing about that is the whole content of this check.
+    #[test]
+    fn a_date_too_far_out_to_convert_is_kept_rather_than_dropped() {
+        use arrow::array::TimestampMicrosecondArray;
+
+        let docs = vec![
+            doc! { "at": bson::DateTime::from_millis(i64::MAX) },
+            doc! { "at": bson::DateTime::from_millis(0) },
+        ];
+        let batch = shape_of(&docs).batch(&docs).expect("batch");
+        let at = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .expect("a microsecond column");
+        assert!(at.is_null(0), "no date at all rather than a wrapped one");
+        assert_eq!(at.value(1), 0, "and the epoch still lands on zero");
+
+        let extra = batch.column_by_name(EXTRA).expect("the escape hatch");
+        let extra = extra.as_any().downcast_ref::<StringArray>().expect("text");
+        assert!(
+            extra.value(0).contains("at"),
+            "the date that did not fit is still readable: {}",
+            extra.value(0)
+        );
+        assert!(
+            extra.is_null(1),
+            "and the one that fitted left nothing over"
+        );
     }
 
     #[test]
