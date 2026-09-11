@@ -153,6 +153,11 @@ struct Tones {
     // itself lightens, because a hue that reads over white is not the one that
     // reads over near-black.
     UINT32 accent;
+    // Grid.pendingCell: Semantic.warning, which is the one tone in this table
+    // that reports something about the data rather than about the chrome. A
+    // cell somebody has typed into is neither an error nor a normal value, and
+    // it has to stay legible under the selection it is usually sitting in.
+    UINT32 pending;
     // Grid.scrollTrack, Grid.scrollThumb and Grid.scrollThumbActive: `rule`
     // again, at three strengths. The bar sits over the data rather than beside
     // it, so the track is barely there and the thumb carries the whole signal.
@@ -163,15 +168,29 @@ struct Tones {
 
 constexpr Tones kLightTones = {
     0xFFFFFF, 0xF1F5F9, 0x1E293B, 0x475569, 0x0F172A, 0x51607A, 0x0F172A, 0.030f, 0.080f,
-    0x4F46E5, 0.040f,   0.180f,   0.320f,
+    0x4F46E5, 0xB45309, 0.040f,   0.180f,   0.320f,
 };
 constexpr Tones kDarkTones = {
     0x0F172A, 0x1E293B, 0xE2E8F0, 0x94A3B8, 0xF8FAFC, 0x7C8AA0, 0xFFFFFF, 0.022f, 0.060f,
-    0x6366F1, 0.035f,   0.220f,   0.380f,
+    0x6366F1, 0xFBBF24, 0.035f,   0.220f,   0.380f,
 };
+
+// What a typed cell's mark is worth. Strong enough to find at a glance and
+// weak enough that the value under it is still the thing being read — the
+// mark says a cell has been changed, not what it was changed to.
+constexpr float kPendingAlpha = 0.300f;
 
 constexpr float kSelectedRowAlpha = 0.180f;
 constexpr float kSelectedCellAlpha = 0.380f;
+
+// A tone the way GDI wants one. The table above is written the way colours are
+// written everywhere else — 0xRRGGBB, the order they appear in `Theme.swift` and
+// in every stylesheet — and a `COLORREF` is the reverse. Only the box opened over
+// a cell needs this, because it is the one thing here that Windows draws rather
+// than Direct2D, and it asks in this order.
+COLORREF colorref(UINT32 rgb) {
+    return RGB((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+}
 
 // How far from the canvas a channel has to move to count as a glyph when the
 // bitmap is read back. 0xFF minus the 0xB4 this was written as when the canvas
@@ -569,6 +588,9 @@ struct Column {
     std::wstring type_name;
     std::vector<std::wstring> cells;
     std::vector<bool> nulls;
+    // Rows somebody has typed a value into. Parallel to `cells` rather than a
+    // set of indices, because every reader of one is already walking the other.
+    std::vector<bool> edited;
     // A property of the type, not of any value in it. A column of numbers is
     // read by comparing magnitudes down it, and that only works when the units
     // line up; `GridRenderer.swift` asks the column's kind the same question.
@@ -1042,6 +1064,68 @@ Selection all_rows(const Selection& from, int last_row) {
     return every;
 }
 
+// The text a cell opens for editing with.
+//
+// Nothing where the value is absent. NULL is what the grid draws over an empty
+// cell, not what the cell holds, and a box that opened on the word would have
+// somebody editing a label — the first keystroke would be appended to it.
+std::wstring edit_seed(const std::vector<Column>& columns, const Selection& at) {
+    const size_t c = static_cast<size_t>(at.column);
+    if (at.column < 0 || c >= columns.size()) {
+        return std::wstring();
+    }
+    return copied_value(columns[c], at.row);
+}
+
+// One committed edit, written into the grid's own copy of the result.
+//
+// And no further, which is this brick's whole boundary. There is no Save on
+// this side and nothing to write against — the statement behind this grid is a
+// `SELECT` over `range(40)`, which no server would take an UPDATE for — so a
+// commit produces a marked cell and a value that copies, and nothing leaves the
+// process.
+//
+// When there is a Save, the staging will have to be keyed by the row rather
+// than by where the row currently sits: `sort_by` re-reads the result and
+// builds new columns, so these marks do not survive a sort. That is the same
+// problem `dbedit` solves on the other side, and it belongs with the brick that
+// can write.
+void stage_edit(std::vector<Column>* columns, const Selection& at, const std::wstring& text) {
+    const size_t c = static_cast<size_t>(at.column);
+    if (at.column < 0 || c >= columns->size()) {
+        return;
+    }
+    Column& column = (*columns)[c];
+    const size_t r = static_cast<size_t>(at.row);
+    if (at.row < 0 || r >= column.cells.size()) {
+        return;
+    }
+    column.cells[r] = text;
+    // Present, whatever it was. Somebody typed over it, and what they typed is
+    // the value — an empty box is an empty string rather than a NULL, because
+    // there is no key here that means "absent" and inventing one that happens
+    // to be "type nothing" would make the two impossible to tell apart.
+    column.nulls[r] = false;
+    column.edited[r] = true;
+}
+
+// Where Tab leaves the cursor, or no answer at the two edges.
+//
+// Wrapping to the next row is what a spreadsheet does and this is not one: a
+// row here is a row of a table somebody is about to write to, and a Tab that
+// quietly moved to a different one would put the next thing typed somewhere
+// nobody looked. `AppController.swift` refuses at the same two places, and also
+// steps over columns the grid is not drawing — this side has no hidden columns
+// to step over.
+bool next_edit_column(int from, int step, int last_column, int* out) {
+    const int next = from + step;
+    if (next < 0 || next > last_column) {
+        return false;
+    }
+    *out = next;
+    return true;
+}
+
 // The largest scroll that still fills the view. Past it the grid would show
 // blank space after the last row or column, and a scrollbar built on it would
 // reach the end of its track before the result ran out.
@@ -1293,10 +1377,13 @@ bool column_edge_at(float x, float y, float scroll_x, const std::vector<Column>&
     return false;
 }
 
-// Whether a right-click opens a menu where it landed, and on which cell.
+// Whether a press acts on a cell where it landed, and on which one. Both presses
+// that mean a particular cell ask this: the right-click that opens the menu, and
+// the double click that opens the box.
 //
 // The scrollbars are asked first and refuse, because both are drawn over the
-// data: a menu offering to copy a row would cover the thing the pointer was on.
+// data: a menu offering to copy a row would cover the thing the pointer was on,
+// and a double click meant for the thumb would open a box behind it.
 // The header and the resize handles are not asked, and that is deliberate
 // rather than forgotten — both live above the fold, `cell_at` refuses
 // everything up there, and a guard that cannot change an answer is a guard
@@ -1305,7 +1392,7 @@ bool column_edge_at(float x, float y, float scroll_x, const std::vector<Column>&
 //
 // Shift extends from wherever the band already starts, the way a shift-click
 // does, so the menu can offer more than the one cell under the pointer.
-bool menu_cell(float x, float y, const View& view, const std::vector<Column>& columns,
+bool pointed_cell(float x, float y, const View& view, const std::vector<Column>& columns,
                const Selection* current, bool extend, Selection* out) {
     bool horizontal = false;
     if (scrollbar_axis_at(x, y, view, &horizontal)) {
@@ -1466,6 +1553,7 @@ bool read_columns(DbHandle* handle, const std::string& order, std::vector<Column
         for (int64_t r = 0; r < batch.length; ++r) {
             const bool present = valid_at(values, r);
             column.nulls.push_back(!present);
+            column.edited.push_back(false);
             if (!present) {
                 column.cells.push_back(kNullText);
             } else if (format == "u") {
@@ -1596,6 +1684,7 @@ struct Palette {
     ComPtr<ID2D1SolidColorBrush> selected_row;
     ComPtr<ID2D1SolidColorBrush> selected_cell;
     ComPtr<ID2D1SolidColorBrush> cursor;
+    ComPtr<ID2D1SolidColorBrush> pending;
     ComPtr<ID2D1SolidColorBrush> scroll_track;
     ComPtr<ID2D1SolidColorBrush> scroll_thumb;
     ComPtr<ID2D1SolidColorBrush> scroll_thumb_active;
@@ -1623,6 +1712,7 @@ struct Palette {
             {&selected_row, tones.accent, kSelectedRowAlpha},
             {&selected_cell, tones.accent, kSelectedCellAlpha},
             {&cursor, tones.accent, 1.0f},
+            {&pending, tones.pending, kPendingAlpha},
             {&scroll_track, tones.rule, tones.scroll_track_alpha},
             {&scroll_thumb, tones.rule, tones.scroll_thumb_alpha},
             {&scroll_thumb_active, tones.rule, tones.scroll_thumb_active_alpha},
@@ -1764,6 +1854,25 @@ void draw_grid(ID2D1RenderTarget* target, IDWriteFactory* dwrite, const Monospac
             target->FillRectangle(D2D1::RectF(0.0f, y, view.width, y + kRowHeight),
                                   palette.selected_row.Get());
         }
+    }
+
+    // Cells somebody has typed into, under the cursor cell and over the row's
+    // own fills: the mark has to survive the row being selected, because the row
+    // somebody is editing is the row they are standing on.
+    for (size_t c = 0; c < columns.size(); ++c) {
+        const Column& column = columns[c];
+        const float x = column_x(column);
+        for (size_t r = span.first; r < span.last && r < column.edited.size(); ++r) {
+            if (!column.edited[r]) {
+                continue;
+            }
+            const float y = row_y(r);
+            target->FillRectangle(D2D1::RectF(x, y, x + column.width, y + kRowHeight),
+                                  palette.pending.Get());
+        }
+    }
+
+    if (selection != nullptr) {
         if (selection->column >= 0 && static_cast<size_t>(selection->column) < columns.size()
             && selection->row >= 0 && static_cast<size_t>(selection->row) < rows) {
             const Column& column = columns[selection->column];
@@ -2456,7 +2565,7 @@ bool the_grid_draws_a_result() {
     // Where the menu may open. The gutter refuses because both bars are drawn
     // over the data; the header refuses through `cell_at`.
     Selection opened;
-    check(menu_cell(20.0f, kHeaderHeight + 4.0f, view, columns, nullptr, false, &opened)
+    check(pointed_cell(20.0f, kHeaderHeight + 4.0f, view, columns, nullptr, false, &opened)
               && opened.row == 0 && opened.column == 0,
           "a right-click on a cell opens the menu on that cell");
     // Asked of the horizontal bar, and that is the whole of why this view is
@@ -2466,20 +2575,131 @@ bool the_grid_draws_a_result() {
     // foot is the one drawn over a cell.
     View crossing = view;
     crossing.width = 200.0f;
-    check(!menu_cell(20.0f, crossing.height - 2.0f, crossing, columns, nullptr, false, &opened),
+    check(!pointed_cell(20.0f, crossing.height - 2.0f, crossing, columns, nullptr, false, &opened),
           "one in the scrollbar's gutter opens none");
-    check(!menu_cell(20.0f, 4.0f, view, columns, nullptr, false, &opened),
+    check(!pointed_cell(20.0f, 4.0f, view, columns, nullptr, false, &opened),
           "and one on a heading opens none");
 
     const Selection standing{3, 1, true, 1};
-    check(menu_cell(20.0f, kHeaderHeight + 5.0f * kRowHeight + 4.0f, view, columns, &standing, true,
-                    &opened)
+    check(pointed_cell(20.0f, kHeaderHeight + 5.0f * kRowHeight + 4.0f, view, columns, &standing,
+                       true, &opened)
               && opened.first_row() == 1 && opened.last_row() == 5,
           "shift extends the band from where it already starts");
-    check(menu_cell(20.0f, kHeaderHeight + 5.0f * kRowHeight + 4.0f, view, columns, &standing, false,
-                    &opened)
+    check(pointed_cell(20.0f, kHeaderHeight + 5.0f * kRowHeight + 4.0f, view, columns, &standing,
+                       false, &opened)
               && !opened.anchored && opened.row == 5,
           "and without it the menu acts on the one cell under the pointer");
+
+    // ------------------------------------------------------------------
+    // Editing: what a box opens with, what a commit leaves, and its mark
+    // ------------------------------------------------------------------
+
+    check(edit_seed(columns, Selection{2, 1}) == L"driver-2",
+          "a box opens with the value that was in the cell");
+    // Row 1's note is the null one. The word is what the grid draws over an
+    // absent value, not the value: seeding the box with it would have the next
+    // keystroke appended to a label.
+    check(edit_seed(columns, Selection{1, 2}).empty(),
+          "and opens empty over a null rather than on the word");
+
+    std::vector<Column> staged = columns;
+    stage_edit(&staged, Selection{1, 2}, L"read 0");
+    check(staged[2].cells[1] == L"read 0", "a commit writes the value into the grid's own copy");
+    check(!staged[2].nulls[1], "over the null that was there, which stops being one");
+    check(staged[2].edited[1], "and marks that cell");
+    check(!staged[2].edited[0] && !staged[1].edited[1],
+          "leaving the cells around it unmarked and unchanged");
+    // An empty box is an empty string. There is no key here that means "absent",
+    // and making the absence of typing mean it would leave no way to enter the
+    // empty string at all.
+    stage_edit(&staged, Selection{2, 1}, std::wstring());
+    check(staged[1].cells[2].empty() && !staged[1].nulls[2],
+          "typing nothing leaves an empty value rather than a null");
+
+    int onwards = 0;
+    check(next_edit_column(1, 1, last_column, &onwards) && onwards == 2,
+          "Tab opens the next column along");
+    check(next_edit_column(1, -1, last_column, &onwards) && onwards == 0,
+          "and shift-Tab the one before");
+    // Neither edge wraps. A Tab that came back on the next row would put the
+    // next thing typed into a row nobody was looking at.
+    check(!next_edit_column(last_column, 1, last_column, &onwards),
+          "Tab out of the last column opens nothing");
+    check(!next_edit_column(0, -1, last_column, &onwards),
+          "and neither does shift-Tab out of the first");
+
+    // The mark, drawn. Row 2 of the note column: an even row, so there is no
+    // banding under it to be mistaken for the mark, and the sample is taken at
+    // the far edge of the column where no glyph reaches.
+    std::vector<Column> with_mark = columns;
+    stage_edit(&with_mark, Selection{2, 2}, L"read 0");
+    const float marked_x = columns[2].x + columns[2].width - 4.0f;
+    const float marked_y = kHeaderHeight + 2.0f * kRowHeight + 10.0f;
+    const float beside_x = columns[1].x + columns[1].width - 4.0f;
+    BYTE before_mark[3] = {};
+    BYTE after_mark[3] = {};
+    BYTE beside_mark[3] = {};
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, nullptr, nullptr,
+              0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(marked_x, marked_y, before_mark)) {
+        return failed("reading a cell before it is marked", E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, with_mark, palette, nullptr,
+              nullptr, 0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(marked_x, marked_y, after_mark)
+        || !surface.pixel_at(beside_x, marked_y, beside_mark)) {
+        return failed("reading a marked cell", E_FAIL);
+    }
+    // Two questions again. It darkened — every fill here is translucent over
+    // white, so it can only darken — and what darkened it was the warning tone
+    // rather than the accent or the rule: warning is the one colour in the table
+    // that spends more blue than red, so red ends up above blue where those two
+    // leave them level or the other way round.
+    check(after_mark[2] < before_mark[2], "a cell somebody has typed into is filled behind");
+    check(after_mark[2] > after_mark[0] + 30,
+          "in the tone that reports rather than the one that selects");
+    // The cell, not the row. A mark that spread across the row would say four
+    // values had been changed when one had.
+    check(beside_mark[0] == beside_mark[2], "and only that cell carries it");
+
+    // And that it survives the selection, which is where it will nearly always
+    // be seen: the cell somebody has just typed into is the cell the cursor is
+    // on. Drawn over the row's wash and under the cursor's own fill, so both
+    // still read as what they are.
+    const Selection on_mark{2, 2};
+    BYTE plain_cursor[3] = {};
+    BYTE marked_cursor[3] = {};
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, columns, palette, &on_mark, nullptr,
+              0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(marked_x, marked_y, plain_cursor)) {
+        return failed("reading the cursor cell before it is marked", E_FAIL);
+    }
+    surface.target->BeginDraw();
+    draw_grid(surface.target.Get(), surface.dwrite.Get(), font, with_mark, palette, &on_mark,
+              nullptr, 0.0f, 0.0f, Bars{});
+    hr = surface.target->EndDraw();
+    if (FAILED(hr) || !surface.pixel_at(marked_x, marked_y, marked_cursor)) {
+        return failed("reading the cursor cell once marked", E_FAIL);
+    }
+    // The accent leaves blue above red; the mark moves that gap the other way.
+    // Asked as the move rather than as a value, because what matters is that the
+    // mark is still doing something under a fill drawn after it.
+    check(marked_cursor[2] - marked_cursor[0] > plain_cursor[2] - plain_cursor[0],
+          "and the mark still shows under the cursor sitting on it");
+    // The value is still readable through both of them.
+    UINT marked_ink = 0;
+    if (!surface.ink_in(columns[2].x, kHeaderHeight + 2.0f * kRowHeight,
+                        columns[2].x + columns[2].width, kHeaderHeight + 3.0f * kRowHeight,
+                        &marked_ink)) {
+        return failed("reading a marked cell's value", E_FAIL);
+    }
+    check(marked_ink > 0, "with the value under the two of them still drawn");
 
     // ------------------------------------------------------------------
     // Scrolling: which rows are on screen, and which row each one is
@@ -3191,7 +3411,8 @@ bool the_grid_draws_a_result() {
               && kLightTones.sorted_header_ink != kDarkTones.sorted_header_ink
               && kLightTones.muted_ink != kDarkTones.muted_ink
               && kLightTones.rule != kDarkTones.rule
-              && kLightTones.accent != kDarkTones.accent,
+              && kLightTones.accent != kDarkTones.accent
+              && kLightTones.pending != kDarkTones.pending,
           "every colour in the table has an answer for both appearances");
     // And every alpha, which is the part that looks safe to copy across. Black
     // at 0.022 over white is a step nobody can see, so the light side is a shade
@@ -3404,6 +3625,13 @@ constexpr UINT kCopyValue = 1;
 constexpr UINT kCopyRows = 2;
 constexpr UINT kCopyRowsAsCsv = 3;
 
+// The `EDIT` class's own procedure, kept so the one below can hand back
+// everything it does not answer. One copy for the process: every field this grid
+// opens is an `EDIT`, and they all share it.
+WNDPROC edit_base_proc = nullptr;
+
+LRESULT CALLBACK editor_proc(HWND field, UINT message, WPARAM wparam, LPARAM lparam);
+
 struct Window {
     HWND hwnd = nullptr;
     ComPtr<ID2D1Factory> d2d;
@@ -3431,6 +3659,16 @@ struct Window {
     float resize_from = 0.0f;
     float resize_width = 0.0f;
     bool is_light = true;
+    // The box somebody is typing in, the cell it is over, and whether it has
+    // already reported. A field taken away while it has the focus loses it on
+    // the way out, which arrives as one more end-of-edit — so ending has to be
+    // idempotent or clicking from one cell to another would stage twice.
+    // `InlineCellEditor.swift` carries the same flag for the same reason.
+    HWND editor = nullptr;
+    Selection editing;
+    bool ending = false;
+    HFONT editor_font = nullptr;
+    HBRUSH editor_brush = nullptr;
 
     const Tones& tones() const { return is_light ? kLightTones : kDarkTones; }
 
@@ -3460,7 +3698,23 @@ struct Window {
             palette = Palette();
             palette.open(target.Get(), tones());
         }
+        // The box's brush holds a colour too, and it is a GDI object rather than
+        // a Direct2D one, so it is dropped here and made again on the next paint
+        // that asks for it.
+        if (editor_brush != nullptr) {
+            DeleteObject(editor_brush);
+            editor_brush = nullptr;
+        }
         InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    ~Window() {
+        if (editor_font != nullptr) {
+            DeleteObject(editor_font);
+        }
+        if (editor_brush != nullptr) {
+            DeleteObject(editor_brush);
+        }
     }
 
     size_t rows() const { return columns.empty() ? 0 : columns[0].cells.size(); }
@@ -3571,6 +3825,205 @@ struct Window {
             return;
         }
         put_on_clipboard(hwnd, clipboard_text(columns, selection));
+    }
+
+    // Opens a box over the cursor's cell.
+    //
+    // `typed` is the character that opened it, where a character did. It
+    // replaces the value rather than joining it — which is what typing over a
+    // selected value means everywhere else — and the caret goes after it, or the
+    // second keystroke would delete the first. Opened by Return or a double
+    // click instead, the whole value is selected, so the first thing typed
+    // replaces it either way.
+    void begin_edit(const std::wstring* typed) {
+        if (editor != nullptr || !selected || columns.empty()) {
+            return;
+        }
+        const size_t c = static_cast<size_t>(selection.column);
+        if (selection.column < 0 || c >= columns.size() || selection.row < 0
+            || static_cast<size_t>(selection.row) >= rows()) {
+            return;
+        }
+        // Brought into view first, and painted, because the cursor can be on a
+        // row the last scroll left behind — Ctrl+A and End both put it there —
+        // and the answer wanted then is the cell, not a box off the bottom edge.
+        const View at = view();
+        scroll_row = scroll_to_visible(at, selection.row);
+        scroll_x = scroll_x_to_visible(at, columns, selection.column);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        UpdateWindow(hwnd);
+
+        const RECT cell = cell_rect(selection);
+        // Right-aligned over a column of numbers, for the reason the drawing is:
+        // magnitudes only line up when the digits do, and a box that left-
+        // aligned what the cell right-aligns would move the value as it opened.
+        //
+        // One line that scrolls rather than wraps: a value longer than its
+        // column is a value being scrolled through, not a cell that grew a
+        // second line.
+        const DWORD align = columns[c].numeric ? ES_RIGHT : ES_LEFT;
+        editor = CreateWindowExW(0, L"EDIT", nullptr,
+                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | align, cell.left,
+                                 cell.top, cell.right - cell.left, cell.bottom - cell.top, hwnd,
+                                 nullptr, GetModuleHandleW(nullptr), nullptr);
+        if (editor == nullptr) {
+            failed("CreateWindowExW for the cell editor", HRESULT_FROM_WIN32(GetLastError()));
+            return;
+        }
+        editing = selection;
+        ending = false;
+
+        open_editor_font();
+        SendMessageW(editor, WM_SETFONT, reinterpret_cast<WPARAM>(editor_font), TRUE);
+        // The text laid out where the grid draws it. `EDIT` starts its own a
+        // couple of pixels in from the left and centres it vertically; the grid
+        // starts at `kCellPadding` and `kCellTextY`. Without this the characters
+        // jump the moment the box opens, which is the one thing a box over a
+        // drawn cell must not do — the whole illusion is that the cell became
+        // typeable. `InsetTextFieldCell` is the same answer on the other side.
+        const float scale = dips();
+        RECT text{static_cast<LONG>(kCellPadding / scale), static_cast<LONG>(kCellTextY / scale),
+                  cell.right - cell.left - static_cast<LONG>(kCellPadding / scale),
+                  cell.bottom - cell.top};
+        SendMessageW(editor, EM_SETRECT, 0, reinterpret_cast<LPARAM>(&text));
+
+        const std::wstring seed = typed != nullptr ? *typed : edit_seed(columns, selection);
+        SetWindowTextW(editor, seed.c_str());
+        SetWindowLongPtrW(editor, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+        edit_base_proc = reinterpret_cast<WNDPROC>(
+            SetWindowLongPtrW(editor, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(editor_proc)));
+        SetFocus(editor);
+        if (typed != nullptr) {
+            SendMessageW(editor, EM_SETSEL, seed.size(), seed.size());
+        } else {
+            // The whole value selected with the caret at its start rather than
+            // its end, which is what the arguments are the other way round for.
+            // A value wider than its column is scrolled to the caret, and a box
+            // that opened on the tail of a string the grid was showing the head
+            // of moves the text the moment it appears — the same jump the inset
+            // above exists to prevent, only further.
+            // A value wider than its column opens showing its end rather than
+            // its start, and nothing here changes that: an `EDIT` puts the caret
+            // at the far end of a selection whichever order the two positions
+            // are given in, and scrolls to it. Reversing the arguments,
+            // `EM_SCROLLCARET` and `WM_HSCROLL` with `SB_LEFT` were each tried
+            // and each left the view at the tail. Home brings it back.
+            // `InlineCellEditor.swift` does not have this to deal with, because
+            // AppKit scrolls to the start of a selection rather than to the
+            // caret — so the two sides differ here, on the long values only.
+            SendMessageW(editor, EM_SETSEL, 0, -1);
+        }
+    }
+
+    // Keeps what was typed. `step` is where the cursor goes afterwards: nowhere
+    // for Return and for a click elsewhere — somebody who has just fixed a value
+    // is as likely to look at it as to move on — and one column either way for
+    // Tab.
+    void commit_edit(int step, bool take_focus) {
+        if (editor == nullptr || ending) {
+            return;
+        }
+        ending = true;
+        // Room for the terminator as well as the text, because that is what
+        // `GetWindowTextW` is counting, and then cut back to the characters.
+        const int length = GetWindowTextLengthW(editor);
+        std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+        if (length > 0) {
+            GetWindowTextW(editor, &text[0], length + 1);
+        }
+        text.resize(static_cast<size_t>(length));
+        const Selection at = editing;
+        close_editor(take_focus);
+        stage_edit(&columns, at, text);
+        // The column keeps the width it had. Re-measuring here would move every
+        // column after this one while somebody is typing down a column, and a
+        // grid that reflowed under the caret would be unusable for the one task
+        // this exists for.
+        selection = at;
+        selected = true;
+        int column = 0;
+        if (step != 0 && next_edit_column(at.column, step, static_cast<int>(columns.size()) - 1,
+                                          &column)) {
+            selection.column = column;
+            // The band goes, the way an unshifted arrow drops it: a Tab is a
+            // move, and a move collapses whatever was extended.
+            selection.anchored = false;
+            const View to = view();
+            scroll_x = scroll_x_to_visible(to, columns, selection.column);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            begin_edit(nullptr);
+            return;
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    // Throws away whatever was being typed. A different answer from the one
+    // above rather than a quieter version of it: one is a value, the other is
+    // "forget I typed that".
+    void cancel_edit() {
+        if (editor == nullptr || ending) {
+            return;
+        }
+        ending = true;
+        close_editor(true);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
+    // Takes the box away, and puts the keyboard back on the grid where the grid
+    // is where it should go.
+    //
+    // It should not when the box is closing *because* the focus left: something
+    // else has it by then — another window, or this one after a click on another
+    // cell — and taking it back would be this grid arguing with the click that
+    // just happened.
+    void close_editor(bool take_focus) {
+        HWND field = editor;
+        editor = nullptr;
+        if (field != nullptr) {
+            DestroyWindow(field);
+        }
+        if (take_focus) {
+            SetFocus(hwnd);
+        }
+    }
+
+    // One font for the boxes, at this window's scale. Built on demand rather
+    // than with the window because it depends on the DPI, which can change while
+    // the window is open.
+    void open_editor_font() {
+        if (editor_font != nullptr) {
+            DeleteObject(editor_font);
+        }
+        const UINT dpi = GetDpiForWindow(hwnd);
+        editor_font = CreateFontW(-MulDiv(static_cast<int>(kFontSize),
+                                          static_cast<int>(dpi == 0 ? 96 : dpi), 96),
+                                  0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                  FIXED_PITCH | FF_MODERN, L"Consolas");
+    }
+
+    // What the box paints itself with. The grid's own canvas colour, so the box
+    // is invisible as a box: what says the cell is live is the caret in it, and a
+    // rectangle in some other colour would read as a second kind of selection
+    // sitting inside the first.
+    //
+    // Kept rather than made per paint, and dropped by `follow_appearance` when
+    // the colour it was made from stops being the colour.
+    HBRUSH editor_background() {
+        if (editor_brush == nullptr) {
+            editor_brush = CreateSolidBrush(colorref(tones().canvas));
+        }
+        return editor_brush;
+    }
+
+    RECT cell_rect(const Selection& at) const {
+        const Column& column = columns[static_cast<size_t>(at.column)];
+        const float x = column.x - scroll_x;
+        const float y = kHeaderHeight + (static_cast<float>(at.row) - scroll_row) * kRowHeight;
+        const float scale = dips();
+        return RECT{static_cast<LONG>(x / scale), static_cast<LONG>(y / scale),
+                    static_cast<LONG>((x + column.width) / scale),
+                    static_cast<LONG>((y + kRowHeight) / scale)};
     }
 
     // Every row of the column the cursor is in.
@@ -3753,6 +4206,59 @@ struct Window {
     }
 };
 
+// The three keys that end an edit, in front of an `EDIT` that would otherwise
+// treat two of them as text and beep at the third. Everything else — the
+// arrows, Home, End, the selection, the undo an `EDIT` already has — is handed
+// straight back, which is the point of subclassing one rather than drawing a
+// caret by hand.
+LRESULT CALLBACK editor_proc(HWND field, UINT message, WPARAM wparam, LPARAM lparam) {
+    auto* window = reinterpret_cast<Window*>(GetWindowLongPtrW(field, GWLP_USERDATA));
+    if (window != nullptr) {
+        switch (message) {
+        case WM_KEYDOWN:
+            switch (wparam) {
+            case VK_RETURN:
+                window->commit_edit(0, true);
+                return 0;
+            case VK_TAB:
+                // Along the row and on into the next cell's box, so a row can be
+                // corrected without reaching for the mouse between fields.
+                window->commit_edit((GetKeyState(VK_SHIFT) & 0x8000) != 0 ? -1 : 1, true);
+                return 0;
+            case VK_ESCAPE:
+                window->cancel_edit();
+                return 0;
+            default:
+                break;
+            }
+            break;
+
+        // The same three again as characters, because `TranslateMessage` makes
+        // one of each and a single-line `EDIT` answers Return and Escape with
+        // `MessageBeep`. The keystroke has already done what it was for; letting
+        // the character through as well would be a noise at every commit.
+        case WM_CHAR:
+            if (wparam == VK_RETURN || wparam == VK_TAB || wparam == VK_ESCAPE) {
+                return 0;
+            }
+            break;
+
+        // The focus left some other way: a click on another cell, on another
+        // window, or Alt+Tab. Kept rather than thrown away — nothing is sent
+        // anywhere from here, so keeping it costs a mark on one cell and losing
+        // it costs whatever was typed. `InlineCellEditor.swift` ends the same
+        // way on the same event.
+        case WM_KILLFOCUS:
+            window->commit_edit(0, false);
+            return 0;
+
+        default:
+            break;
+        }
+    }
+    return CallWindowProcW(edit_base_proc, field, message, wparam, lparam);
+}
+
 LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_NCCREATE) {
         auto* created = reinterpret_cast<CREATESTRUCTW*>(lparam);
@@ -3850,6 +4356,34 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
+    }
+
+    // Opens the cell under the pointer. The press before it has already put the
+    // cursor there, and this asks again anyway: the same two clicks over a
+    // heading are a sort and then nothing, and a box opened on the strength of
+    // the second would appear over whichever cell the cursor was last left on.
+    case WM_LBUTTONDBLCLK: {
+        const float scale = window->dips();
+        Selection hit;
+        if (pointed_cell(static_cast<float>(GET_X_LPARAM(lparam)) * scale,
+                         static_cast<float>(GET_Y_LPARAM(lparam)) * scale, window->view(),
+                         window->columns, nullptr, false, &hit)) {
+            window->selection = hit;
+            window->selected = true;
+            window->begin_edit(nullptr);
+        }
+        return 0;
+    }
+
+    // The box paints itself with the grid's own colours rather than the system's
+    // window colours, which are white text on white here as often as not: an
+    // `EDIT` asks its parent for them, and this window is the only thing that
+    // knows which appearance the grid is drawn in.
+    case WM_CTLCOLOREDIT: {
+        auto dc = reinterpret_cast<HDC>(wparam);
+        SetTextColor(dc, colorref(window->tones().ink));
+        SetBkColor(dc, colorref(window->tones().canvas));
+        return reinterpret_cast<LRESULT>(window->editor_background());
     }
 
     // Three rows a notch, `AppController.swift`'s multiplier. One row would be
@@ -3951,7 +4485,7 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         ScreenToClient(hwnd, &client);
         const float scale = window->dips();
         Selection on;
-        if (!menu_cell(static_cast<float>(client.x) * scale, static_cast<float>(client.y) * scale,
+        if (!pointed_cell(static_cast<float>(client.x) * scale, static_cast<float>(client.y) * scale,
                        window->view(), window->columns,
                        window->selected ? &window->selection : nullptr,
                        (GetKeyState(VK_SHIFT) & 0x8000) != 0, &on)) {
@@ -4002,8 +4536,31 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
             }
             return 0;
         }
+        // Return opens the cursor's cell with its value selected, which is the
+        // key every grid with an editor uses for it and the one somebody who has
+        // arrowed to a cell already has a finger near.
+        if (wparam == VK_RETURN) {
+            window->begin_edit(nullptr);
+            return 0;
+        }
         window->key(wparam, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
         return 0;
+
+    // Typing over a cell opens it and keeps the character, rather than needing
+    // Return first: a value that has to be announced before it can be typed is a
+    // value people mistype, having started before the box was there.
+    //
+    // Anything below a space is a command rather than a value — Return, Tab and
+    // Escape all arrive here as characters too, as does every Ctrl+letter — and
+    // 0x7F is Ctrl+Backspace, which is a deletion and not a value either.
+    case WM_CHAR: {
+        const auto typed = static_cast<wchar_t>(wparam);
+        if (typed >= L' ' && typed != 0x7F) {
+            const std::wstring one(1, typed);
+            window->begin_edit(&one);
+        }
+        return 0;
+    }
 
     // The window has moved to a display with a different scale. Windows offers a
     // rectangle for where it should now sit; taking it is what keeps the window
@@ -4073,6 +4630,10 @@ int show_the_grid_in_a_window() {
 
     WNDCLASSEXW window_class{};
     window_class.cbSize = sizeof(window_class);
+    // Without `CS_DBLCLKS` Windows sends a second `WM_LBUTTONDOWN` instead of a
+    // `WM_LBUTTONDBLCLK`, and the class has to say so: a window cannot ask for
+    // double clicks after the fact.
+    window_class.style = CS_DBLCLKS;
     window_class.lpfnWndProc = window_proc;
     window_class.hInstance = GetModuleHandleW(nullptr);
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
