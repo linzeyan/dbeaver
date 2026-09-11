@@ -76,7 +76,12 @@ fn relation_kind(kind: &str) -> RelationKind {
 /// A repeated field is an `ARRAY<…>` of its own type, because that is what it is
 /// in a result: BigQuery has no separate array type declaration, and `mode:
 /// REPEATED` is how one is spelled in this catalog.
-fn type_name(field: &TableField) -> String {
+///
+/// Shared with the query path, which asks the same question about a result's
+/// destination table — see `relabelled`. One function rather than two, so that
+/// a `STRUCT<city STRING>` is written the same way in the structure pane and in
+/// the grid's type row.
+pub(crate) fn type_name(field: &TableField) -> String {
     let base = match field.r#type.as_str() {
         "INTEGER" => "INT64".to_string(),
         "FLOAT" => "FLOAT64".to_string(),

@@ -33,6 +33,10 @@
 //!   statements containing non-ASCII and nowhere else.
 //! - **Every metadata answer.** `metadata.rs` reads `tables.get`, whose shape is
 //!   documented in detail and has never been seen in this repository.
+//! - **Whether a query's destination table can be read by `tables.get`**, and
+//!   whether it describes the same columns in the same order the read session
+//!   does. `relabelled` needs both and asserts neither: a mismatch labels
+//!   nothing, and so does a request that fails.
 //!
 //! What follows is the design, and it is worth reading as a set of choices
 //! rather than as a description, because nothing has pushed back on any of them.
@@ -46,6 +50,12 @@
 //! for it, ask the Storage Read API for the anonymous table BigQuery put the
 //! answer in — and the third one is where every row travels. `rest.rs` never
 //! calls `jobs.getQueryResults`.
+//!
+//! There is a fourth move and it carries no rows: one `tables.get` on that same
+//! anonymous table, for the GoogleSQL names of its columns. Arrow describes the
+//! columns and has no field for what BigQuery *calls* them, and a `STRING`, a
+//! `GEOGRAPHY` and a `JSON` all arrive in the same `utf8` buffer. `relabelled`
+//! is the whole of it, including why its failure is not an error.
 //!
 //! **The Arrow bytes are not decoded and re-encoded, and that is checkable
 //! without an account.** `storage::decode_batch` is a free function from an
@@ -103,7 +113,8 @@ mod rest;
 mod storage;
 
 use arrow::array::{ArrayRef, RecordBatch};
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Field, Schema, SchemaRef};
+use dbconn::DECLARED_TYPE;
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,7 +123,7 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 use auth::Credentials;
-use rest::{Api, Job, JobReference};
+use rest::{Api, Job, JobReference, Table, TableField};
 use storage::{Read, ReadRowsResponse};
 
 /// What BigQuery's audit log shows this connection as.
@@ -737,7 +748,21 @@ impl Rows {
                 .await
                 .map_err(|e| e.about(sql))?;
             if let Some(schema) = &session.arrow_schema {
-                rows.schema = storage::read_schema(&schema.serialized_schema)?;
+                // The GoogleSQL names, which the Arrow schema does not carry and
+                // the read session does not either — the destination table is
+                // the only place a finished query states them. See `relabelled`
+                // for why a failure here is nothing rather than an error.
+                let named = rows
+                    .api
+                    .get::<Table>(&rest::table_url(
+                        &table.project_id,
+                        &table.dataset_id,
+                        &table.table_id,
+                    ))
+                    .await
+                    .map(|table| table.schema.fields)
+                    .unwrap_or_default();
+                rows.schema = relabelled(storage::read_schema(&schema.serialized_schema)?, &named);
             }
             rows.streams = session.streams.into_iter().map(|s| s.name).collect();
             // A session with no streams is an empty result, not a fault:
@@ -983,6 +1008,52 @@ impl RowsCancel {
 /// long HTTP request: a request this side is parked on is a request the Cancel
 /// button cannot reach, and a ten-minute query would then be a client that has
 /// apparently hung.
+/// The Arrow schema with the GoogleSQL names of the same columns attached.
+///
+/// **This is the one thing this driver asks for that the Arrow path does not
+/// give it.** Everywhere else `lib.rs` names no `DataType` at all — the Storage
+/// Read API describes the columns and Google decides how — but Arrow has no
+/// field for what BigQuery *calls* a type, and three of them share one buffer:
+/// a `STRING`, a `GEOGRAPHY` and a `JSON` all arrive as `utf8` and reach the
+/// grid as the same word. See `dbconn::DECLARED_TYPE`.
+///
+/// **It costs one `tables.get` per statement that produced rows**, and it is the
+/// only request in this driver whose failure is not an error. A result that
+/// arrived is not worth refusing over the name of a column in it, and what a
+/// failure produces is the type row this driver had before this existed —
+/// absent, which `DECLARED_TYPE` calls a real state and not a wrong answer. The
+/// cost of that choice is stated rather than hidden: an account whose role can
+/// read a table's data and not its metadata would show `utf8` for every text
+/// column forever and say nothing about why.
+///
+/// The join is positional, so it is refused unless the two descriptions agree
+/// about every column name. They come from two different APIs about the same
+/// table and nothing promises they line up; labelling each column with its
+/// neighbour's type is the outcome `DECLARED_TYPE` calls worse than no label.
+fn relabelled(schema: SchemaRef, named: &[TableField]) -> SchemaRef {
+    let aligned = named.len() == schema.fields().len()
+        && schema
+            .fields()
+            .iter()
+            .zip(named)
+            .all(|(field, named)| field.name() == &named.name);
+    if !aligned {
+        return schema;
+    }
+
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .zip(named)
+        .map(|(field, named)| {
+            let mut carried = field.metadata().clone();
+            carried.insert(DECLARED_TYPE.to_string(), metadata::type_name(named));
+            field.as_ref().clone().with_metadata(carried)
+        })
+        .collect();
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
+
 async fn wait_for(
     api: &Api,
     job: &JobReference,
@@ -1008,6 +1079,91 @@ async fn wait_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::datatypes::DataType;
+
+    fn named(fields: &[(&str, &str)]) -> Vec<TableField> {
+        fields
+            .iter()
+            .map(|(name, kind)| TableField {
+                name: (*name).to_string(),
+                r#type: (*kind).to_string(),
+                ..TableField::default()
+            })
+            .collect()
+    }
+
+    fn declared_of(schema: &Schema, at: usize) -> Option<&str> {
+        schema.field(at).metadata().get(DECLARED_TYPE).map(|s| &**s)
+    }
+
+    /// The three types that share one Arrow buffer, which is the whole reason
+    /// this driver makes a request it otherwise would not need.
+    #[test]
+    fn the_types_that_share_a_utf8_buffer_say_which_of_them_they_are() {
+        let arrived = Arc::new(Schema::new(vec![
+            Field::new("note", DataType::Utf8, true),
+            Field::new("where_it_is", DataType::Utf8, true),
+            Field::new("document", DataType::Utf8, true),
+        ]));
+        let labelled = relabelled(
+            arrived,
+            &named(&[
+                ("note", "STRING"),
+                ("where_it_is", "GEOGRAPHY"),
+                ("document", "JSON"),
+            ]),
+        );
+        assert_eq!(declared_of(&labelled, 0), Some("STRING"));
+        assert_eq!(declared_of(&labelled, 1), Some("GEOGRAPHY"));
+        assert_eq!(declared_of(&labelled, 2), Some("JSON"));
+        // Still Arrow's types. This driver names no `DataType` and does not
+        // start here.
+        assert_eq!(labelled.field(1).data_type(), &DataType::Utf8);
+    }
+
+    /// The grid's type row and the structure pane's column both go through
+    /// `metadata::type_name`, so a legacy name is translated once and a repeated
+    /// field is an `ARRAY<…>` in both.
+    #[test]
+    fn a_result_names_its_types_the_way_the_structure_pane_does() {
+        let arrived = Arc::new(Schema::new(vec![
+            Field::new("n", DataType::Int64, true),
+            Field::new("tags", DataType::Utf8, true),
+        ]));
+        let mut fields = named(&[("n", "INTEGER"), ("tags", "STRING")]);
+        fields[1].mode = "REPEATED".to_string();
+
+        let labelled = relabelled(arrived, &fields);
+        assert_eq!(declared_of(&labelled, 0), Some("INT64"));
+        assert_eq!(declared_of(&labelled, 1), Some("ARRAY<STRING>"));
+    }
+
+    /// The guard on a positional join across two APIs. A table description that
+    /// is about other columns labels none of them, which is what a `tables.get`
+    /// that failed also produces.
+    #[test]
+    fn a_table_that_describes_other_columns_labels_nothing() {
+        let arrived = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+        for wrong in [
+            // The same count, in the other order.
+            named(&[("note", "STRING"), ("id", "INT64")]),
+            // One name in common and one not: all of it is refused, because the
+            // agreement is about the result rather than about a column.
+            named(&[("id", "INT64"), ("other", "STRING")]),
+            // Fewer, and more.
+            named(&[("id", "INT64")]),
+            named(&[("id", "INT64"), ("note", "STRING"), ("extra", "DATE")]),
+            // None, which is what a failed or refused `tables.get` leaves.
+            named(&[]),
+        ] {
+            let labelled = relabelled(Arc::clone(&arrived), &wrong);
+            assert_eq!(declared_of(&labelled, 0), None, "{wrong:?}");
+            assert_eq!(declared_of(&labelled, 1), None, "{wrong:?}");
+        }
+    }
 
     /// A URL that is not one is refused before anything is sent — before, in
     /// particular, a credentials file is looked for, which is what makes this
