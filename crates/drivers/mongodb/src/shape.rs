@@ -39,6 +39,28 @@
 //! documents that have it and explodes into hundreds of mostly-null columns on
 //! the documents that do not. A nested document or array is one column of JSON
 //! text, which is the form a person reads it in anyway.
+//!
+//! **What a column says it is.** The inference above answers "which Arrow column
+//! do these values go in", and that is a smaller question than "what are they":
+//! a `Decimal128`, a `Timestamp`, a regex and a string all reconcile to `Text`,
+//! and a document and an array both to `Document`. So the name a column reports
+//! is taken from the values themselves rather than from the reconciliation —
+//! `bson_name` — and it is MongoDB's own vocabulary, the aliases `$type` and a
+//! validator's `bsonType` accept.
+//!
+//! Reported only where the sample agreed. A field holding an int in one document
+//! and a string in the next has no one name, and BSON permits exactly that, so
+//! the field reports none and the reader falls back to the Arrow type — which
+//! for that column is the honest answer. A field that held nothing but nulls is
+//! the same case: `Text` is this file's choice of column for it, not something
+//! the database said.
+//!
+//! That string is read in three places and this is the only one that writes it:
+//! the structure pane shows it, `edits.rs` decides an edit's Extended JSON from
+//! it, and it reaches the grid header as `dbconn::DECLARED_TYPE`. The structure
+//! pane's field is a `String` with no way to say "no answer", so `metadata.rs`
+//! falls back there to the name of whatever the column reconciled to; the result
+//! schema, which can be absent, is.
 
 use arrow::array::{
     ArrayRef, BinaryBuilder, BooleanBuilder, Float64Builder, Int32Builder, Int64Builder,
@@ -46,7 +68,8 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use bson::{Bson, Document};
-use dbconn::{SHAPE_JSON, VALUE_SHAPE};
+use dbconn::{DECLARED_TYPE, SHAPE_JSON, VALUE_SHAPE};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::MongoError;
@@ -77,16 +100,16 @@ pub enum ColumnType {
     ///
     /// Utf8 like `Text`, and a separate type for one reason: so that something
     /// downstream can tell a document from a string that happens to look like
-    /// one. `metadata::columns` reports this name, and the value viewer
-    /// re-indents a column that declares it rather than sniffing the value —
-    /// which would eventually meet a `Text` column holding `{}`.
+    /// one. That something is `VALUE_SHAPE`, which `build` puts on every column
+    /// of this type — the value viewer re-indents a cell whose field says it
+    /// holds JSON rather than sniffing the value, which would eventually meet a
+    /// `Text` column holding `{}`.
     ///
     /// A field holding a document in one record and a string in another unifies
     /// to `Text`, where no such promise is made.
     ///
-    /// The result's own field carries `VALUE_SHAPE` as well, which is what a
-    /// statement in the Query tab is left with: its columns come from no
-    /// relation, so there is no declared type there to read the name off.
+    /// Not the name a column reports, which comes off the values and separates
+    /// the two things this variant merges: `object` and `array`.
     Document,
     /// MongoDB's own identifier, as the 24 hex digits it is written with.
     ///
@@ -118,6 +141,27 @@ impl ColumnType {
             ColumnType::DateTime => DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
             ColumnType::Binary => DataType::Binary,
             ColumnType::Document | ColumnType::ObjectId | ColumnType::Text => DataType::Utf8,
+        }
+    }
+
+    /// What MongoDB would call the column this reconciled to.
+    ///
+    /// The answer for a field the sample disagreed about, where there is no one
+    /// BSON type to report but the structure pane still has to print something.
+    /// Less precise than `bson_name` by construction — `Document` covers both
+    /// `object` and `array`, and `Text` covers everything that reconciled to
+    /// text — which is why it is the fallback and not the source.
+    pub fn bson_name(self) -> &'static str {
+        match self {
+            ColumnType::Bool => "bool",
+            ColumnType::Int32 => "int",
+            ColumnType::Int64 => "long",
+            ColumnType::Float64 => "double",
+            ColumnType::DateTime => "date",
+            ColumnType::Binary => "binData",
+            ColumnType::Document => "object",
+            ColumnType::ObjectId => "objectId",
+            ColumnType::Text => "string",
         }
     }
 
@@ -170,6 +214,85 @@ fn type_of(value: &Bson) -> Option<ColumnType> {
         Bson::Document(_) | Bson::Array(_) => Some(ColumnType::Document),
         Bson::ObjectId(_) => Some(ColumnType::ObjectId),
         _ => Some(ColumnType::Text),
+    }
+}
+
+/// One BSON value's type, under the name MongoDB itself uses for it.
+///
+/// These are the aliases `$type` and a validator's `bsonType` accept, so the
+/// word in the header is one that can be pasted straight into a query about the
+/// field.
+///
+/// Deliberately not derived from `ColumnType`. That enum is a lattice built for
+/// reconciling values into one Arrow column, and four unrelated things land in
+/// its `Text`: a real string, a `Decimal128`, a `Timestamp`, and a field whose
+/// documents disagreed. Naming a column from it would tell someone their
+/// `decimal` field is a `string`. These names come off the value instead, which
+/// is the only place the distinction still exists.
+///
+/// `None` for null and undefined, for the same reason `type_of` gives them none:
+/// a null decides nothing about the field holding it.
+fn bson_name(value: &Bson) -> Option<&'static str> {
+    let name = match value {
+        Bson::Null | Bson::Undefined => return None,
+        Bson::Double(_) => "double",
+        Bson::String(_) => "string",
+        Bson::Array(_) => "array",
+        Bson::Document(_) => "object",
+        Bson::Boolean(_) => "bool",
+        Bson::RegularExpression(_) => "regex",
+        Bson::JavaScriptCode(_) => "javascript",
+        Bson::JavaScriptCodeWithScope(_) => "javascriptWithScope",
+        Bson::Int32(_) => "int",
+        Bson::Int64(_) => "long",
+        Bson::Timestamp(_) => "timestamp",
+        Bson::Binary(_) => "binData",
+        Bson::ObjectId(_) => "objectId",
+        Bson::DateTime(_) => "date",
+        Bson::Symbol(_) => "symbol",
+        Bson::Decimal128(_) => "decimal",
+        Bson::MaxKey => "maxKey",
+        Bson::MinKey => "minKey",
+        Bson::DbPointer(_) => "dbPointer",
+    };
+    Some(name)
+}
+
+/// What the sample established about one field's BSON type.
+///
+/// Three states and not two, because "every document agreed" and "no document
+/// said anything" are different facts that a bare `Option` would merge — and
+/// only the first of them is a type worth putting in a header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Declared {
+    /// No value yet, or only nulls. A field can be present in a thousand
+    /// documents and still be this.
+    Unseen,
+    /// Every value seen had this type.
+    One(&'static str),
+    /// Two documents disagreed. BSON allows it and no single name covers it, so
+    /// the field reports nothing and the reader falls back to what arrived —
+    /// which, for a column that reconciled to `Text`, is the truth of it.
+    Mixed,
+}
+
+impl Declared {
+    fn saw(self, value: &Bson) -> Declared {
+        let Some(name) = bson_name(value) else {
+            return self;
+        };
+        match self {
+            Declared::Unseen => Declared::One(name),
+            Declared::One(known) if known == name => self,
+            _ => Declared::Mixed,
+        }
+    }
+
+    fn name(self) -> Option<&'static str> {
+        match self {
+            Declared::One(name) => Some(name),
+            Declared::Unseen | Declared::Mixed => None,
+        }
     }
 }
 
@@ -282,6 +405,11 @@ pub struct Shape {
     /// Field names in the order they were first seen, `_extra` excluded.
     names: Vec<String>,
     types: Vec<ColumnType>,
+    /// Each field's BSON type where the sample agreed on one, parallel to
+    /// `names`. Separate from `types` because they answer different questions:
+    /// `types` is which Arrow column the values go in, this is what MongoDB
+    /// calls them, and the mapping between the two is many-to-one.
+    declared: Vec<Option<&'static str>>,
     schema: SchemaRef,
 }
 
@@ -299,25 +427,31 @@ impl Shape {
         // otherwise be locked to text, and every later integer in it would
         // unify against text and stay there.
         let mut types: Vec<Option<ColumnType>> = Vec::new();
+        let mut declared: Vec<Declared> = Vec::new();
 
         for document in sample {
             for (key, value) in document {
-                match names.iter().position(|n| n == key) {
-                    Some(at) => {
-                        if let Some(found) = type_of(value) {
-                            types[at] = Some(match types[at] {
-                                Some(known) => known.unify(found),
-                                None => found,
-                            });
-                        }
-                    }
+                // Resolved to one index first so that the two things learnt from
+                // a value — which Arrow column it forces, and what MongoDB calls
+                // it — are recorded in one place rather than once per branch.
+                let at = match names.iter().position(|n| n == key) {
+                    Some(at) => at,
                     None => {
                         names.push(key.clone());
                         // A field first seen holding null is still a field, but
                         // nothing is known about it yet.
-                        types.push(type_of(value));
+                        types.push(None);
+                        declared.push(Declared::Unseen);
+                        names.len() - 1
                     }
+                };
+                if let Some(found) = type_of(value) {
+                    types[at] = Some(match types[at] {
+                        Some(known) => known.unify(found),
+                        None => found,
+                    });
                 }
+                declared[at] = declared[at].saw(value);
             }
         }
 
@@ -325,27 +459,40 @@ impl Shape {
         // Text is the right answer: every value in the column is null, so the
         // choice costs nothing, and it is the type that can hold whatever turns
         // up in a document the sample did not reach.
+        //
+        // That choice is this driver's and not the database's, which is why it
+        // is not repeated in `declared`: the column reports no BSON type at all
+        // and the header falls back to what arrived.
         let types = types
             .into_iter()
             .map(|t| t.unwrap_or(ColumnType::Text))
             .collect();
-        Shape::build(names, types)
+        let declared = declared.into_iter().map(Declared::name).collect();
+        Shape::build(names, types, declared)
     }
 
-    fn build(names: Vec<String>, types: Vec<ColumnType>) -> Shape {
+    fn build(
+        names: Vec<String>,
+        types: Vec<ColumnType>,
+        declared: Vec<Option<&'static str>>,
+    ) -> Shape {
         let mut fields: Vec<Field> = names
             .iter()
             .zip(&types)
+            .zip(&declared)
             // Every column is nullable without exception. A field present in
             // every sampled document may still be missing from the next one, and
             // a schema that promised otherwise would be a promise this database
             // cannot keep.
-            .map(|(name, ty)| {
-                let field = Field::new(name, ty.arrow(), true);
-                match ty {
-                    ColumnType::Document => field.with_metadata(json_shape()),
-                    _ => field,
+            .map(|((name, ty), declared)| {
+                let mut metadata = match ty {
+                    ColumnType::Document => json_shape(),
+                    _ => HashMap::new(),
+                };
+                if let Some(declared) = declared {
+                    metadata.insert(DECLARED_TYPE.to_string(), (*declared).to_string());
                 }
+                Field::new(name, ty.arrow(), true).with_metadata(metadata)
             })
             .collect();
         // An empty result has no columns at all, and giving it a lone `_extra`
@@ -363,6 +510,7 @@ impl Shape {
         Shape {
             names,
             types,
+            declared,
             schema,
         }
     }
@@ -384,6 +532,17 @@ impl Shape {
             .cloned()
             .zip(self.types.iter().copied())
             .collect()
+    }
+
+    /// What MongoDB calls each field, parallel to `columns`, where the sample
+    /// agreed on one answer.
+    ///
+    /// Separate from `columns` rather than a third element of it, because a
+    /// dozen checks read `columns()[n].1` and the two facts have different
+    /// lifetimes in this file: the Arrow type is what the batch builder needs,
+    /// and this is what a reader is shown.
+    pub fn declared(&self) -> &[Option<&'static str>] {
+        &self.declared
     }
 
     /// Packs documents into one batch of this shape.
@@ -570,6 +729,17 @@ mod tests {
             .collect()
     }
 
+    /// What one field of a result says it is, off the schema the reader reads.
+    fn declared_on_field(shape: &Shape, name: &str) -> Option<String> {
+        shape
+            .schema()
+            .field_with_name(name)
+            .expect(name)
+            .metadata()
+            .get(DECLARED_TYPE)
+            .cloned()
+    }
+
     #[test]
     fn the_escape_hatch_is_the_last_column_and_is_always_there() {
         let docs = vec![
@@ -580,6 +750,140 @@ mod tests {
         assert_eq!(result_columns(&shape), vec!["_id", "name", EXTRA]);
         let fields: Vec<String> = shape.columns().into_iter().map(|(n, _)| n).collect();
         assert_eq!(fields, vec!["_id", "name"], "the hatch is not a field");
+    }
+
+    /// The point of naming from the value rather than from `ColumnType`. Each of
+    /// these pairs reconciles to one Arrow type and one `ColumnType`, and
+    /// MongoDB has a different word for each half — so a header built from the
+    /// mapping would call a `decimal` a string and an `array` an object.
+    #[test]
+    fn a_name_says_what_the_mapping_had_to_forget() {
+        let docs = vec![doc! {
+            "oid": ObjectId::new(),
+            "str": "text",
+            "dec": Bson::Decimal128("1.5".parse().expect("a decimal")),
+            "obj": doc! { "a": 1i32 },
+            "arr": vec![1i32, 2],
+        }];
+        let shape = shape_of(&docs);
+        let named = |field: &str| declared_on_field(&shape, field).expect(field);
+
+        // Three fields, one `Utf8`, one `ColumnType::Text` between two of them.
+        assert_eq!(
+            shape.schema().field_with_name("dec").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        assert_eq!(
+            shape.schema().field_with_name("str").unwrap().data_type(),
+            &DataType::Utf8
+        );
+        assert_eq!(named("str"), "string");
+        assert_eq!(named("dec"), "decimal");
+        assert_eq!(named("oid"), "objectId");
+
+        // And the pair `ColumnType::Document` covers, which is why that enum
+        // cannot be the source of the name.
+        assert_eq!(shape.columns()[3].1, ColumnType::Document);
+        assert_eq!(shape.columns()[4].1, ColumnType::Document);
+        assert_eq!(named("obj"), "object");
+        assert_eq!(named("arr"), "array");
+    }
+
+    /// The rest of the BSON types, under the aliases `$type` accepts — the point
+    /// being that the word in the header is one that can be pasted into a query.
+    #[test]
+    fn the_remaining_types_use_mongodbs_own_aliases() {
+        let docs = vec![doc! {
+            "b": true,
+            "i": 1i32,
+            "l": 1i64,
+            "d": 1.5f64,
+            "dt": bson::DateTime::from_millis(0),
+            "bin": Bson::Binary(bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: vec![1],
+            }),
+            "ts": Bson::Timestamp(bson::Timestamp { time: 1, increment: 2 }),
+            "re": Bson::RegularExpression(bson::Regex {
+                pattern: "^a".to_string(),
+                options: "i".to_string(),
+            }),
+        }];
+        let shape = shape_of(&docs);
+        let named = |field: &str| declared_on_field(&shape, field).expect(field);
+
+        assert_eq!(named("b"), "bool");
+        assert_eq!(named("i"), "int");
+        assert_eq!(named("l"), "long");
+        assert_eq!(named("d"), "double");
+        assert_eq!(named("dt"), "date");
+        assert_eq!(named("bin"), "binData");
+        // The two that would otherwise be indistinguishable from a string: a
+        // BSON timestamp is a replication token, not a date, and a regex is a
+        // pattern with flags.
+        assert_eq!(named("ts"), "timestamp");
+        assert_eq!(named("re"), "regex");
+    }
+
+    /// A field two documents disagree about has no one name, and BSON permits
+    /// the disagreement — so the field says nothing and the reader falls back to
+    /// what arrived. Naming it from the reconciliation would report `string` for
+    /// a field that holds no strings at all.
+    #[test]
+    fn a_field_its_documents_disagree_about_reports_no_type() {
+        let docs = vec![doc! { "v": 1i32 }, doc! { "v": "text" }];
+        let shape = shape_of(&docs);
+        assert_eq!(shape.columns()[0].1, ColumnType::Text);
+        assert_eq!(declared_on_field(&shape, "v"), None);
+        // Two widths of integer still disagree as declarations, even though they
+        // reconcile cleanly as a column: `int` and `long` are different types to
+        // a query, and the column is neither one of them throughout.
+        let widths = vec![doc! { "v": 1i32 }, doc! { "v": 1i64 }];
+        let widths = shape_of(&widths);
+        assert_eq!(widths.columns()[0].1, ColumnType::Int64);
+        assert_eq!(declared_on_field(&widths, "v"), None);
+    }
+
+    /// A field that held nothing but nulls is a field nothing is known about.
+    /// `Text` is this driver's choice of column for it, and reporting `string`
+    /// would hand that choice to the reader as the database's answer.
+    #[test]
+    fn a_field_that_was_only_ever_null_reports_no_type() {
+        let docs = vec![doc! { "v": Bson::Null }, doc! { "v": Bson::Null }];
+        let shape = shape_of(&docs);
+        assert_eq!(shape.columns()[0].1, ColumnType::Text);
+        assert_eq!(declared_on_field(&shape, "v"), None);
+
+        // But a null among values does not erase what the others established —
+        // it decides nothing, which is not the same as contradicting.
+        let mixed = vec![doc! { "v": Bson::Null }, doc! { "v": 1i32 }];
+        assert_eq!(
+            declared_on_field(&shape_of(&mixed), "v").as_deref(),
+            Some("int")
+        );
+    }
+
+    /// The escape hatch is this driver's column, not a field of the collection,
+    /// so it has no BSON type to report. It already says `json` through
+    /// `VALUE_SHAPE`, which is a claim about its contents rather than a type the
+    /// database declared.
+    #[test]
+    fn the_escape_hatch_declares_no_type_of_its_own() {
+        let shape = shape_of(&[doc! { "v": 1i32 }]);
+        assert_eq!(declared_on_field(&shape, EXTRA), None);
+    }
+
+    /// The structure pane has no way to say "no answer", so it prints what the
+    /// column reconciled to where the documents disagreed. Less precise on
+    /// purpose, and still MongoDB's vocabulary rather than this file's enum
+    /// names — `objectid` and `document` are not words any query accepts.
+    #[test]
+    fn the_fallback_for_a_disputed_field_is_still_mongodbs_vocabulary() {
+        assert_eq!(ColumnType::Text.bson_name(), "string");
+        assert_eq!(ColumnType::Document.bson_name(), "object");
+        assert_eq!(ColumnType::ObjectId.bson_name(), "objectId");
+        assert_eq!(ColumnType::Int64.bson_name(), "long");
+        assert_eq!(ColumnType::Binary.bson_name(), "binData");
     }
 
     #[test]

@@ -224,6 +224,46 @@ async fn each_kind_of_value_arrives_as_the_type_that_was_decided_for_it() {
     assert_eq!(of("list"), DataType::Utf8);
 }
 
+/// The other half of the test above, on the same columns: what each says it is.
+///
+/// A statement's columns come from no relation, so the structure pane's answer
+/// is not available to them — this is the only place a Query tab result can
+/// learn that `nested` is an object and `text` is a string rather than both
+/// being `utf8`. Read off the schema against a real server because the names
+/// are taken from the values, and only the server decides what BSON type a
+/// document it stored has.
+#[tokio::test]
+#[ignore = "requires a MongoDB server"]
+async fn each_column_of_a_result_says_what_mongodb_calls_it() {
+    let (src, _db) = fixture("each_column_of_a_result_says_what_mongodb_calls_it").await;
+    let stream = src.query(&find("kinds"), 10).await.expect("query");
+    let schema = stream.schema();
+    let named = |name: &str| {
+        schema
+            .field_with_name(name)
+            .expect(name)
+            .metadata()
+            .get(dbconn::DECLARED_TYPE)
+            .cloned()
+    };
+
+    assert_eq!(named("flag").as_deref(), Some("bool"));
+    assert_eq!(named("small").as_deref(), Some("int"));
+    assert_eq!(named("big").as_deref(), Some("long"));
+    assert_eq!(named("real").as_deref(), Some("double"));
+    assert_eq!(named("when").as_deref(), Some("date"));
+    assert_eq!(named("blob").as_deref(), Some("binData"));
+    // The three the Arrow type cannot tell apart, which is the whole reason
+    // this key is written: all of them arrive as `Utf8`.
+    assert_eq!(named("text").as_deref(), Some("string"));
+    assert_eq!(named("nested").as_deref(), Some("object"));
+    assert_eq!(named("list").as_deref(), Some("array"));
+    // The escape hatch is this client's column and not a field of anything, so
+    // it declares no type — it says `json` through `VALUE_SHAPE` instead, which
+    // is a claim about its contents.
+    assert_eq!(named("_extra"), None);
+}
+
 #[tokio::test]
 #[ignore = "requires a MongoDB server"]
 async fn a_command_with_no_cursor_is_its_own_one_row_result() {
@@ -346,13 +386,12 @@ async fn a_collections_fields_are_found_by_looking_at_documents() {
 #[tokio::test]
 #[ignore = "requires a MongoDB server"]
 async fn a_nested_field_reports_the_type_name_the_value_viewer_reads() {
-    // The seam between the two halves of one decision. `ColumnType::Document` is
-    // a Rust variant; what crosses to the app is the string `metadata::columns`
-    // derives from its name, and `ValueRendering.isJSONType` matches that string
-    // to decide whether to lay the document out over lines. Nothing carries the
-    // name across, so renaming the variant would leave the unit tests on this
-    // side and the checks on that one both passing, with every document back on
-    // the single line the viewer exists to escape.
+    // The seam between the two halves of one decision. What crosses to the app
+    // is the string `metadata::columns` puts on a column, and three things read
+    // it: the structure pane shows it, `edits.rs` decides an edit's BSON from
+    // it, and the value viewer once decided JSON layout from it. So it is
+    // MongoDB's own vocabulary rather than this driver's enum names — `object`
+    // is a word a query accepts and `document` was not.
     let (src, db) = fixture("a_nested_field_reports_the_type_name_the_viewer_reads").await;
     let columns = src.columns(&db, "kinds").await.expect("columns");
     let named = |name: &str| {
@@ -364,11 +403,17 @@ async fn a_nested_field_reports_the_type_name_the_value_viewer_reads() {
             .clone()
     };
 
-    assert_eq!(named("nested"), "document");
-    assert_eq!(named("list"), "document", "an array is nested too");
-    // And the catch-all this was split out of keeps its own name: a column of
-    // ObjectIds must never be handed to a JSON parser.
-    assert_eq!(named("text"), "text");
+    // The distinction `ColumnType` cannot make: both of these are one variant
+    // and one Arrow type, and BSON calls them different things.
+    assert_eq!(named("nested"), "object");
+    assert_eq!(named("list"), "array");
+    // And the catch-all they were split out of: a column of text is `string`,
+    // which is the word `$type` takes, and must never reach a JSON parser.
+    assert_eq!(named("text"), "string");
+    assert_eq!(named("when"), "date");
+    assert_eq!(named("small"), "int");
+    assert_eq!(named("big"), "long");
+    assert_eq!(named("blob"), "binData");
 }
 
 #[tokio::test]
@@ -551,8 +596,8 @@ async fn an_id_is_read_as_an_id_and_written_back_as_one() {
     let key = src.columns(&db, "notes").await.expect("columns");
     assert_eq!(
         key.iter().find(|c| c.name == "_id").expect("_id").data_type,
-        "objectid",
-        "the column says what the digits are"
+        "objectId",
+        "the column says what the digits are, in the word a query would use"
     );
 
     let staged: dbconn::RowEdits = serde_json::from_str(&format!(

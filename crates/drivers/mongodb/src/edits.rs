@@ -15,8 +15,15 @@
 //! matches nothing. That is what `ColumnType::ObjectId` in `shape.rs` exists
 //! for: the column says which, and this file writes `{"$oid": …}` or a bare
 //! string accordingly. Every other type is spelled the same way, in Extended
-//! JSON, so that an `int32` field stays an `int32` after an edit rather than
+//! JSON, so that an `int` field stays an `int` after an edit rather than
 //! becoming whatever JSON's one number type happens to decode as.
+//!
+//! The names matched below are MongoDB's own — `objectId`, `int`, `long`,
+//! `binData` — because they are what `metadata::columns` puts on a column, and
+//! that string is read in three places: the structure pane shows it, this file
+//! decides an edit's BSON from it, and the value viewer decides from it whether
+//! to lay a cell out over lines. Changing the spelling in one of those is
+//! changing a contract in all three.
 //!
 //! Two things are refused rather than written:
 //!
@@ -183,34 +190,38 @@ fn value(
         // has one number type, so `5` written plainly comes back as an Int64 and
         // an edit to an Int32 field would change the field's type as a side
         // effect of changing its value.
-        "int32" => match typed.parse::<i32>() {
+        "int" => match typed.parse::<i32>() {
             Ok(n) => Ok(format!("{{\"$numberInt\": \"{n}\"}}")),
             Err(_) => Err(wrong(text, "a whole number")),
         },
-        "int64" => match typed.parse::<i64>() {
+        "long" => match typed.parse::<i64>() {
             Ok(n) => Ok(format!("{{\"$numberLong\": \"{n}\"}}")),
             Err(_) => Err(wrong(text, "a whole number")),
         },
-        "float64" => match typed.parse::<f64>() {
+        "double" => match typed.parse::<f64>() {
             Ok(n) if n.is_finite() => Ok(format!("{{\"$numberDouble\": \"{n}\"}}")),
             _ => Err(wrong(text, "a number")),
         },
-        "datetime" => match DateTime::parse_rfc3339_str(typed) {
+        "date" => match DateTime::parse_rfc3339_str(typed) {
             Ok(_) => Ok(format!("{{\"$date\": {}}}", quoted(typed))),
             Err(_) => Err(wrong(text, "a date as 2024-01-31T09:00:00Z")),
         },
-        "objectid" => match ObjectId::parse_str(typed) {
+        "objectId" => match ObjectId::parse_str(typed) {
             Ok(id) => Ok(format!("{{\"$oid\": \"{}\"}}", id.to_hex())),
             Err(_) => Err(wrong(text, "24 hex digits")),
         },
         // The cell already holds JSON -- it is how a nested document is shown --
         // so it goes in as the user has it rather than being parsed and printed
         // again, which would reorder its keys and reformat its numbers.
-        "document" => match serde_json::from_str::<serde_json::Value>(typed) {
+        //
+        // Two names where the column type has one: BSON calls a document and an
+        // array different types and so does the structure pane, but both arrive
+        // in a cell as the JSON they render to, and both go back the same way.
+        "object" | "array" => match serde_json::from_str::<serde_json::Value>(typed) {
             Ok(_) => Ok(typed.to_string()),
             Err(_) => Err(wrong(text, "a JSON object or array")),
         },
-        "binary" => Err(refused(format!(
+        "binData" => Err(refused(format!(
             "{} shows how many bytes {} holds rather than the bytes, so there is nothing here to \
              write back",
             cell.column, cell.column
@@ -258,14 +269,20 @@ mod tests {
 
     fn shape() -> Vec<ColumnInfo> {
         vec![
-            column("_id", "objectid"),
-            column("name", "text"),
-            column("seats", "int32"),
-            column("total", "float64"),
+            column("_id", "objectId"),
+            column("name", "string"),
+            column("seats", "int"),
+            column("total", "double"),
             column("open", "bool"),
-            column("placed_at", "datetime"),
-            column("address", "document"),
-            column("thumbnail", "binary"),
+            column("placed_at", "date"),
+            column("address", "object"),
+            // An array is its own BSON type and its own name, and it reaches a
+            // cell as the same JSON a document does. Here because the two are
+            // one arm of one match, and an arm that lost this name would send
+            // `[1,2]` back as the string "[1,2]" — a change of type disguised
+            // as a change of value.
+            column("tags", "array"),
+            column("thumbnail", "binData"),
         ]
     }
 
@@ -340,6 +357,34 @@ mod tests {
         }
     }
 
+    /// A nested field goes back as the JSON the cell holds, whichever of the two
+    /// nested types it is.
+    ///
+    /// Both names matter and for the same reason: the cell of an `object` and
+    /// the cell of an `array` are both JSON text, and a field that fell through
+    /// to the catch-all would be quoted — turning `[1,2]` into the string
+    /// `"[1,2]"` and an array field into a string field. The `$set` is compared
+    /// verbatim because "not quoted" is the whole claim.
+    #[test]
+    fn a_nested_field_goes_back_as_json_whether_it_is_an_object_or_an_array() {
+        let statements = written(
+            r#"{"schema": "shop", "relation": "orders",
+                "updates": [], "deletes": [],
+                "inserts": [{"set": [{"column": "address", "value": "{\"city\": \"Taipei\"}"},
+                                     {"column": "tags", "value": "[1,2]"}]}]}"#,
+        );
+        assert!(
+            statements[0].contains(r#""address": {"city": "Taipei"}"#),
+            "an object is written as the document it is: {}",
+            statements[0]
+        );
+        assert!(
+            statements[0].contains(r#""tags": [1,2]"#),
+            "and an array as the array it is: {}",
+            statements[0]
+        );
+    }
+
     #[test]
     fn a_number_keeps_the_width_its_field_has() {
         let statements = written(
@@ -364,7 +409,7 @@ mod tests {
     fn an_id_that_is_a_string_is_matched_as_a_string() {
         // The whole reason `shape.rs` tells an ObjectId from text: the same 24
         // characters in a text field name a different document.
-        let text_id = vec![column("_id", "text")];
+        let text_id = vec![column("_id", "string")];
         let statements = statements(
             &edits(&format!(
                 r#"{{"schema": "shop", "relation": "notes",

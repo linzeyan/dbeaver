@@ -112,6 +112,7 @@ impl MongoSource {
             return Ok(Vec::new());
         }
         let shape = Shape::infer(&documents);
+        let declared = shape.declared().to_vec();
         Ok(shape
             .columns()
             .into_iter()
@@ -121,7 +122,13 @@ impl MongoSource {
                 // in every document, unique, and indexed. That is a primary key
                 // by every property that matters.
                 is_primary_key: name == "_id",
-                data_type: format!("{ty:?}").to_lowercase(),
+                // MongoDB's own word for the type, falling back to the word for
+                // whatever the column reconciled to where the sampled documents
+                // disagreed. This pane has no way to say "no answer" — the field
+                // is a `String` — so unlike the result schema it always prints
+                // something, and the fallback is the honest remainder rather
+                // than a second-guess.
+                data_type: declared[at].unwrap_or_else(|| ty.bson_name()).to_string(),
                 name,
                 nullable: true,
                 position: at as i32 + 1,

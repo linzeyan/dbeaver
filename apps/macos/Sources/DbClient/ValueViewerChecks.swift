@@ -83,25 +83,31 @@ enum ValueViewerChecks {
             "and the pane is showing something else, which is what makes this matter")
     }
 
-    /// MongoDB's inferred `document` type gets the JSON rendering, and the text
-    /// catch-all beside it does not.
+    /// A MongoDB document column is read as JSON from the shape on its field,
+    /// and its neighbours are not read as JSON at all.
     ///
-    /// The two halves of this agreement are in different languages — `shape.rs`
-    /// names the type, this file reads the name — and nothing carries the string
-    /// between them, so a check is the only thing holding them together. The
-    /// second assertion is the one that matters as much: a collection's ObjectId
-    /// columns arrive as `text`, and a rule loose enough to catch those would
-    /// hand every one of them to a JSON parser that fails.
+    /// This half of the agreement used to be a name — `document` — matched in
+    /// `isJSONType`. It is the field's `VALUE_SHAPE` instead, and it always was
+    /// in practice: `shape.rs` puts that on every nested column and the shape is
+    /// tested before any name. The name was the fragile half, which is what
+    /// this check now says. The second assertion matters as much as the first:
+    /// MongoDB now reports its own vocabulary, and `objectId` is a column of
+    /// 24-hex-digit strings that a JSON parser would fail on every row of.
     @MainActor private static func checkAMongoDocumentColumnIsReadAsJSONAndItsNeighbourIsNot() {
         expect(
-            ValueRendering.isJSONType("document"), true,
-            "the name `ColumnType::Document` reports, spelled the same on this side")
-        expect(
-            ValueRendering.isJSONType("text"), false,
-            "and the catch-all it was split out of stays text")
+            name(
+                of: AppModel.rendering(
+                    kind: .utf8, shape: ArrowTable.jsonShape, declared: "object", bytes: { [] })),
+            "json",
+            "a nested column is JSON because its field says so, whatever its type is called")
+        for declared in ["object", "array", "objectId", "string", "decimal"] {
+            expect(
+                ValueRendering.isJSONType(declared), false,
+                "no MongoDB type name is matched by name any more: \(declared)")
+        }
 
         let stored = "{\"city\":\"Taipei\",\"zip\":100}"
-        let cell = cell(value: stored, type: "document", rendering: .json)
+        let cell = cell(value: stored, type: "object", rendering: .json)
         expect(
             RenderedValue.make(from: cell).text.contains("\n"), true,
             "a document is laid out over lines rather than left as the one the driver sent")

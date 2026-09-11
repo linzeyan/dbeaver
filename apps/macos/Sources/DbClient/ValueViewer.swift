@@ -61,19 +61,23 @@ enum ValueRendering {
     /// Whether a declared type is one whose values are JSON.
     ///
     /// `json` and `jsonb` are PostgreSQL's, and MySQL, ClickHouse and DuckDB all
-    /// spell theirs `json` too. `document` is MongoDB's, which has no declared
-    /// types of its own: its columns are inferred from a sample, and a field
-    /// whose values were all documents or arrays says so rather than falling
-    /// into the text catch-all with the ObjectIds — see `ColumnType::Document`
-    /// in `shape.rs` for the other half of this agreement. The name is the
-    /// contract, spelled in both places because nothing carries it across.
+    /// spell theirs `json` too. Every one of them is a SQL type a column was
+    /// declared with, which is what makes a name safe to match on here.
+    ///
+    /// MongoDB is deliberately not in this list, though it once was under the
+    /// name `document`. Its columns carry `VALUE_SHAPE` on the field itself —
+    /// `shape.rs` puts it there for every nested column — and the case above
+    /// reads that before this one is reached, so a document was never being
+    /// recognised by its name in practice. Matching MongoDB's names here would
+    /// now mean matching `object` and `array`, and `array` is a word DuckDB
+    /// already uses for a column whose text is not JSON.
     ///
     /// The list is of types, never of what a value looks like. A `text` column
     /// holding `{}` is text, and the day one holds something that is nearly JSON
     /// is the day sniffing puts a parse failure where a value used to be.
     static func isJSONType(_ declared: String) -> Bool {
         let name = declared.lowercased()
-        return name == "json" || name == "jsonb" || name == "document"
+        return name == "json" || name == "jsonb"
     }
 
     /// The one-line form of a binary cell, for the strip.
