@@ -42,6 +42,55 @@ final class ArrowTable {
         fileprivate var batches: [ColumnBatch] = []
     }
 
+    /// The scale a datetime column counts in.
+    ///
+    /// Arrow spells the unit into the format string and one column's unit is not
+    /// another's — DuckDB alone sends all four for timestamps, because
+    /// `TIMESTAMP_S`, `TIMESTAMP_MS`, `TIMESTAMP` and `TIMESTAMP_NS` are four
+    /// types a person can declare. Measured, not assumed: a fixture holding one
+    /// of each comes back as `Second`, `Millisecond`, `Microsecond` and
+    /// `Nanosecond`, and `TIME_NS` comes back as `Time64(Nanosecond)`.
+    ///
+    /// This reader used to take microseconds for granted and send everything
+    /// else to `unsupported`, which drew `<tsn:>` in every cell. Reading them as
+    /// microseconds instead would have been worse: the same instant off by a
+    /// factor of a thousand either way, and a plausible date is not something
+    /// anyone checks.
+    enum TimeUnit {
+        case second, milli, micro, nano
+
+        /// What Arrow puts between `ts` and the zone, and after `tt`.
+        init?(arrow letter: Character) {
+            switch letter {
+            case "s": self = .second
+            case "m": self = .milli
+            case "u": self = .micro
+            case "n": self = .nano
+            default: return nil
+            }
+        }
+
+        var perSecond: Int64 {
+            switch self {
+            case .second: return 1
+            case .milli: return 1_000
+            case .micro: return 1_000_000
+            case .nano: return 1_000_000_000
+            }
+        }
+
+        /// How many digits a fraction of this unit is written with, and zero
+        /// where there is no fraction to write.
+        var fractionDigits: Int {
+            switch self {
+            case .second: return 0
+            case .milli: return 3
+            case .micro: return 6
+            case .nano: return 9
+            }
+        }
+    }
+
     enum Kind {
         case bool, int8, int16, int32, int64, float32, float64
         /// The unsigned widths, which are not the signed ones read differently:
@@ -56,8 +105,9 @@ final class ArrowTable {
         /// all, which is why `isNull` answers for it by its kind.
         case null
         case decimal128(precision: Int32, scale: Int32)
-        case timestamp(tz: Bool)
-        case date32, time64
+        case timestamp(tz: Bool, unit: TimeUnit)
+        case date32
+        case time64(unit: TimeUnit)
         /// A column whose values are not in its own buffers but in the children
         /// beside them. Three drivers send one — see `Nested`.
         indirect case nested(Nested)
@@ -125,7 +175,11 @@ final class ArrowTable {
                 return precision == ArrowTable.normalizedPrecision
                     && scale == ArrowTable.normalizedScale
                     ? "decimal" : "decimal(\(precision),\(scale))"
-            case .timestamp(let tz): return tz ? "timestamptz" : "timestamp"
+            // The unit is not in the label. It is in the values — a fraction is
+            // written when there is one — and `dbclient.declared_type` carries
+            // the name the database gave the column, which for the driver that
+            // sends all four units says `TIMESTAMP_NS` outright.
+            case .timestamp(let tz, _): return tz ? "timestamptz" : "timestamp"
             case .date32: return "date"
             case .time64: return "time"
             case .nested(let nested): return nested.label
@@ -605,7 +659,13 @@ final class ArrowTable {
         case "u", "U": return .utf8
         case "z", "Z": return .binary
         case "tdD": return .date32
-        case "ttu": return .time64
+        // Only the two 64-bit spellings. Arrow's `tts` and `ttm` are `Time32`,
+        // which is the same unit letter at half the stride — reading one of
+        // those as an `Int64` takes two values for one and prints a number that
+        // is neither. No driver here sends a `Time32`; if one starts, it belongs
+        // in a case of its own rather than in this one.
+        case "ttu": return .time64(unit: .micro)
+        case "ttn": return .time64(unit: .nano)
         // Microseconds only, which is the one unit any driver here sends. The
         // other three spellings reach `unsupported` and say so, rather than
         // being read as microseconds and drawn a thousandfold wrong.
@@ -628,8 +688,16 @@ final class ArrowTable {
                 guard bits == 128 else { return .unsupported(f) }
                 return .decimal128(precision: precision, scale: scale)
             }
-            if f.hasPrefix("tsu:") {
-                return .timestamp(tz: f.count > 4)
+            // `ts<unit>:<zone>`, where the zone is optional and its presence is
+            // the whole difference between a wall clock and an instant. The
+            // colon is checked rather than assumed: `ts` is also the start of
+            // nothing else Arrow spells, but a format this reader half-matched
+            // would be read at the wrong scale instead of being named.
+            let letters = Array(f)
+            if letters.count >= 4, letters[0] == "t", letters[1] == "s", letters[3] == ":",
+                let unit = TimeUnit(arrow: letters[2])
+            {
+                return .timestamp(tz: letters.count > 4, unit: unit)
             }
             return .unsupported(f)
         }
@@ -750,14 +818,14 @@ private struct ColumnBatch {
             return String(v)
         case .int64, .time64:
             let v = load(Int64.self, idx)
-            if case .time64 = kind { return Self.timeText(micros: v) }
+            if case .time64(let unit) = kind { return Self.timeText(v, unit: unit) }
             return String(v)
         case .float32:
             return String(load(Float.self, idx))
         case .float64:
             return String(load(Double.self, idx))
-        case .timestamp:
-            return Self.timestampText(micros: load(Int64.self, idx))
+        case .timestamp(_, let unit):
+            return Self.timestampText(load(Int64.self, idx), unit: unit)
         case .decimal128(let precision, let scale):
             return Self.decimalText(
                 load(Int128Bits.self, idx), precision: precision, scale: scale)
@@ -1045,9 +1113,11 @@ private struct ColumnBatch {
         return isoDate.string(from: Date(timeIntervalSince1970: secs))
     }
 
-    private static func timeText(micros: Int64) -> String {
-        let s = micros / 1_000_000
-        return String(format: "%02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+    private static func timeText(_ value: Int64, unit: ArrowTable.TimeUnit) -> String {
+        let (seconds, fraction) = Self.split(value, unit: unit)
+        let clock = String(
+            format: "%02lld:%02lld:%02lld", seconds / 3600, (seconds % 3600) / 60, seconds % 60)
+        return clock + Self.fractionText(fraction, unit: unit)
     }
 
     /// A span of time, which is not a reading on a clock.
@@ -1076,8 +1146,48 @@ private struct ColumnBatch {
         return fraction == 0 ? span : span + String(format: ".%06llu", fraction)
     }
 
-    private static func timestampText(micros: Int64) -> String {
-        isoDateTime.string(from: Date(timeIntervalSince1970: TimeInterval(micros) / 1e6))
+    private static func timestampText(_ value: Int64, unit: ArrowTable.TimeUnit) -> String {
+        let (seconds, fraction) = Self.split(value, unit: unit)
+        let clock = isoDateTime.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
+        return clock + Self.fractionText(fraction, unit: unit)
+    }
+
+    /// One datetime as whole seconds and the fraction left over, both exact.
+    ///
+    /// The division happens in integers and before anything becomes a
+    /// `TimeInterval`, which is a `Double` with 53 bits of mantissa: a
+    /// nanosecond count in this century needs 61, so converting first and
+    /// dividing after rounds the value before the formatter has seen it. At
+    /// microseconds that was already within a hair of showing.
+    ///
+    /// Floored rather than truncated, so that an instant before 1970 keeps
+    /// counting forward from the second below it. `-1_500_000` microseconds is
+    /// half a second before `23:59:59`, not half a second after it, and
+    /// truncation toward zero would draw it a whole second late.
+    private static func split(_ value: Int64, unit: ArrowTable.TimeUnit) -> (
+        seconds: Int64, fraction: Int64
+    ) {
+        let per = unit.perSecond
+        var seconds = value / per
+        var fraction = value % per
+        if fraction < 0 {
+            seconds -= 1
+            fraction += per
+        }
+        return (seconds, fraction)
+    }
+
+    /// The fraction of a second, written only when there is one.
+    ///
+    /// The same rule `durationText` states: a `TIMESTAMP_NS` column of whole
+    /// seconds would otherwise be nine columns of zeros in every row, pushing
+    /// the part that differs off the width the values need. When there is a
+    /// fraction it is written to the column's full width rather than trimmed —
+    /// the declared unit is part of what the column means, and `.5` and
+    /// `.500000` are the same number in two different columns.
+    private static func fractionText(_ fraction: Int64, unit: ArrowTable.TimeUnit) -> String {
+        guard fraction != 0 else { return "" }
+        return "." + String(format: "%0*lld", unit.fractionDigits, fraction)
     }
 
     /// Formats a decimal exactly, by placing a point in the integer's digits.

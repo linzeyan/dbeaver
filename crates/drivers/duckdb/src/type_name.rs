@@ -106,6 +106,7 @@ fn sql_name(logical: &LogicalTypeHandle) -> String {
         LogicalTypeId::Uuid => "UUID".into(),
         LogicalTypeId::Date => "DATE".into(),
         LogicalTypeId::Time => "TIME".into(),
+        LogicalTypeId::TimeNs => "TIME_NS".into(),
         LogicalTypeId::TimeTZ => "TIME WITH TIME ZONE".into(),
         LogicalTypeId::Timestamp => "TIMESTAMP".into(),
         LogicalTypeId::TimestampTZ => "TIMESTAMP WITH TIME ZONE".into(),

@@ -13,7 +13,11 @@
 //! is dropped before the driver opens it, and a test that needs to write behind
 //! a reader writes through the driver.
 
-use arrow::array::{Array, Decimal128Array, Int64Array, RecordBatch, StringArray, UInt64Array};
+use arrow::array::{
+    Array, Decimal128Array, Int64Array, RecordBatch, StringArray, Time64NanosecondArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt64Array,
+};
 use arrow::datatypes::{DataType, TimeUnit};
 use dbconn::{Driver, RelationKind, TxStep};
 use driver_duckdb::{DuckError, DuckSource};
@@ -244,6 +248,109 @@ async fn the_types_a_duckdb_user_has_arrive_as_themselves() {
         col::<StringArray>(&batch, "v_varchar").value(0),
         "ünïcödé ✓ 漢字"
     );
+}
+
+/// The four units a DuckDB user can declare a timestamp in, and the two a time
+/// comes in, each arriving as itself.
+///
+/// This is one half of a contract whose other half is in another language:
+/// `ArrowTable.TimeUnit` reads `tss:`, `tsm:`, `tsu:`, `tsn:` and `ttn` at four
+/// different scales, and nothing but a test on each side holds the two
+/// together. Getting it wrong is the quiet kind of wrong — a `TIMESTAMP_NS`
+/// read as microseconds is a 1970 date sitting in a column of 2024 ones.
+///
+/// The units are not converted on the way out, which is the position this
+/// driver takes everywhere: DuckDB produced the Arrow and the bytes in the
+/// buffer already are the number. Narrowing `TIMESTAMP_NS` to microseconds
+/// would drop three digits to work around a reader that now has the case.
+#[tokio::test]
+async fn every_unit_a_duckdb_datetime_is_declared_in_arrives_as_itself() {
+    let fixture = Fixture::new(
+        "CREATE TABLE units AS SELECT
+            TIMESTAMP_S '2024-01-23 09:33:20'              AS t_s,
+            TIMESTAMP_MS '2024-01-23 09:33:20.123'         AS t_ms,
+            TIMESTAMP '2024-01-23 09:33:20.123456'         AS t_us,
+            TIMESTAMP_NS '2024-01-23 09:33:20.123456789'   AS t_ns,
+            TIMESTAMPTZ '2024-01-23 09:33:20+00'           AS t_tz,
+            TIME '23:59:59.999999'                         AS ti_us,
+            TIME_NS '23:59:59.123456789'                   AS ti_ns;",
+    );
+    let src = fixture.connect().await;
+    let mut stream = src.query("SELECT * FROM units", 10).await.unwrap();
+    let schema = stream.schema();
+
+    for (column, unit) in [
+        ("t_s", TimeUnit::Second),
+        ("t_ms", TimeUnit::Millisecond),
+        ("t_us", TimeUnit::Microsecond),
+        ("t_ns", TimeUnit::Nanosecond),
+    ] {
+        assert_eq!(
+            field_type(&schema, column),
+            DataType::Timestamp(unit, None),
+            "{column} is the unit it was declared in"
+        );
+    }
+    // A zone makes it an instant, and DuckDB stores every one of those in
+    // microseconds whatever the session's zone is.
+    assert_eq!(
+        field_type(&schema, "t_tz"),
+        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+    );
+    assert_eq!(
+        field_type(&schema, "ti_us"),
+        DataType::Time64(TimeUnit::Microsecond)
+    );
+    assert_eq!(
+        field_type(&schema, "ti_ns"),
+        DataType::Time64(TimeUnit::Nanosecond)
+    );
+
+    // And the values are the counts those units imply, which is the half a type
+    // assertion cannot reach: a driver that declared nanoseconds and wrote
+    // microseconds would satisfy everything above.
+    let batch = stream.next_batch().await.unwrap().expect("one row");
+    assert_eq!(
+        col::<TimestampSecondArray>(&batch, "t_s").value(0),
+        1_706_002_400
+    );
+    assert_eq!(
+        col::<TimestampMillisecondArray>(&batch, "t_ms").value(0),
+        1_706_002_400_123
+    );
+    assert_eq!(
+        col::<TimestampMicrosecondArray>(&batch, "t_us").value(0),
+        1_706_002_400_123_456
+    );
+    assert_eq!(
+        col::<TimestampNanosecondArray>(&batch, "t_ns").value(0),
+        1_706_002_400_123_456_789
+    );
+    assert_eq!(
+        col::<Time64NanosecondArray>(&batch, "ti_ns").value(0),
+        86_399 * 1_000_000_000 + 123_456_789
+    );
+
+    // And each says which one it is. The four timestamps are already four Arrow
+    // types, so the header would have told them apart without this; `TIME_NS`
+    // and `TIME` would not — the values differ by a thousand and the label the
+    // reader falls back to is `time` for both.
+    let declared = |name: &str| {
+        schema
+            .field_with_name(name)
+            .expect(name)
+            .metadata()
+            .get(dbconn::DECLARED_TYPE)
+            .cloned()
+            .unwrap_or_default()
+    };
+    assert_eq!(declared("t_s"), "TIMESTAMP_S");
+    assert_eq!(declared("t_ms"), "TIMESTAMP_MS");
+    assert_eq!(declared("t_us"), "TIMESTAMP");
+    assert_eq!(declared("t_ns"), "TIMESTAMP_NS");
+    assert_eq!(declared("t_tz"), "TIMESTAMP WITH TIME ZONE");
+    assert_eq!(declared("ti_us"), "TIME");
+    assert_eq!(declared("ti_ns"), "TIME_NS");
 }
 
 #[tokio::test]

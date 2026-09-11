@@ -294,9 +294,13 @@ mod tests {
 
     #[test]
     fn a_column_whose_buffers_hold_its_own_values_is_left_alone() {
-        // Every one of these is a type the Swift reader has no case for. Turning
-        // them into text would remove the value to work around a missing case:
-        // the bytes in the buffer already are the number.
+        // Not one of these is rendered, whether or not the reader on the far
+        // side of the FFI has a case for it: the bytes in the buffer already are
+        // the number, and turning them into text removes the value to work
+        // around something else's gap. Five of the six have since been given a
+        // case — the two nanosecond units by the brick that added
+        // `ArrowTable.TimeUnit` — and this test did not change, which is the
+        // property it is really about.
         for t in [
             DataType::Int8,
             DataType::UInt64,

@@ -306,7 +306,8 @@ enum SchemaMetadataChecks {
     private static func checkTheResultsSpellingIsShortenedTheSameWay() {
         expect(
             GridRenderer.typeLabel(
-                catalogue: nil, declared: "timestamp(3) with time zone", kind: .timestamp(tz: true)),
+                catalogue: nil, declared: "timestamp(3) with time zone",
+                kind: .timestamp(tz: true, unit: .micro)),
             "timestamptz(3)", "a zoned timestamp declared by the result")
         expect(
             GridRenderer.typeLabel(catalogue: nil, declared: "character varying(64)", kind: .utf8),
@@ -325,10 +326,12 @@ enum SchemaMetadataChecks {
     private static func checkACapitalisedSpellingIsShortenedAndStaysCapitalised() {
         expect(
             GridRenderer.typeLabel(
-                catalogue: nil, declared: "TIMESTAMP WITH TIME ZONE", kind: .timestamp(tz: true)),
+                catalogue: nil, declared: "TIMESTAMP WITH TIME ZONE",
+                kind: .timestamp(tz: true, unit: .micro)),
             "TIMESTAMPTZ", "the type DuckDB's C API declares for a zoned timestamp")
         expect(
-            GridRenderer.typeLabel(catalogue: nil, declared: "TIME WITH TIME ZONE", kind: .time64),
+            GridRenderer.typeLabel(
+                catalogue: nil, declared: "TIME WITH TIME ZONE", kind: .time64(unit: .micro)),
             "TIMETZ", "and the zoned time beside it")
         expect(
             GridRenderer.typeLabel(catalogue: nil, declared: "CHARACTER VARYING(64)", kind: .utf8),

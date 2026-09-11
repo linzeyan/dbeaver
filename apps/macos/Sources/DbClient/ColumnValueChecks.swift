@@ -41,6 +41,10 @@ enum ColumnValueChecks {
         checkEveryIntegerWidthIsLinedUpForScanning()
         checkADurationIsWrittenAsASpanAndNotAClock()
         checkAColumnOfNothingButNullSaysSoWithoutABitmap()
+        checkEachDatetimeUnitIsReadAtItsOwnScale()
+        checkADatetimeShowsTheDigitsItsColumnCounts()
+        checkAnInstantBeforeTheEpochCountsForwardFromTheSecondBelowIt()
+        checkAHalfMatchedDatetimeFormatIsNamedAndNotGuessedAt()
         // After the cases and not inside them, for the reason `keep` gives.
         for arena in arenas { arena.release() }
         arenas.removeAll()
@@ -147,6 +151,113 @@ enum ColumnValueChecks {
         // column is a plain int32 with no bitmap, which is Arrow for "all
         // present".
         expect(table.isNull(row: 0, column: 1), false, "an ordinary column beside it")
+    }
+
+    /// The same instant in all four units, which has to draw the same time.
+    ///
+    /// This is the failure the units exist to prevent, and it is the quiet kind:
+    /// a `TIMESTAMP_NS` read as microseconds is not an unreadable cell, it is
+    /// `1970-01-20` sitting in a column of 2024 dates — or, for the millisecond
+    /// column, a date in the year 57000. Before this, all three reached
+    /// `unsupported` and drew `<tsn:>`, which at least could not be mistaken for
+    /// data; reading them at one scale would have been worse than either.
+    @MainActor private static func checkEachDatetimeUnitIsReadAtItsOwnScale() {
+        // 2024-01-23 09:33:20 UTC, in each unit's own counting.
+        let instant: Int64 = 1_706_002_400
+        for (format, value) in [
+            ("tss:", instant),
+            ("tsm:", instant * 1_000),
+            ("tsu:", instant * 1_000_000),
+            ("tsn:", instant * 1_000_000_000)
+        ] {
+            let table = read(format: format, values: [value])
+            expect(
+                table.text(row: 0, column: 0), "2024-01-23 09:33:20",
+                "the instant a \(format) column holds")
+        }
+
+        // And the zoned spelling is the same value with a zone after the colon,
+        // which changes the label and not the reading.
+        let zoned = read(format: "tsu:UTC", values: [instant * 1_000_000])
+        expect(zoned.text(row: 0, column: 0), "2024-01-23 09:33:20", "a zoned timestamp")
+        expect(zoned.columns[0].kind.label, "timestamptz", "a zone makes it an instant")
+
+        // `TIME_NS` is DuckDB's, and it is the reason `ttn` is here at all.
+        let time = read(format: "ttn", values: [Int64(86_399) * 1_000_000_000])
+        expect(time.text(row: 0, column: 0), "23:59:59", "the last second of a ttn day")
+    }
+
+    /// A column shows the digits it counts in, and no more.
+    ///
+    /// The rule `durationText` already states, applied to the clock types: a
+    /// fraction is written only when there is one, and when it is written it is
+    /// written to the column's own width. Nine columns of zeros in every row of
+    /// a whole-second `TIMESTAMP_NS` would push the part that differs off the
+    /// width the values need; and `.5` in a microsecond column would be the same
+    /// number written as if it came from a different one.
+    @MainActor private static func checkADatetimeShowsTheDigitsItsColumnCounts() {
+        let second: Int64 = 1_706_002_400
+        let cases: [(String, Int64, String)] = [
+            ("tss:", second, "2024-01-23 09:33:20"),
+            ("tsm:", second * 1_000 + 123, "2024-01-23 09:33:20.123"),
+            ("tsu:", second * 1_000_000 + 123_456, "2024-01-23 09:33:20.123456"),
+            ("tsn:", second * 1_000_000_000 + 123_456_789, "2024-01-23 09:33:20.123456789"),
+            // Trailing zeros are kept: the declared unit is part of what the
+            // column means.
+            ("tsu:", second * 1_000_000 + 500_000, "2024-01-23 09:33:20.500000"),
+            // And nothing is written where there is nothing.
+            ("tsn:", second * 1_000_000_000, "2024-01-23 09:33:20"),
+            // One nanosecond short of the next second, which is where taking a
+            // nanosecond count through a `TimeInterval` first shows: this value
+            // has no `Double` of its own — the nearest one is the whole second
+            // above it — so the clock would read 09:33:21 with a fraction of
+            // .999999999 under it, an instant that contradicts itself and is a
+            // second in the future.
+            (
+                "tsn:", second * 1_000_000_000 + 999_999_999,
+                "2024-01-23 09:33:20.999999999"
+            )
+        ]
+        for (format, value, want) in cases {
+            let table = read(format: format, values: [value])
+            expect(table.text(row: 0, column: 0), want, "a \(format) value of \(value)")
+        }
+
+        let time = read(format: "ttn", values: [Int64(45_296) * 1_000_000_000 + 123_456_789])
+        expect(time.text(row: 0, column: 0), "12:34:56.123456789", "a ttn with a fraction")
+    }
+
+    /// Half a second before the epoch is `23:59:59.5`, not `00:00:00.5`.
+    ///
+    /// Integer division truncates toward zero, so the seconds and the fraction of
+    /// a negative instant disagree about which way they are counting: the naive
+    /// pair draws this a whole second late and with the fraction on the wrong
+    /// side of it. Every timestamp before 1970 is in this half.
+    @MainActor private static func checkAnInstantBeforeTheEpochCountsForwardFromTheSecondBelowIt() {
+        let table = read(format: "tsu:", values: [Int64(-500_000)])
+        expect(table.text(row: 0, column: 0), "1969-12-31 23:59:59.500000", "half a second before")
+
+        let whole = read(format: "tss:", values: [Int64(-1)])
+        expect(whole.text(row: 0, column: 0), "1969-12-31 23:59:59", "one whole second before")
+    }
+
+    /// A format this reader only half recognises is named rather than read.
+    ///
+    /// `ts` starts four formats and the unit letter is the third character; a
+    /// prefix match that stopped at `ts` would take anything after it as
+    /// microseconds. `tts` and `ttm` are the sharper case — they are `Time32`,
+    /// the same unit letters at half the stride, so reading one as an `Int64`
+    /// takes two values for one and prints a number that is neither.
+    @MainActor private static func checkAHalfMatchedDatetimeFormatIsNamedAndNotGuessedAt() {
+        // `tsum` is the one that matters: four characters, a unit letter in the
+        // right place, and no colon. A match that stopped at the unit would read
+        // it as microseconds rather than say it had never seen it.
+        for format in ["ts", "tsx:", "ts:", "tsu", "tsum", "tsn!", "tts", "ttm", "tt"] {
+            let table = read(format: format, values: [Int64(0)])
+            expect(
+                table.columns[0].kind.label, "<\(format)>",
+                "\(format) is named rather than read at a guessed scale")
+        }
     }
 
     /// A span written the way it is read — `838:59:59`, and a fraction where
