@@ -974,8 +974,11 @@ async fn a_materialized_view_is_not_reported_as_a_view() {
 /// reports a view as empty is stating something false.
 ///
 /// The spec this was written from expected the `Log` engine to be the case that
-/// declines; on 24.10 it reports a real count, and the engines that answer NULL
-/// are the views.
+/// declines; on 24.10 the engines that answer NULL are the views, and a `Log`
+/// table answers or declines depending on something that is not a property of
+/// the table at all — see the test below, which is where it is pinned. Nothing
+/// about a `Log` table belongs in here: this one asserts what is true of a
+/// relation whenever it is asked.
 #[tokio::test]
 #[ignore = "requires a ClickHouse server"]
 async fn a_view_declines_to_estimate_its_rows() {
@@ -991,7 +994,69 @@ async fn a_view_declines_to_estimate_its_rows() {
     assert_eq!(rows("plain_view"), None);
     assert_eq!(rows("mat_view"), None);
     assert_eq!(rows("meta_rich"), Some(1000));
-    assert_eq!(rows("no_stats"), Some(3));
+}
+
+/// A `Log` table's estimate is **lazy**, and both of its answers are this driver
+/// relaying ClickHouse faithfully.
+///
+/// ClickHouse will not open a `Log` table to answer `system.tables`, so
+/// `total_rows` is NULL until something else opens it and exact from then on —
+/// which means the same table reports `None` on a server that has just started
+/// and `Some(3)` a moment after anything reads it. This cost a red test for two
+/// days: `a_view_declines_to_estimate_its_rows` asserted `Some(3)` and was true
+/// only on a container nobody had restarted. It is written down here rather than
+/// removed, because the alternative is the next person seeing a `Log` table with
+/// no row count in the sidebar and filing it as a driver bug.
+///
+/// `DETACH` and `ATTACH` are what make it testable without restarting a server:
+/// measured, they put the table back in exactly the state a restart leaves it
+/// in. They run back to back with no assertion between them, so a failure here
+/// leaves the fixture as it found it.
+#[tokio::test]
+#[ignore = "requires a ClickHouse server"]
+async fn a_log_tables_estimate_is_absent_until_something_opens_it() {
+    let source = source().await;
+    // Its own table rather than the seed's, as `bench.scratch` above: a `DETACH`
+    // takes a relation out of the listing for as long as it lasts, and
+    // `a_materialized_view_is_not_reported_as_a_view` reads `no_stats` out of
+    // that same listing.
+    for statement in [
+        "DROP TABLE IF EXISTS bench.lazy_log",
+        "CREATE TABLE bench.lazy_log (a Int32) ENGINE = Log",
+        "INSERT INTO bench.lazy_log VALUES (1), (2), (3)",
+        "DETACH TABLE bench.lazy_log",
+        "ATTACH TABLE bench.lazy_log",
+    ] {
+        source.query(statement, 10).await.expect(statement);
+    }
+
+    async fn estimate(source: &ChSource) -> Option<i64> {
+        source
+            .relations("bench")
+            .await
+            .expect("relations failed")
+            .into_iter()
+            .find(|r| r.name == "lazy_log")
+            .expect("lazy_log should be listed")
+            .estimated_rows
+    }
+
+    assert_eq!(
+        estimate(&source).await,
+        None,
+        "a table nothing has opened has no count to report"
+    );
+    read_all(&source, "SELECT count() FROM bench.lazy_log").await;
+    assert_eq!(
+        estimate(&source).await,
+        Some(3),
+        "and reading it is what makes ClickHouse open it"
+    );
+
+    source
+        .query("DROP TABLE bench.lazy_log", 10)
+        .await
+        .expect("dropping the table this test made");
 }
 
 /// Upstream runs a second query over `system.parts` to get this number, because

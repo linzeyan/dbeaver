@@ -201,8 +201,13 @@ DROP VIEW IF EXISTS bench.mat_view
 CREATE MATERIALIZED VIEW bench.mat_view TO bench.mv_target AS
     SELECT tag, count() AS n FROM bench.meta_rich GROUP BY tag
 ;;
--- An engine that tracks no row count, so `estimated_rows: None` is exercised
--- rather than assumed.
+-- A table outside the MergeTree family, so that `RelationKind::Table` is read
+-- from what the engine is rather than from whether its name contains MergeTree.
+-- It was added believing a `Log` engine tracks no row count; it does track one,
+-- lazily, and nothing asserts its estimate any more —
+-- `a_log_tables_estimate_is_absent_until_something_opens_it` builds its own
+-- table for that, because pinning it needs a `DETACH` that would take this one
+-- out of the listing another test reads.
 DROP TABLE IF EXISTS bench.no_stats
 ;;
 CREATE TABLE bench.no_stats (a Int32) ENGINE = Log

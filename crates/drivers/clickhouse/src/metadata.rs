@@ -198,10 +198,16 @@ impl ChSource {
                 kind: relation_kind(&r.engine),
                 name: r.name,
                 // `total_rows` is the sum over active parts for the MergeTree
-                // family and NULL for every view and every engine that keeps no
-                // count. That NULL is carried through as `None` rather than
-                // clamped to 0 — declining to answer is not the same as
-                // answering zero, and only one of them is true.
+                // family and NULL for every view. It is also NULL for a `Log`
+                // table nothing has opened yet — ClickHouse will not open one to
+                // answer this question, so the same table declines on a server
+                // that has just started and answers exactly once anything reads
+                // it. That is measured rather than inferred, and pinned by
+                // `a_log_tables_estimate_is_absent_until_something_opens_it`.
+                //
+                // Every NULL is carried through as `None` rather than clamped to
+                // 0 — declining to answer is not the same as answering zero, and
+                // only one of them is true.
                 estimated_rows: r.total_rows.map(|n| n as i64),
             })
             .collect())
