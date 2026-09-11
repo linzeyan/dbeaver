@@ -19,7 +19,8 @@
 # off the last screenshot and it lands where it looked like it would. Several
 # points in one --click are separated by semicolons and pressed in order.
 # SendKeys notation for --keys: ^ is Ctrl, + is Shift, % is Alt, and the named
-# keys are {DOWN} {UP} {LEFT} {RIGHT} {ENTER} {ESC} {TAB}.
+# keys are {DOWN} {UP} {LEFT} {RIGHT} {PGUP} {PGDN} {HOME} {END} {ENTER} {ESC}
+# {TAB}.
 #
 #   DBEAVER_VM=host   ssh host to use (default: macshot-vm)
 #

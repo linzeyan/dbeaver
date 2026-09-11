@@ -750,6 +750,97 @@ float whole_visible_rows(const View& view) {
     return span < 1.0f ? 1.0f : span;
 }
 
+// How far a page key moves: every whole row the view holds, less one.
+//
+// The row that was against one edge is the row against the other once the key
+// has been pressed, and that shared line is what a page of reading is joined to
+// the last one by. A page of exactly the view's height leaves two consecutive
+// screens with nothing in common, and no way to tell a row that was skipped from
+// one that was read. `AppController.swift` keeps the same row back.
+int page_rows(const View& view) {
+    const int span = static_cast<int>(whole_visible_rows(view)) - 1;
+    // A view with room for a single row still moves by one. Nought would be a
+    // key that reads as broken, and the quantity above is allowed to be one.
+    return span < 1 ? 1 : span;
+}
+
+// Where one key takes the cursor, or no answer at all for a key the grid does
+// not use.
+//
+// One function rather than a case per key in the message handler, because this
+// is the whole of what the keyboard means and `--verify-grid` has no window to
+// press a key in. Everything it needs is a value — the cursor, the view that
+// decides how far a page is, and where the result ends — so every answer below
+// can be asked for directly instead of being inferred from a photograph.
+//
+// The virtual key rather than a decoded direction, so that the pairing of a key
+// with what it does is inside the part that is checked. A vocabulary in between
+// would be one more place for `VK_NEXT` to be given the wrong sign, and it would
+// be the place with nothing asking.
+bool key_moves(WPARAM key, const Selection& from, const View& view, bool extend, int last_row,
+               int last_column, Selection* out) {
+    int row = from.row;
+    int column = from.column;
+    bool extending = extend;
+    switch (key) {
+    case VK_UP:
+        row -= 1;
+        break;
+    case VK_DOWN:
+        row += 1;
+        break;
+    // Sideways never extends. The band is a range of rows, so a key that moves
+    // across the columns has no range to grow, and holding shift while pressing
+    // one asks for nothing this grid has; it does what the unshifted key does,
+    // which is to drop the band.
+    case VK_LEFT:
+        column -= 1;
+        extending = false;
+        break;
+    case VK_RIGHT:
+        column += 1;
+        extending = false;
+        break;
+    case VK_PRIOR:
+        row -= page_rows(view);
+        break;
+    case VK_NEXT:
+        row += page_rows(view);
+        break;
+    // The ends of the result, not the ends of the row. A grid's Home is the
+    // first row: sideways the cursor is already a press or two from either end
+    // of a handful of columns, while the far end of a result is a hundred
+    // thousand rows away and otherwise reachable only by holding a key down.
+    case VK_HOME:
+        row = 0;
+        break;
+    case VK_END:
+        row = last_row;
+        break;
+    default:
+        return false;
+    }
+
+    Selection next = from;
+    // Taken before the move, so a shift-held key grows the band from where the
+    // cursor was rather than from where it lands.
+    if (extending && !from.anchored) {
+        next.anchored = true;
+        next.anchor = from.row;
+    } else if (!extending) {
+        next.anchored = false;
+    }
+    // Clamped rather than wrapped: a key at the edge of a result does nothing,
+    // which is what every grid does and what stops a keystroke from teleporting
+    // the cursor to the far corner. Here rather than in each case above, because
+    // six of the eight can name a row outside the result and this is the only
+    // place that knows where it ends.
+    next.row = row < 0 ? 0 : (row > last_row ? last_row : row);
+    next.column = column < 0 ? 0 : (column > last_column ? last_column : column);
+    *out = next;
+    return true;
+}
+
 // The largest scroll that still fills the view. Past it the grid would show
 // blank space after the last row or column, and a scrollbar built on it would
 // reach the end of its track before the result ran out.
@@ -1924,6 +2015,77 @@ bool the_grid_draws_a_result() {
     check(selected_ink > 0, "and the value under it is still drawn");
 
     // ------------------------------------------------------------------
+    // The keyboard: how far each key moves, and what becomes of the band
+    // ------------------------------------------------------------------
+
+    // Thirty whole rows fit in this bitmap, so a page is twenty-nine of them.
+    check(page_rows(view) == 29, "a page is every whole row the view holds, less one");
+    View cramped = view;
+    cramped.height = kHeaderHeight + kRowHeight;
+    check(page_rows(cramped) == 1, "and is a row even in a view that holds one");
+
+    const int last_row = static_cast<int>(rows) - 1;
+    const int last_column = static_cast<int>(columns.size()) - 1;
+    // One press. A key the grid does not use leaves the default selection,
+    // which is the top left cell and answers no case below with what it asked.
+    const auto pressed = [&](WPARAM key, const Selection& from, bool extend) {
+        Selection next;
+        key_moves(key, from, view, extend, last_row, last_column, &next);
+        return next;
+    };
+
+    const Selection home;
+    check(pressed(VK_DOWN, home, false).row == 1, "an arrow moves one row");
+    check(pressed(VK_NEXT, home, false).row == 29, "and a page key moves a page");
+    // Twice down from the top is past the end of forty rows. The key stopping
+    // at the last row rather than doing nothing is what makes a second press
+    // the way to the end of a result.
+    check(pressed(VK_NEXT, Selection{29, 0}, false).row == last_row,
+          "a page past the end stops at the last row");
+    check(pressed(VK_PRIOR, Selection{last_row, 0}, false).row == 10,
+          "and a page back from there is a page back");
+    check(pressed(VK_UP, home, false).row == 0, "a key at the edge does nothing");
+    check(pressed(VK_RIGHT, Selection{0, last_column}, false).column == last_column,
+          "sideways too");
+
+    // Home and End are the two keys whose whole purpose is the row they name,
+    // and the column has to survive them: a user who has arrowed across to the
+    // fourth column and presses End is asking about that column at the end of
+    // the result, not about the first one.
+    const Selection third_column{20, 2};
+    check(pressed(VK_HOME, third_column, false).row == 0
+              && pressed(VK_HOME, third_column, false).column == 2,
+          "Home is the first row of the column the cursor is in");
+    check(pressed(VK_END, third_column, false).row == last_row
+              && pressed(VK_END, third_column, false).column == 2,
+          "and End is the last row of it");
+
+    // The band, which is what the shift key is for. Anchored where the cursor
+    // was rather than where it lands, so the rows between the two are the ones
+    // that were crossed.
+    const Selection extended = pressed(VK_END, Selection{3, 0}, true);
+    check(extended.anchored && extended.first_row() == 3 && extended.last_row() == last_row,
+          "a shift-held key opens a band behind the cursor");
+    // A second shift-held key moves the cursor and leaves the anchor where it
+    // was, so a band can be taken back as well as out: a page up from the end
+    // of the result gives up the rows at that end, not the rows at row three.
+    // Re-taking the anchor on every press would put the band at ten to thirty
+    // nine instead — a band that is only ever one key long, which is the shape
+    // this reads as working in until somebody presses twice.
+    const Selection grown = pressed(VK_PRIOR, extended, true);
+    check(grown.anchored && grown.first_row() == 3 && grown.last_row() == 10,
+          "and a second one moves the cursor end rather than the anchor");
+    check(!pressed(VK_HOME, extended, false).anchored, "an unshifted key drops it");
+    check(!pressed(VK_RIGHT, extended, true).anchored, "and so does a sideways one, shift or not");
+
+    // A key the grid has nothing to do with is refused rather than answered
+    // with the cursor where it already was. The window has to be able to tell
+    // the two apart: one of them is a keystroke it should leave alone.
+    Selection untouched;
+    check(!key_moves(VK_TAB, third_column, view, false, last_row, last_column, &untouched),
+          "a key the grid does not use gets no answer");
+
+    // ------------------------------------------------------------------
     // Scrolling: which rows are on screen, and which row each one is
     // ------------------------------------------------------------------
 
@@ -2997,40 +3159,30 @@ struct Window {
         return dpi == 0 ? 1.0f : 96.0f / static_cast<float>(dpi);
     }
 
-    // Moved and clamped rather than wrapped: an arrow at the edge of a result
-    // does nothing, which is what every grid does and what stops a keystroke
-    // from teleporting the cursor to the far corner.
-    void move(int rows_by, int columns_by, bool extend) {
+    // A key arrived with the grid focused. `key_moves` is where the keys differ
+    // from one another; this is the part that is the same for all of them.
+    void key(WPARAM pressed, bool extend) {
         const int last_row = static_cast<int>(rows()) - 1;
         const int last_column = static_cast<int>(columns.size()) - 1;
         if (last_row < 0 || last_column < 0) {
             return;
         }
-        // An arrow key with nothing selected acts from the first cell rather
-        // than doing nothing, which is what `AppController.swift` does when the
+        // A key with nothing selected acts from the first cell rather than
+        // doing nothing, which is what `AppController.swift` does when the
         // renderer's selection is nil. Ignoring it instead would leave a click
         // as the only way into the grid, and a result opened from the keyboard
-        // would have four keys that appeared not to work.
-        if (!selected) {
-            selection = Selection{};
-            selected = true;
+        // would have eight keys that appeared not to work.
+        Selection next;
+        if (!key_moves(pressed, selected ? selection : Selection{}, view(), extend, last_row,
+                       last_column, &next)) {
+            return;
         }
-        // Taken before the move, so a shift-arrow from an unextended selection
-        // grows from where the cursor was rather than from where it lands.
-        if (extend && !selection.anchored) {
-            selection.anchored = true;
-            selection.anchor = selection.row;
-        } else if (!extend) {
-            selection.anchored = false;
-        }
-        const int row = selection.row + rows_by;
-        const int column = selection.column + columns_by;
-        selection.row = row < 0 ? 0 : (row > last_row ? last_row : row);
-        selection.column = column < 0 ? 0 : (column > last_column ? last_column : column);
+        selection = next;
+        selected = true;
         // The cursor takes the view with it, on whichever axis it moved. A grid
-        // that let the cursor leave the screen would answer every further arrow
-        // key by moving something the user cannot see, and the only way back
-        // would be to guess how far.
+        // that let the cursor leave the screen would answer every further key
+        // by moving something the user cannot see, and the only way back would
+        // be to guess how far.
         const View at = view();
         scroll_row = scroll_to_visible(at, selection.row);
         scroll_x = scroll_x_to_visible(at, columns, selection.column);
@@ -3297,28 +3449,13 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
 
-    case WM_KEYDOWN: {
-        const bool extend = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        switch (wparam) {
-        case VK_UP:
-            window->move(-1, 0, extend);
-            return 0;
-        case VK_DOWN:
-            window->move(1, 0, extend);
-            return 0;
-        // Sideways never extends: the band is a range of rows, and shift-left
-        // has no range to grow. Passing `extend` here would collapse one that
-        // was already open, which is the opposite of what the key says.
-        case VK_LEFT:
-            window->move(0, -1, false);
-            return 0;
-        case VK_RIGHT:
-            window->move(0, 1, false);
-            return 0;
-        default:
-            return 0;
-        }
-    }
+    // One handler for every key, because every key this grid has moves the
+    // cursor and `key_moves` is where they differ. Claimed whether or not the
+    // key was one of them, which is what this did when there were four: there is
+    // nothing else in the window for a keystroke to reach.
+    case WM_KEYDOWN:
+        window->key(wparam, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+        return 0;
 
     // The window has moved to a display with a different scale. Windows offers a
     // rectangle for where it should now sit; taking it is what keeps the window
