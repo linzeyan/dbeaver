@@ -657,6 +657,126 @@ struct Selection {
     int last_row() const { return anchored && anchor > row ? anchor : row; }
 };
 
+// A cell as it should land on the clipboard: the value, not the way the grid
+// spells it. NULL copies as nothing rather than as the word, which would paste
+// into the next tool as a four-character string that nothing there reads as
+// absent. `GridClipboard.swift` draws the same line.
+std::wstring copied_value(const Column& column, int row) {
+    const size_t at = static_cast<size_t>(row);
+    if (row < 0 || at >= column.cells.size() || column.nulls[at]) {
+        return std::wstring();
+    }
+    return column.cells[at];
+}
+
+// A tab or a newline inside a value would add columns and rows nobody selected,
+// so they collapse to spaces. Quoting them is CSV's answer and would stop this
+// being pasteable as plain text, which is the whole of what tab-separated is
+// for.
+std::wstring sanitized(std::wstring value) {
+    for (wchar_t& c : value) {
+        if (c == L'\t' || c == L'\n' || c == L'\r') {
+            c = L' ';
+        }
+    }
+    return value;
+}
+
+// What a copy puts on the clipboard.
+//
+// One row copies as the value under the cursor and nothing else — no name, no
+// separator, and deliberately not sanitised: a lone value has no format to
+// break, and a cell holding a tab should paste as the cell. Several rows copy
+// as tab-separated text with the column names on the first line, which is the
+// one shape a spreadsheet, a SQL console and a text editor all read unchanged.
+//
+// Kept out of the window so the checks can ask what a paste would contain
+// without one, the same reason `GridClipboard.swift` is not in the view.
+std::wstring clipboard_text(const std::vector<Column>& columns, const Selection& selection) {
+    if (columns.empty()) {
+        return std::wstring();
+    }
+    const int first = selection.first_row();
+    const int last = selection.last_row();
+    const size_t at = static_cast<size_t>(selection.column);
+    if (first == last) {
+        return at < columns.size() ? copied_value(columns[at], first) : std::wstring();
+    }
+
+    std::wstring out = columns[0].heading;
+    for (size_t c = 1; c < columns.size(); ++c) {
+        out += L'\t';
+        out += columns[c].heading;
+    }
+    for (int r = first; r <= last; ++r) {
+        // CRLF rather than the bare newline the macOS side writes. This is the
+        // line ending every Windows program that reads `CF_UNICODETEXT` expects,
+        // and the older ones show a paste that lacks it as one long line.
+        out += L"\r\n";
+        for (size_t c = 0; c < columns.size(); ++c) {
+            if (c > 0) {
+                out += L'\t';
+            }
+            out += sanitized(copied_value(columns[c], r));
+        }
+    }
+    return out;
+}
+
+// Puts one string on the clipboard, as the only format this grid has to offer.
+//
+// `CF_UNICODETEXT` and no second rendering: the text above is already the whole
+// answer, and a program that wants bytes converts the Unicode itself — the
+// synthesised `CF_TEXT` Windows offers on its own is better than one written
+// here, since it uses the reader's own code page.
+bool put_on_clipboard(HWND owner, const std::wstring& text) {
+    if (OpenClipboard(owner) == 0) {
+        return failed("OpenClipboard", HRESULT_FROM_WIN32(GetLastError()));
+    }
+    // Emptied before anything is set. Not because the set would fail without it
+    // — it succeeds, which is what makes this worth writing down — but because
+    // the formats the last owner left stay there otherwise, and a program that
+    // prefers one of them pastes the previous copy out of a clipboard this one
+    // appears to have taken. `NSPasteboard.clearContents()` is the same call for
+    // the same reason.
+    EmptyClipboard();
+
+    // Terminated, and the terminator is inside the block. `CF_UNICODETEXT` is a
+    // NUL-terminated string rather than a counted one — the allocation's size is
+    // not where the reader stops.
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    // Moveable rather than fixed, because that is what `SetClipboardData`
+    // documents: it takes ownership of a handle it is free to move, and
+    // `GMEM_FIXED` answers with a pointer rather than a handle. A fixed block is
+    // accepted here and pastes back correctly — measured, by giving this one
+    // `GMEM_FIXED` — so nothing in this program can tell the two apart. The
+    // contract is the reason, not an observed failure.
+    HGLOBAL block = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (block == nullptr) {
+        CloseClipboard();
+        return failed("GlobalAlloc", HRESULT_FROM_WIN32(GetLastError()));
+    }
+    void* into = GlobalLock(block);
+    if (into == nullptr) {
+        GlobalFree(block);
+        CloseClipboard();
+        return failed("GlobalLock", HRESULT_FROM_WIN32(GetLastError()));
+    }
+    std::memcpy(into, text.c_str(), bytes);
+    GlobalUnlock(block);
+
+    // From here the block belongs to the clipboard whether or not this succeeds
+    // — freeing it after a successful set is a free of somebody else's memory,
+    // and not freeing it after a failed one is the leak.
+    if (SetClipboardData(CF_UNICODETEXT, block) == nullptr) {
+        GlobalFree(block);
+        CloseClipboard();
+        return failed("SetClipboardData", HRESULT_FROM_WIN32(GetLastError()));
+    }
+    CloseClipboard();
+    return true;
+}
+
 // How far the view has been taken through the result, and how big the view is.
 //
 // `scroll_row` is fractional, like `GridRenderer.swift`'s. A wheel notch is a
@@ -2086,6 +2206,102 @@ bool the_grid_draws_a_result() {
           "a key the grid does not use gets no answer");
 
     // ------------------------------------------------------------------
+    // The clipboard: what a copy would paste
+    // ------------------------------------------------------------------
+
+    check(clipboard_text(columns, Selection{2, 1}) == L"driver-2",
+          "one cell copies as the value in it");
+    // The word is how the grid says "there is nothing here"; the clipboard has
+    // its own way of saying that, and pasting the word would put a
+    // four-character string into a column of numbers.
+    check(clipboard_text(columns, Selection{1, 2}).empty(), "and a null cell copies as nothing");
+
+    // Rows one and two, which is the band a shift-arrow from row two leaves.
+    const std::wstring rows_text = clipboard_text(columns, Selection{2, 0, true, 1});
+    std::wstring names = columns[0].heading;
+    for (size_t c = 1; c < columns.size(); ++c) {
+        names += L'\t';
+        names += columns[c].heading;
+    }
+    check(rows_text.rfind(names + L"\r\n", 0) == 0, "several rows copy under a line of column names");
+    // Two line endings for two rows: the names are the first line rather than a
+    // line of their own with a blank one after it.
+    size_t endings = 0;
+    for (size_t at = rows_text.find(L"\r\n"); at != std::wstring::npos; at = rows_text.find(L"\r\n", at + 1)) {
+        endings += 1;
+    }
+    check(endings == 2, "one line each and no line for the names to sit above");
+    // The null field is empty between its two tabs rather than absent: a row
+    // that dropped it would paste every column after it one place to the left.
+    check(rows_text.find(L"\r\n1\tdriver-1\t\ta value") != std::wstring::npos,
+          "and a null inside a row is an empty field rather than a missing one");
+
+    // The two characters the format is made of, in the one place they cannot be
+    // left alone. Asked of a table of literals, because the query above has no
+    // value with a tab in it and giving it one would change every width the
+    // checks above measure.
+    std::vector<Column> unruly(2);
+    unruly[0].heading = L"a";
+    unruly[0].cells = {L"one\ttwo", L"three\r\nfour"};
+    unruly[0].nulls = {false, false};
+    unruly[1].heading = L"b";
+    unruly[1].cells = {L"x", L"y"};
+    unruly[1].nulls = {false, false};
+    check(clipboard_text(unruly, Selection{1, 0, true, 0})
+              == L"a\tb\r\none two\tx\r\nthree  four\ty",
+          "a tab or a newline inside a value becomes a space");
+    // Not in a single-cell copy, where there is no format to break. A value is
+    // pasted as the value; it is the rows around it that make the tab mean
+    // something else.
+    check(clipboard_text(unruly, Selection{0, 0}) == L"one\ttwo",
+          "and is left alone where the value is the whole of what was copied");
+
+    // The Win32 half, round-tripped. Nothing else can say that the block was
+    // allocated moveable, that the terminator went into it, or that the
+    // clipboard still held it after the handle was handed over — every one of
+    // those is invisible until somebody pastes.
+    const std::wstring posted = clipboard_text(columns, Selection{2, 0, true, 1});
+    check(put_on_clipboard(nullptr, posted), "the clipboard takes the copy");
+    std::wstring pasted;
+    if (OpenClipboard(nullptr) != 0) {
+        HANDLE held = GetClipboardData(CF_UNICODETEXT);
+        const void* read = held != nullptr ? GlobalLock(held) : nullptr;
+        if (read != nullptr) {
+            pasted.assign(static_cast<const wchar_t*>(read));
+            GlobalUnlock(held);
+        }
+        CloseClipboard();
+    }
+    check(pasted == posted, "and reads back as the text that was put there");
+
+    // And that a copy takes the clipboard rather than joining what is on it.
+    // The set succeeds either way — that is why this is asked rather than
+    // assumed — but a format the last owner left stays behind, and a program
+    // that prefers that format pastes the previous copy.
+    //
+    // Asked with a format of this check's own: Windows synthesises `CF_TEXT` and
+    // `CF_OEMTEXT` from the Unicode above, so either of those would answer yes
+    // whatever happened here.
+    const UINT marker = RegisterClipboardFormatW(L"dbclient.verify-grid");
+    if (marker != 0 && OpenClipboard(nullptr) != 0) {
+        EmptyClipboard();
+        HGLOBAL mark = GlobalAlloc(GMEM_MOVEABLE, sizeof(wchar_t));
+        void* into = mark != nullptr ? GlobalLock(mark) : nullptr;
+        if (into != nullptr) {
+            *static_cast<wchar_t*>(into) = L'\0';
+            GlobalUnlock(mark);
+            if (SetClipboardData(marker, mark) == nullptr) {
+                GlobalFree(mark);
+            }
+        }
+        CloseClipboard();
+    }
+    check(marker != 0 && IsClipboardFormatAvailable(marker) != 0,
+          "a format left by somebody else is on the clipboard");
+    check(put_on_clipboard(nullptr, posted) && IsClipboardFormatAvailable(marker) == 0,
+          "and a copy empties it rather than settling in beside it");
+
+    // ------------------------------------------------------------------
     // Scrolling: which rows are on screen, and which row each one is
     // ------------------------------------------------------------------
 
@@ -3159,6 +3375,17 @@ struct Window {
         return dpi == 0 ? 1.0f : 96.0f / static_cast<float>(dpi);
     }
 
+    // The selection, on the clipboard. Nothing selected is not a failure: there
+    // is no cursor until something has been pointed at or arrowed to, and a
+    // grid that reported an error for Ctrl+C pressed on a fresh result would be
+    // answering a question nobody asked.
+    void copy() {
+        if (!selected || columns.empty()) {
+            return;
+        }
+        put_on_clipboard(hwnd, clipboard_text(columns, selection));
+    }
+
     // A key arrived with the grid focused. `key_moves` is where the keys differ
     // from one another; this is the part that is the same for all of them.
     void key(WPARAM pressed, bool extend) {
@@ -3449,11 +3676,24 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         }
         return 0;
 
-    // One handler for every key, because every key this grid has moves the
-    // cursor and `key_moves` is where they differ. Claimed whether or not the
-    // key was one of them, which is what this did when there were four: there is
-    // nothing else in the window for a keystroke to reach.
+    // One handler for every key, because every key this grid has either moves
+    // the cursor or copies it, and `key_moves` is where the movers differ.
+    // Claimed whether or not the key was one of them, which is what this did
+    // when there were four: there is nothing else in the window for a keystroke
+    // to reach.
+    //
+    // Control is asked first and answers for itself. A modified key is a
+    // command rather than a direction — Ctrl+End means the end of the result in
+    // some grids and nothing in this one, and letting it through to `key_moves`
+    // would make it silently mean End. `AppController.swift` puts ⌘ in front of
+    // its own switch for the same reason.
     case WM_KEYDOWN:
+        if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
+            if (wparam == 'C') {
+                window->copy();
+            }
+            return 0;
+        }
         window->key(wparam, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
         return 0;
 
