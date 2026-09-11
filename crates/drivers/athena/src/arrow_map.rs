@@ -21,6 +21,13 @@
 //! text, and the text is Athena's own rendering, which is the form a person
 //! would recognise because it is the form the console shows.
 //!
+//! **Every column also carries the name Athena gave its type**, under
+//! `dbconn::DECLARED_TYPE`, and the paragraph above is the reason it has to: a
+//! `varbinary`, a `row`, a `map`, an `array`, a zoned timestamp and a plain
+//! `varchar` all reach the grid as `Utf8`, so the Arrow type can tell none of
+//! them from any other. `declared` says which of those names get rebuilt and
+//! which are handed over as they arrived.
+//!
 //! **Four decisions, and each of them could be wrong in a way only an account
 //! can settle.**
 //!
@@ -62,6 +69,7 @@ use arrow::datatypes::{
     TimeUnit, TimestampMicrosecondType,
 };
 use arrow::error::ArrowError;
+use dbconn::DECLARED_TYPE;
 use std::sync::Arc;
 
 use crate::wire::{ColumnInfo, Row};
@@ -147,6 +155,43 @@ pub(crate) fn cell_of(column: &ColumnInfo) -> Cell {
     }
 }
 
+/// What Athena called one column's type, for the grid's type row.
+///
+/// Presto's vocabulary and not Hive's, which is the split `wire::ColumnInfo`
+/// states: this is the result talking about itself, where `GetTableMetadata`
+/// is the Glue catalog talking about a table. A query pane showing `varchar`
+/// beside a structure pane showing `string` is the two of them answering
+/// different questions, and the grid prefers the catalog's answer where it has
+/// one. See `dbconn::DECLARED_TYPE`.
+///
+/// **`decimal` is the only name rebuilt**, because it is the only one that
+/// arrives without the two numbers that decide what it means — `decimal` alone
+/// cannot say whether two values compare exactly, which is the example
+/// `DECLARED_TYPE` gives for why the Arrow type is not enough. The digits come
+/// from the same two fields `cell_of` already trusts to pick a `Decimal128`, so
+/// nothing new is being believed here.
+///
+/// A `varchar`'s length is **not** put back, though `Precision` carries
+/// something for it: what that something is has no server to settle it, the
+/// same field is documented here as holding a fixed-width integer's width, and
+/// an unbounded `varchar` would come out as `varchar(2147483647)` — a number
+/// nobody declared, printed with the authority of one. `varchar` is true.
+pub(crate) fn declared(column: &ColumnInfo) -> Option<String> {
+    let name = column.r#type.trim();
+    if name.is_empty() {
+        return None;
+    }
+    if name == "decimal"
+        && (1..=38).contains(&column.precision)
+        && (0..=column.precision).contains(&column.scale)
+    {
+        // Spaced after the comma, which is how the Trino driver's live results
+        // spell it — Athena's engine is the same one.
+        return Some(format!("decimal({}, {})", column.precision, column.scale));
+    }
+    Some(name.to_string())
+}
+
 /// A result's columns and how to read their values.
 pub(crate) struct Plan {
     schema: SchemaRef,
@@ -167,7 +212,15 @@ impl Plan {
             // `NOT NULL` produces nulls in it. Athena's `ColumnInfo` does carry
             // a `Nullable`, and it is documented to be `UNKNOWN` for every
             // column of every result, which is worse than not asking.
-            .map(|(column, cell)| Field::new(&column.name, cell.arrow(), true))
+            .map(|(column, cell)| {
+                let field = Field::new(&column.name, cell.arrow(), true);
+                match declared(column) {
+                    None => field,
+                    Some(declared) => {
+                        field.with_metadata([(DECLARED_TYPE.to_string(), declared)].into())
+                    }
+                }
+            })
             .collect();
         Plan {
             schema: Arc::new(Schema::new(fields)),
@@ -497,6 +550,71 @@ mod tests {
         // The default, which is what a `ColumnInfo` with no digits in it looks
         // like.
         assert_eq!(cell_of(&column("amount", "decimal")), Cell::Text);
+    }
+
+    /// The six types this driver hands over as `Utf8`, each still saying what it
+    /// is. Without this the grid's type row reads `utf8` six times for six
+    /// different things, which is the whole reason the key exists.
+    #[test]
+    fn a_column_says_the_presto_type_athena_named_and_not_the_buffer_it_arrived_in() {
+        let columns: Vec<ColumnInfo> = [
+            "varchar",
+            "varbinary",
+            "array(integer)",
+            "map(varchar, integer)",
+            "row(n integer, w varchar)",
+            "timestamp with time zone",
+        ]
+        .iter()
+        .map(|kind| column("c", kind))
+        .collect();
+        let plan = Plan::of(&columns);
+
+        for (at, kind) in columns.iter().enumerate() {
+            let field = plan.schema().field(at).clone();
+            assert_eq!(field.data_type(), &DataType::Utf8, "{}", kind.r#type);
+            assert_eq!(
+                field.metadata().get(DECLARED_TYPE).map(String::as_str),
+                Some(kind.r#type.as_str())
+            );
+        }
+    }
+
+    /// `decimal` is the one name Athena sends without the numbers that decide
+    /// what it means, and the two fields holding them are the same ones the
+    /// builder already reads.
+    #[test]
+    fn a_decimal_is_named_with_the_digits_that_decide_how_it_compares() {
+        let mut money = column("amount", "decimal");
+        money.precision = 18;
+        money.scale = 2;
+        assert_eq!(declared(&money).as_deref(), Some("decimal(18, 2)"));
+
+        // Digits that cannot describe a decimal leave the bare name rather than
+        // printing them — the same fallback `cell_of` makes for the same input.
+        money.precision = 39;
+        assert_eq!(declared(&money).as_deref(), Some("decimal"));
+        assert_eq!(
+            declared(&column("amount", "decimal")).as_deref(),
+            Some("decimal")
+        );
+    }
+
+    /// Absent is a real state, and a result that named no type is the one case
+    /// that reaches it. An empty string here would put a blank in the type row
+    /// where the grid would otherwise fall back to what arrived.
+    #[test]
+    fn a_column_athena_named_no_type_for_carries_no_label() {
+        assert_eq!(declared(&column("c", "")), None);
+        assert_eq!(declared(&column("c", "   ")), None);
+        assert!(
+            Plan::of(&[column("c", "")])
+                .schema()
+                .field(0)
+                .metadata()
+                .get(DECLARED_TYPE)
+                .is_none()
+        );
     }
 
     /// The three values a `double` can hold that a decimal point cannot spell.
