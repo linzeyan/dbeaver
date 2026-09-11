@@ -8,6 +8,25 @@
 //! reply that is one thing, two for a reply that is pairs. What each is called is
 //! argued at `VALUE` and `FIELD`.
 //!
+//! The column's *type* is not invented, and that is the one thing here the
+//! protocol does answer. RESP marks every value it sends, and `scalar_type`
+//! keeps an Arrow type for three of those and puts the other seven in `Utf8` —
+//! so a bulk string, a verbatim string, a big number and an error reach the grid
+//! as one column. `resp_name` carries the distinction across under RESP's own
+//! names, beside the type the values arrive as.
+//!
+//! Reported only where the values agree, which is the same rule MongoDB's
+//! `shape.rs` reaches for the same reason. An array may mix an integer, a string
+//! and a nested array — `CONFIG GET` and `XRANGE` both return one — and there is
+//! no single name for that, so the column says nothing and the Arrow type stands
+//! as the answer. A null is not a disagreement but a hole: `MGET a missing b` is
+//! a reply of bulk strings, and treating its null as a third type would blank
+//! the header on the reply shape people read most.
+//!
+//! Named from the elements and not from the container, because a row here is one
+//! element — a column of bulk strings headed `array` would be describing the
+//! reply where the reader is asking about the column.
+//!
 //! **A page of keys, as rows.** This is the shape a browse produces, and the one
 //! that makes the `Driver` trait fit a key-value store at all: the rows of the
 //! `hash` relation are the keys that hold hashes. The column set is fixed per
@@ -30,6 +49,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::error::ArrowError;
+use dbconn::DECLARED_TYPE;
 use redis::{Cmd, Value};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -366,19 +386,38 @@ impl Reply {
             other => Rows::One(other),
         };
         let schema = match &rows {
-            Rows::One(value) => Arc::new(Schema::new(vec![Field::new(
+            Rows::One(value) => Arc::new(Schema::new(vec![named_field(
                 VALUE,
                 scalar_type(value),
-                true,
+                resp_name(value),
             )])),
             // Text, whatever the elements are. An array is free to mix an
             // integer, a string and a nested array in one reply — `CONFIG GET`
             // and `XRANGE` both do — so a column typed from the first element
             // would be a column the second one does not fit.
-            Rows::Many(_) => Arc::new(Schema::new(vec![Field::new(VALUE, DataType::Utf8, true)])),
-            Rows::Pairs(_) => Arc::new(Schema::new(vec![
-                Field::new(FIELD, DataType::Utf8, true),
-                Field::new(VALUE, DataType::Utf8, true),
+            //
+            // The name is the one thing that can still be said when they do
+            // agree, which is the ordinary case: `LRANGE` and `SMEMBERS` return
+            // bulk strings throughout, and the column says so where `Utf8`
+            // cannot. The container's own type is deliberately not what is
+            // reported — a row here is one element, so the column is the
+            // elements' type and not the array's.
+            Rows::Many(items) => Arc::new(Schema::new(vec![named_field(
+                VALUE,
+                DataType::Utf8,
+                column_name(items.iter()),
+            )])),
+            Rows::Pairs(pairs) => Arc::new(Schema::new(vec![
+                named_field(
+                    FIELD,
+                    DataType::Utf8,
+                    column_name(pairs.iter().map(|(key, _)| key)),
+                ),
+                named_field(
+                    VALUE,
+                    DataType::Utf8,
+                    column_name(pairs.iter().map(|(_, value)| value)),
+                ),
             ])),
         };
         Reply { schema, rows }
@@ -458,6 +497,79 @@ fn scalar_type(value: &Value) -> DataType {
         Value::Double(_) => DataType::Float64,
         Value::Boolean(_) => DataType::Boolean,
         _ => DataType::Utf8,
+    }
+}
+
+/// One RESP value's type, under the name the protocol gives it.
+///
+/// The counterpart of `scalar_type` and the reason it can stay so small. Three
+/// RESP types keep an Arrow type of their own and the other seven share `Utf8`,
+/// so the column alone cannot tell a bulk string from a verbatim string, a big
+/// number or an error — and RESP marks every one of them differently on the
+/// wire. These are the names the protocol's own documentation uses, so the word
+/// in the header is the word for the byte the server sent.
+///
+/// `None` for a null, which is `scalar_type`'s catch-all too. A null says
+/// nothing about what a column holds: `MGET a missing b` is a reply of bulk
+/// strings with a hole in it, not a reply of a third type.
+fn resp_name(value: &Value) -> Option<&'static str> {
+    let name = match value {
+        Value::Nil => return None,
+        Value::Int(_) => "integer",
+        Value::Double(_) => "double",
+        Value::Boolean(_) => "boolean",
+        Value::BulkString(_) => "bulk string",
+        // `Okay` is the `+OK` every write answers with, which is a simple string
+        // and is only its own variant because it is the common one.
+        Value::SimpleString(_) | Value::Okay => "simple string",
+        Value::VerbatimString { .. } => "verbatim string",
+        Value::BigNumber(_) => "big number",
+        Value::ServerError(_) => "simple error",
+        Value::Array(_) => "array",
+        Value::Set(_) => "set",
+        Value::Map(_) => "map",
+        Value::Push { .. } => "push",
+        // Unreachable through `Reply::of`, which unwraps an attribute before
+        // anything asks. Named anyway rather than left to fall through, because
+        // the fall-through means "no name for this" and an attribute has one.
+        Value::Attribute { .. } => "attribute",
+        // `Value` is `#[non_exhaustive]`: a type added by a later protocol
+        // revision has no name here, and no name is what this says.
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// What a column of `values` says it is.
+///
+/// `None` unless every value that has a type agrees on one — an array is free to
+/// mix an integer, a string and a nested array in one reply, and `CONFIG GET`
+/// and `XRANGE` both do, so there is often no single answer. That is the same
+/// state a null produces and it means the same thing to a reader: nothing is
+/// claimed, and the Arrow type is what the column is.
+fn column_name<'a>(values: impl Iterator<Item = &'a Value>) -> Option<&'static str> {
+    let mut found: Option<&'static str> = None;
+    for value in values {
+        let Some(name) = resp_name(value) else {
+            continue;
+        };
+        match found {
+            None => found = Some(name),
+            Some(known) if known == name => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+/// A field carrying what its values say they are, where they agree.
+fn named_field(name: &str, arrow: DataType, declared: Option<&'static str>) -> Field {
+    let field = Field::new(name, arrow, true);
+    match declared {
+        Some(declared) => {
+            field.with_metadata([(DECLARED_TYPE.to_string(), declared.to_string())].into())
+        }
+        None => field,
     }
 }
 
@@ -632,6 +744,134 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .expect("text")
+    }
+
+    /// What one column of a reply says it is, off the schema the reader reads.
+    fn declared(value: Value, name: &str) -> Option<String> {
+        Reply::of(value)
+            .schema()
+            .field_with_name(name)
+            .expect(name)
+            .metadata()
+            .get(DECLARED_TYPE)
+            .cloned()
+    }
+
+    /// The seven RESP types that share one Arrow column, each saying which it
+    /// is.
+    ///
+    /// This is what the key is for here. `scalar_type` keeps a type of its own
+    /// for an integer, a double and a boolean, and everything else is `Utf8` —
+    /// so without a name a bulk string, a verbatim string, a big number and an
+    /// error are one column to a reader, and RESP marks all four differently on
+    /// the wire.
+    #[test]
+    fn the_types_that_share_a_column_each_say_which_they_are() {
+        assert_eq!(declared(bulk("v"), VALUE).as_deref(), Some("bulk string"));
+        assert_eq!(
+            declared(Value::SimpleString("PONG".into()), VALUE).as_deref(),
+            Some("simple string")
+        );
+        // `+OK` is a simple string that happens to have its own variant.
+        assert_eq!(
+            declared(Value::Okay, VALUE).as_deref(),
+            Some("simple string")
+        );
+        assert_eq!(
+            declared(
+                Value::VerbatimString {
+                    format: redis::VerbatimFormat::Text,
+                    text: "help".into()
+                },
+                VALUE
+            )
+            .as_deref(),
+            Some("verbatim string")
+        );
+        assert_eq!(
+            declared(Value::BigNumber(b"123".to_vec()), VALUE).as_deref(),
+            Some("big number")
+        );
+
+        // And the three that do keep a type of their own still say what they
+        // are, because a header with a word for six columns and a blank for the
+        // seventh reads as a column that failed rather than one that is a number.
+        assert_eq!(declared(Value::Int(1), VALUE).as_deref(), Some("integer"));
+        assert_eq!(
+            declared(Value::Double(1.5), VALUE).as_deref(),
+            Some("double")
+        );
+        assert_eq!(
+            declared(Value::Boolean(true), VALUE).as_deref(),
+            Some("boolean")
+        );
+    }
+
+    /// A reply of many elements is named from the elements, not the container.
+    ///
+    /// A row here is one element, so the column is what the elements are. The
+    /// container's own type — array, set, push — is a fact about the reply and
+    /// not about the column, and putting it in the header would label a column
+    /// of bulk strings `array`.
+    #[test]
+    fn a_column_of_elements_is_named_from_the_elements() {
+        let list = Value::Array(vec![bulk("a"), bulk("b")]);
+        assert_eq!(declared(list, VALUE).as_deref(), Some("bulk string"));
+        let members = Value::Set(vec![Value::Int(1), Value::Int(2)]);
+        assert_eq!(declared(members, VALUE).as_deref(), Some("integer"));
+    }
+
+    /// An array that mixes types has no one name, and RESP allows exactly that.
+    ///
+    /// `CONFIG GET` and `XRANGE` both return one. The column is `Utf8` for the
+    /// same reason, so the header falling back to that is the honest answer
+    /// rather than a missing one.
+    #[test]
+    fn a_reply_that_mixes_types_claims_none_of_them() {
+        let mixed = Value::Array(vec![bulk("maxmemory"), Value::Int(0)]);
+        assert_eq!(declared(mixed, VALUE), None);
+    }
+
+    /// A null is a hole in a reply, not a type the reply has.
+    ///
+    /// `MGET a missing b` is the ordinary case: two bulk strings and a key that
+    /// is not there. Treating the null as a disagreement would leave the header
+    /// blank on the reply shape people read most often.
+    #[test]
+    fn a_null_among_values_does_not_erase_what_the_others_said() {
+        let mget = Value::Array(vec![bulk("a"), Value::Nil, bulk("b")]);
+        assert_eq!(declared(mget, VALUE).as_deref(), Some("bulk string"));
+
+        // But a reply that is nothing but nulls has nothing to report: `GET` on
+        // a key that is not there says the key is not there, not that it holds
+        // a value of some type.
+        assert_eq!(declared(Value::Nil, VALUE), None);
+        assert_eq!(
+            declared(Value::Array(vec![Value::Nil, Value::Nil]), VALUE),
+            None
+        );
+    }
+
+    /// A map's two columns are named apart, because they are two different
+    /// questions — `CONFIG GET` answers with string keys and values that are
+    /// whatever the parameter is.
+    #[test]
+    fn a_map_names_its_key_column_and_its_value_column_separately() {
+        let config = Value::Map(vec![
+            (bulk("maxmemory"), Value::Int(0)),
+            (bulk("appendonly"), Value::Int(1)),
+        ]);
+        let schema = Reply::of(config).schema();
+        let named = |name: &str| {
+            schema
+                .field_with_name(name)
+                .expect(name)
+                .metadata()
+                .get(DECLARED_TYPE)
+                .cloned()
+        };
+        assert_eq!(named(FIELD).as_deref(), Some("bulk string"));
+        assert_eq!(named(VALUE).as_deref(), Some("integer"));
     }
 
     #[test]

@@ -328,6 +328,57 @@ async fn a_map_reply_is_two_columns_and_an_array_reply_is_one() {
     assert_eq!(cell(&batches[0], "value", 0), None);
 }
 
+/// Each reply says which RESP type the server marked it with.
+///
+/// Against a real server because the distinction is the server's to make and
+/// nothing else can vouch for it: `PING` answers with a simple string and `GET`
+/// with a bulk string, and both arrive as `Utf8` — a hand-written fixture would
+/// only be asserting what this test's own author believed. `INCR` is here for
+/// the other half: a type that does keep an Arrow column of its own still has to
+/// say what it is, or a header reads as one failed column among named ones.
+#[tokio::test]
+#[ignore = "requires a Redis server"]
+async fn each_reply_says_the_resp_type_the_server_marked_it_with() {
+    let (source, mut conn) = fixture(12).await;
+    seed_one_of_each(&mut conn).await;
+
+    let declared = |batch: &RecordBatch, column: &str| {
+        batch
+            .schema()
+            .field_with_name(column)
+            .unwrap_or_else(|_| panic!("no column {column}"))
+            .metadata()
+            .get(dbconn::DECLARED_TYPE)
+            .cloned()
+    };
+
+    // The two the protocol separates and `Utf8` does not.
+    let ping = run(&source, "PING").await;
+    assert_eq!(
+        declared(&ping[0], "value").as_deref(),
+        Some("simple string")
+    );
+    let get = run(&source, "GET s").await;
+    assert_eq!(declared(&get[0], "value").as_deref(), Some("bulk string"));
+
+    // An element column is named from its elements.
+    let list = run(&source, "LRANGE l 0 -1").await;
+    assert_eq!(declared(&list[0], "value").as_deref(), Some("bulk string"));
+
+    // A map names its halves apart.
+    let hash = run(&source, "HGETALL h").await;
+    assert_eq!(declared(&hash[0], "field").as_deref(), Some("bulk string"));
+    assert_eq!(declared(&hash[0], "value").as_deref(), Some("bulk string"));
+
+    // And a number says so as well as arriving as one.
+    let len = run(&source, "LLEN l").await;
+    assert_eq!(declared(&len[0], "value").as_deref(), Some("integer"));
+
+    // A key that is not there is a hole, not a type.
+    let missing = run(&source, "GET nosuchkey").await;
+    assert_eq!(declared(&missing[0], "value"), None);
+}
+
 /// The cursor the contract subject declines to claim, paging a real keyspace.
 ///
 /// It works, and this is where that is checked — the contract's `cursors: false`
