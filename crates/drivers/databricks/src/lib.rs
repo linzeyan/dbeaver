@@ -37,6 +37,11 @@
 //! 7. **Whether a presigned link refuses the workspace's bearer token.** This
 //!    driver omits it, which is what S3 and Azure Blob require of a request that
 //!    is already signed in its query string; see `Wire::fetch`.
+//! 8. **Whether a manifest names each column's type, and in the same order the
+//!    Arrow stream does.** `relabelled` reads `type_text` for the grid's type
+//!    row and refuses the whole join unless the two agree about every name, so a
+//!    manifest that is absent, short or in another order labels nothing rather
+//!    than labelling wrongly.
 //!
 //! One thing is *not* on that list, and it is worth saying which: the
 //! `ordinal_position` a catalog counts columns from. It would have been a guess,
@@ -52,6 +57,13 @@
 //! there is none in the Flight SQL driver — the schema and the values come off
 //! the wire already described, and a type mapping would be this driver's second
 //! opinion about columns Arrow has stated.
+//!
+//! The one thing taken from outside that schema is the *name* Unity Catalog
+//! gives each type, which the statement's manifest carries and Arrow has no
+//! field for: `STRING`, `VARCHAR(64)` and `CHAR(8)` all arrive in a `Utf8`
+//! buffer. `relabelled` copies it onto the fields under `dbconn::DECLARED_TYPE`
+//! and changes no type — the same thing the Flight SQL driver does with
+//! `ARROW:FLIGHT:SQL:TYPE_NAME`.
 //!
 //! The decode is the Flight SQL driver's, in the one respect that matters: the
 //! body arrives as an owned `bytes::Bytes` and goes to `Buffer::from` whole, so
@@ -89,9 +101,10 @@ mod wire;
 
 use arrow::array::RecordBatch;
 use arrow::buffer::Buffer;
-use arrow::datatypes::{Schema, SchemaRef};
+use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::ipc::reader::StreamDecoder;
 use auth::{Credential, Machine};
+use dbconn::DECLARED_TYPE;
 // Only named by the test decode below: everywhere else the bytes go from
 // `Wire::fetch` straight into `Buffer::from` without this side spelling the type.
 #[cfg(test)]
@@ -101,7 +114,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use wire::{Delivery, Session, Statement, Wire};
+use wire::{Delivery, NamedColumn, Session, Statement, Wire};
 
 /// How long to wait before asking a running statement whether it is done, and
 /// the ceiling that wait doubles up to.
@@ -556,6 +569,12 @@ pub struct Rows {
     /// Set once every chunk has been read, which is not the same as having
     /// nothing left to hand over.
     drained: bool,
+    /// What the manifest said this result's columns are, kept for `relabelled`.
+    ///
+    /// Held rather than applied once, because the schema it labels does not
+    /// exist yet when this arrives: the manifest comes with the statement and
+    /// the Arrow schema comes off the first chunk.
+    manifest: Vec<NamedColumn>,
     _registration: Option<Registration>,
 }
 
@@ -585,6 +604,11 @@ impl Rows {
             Delivery::Arrow,
         )?;
 
+        let manifest = finished
+            .manifest
+            .and_then(|m| m.schema)
+            .map(|schema| schema.columns)
+            .unwrap_or_default();
         let chunk = finished.result.unwrap_or_default();
         let next_chunk = chunk.next().map(str::to_string);
         let links: VecDeque<String> = chunk
@@ -607,6 +631,7 @@ impl Rows {
             batch_rows,
             delivered: 0,
             drained: false,
+            manifest,
             _registration: registration,
         };
 
@@ -683,17 +708,28 @@ impl Rows {
         decoder.finish()?;
 
         if let Some(schema) = decoder.schema() {
-            // Every chunk of one result describes the same columns, and a caller
-            // was promised the schema before the first row. A later chunk that
-            // disagreed would silently change the grid under the rows already in
-            // it.
-            if self.schema.fields().is_empty() {
-                self.schema = schema;
-            } else if self.schema != schema {
-                return Err(DatabricksError::Transport(
-                    "the chunks of this result do not agree about its columns".to_string(),
-                ));
-            }
+            self.adopt(schema)?;
+        }
+        Ok(())
+    }
+
+    /// Takes one chunk's Arrow schema as this result's, labelled and checked.
+    ///
+    /// Apart from `pull` so that it can be reached without a warehouse: there is
+    /// none, so everything this does — attaching the manifest's type names, and
+    /// refusing a chunk that describes other columns — would otherwise be
+    /// reachable only over HTTP and therefore checked by nothing.
+    fn adopt(&mut self, schema: SchemaRef) -> Result<(), DatabricksError> {
+        let schema = relabelled(schema, &self.manifest);
+        // Every chunk of one result describes the same columns, and a caller was
+        // promised the schema before the first row. A later chunk that disagreed
+        // would silently change the grid under the rows already in it.
+        if self.schema.fields().is_empty() {
+            self.schema = schema;
+        } else if self.schema != schema {
+            return Err(DatabricksError::Transport(
+                "the chunks of this result do not agree about its columns".to_string(),
+            ));
         }
         Ok(())
     }
@@ -786,6 +822,50 @@ impl Rows {
         self._registration = None;
         Ok(())
     }
+}
+
+/// The Arrow schema with the declarations the manifest stated attached to it.
+///
+/// The types stay Arrow's, which is this driver's whole position; what is added
+/// is the one thing Arrow has no field for. `STRING`, `VARCHAR(64)` and `CHAR(8)`
+/// all reach the reader as `Utf8`, and a grid header that says `utf8` is true
+/// about the buffer and silent about the column. See `dbconn::DECLARED_TYPE`.
+///
+/// **The join is positional, so it is refused unless the two descriptions agree
+/// about every column name.** They come from different halves of the same
+/// answer and nothing in the API promises they line up; a manifest describing a
+/// different result would label each column with its neighbour's type, which is
+/// worse than labelling none — the one outcome `DECLARED_TYPE` exists to rule
+/// out. A warehouse that sends no manifest schema at all lands here as an empty
+/// slice and takes the same way out.
+fn relabelled(schema: SchemaRef, manifest: &[NamedColumn]) -> SchemaRef {
+    let aligned = manifest.len() == schema.fields().len()
+        && schema
+            .fields()
+            .iter()
+            .zip(manifest)
+            .all(|(field, column)| field.name() == &column.name);
+    if !aligned {
+        return schema;
+    }
+
+    let fields: Vec<Field> = schema
+        .fields()
+        .iter()
+        .zip(manifest)
+        .map(|(field, column)| {
+            let field = field.as_ref().clone();
+            match column.declared() {
+                None => field,
+                Some(declared) => {
+                    let mut carried = field.metadata().clone();
+                    carried.insert(DECLARED_TYPE.to_string(), declared);
+                    field.with_metadata(carried)
+                }
+            }
+        })
+        .collect();
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
 }
 
 /// Stops the statement one reader is running.
@@ -975,5 +1055,187 @@ mod tests {
         }
         written.truncate(written.len() / 2);
         assert!(decode(Bytes::from(written)).is_err());
+    }
+
+    fn manifest(columns: &[(&str, Option<&str>)]) -> Vec<NamedColumn> {
+        columns
+            .iter()
+            .map(|(name, declared)| NamedColumn {
+                name: (*name).to_string(),
+                type_text: declared.map(str::to_string),
+            })
+            .collect()
+    }
+
+    fn declared_of(schema: &Schema, at: usize) -> Option<&str> {
+        schema.field(at).metadata().get(DECLARED_TYPE).map(|s| &**s)
+    }
+
+    /// A reader with no warehouse behind it, which is enough to reach `adopt`.
+    ///
+    /// Nothing here sends a request; the `Wire` is built because the struct has
+    /// one field for it and never asked anything.
+    fn reader(manifest: Vec<NamedColumn>) -> Rows {
+        Rows {
+            wire: Arc::new(Wire::new(
+                "https://example.invalid".to_string(),
+                Credential::Token("dapi".to_string()),
+                Session::default(),
+            )),
+            statement: "01ef".to_string(),
+            schema: Arc::new(Schema::empty()),
+            links: VecDeque::new(),
+            next_chunk: None,
+            carry: VecDeque::new(),
+            held: 0,
+            batch_rows: 100,
+            delivered: 0,
+            drained: false,
+            manifest,
+            _registration: None,
+        }
+    }
+
+    /// The three columns Arrow cannot tell apart, which is the whole reason the
+    /// manifest is read at all: all three arrive in a `Utf8` buffer and only the
+    /// declaration says which is which.
+    #[test]
+    fn a_column_says_what_unity_catalog_calls_it_and_not_what_arrow_holds_it_in() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("c", DataType::Utf8, true),
+        ]));
+        let labelled = relabelled(
+            schema,
+            &manifest(&[
+                ("a", Some("STRING")),
+                ("b", Some("VARCHAR(64)")),
+                ("c", Some("CHAR(8)")),
+            ]),
+        );
+        assert_eq!(declared_of(&labelled, 0), Some("STRING"));
+        assert_eq!(declared_of(&labelled, 1), Some("VARCHAR(64)"));
+        assert_eq!(declared_of(&labelled, 2), Some("CHAR(8)"));
+        // The types are still Arrow's, which is the position this driver takes
+        // everywhere else: the manifest names the column and does not retype it.
+        assert_eq!(labelled.field(1).data_type(), &DataType::Utf8);
+    }
+
+    /// Absent is a real state and an empty string is not it. A manifest field
+    /// that arrived empty would otherwise put a blank where the grid falls back
+    /// to the Arrow type.
+    #[test]
+    fn a_column_the_manifest_says_nothing_about_carries_no_label_at_all() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("named", DataType::Int64, true),
+            Field::new("silent", DataType::Int64, true),
+            Field::new("empty", DataType::Int64, true),
+        ]));
+        let labelled = relabelled(
+            schema,
+            &manifest(&[
+                ("named", Some("BIGINT")),
+                ("silent", None),
+                ("empty", Some("")),
+            ]),
+        );
+        assert_eq!(declared_of(&labelled, 0), Some("BIGINT"));
+        assert_eq!(declared_of(&labelled, 1), None);
+        assert_eq!(declared_of(&labelled, 2), None);
+    }
+
+    /// The guard on a positional join. A manifest describing other columns would
+    /// give every column its neighbour's type — a wrong label, which is the one
+    /// outcome worse than none.
+    #[test]
+    fn a_manifest_that_describes_other_columns_labels_nothing() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("label", DataType::Utf8, true),
+        ]));
+        for wrong in [
+            // The same count, different names.
+            manifest(&[("label", Some("STRING")), ("id", Some("BIGINT"))]),
+            // Fewer columns than the stream carries.
+            manifest(&[("id", Some("BIGINT"))]),
+            // More.
+            manifest(&[
+                ("id", Some("BIGINT")),
+                ("label", Some("STRING")),
+                ("extra", Some("DATE")),
+            ]),
+            // The same count, and one name in common. All of it is refused and
+            // not the part that lined up: the agreement is about the result, and
+            // a manifest that is right about one column out of two is a manifest
+            // for something else.
+            manifest(&[("id", Some("BIGINT")), ("other", Some("STRING"))]),
+            // None at all, which is a warehouse that sent no manifest schema.
+            manifest(&[]),
+        ] {
+            let labelled = relabelled(Arc::clone(&schema), &wrong);
+            assert_eq!(declared_of(&labelled, 0), None, "{wrong:?}");
+            assert_eq!(declared_of(&labelled, 1), None, "{wrong:?}");
+        }
+    }
+
+    /// The schema a caller is handed is the labelled one — which is the step
+    /// between `relabelled` being right and the grid seeing anything at all.
+    #[test]
+    fn the_schema_a_reader_reports_is_the_one_carrying_the_declarations() {
+        let mut rows = reader(manifest(&[
+            ("id", Some("BIGINT")),
+            ("note", Some("STRING")),
+        ]));
+        let arrived = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, true),
+            Field::new("note", DataType::Utf8, true),
+        ]));
+        rows.adopt(Arc::clone(&arrived)).expect("the first chunk");
+        assert_eq!(declared_of(&rows.schema(), 0), Some("BIGINT"));
+        assert_eq!(declared_of(&rows.schema(), 1), Some("STRING"));
+
+        // A second chunk describing the same columns is the ordinary case, and
+        // it agrees with what was adopted rather than with what arrived — which
+        // is only true if both sides went through the same labelling.
+        rows.adopt(arrived).expect("a second chunk");
+    }
+
+    /// A later chunk that describes other columns is a sentence, not a grid that
+    /// changes under the rows already in it.
+    #[test]
+    fn a_chunk_that_describes_other_columns_stops_the_result() {
+        let mut rows = reader(manifest(&[("id", Some("BIGINT"))]));
+        rows.adopt(Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            true,
+        )])))
+        .expect("the first chunk");
+
+        let message = rows
+            .adopt(Arc::new(Schema::new(vec![Field::new(
+                "id",
+                DataType::Utf8,
+                true,
+            )])))
+            .expect_err("a chunk about something else")
+            .to_string();
+        assert!(message.contains("do not agree"), "got: {message}");
+    }
+
+    /// The field this brick rests on is one more thing no warehouse has answered
+    /// here, so the shape it is read out of is pinned rather than assumed: a
+    /// manifest without it parses, and labels nothing.
+    #[test]
+    fn a_manifest_column_reads_its_declaration_out_of_the_documented_field() {
+        let stated: NamedColumn =
+            serde_json::from_str(r#"{"name":"total","type_text":"DECIMAL(10,2)","position":0}"#)
+                .expect("a manifest column");
+        assert_eq!(stated.declared().as_deref(), Some("DECIMAL(10,2)"));
+
+        let silent: NamedColumn =
+            serde_json::from_str(r#"{"name":"total","position":0}"#).expect("a manifest column");
+        assert_eq!(silent.declared(), None);
     }
 }

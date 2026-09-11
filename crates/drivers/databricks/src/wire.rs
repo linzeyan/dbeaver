@@ -122,13 +122,32 @@ pub(crate) struct Columns {
 
 /// One column as the manifest describes it.
 ///
-/// Read only for a catalog query, whose values arrive as JSON and need a name to
-/// be found by. A statement read for its data takes its schema off the Arrow
-/// stream itself, which is the entire point of this driver — a type mapping here
-/// would be a second opinion about columns Arrow has already described.
+/// The name is what a catalog query is read by, whose values arrive as JSON and
+/// need a name to be found by. A statement read for its data still takes its
+/// *types* off the Arrow stream itself, which is the entire point of this driver
+/// — a type mapping here would be a second opinion about columns Arrow has
+/// already described.
+///
+/// `type_text` is not that second opinion. It is the declaration as Unity
+/// Catalog spells it, and Arrow has nowhere to put it: `STRING`, `VARCHAR(64)`
+/// and `CHAR(8)` all arrive in a `Utf8` buffer, and the declaration is the only
+/// thing that tells them apart. Optional because it is one more field of a
+/// manifest no warehouse has answered here — a manifest without it labels
+/// nothing, which is what `dbconn::DECLARED_TYPE` means by absent.
 #[derive(Debug, Deserialize)]
 pub(crate) struct NamedColumn {
     pub name: String,
+    pub type_text: Option<String>,
+}
+
+impl NamedColumn {
+    /// The declaration, or `None` where the manifest carried none.
+    ///
+    /// Empty is the same nothing as absent, for the reason `DECLARED_TYPE`
+    /// gives: a key present with no value is an answer.
+    pub fn declared(&self) -> Option<String> {
+        self.type_text.clone().filter(|text| !text.is_empty())
+    }
 }
 
 /// One piece of a result: JSON rows, or links to Arrow.
