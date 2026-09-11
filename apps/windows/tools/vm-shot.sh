@@ -13,6 +13,7 @@
 #   apps/windows/tools/vm-shot.sh --click 900,470                  # click there, then photograph
 #   apps/windows/tools/vm-shot.sh --click 900,470 --keys '{DOWN}{RIGHT}'
 #   apps/windows/tools/vm-shot.sh --drag 700,250,900,250           # drag from here to there
+#   apps/windows/tools/vm-shot.sh --right-click 900,470            # …with the other button
 #   apps/windows/tools/vm-shot.sh --wait 3 /tmp/grid.png           # slower; somewhere specific
 #
 # Points are in physical pixels, which is what the capture is in too — read one
@@ -40,7 +41,9 @@
 # until something points at it: a photograph of the window as it opens says
 # nothing about the feature it was taken to look at. The drag came over when the
 # columns grew handles, for the same reason and more so: a column width is a
-# number that only a gesture can change.
+# number that only a gesture can change. The right button came over when the
+# grid grew a menu, which is the one thing on this desktop that exists only
+# while it is being looked at.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -54,6 +57,7 @@ wait_for=2
 click=""
 keys=""
 drag=""
+right_click=""
 destination=""
 
 while [ $# -gt 0 ]; do
@@ -71,6 +75,12 @@ while [ $# -gt 0 ]; do
     # first press did would be gone.
     --click)
         click="${click:+$click;}$2"
+        shift 2
+        ;;
+    # One per run, and pressed before `--click`: what it opens is a menu, and
+    # the click that follows is how an item comes off it.
+    --right-click)
+        right_click="$2"
         shift 2
         ;;
     --keys)
@@ -152,6 +162,7 @@ $Wait = if ($arguments.Count -ge 2 -and $arguments[1]) { [double]$arguments[1] }
 $Click = if ($arguments.Count -ge 3) { $arguments[2] } else { "" }
 $Keys = if ($arguments.Count -ge 4) { $arguments[3] } else { "" }
 $Drag = if ($arguments.Count -ge 5) { $arguments[4] } else { "" }
+$RightClick = if ($arguments.Count -ge 6) { $arguments[5] } else { "" }
 
 Add-Type -Namespace VmShot -Name Window -MemberDefinition @"
 [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr window);
@@ -180,6 +191,20 @@ if ($Start) {
     if ($process.MainWindowHandle -ne 0) {
         [VmShot.Window]::SetForegroundWindow($process.MainWindowHandle) | Out-Null
     }
+}
+
+if ($RightClick) {
+    # Before the left button, which is what makes `--right-click` and `--click`
+    # together the way to take an item off the menu the first one opened.
+    $at = $RightClick.Split(",")
+    [VmShot.Pointer]::SetCursorPos([int]$at[0], [int]$at[1]) | Out-Null
+    Start-Sleep -Milliseconds 120
+    [VmShot.Pointer]::mouse_event(0x0008, 0, 0, 0, 0)
+    [VmShot.Pointer]::mouse_event(0x0010, 0, 0, 0, 0)
+    # Longer than the left button's pause: what this opens is a menu, and
+    # TrackPopupMenu has its own loop to get into before anything can be aimed
+    # at it.
+    Start-Sleep -Milliseconds 400
 }
 
 if ($Click) {
@@ -267,7 +292,7 @@ ssh "$VM" "MSYS_NO_PATHCONV=1 schtasks /create /tn $TASK \
     /tr 'powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File \"$windows_script\"' \
     /sc once /st 00:00 /it /f" >/dev/null
 
-ssh "$VM" "printf '%s\n%s\n%s\n%s\n%s\n' '$start' '$wait_for' '$click' '$keys' '$drag' \
+ssh "$VM" "printf '%s\n%s\n%s\n%s\n%s\n%s\n' '$start' '$wait_for' '$click' '$keys' '$drag' '$right_click' \
     > '$home/dbeaver-vm-shot.args'"
 ssh "$VM" "rm -f '$remote_image'; MSYS_NO_PATHCONV=1 schtasks /run /tn $TASK" >/dev/null
 

@@ -682,16 +682,86 @@ std::wstring sanitized(std::wstring value) {
     return value;
 }
 
-// What a copy puts on the clipboard.
+// Rows as tab-separated text with the column names on the first line, which is
+// the one shape a spreadsheet, a SQL console and a text editor all read
+// unchanged.
+//
+// Kept out of the window so the checks can ask what a paste would contain
+// without one, the same reason `GridClipboard.swift` is not in the view.
+//
+// CRLF rather than the bare newline the macOS side writes. This is the line
+// ending every Windows program that reads `CF_UNICODETEXT` expects, and the
+// older ones show a paste that lacks it as one long line.
+std::wstring tab_separated(const std::vector<Column>& columns, int first, int last) {
+    if (columns.empty()) {
+        return std::wstring();
+    }
+    std::wstring out = columns[0].heading;
+    for (size_t c = 1; c < columns.size(); ++c) {
+        out += L'\t';
+        out += columns[c].heading;
+    }
+    for (int r = first; r <= last; ++r) {
+        out += L"\r\n";
+        for (size_t c = 0; c < columns.size(); ++c) {
+            if (c > 0) {
+                out += L'\t';
+            }
+            out += sanitized(copied_value(columns[c], r));
+        }
+    }
+    return out;
+}
+
+// One CSV field, quoted only where it has to be: a comma, a double quote or a
+// line ending inside it, and a double quote doubled. RFC 4180 allows quoting
+// everything, and quoting everything is correct and unreadable.
+//
+// A tab is an ordinary character here, unlike the rendering above — this format
+// has a way to carry one, so there is nothing to protect the reader from.
+std::wstring csv_field(const std::wstring& value) {
+    if (value.find_first_of(L",\"\r\n") == std::wstring::npos) {
+        return value;
+    }
+    std::wstring quoted = L"\"";
+    for (const wchar_t c : value) {
+        quoted += c;
+        if (c == L'"') {
+            quoted += c;
+        }
+    }
+    return quoted + L'"';
+}
+
+// The same rows as RFC 4180 CSV: the column names, then one line per row.
+std::wstring csv_rows(const std::vector<Column>& columns, int first, int last) {
+    if (columns.empty()) {
+        return std::wstring();
+    }
+    std::wstring out = csv_field(columns[0].heading);
+    for (size_t c = 1; c < columns.size(); ++c) {
+        out += L',';
+        out += csv_field(columns[c].heading);
+    }
+    for (int r = first; r <= last; ++r) {
+        out += L"\r\n";
+        for (size_t c = 0; c < columns.size(); ++c) {
+            if (c > 0) {
+                out += L',';
+            }
+            out += csv_field(copied_value(columns[c], r));
+        }
+    }
+    return out;
+}
+
+// What Ctrl+C puts on the clipboard.
 //
 // One row copies as the value under the cursor and nothing else — no name, no
 // separator, and deliberately not sanitised: a lone value has no format to
 // break, and a cell holding a tab should paste as the cell. Several rows copy
-// as tab-separated text with the column names on the first line, which is the
-// one shape a spreadsheet, a SQL console and a text editor all read unchanged.
-//
-// Kept out of the window so the checks can ask what a paste would contain
-// without one, the same reason `GridClipboard.swift` is not in the view.
+// as the rendering above. The menu offers all of them by name and so has no
+// such rule; this is the one key, and it has to guess.
 std::wstring clipboard_text(const std::vector<Column>& columns, const Selection& selection) {
     if (columns.empty()) {
         return std::wstring();
@@ -702,25 +772,18 @@ std::wstring clipboard_text(const std::vector<Column>& columns, const Selection&
     if (first == last) {
         return at < columns.size() ? copied_value(columns[at], first) : std::wstring();
     }
+    return tab_separated(columns, first, last);
+}
 
-    std::wstring out = columns[0].heading;
-    for (size_t c = 1; c < columns.size(); ++c) {
-        out += L'\t';
-        out += columns[c].heading;
-    }
-    for (int r = first; r <= last; ++r) {
-        // CRLF rather than the bare newline the macOS side writes. This is the
-        // line ending every Windows program that reads `CF_UNICODETEXT` expects,
-        // and the older ones show a paste that lacks it as one long line.
-        out += L"\r\n";
-        for (size_t c = 0; c < columns.size(); ++c) {
-            if (c > 0) {
-                out += L'\t';
-            }
-            out += sanitized(copied_value(columns[c], r));
-        }
-    }
-    return out;
+// "1 row", "3 rows", for the menu items that offer to copy them.
+//
+// Ungrouped, which is where this parts company with `AppModel.pluralized`: that
+// one reaches for a decimal `NumberFormatter` and writes 1,234. Doing it
+// properly here means `LOCALE_SGROUPING`, which is not three digits everywhere,
+// and this grid's result is forty rows. The divergence starts at a thousand,
+// and this is the note to start from when something here can produce one.
+std::wstring row_count_phrase(int count) {
+    return std::to_wstring(count) + (count == 1 ? L" row" : L" rows");
 }
 
 // Puts one string on the clipboard, as the only format this grid has to offer.
@@ -1210,6 +1273,36 @@ bool column_edge_at(float x, float y, float scroll_x, const std::vector<Column>&
         }
     }
     return false;
+}
+
+// Whether a right-click opens a menu where it landed, and on which cell.
+//
+// The scrollbars are asked first and refuse, because both are drawn over the
+// data: a menu offering to copy a row would cover the thing the pointer was on.
+// The header and the resize handles are not asked, and that is deliberate
+// rather than forgotten — both live above the fold, `cell_at` refuses
+// everything up there, and a guard that cannot change an answer is a guard
+// nothing can check. `AppController.swift` asks all three because over there
+// the header hit test reaches further down than the cells do.
+//
+// Shift extends from wherever the band already starts, the way a shift-click
+// does, so the menu can offer more than the one cell under the pointer.
+bool menu_cell(float x, float y, const View& view, const std::vector<Column>& columns,
+               const Selection* current, bool extend, Selection* out) {
+    bool horizontal = false;
+    if (scrollbar_axis_at(x, y, view, &horizontal)) {
+        return false;
+    }
+    Selection hit;
+    if (!cell_at(x, y, view, columns, &hit)) {
+        return false;
+    }
+    if (extend && current != nullptr) {
+        hit.anchored = true;
+        hit.anchor = current->anchored ? current->anchor : current->row;
+    }
+    *out = hit;
+    return true;
 }
 
 // Arrow's `utf8`: offsets in `buffers[1]`, bytes packed end to end in
@@ -2302,6 +2395,63 @@ bool the_grid_draws_a_result() {
           "and a copy empties it rather than settling in beside it");
 
     // ------------------------------------------------------------------
+    // The menu: where it opens, and the renderings it offers by name
+    // ------------------------------------------------------------------
+
+    check(row_count_phrase(1) == L"1 row" && row_count_phrase(3) == L"3 rows",
+          "the items count the rows they would copy, in the plural they need");
+
+    // Named items have no guessing to do, so this one says rows even where
+    // there is one of them: the item that copies a value is the one above it.
+    check(tab_separated(columns, 2, 2) == names + L"\r\n2\tdriver-2\tread 200\t"
+                                              + columns[3].cells[2],
+          "copying one row still copies it under the names");
+
+    std::vector<Column> quoting(2);
+    quoting[0].heading = L"a,b";
+    quoting[0].cells = {L"x, y", L"he said \"no\""};
+    quoting[0].nulls = {false, false};
+    quoting[1].heading = L"plain";
+    quoting[1].cells = {L"1", L""};
+    quoting[1].nulls = {false, true};
+    check(csv_rows(quoting, 0, 1) == L"\"a,b\",plain\r\n\"x, y\",1\r\n\"he said \"\"no\"\"\",",
+          "CSV quotes a field that holds a comma or a quote, and doubles the quote");
+    // The other half of that rule, and the difference from the rendering above:
+    // a tab is an ordinary character in CSV and is left where it is, while a
+    // line ending is quoted rather than replaced. Nothing is lost either way,
+    // which is the point of offering both.
+    check(csv_rows(unruly, 0, 1) == L"a,b\r\none\ttwo,x\r\n\"three\r\nfour\",y",
+          "and quotes a line ending rather than flattening it");
+
+    // Where the menu may open. The gutter refuses because both bars are drawn
+    // over the data; the header refuses through `cell_at`.
+    Selection opened;
+    check(menu_cell(20.0f, kHeaderHeight + 4.0f, view, columns, nullptr, false, &opened)
+              && opened.row == 0 && opened.column == 0,
+          "a right-click on a cell opens the menu on that cell");
+    // Asked of the horizontal bar, and that is the whole of why this view is
+    // narrowed: this result is narrower than the bitmap, so the vertical
+    // gutter sits past the last column where `cell_at` refuses anyway, and a
+    // check written there passes with the guard taken out. The bar along the
+    // foot is the one drawn over a cell.
+    View crossing = view;
+    crossing.width = 200.0f;
+    check(!menu_cell(20.0f, crossing.height - 2.0f, crossing, columns, nullptr, false, &opened),
+          "one in the scrollbar's gutter opens none");
+    check(!menu_cell(20.0f, 4.0f, view, columns, nullptr, false, &opened),
+          "and one on a heading opens none");
+
+    const Selection standing{3, 1, true, 1};
+    check(menu_cell(20.0f, kHeaderHeight + 5.0f * kRowHeight + 4.0f, view, columns, &standing, true,
+                    &opened)
+              && opened.first_row() == 1 && opened.last_row() == 5,
+          "shift extends the band from where it already starts");
+    check(menu_cell(20.0f, kHeaderHeight + 5.0f * kRowHeight + 4.0f, view, columns, &standing, false,
+                    &opened)
+              && !opened.anchored && opened.row == 5,
+          "and without it the menu acts on the one cell under the pointer");
+
+    // ------------------------------------------------------------------
     // Scrolling: which rows are on screen, and which row each one is
     // ------------------------------------------------------------------
 
@@ -3217,6 +3367,13 @@ bool the_driver_list_draws() {
 // The window, drawing what the check above draws
 // -------------------------------------------------------------------------
 
+// The context menu's items. Numbered from one because `TrackPopupMenu` answers
+// nought for a menu that was dismissed, so an item with that id could never be
+// told from somebody pressing Escape.
+constexpr UINT kCopyValue = 1;
+constexpr UINT kCopyRows = 2;
+constexpr UINT kCopyRowsAsCsv = 3;
+
 struct Window {
     HWND hwnd = nullptr;
     ComPtr<ID2D1Factory> d2d;
@@ -3384,6 +3541,64 @@ struct Window {
             return;
         }
         put_on_clipboard(hwnd, clipboard_text(columns, selection));
+    }
+
+    // The three renderings, offered by name at a point on the screen.
+    //
+    // `TPM_RETURNCMD` hands the choice back here rather than posting
+    // `WM_COMMAND`: this window has no command table, and adding one would put
+    // the three items and the three answers in two places that have to agree.
+    void show_menu(POINT screen, const Selection& on) {
+        HMENU menu = CreatePopupMenu();
+        if (menu == nullptr) {
+            failed("CreatePopupMenu", HRESULT_FROM_WIN32(GetLastError()));
+            return;
+        }
+        const std::wstring rows = row_count_phrase(on.last_row() - on.first_row() + 1);
+        AppendMenuW(menu, MF_STRING, kCopyValue, L"Copy Value");
+        AppendMenuW(menu, MF_STRING, kCopyRows, (L"Copy " + rows).c_str());
+        AppendMenuW(menu, MF_STRING, kCopyRowsAsCsv, (L"Copy " + rows + L" as CSV").c_str());
+        const int chosen = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screen.x, screen.y,
+                                          0, hwnd, nullptr);
+        DestroyMenu(menu);
+
+        const size_t at = static_cast<size_t>(on.column);
+        switch (chosen) {
+        case kCopyValue:
+            // The cursor's own row rather than the band's first, because this
+            // item names one cell and the cursor is which one.
+            if (at < columns.size()) {
+                put_on_clipboard(hwnd, copied_value(columns[at], on.row));
+            }
+            break;
+        case kCopyRows:
+            put_on_clipboard(hwnd, tab_separated(columns, on.first_row(), on.last_row()));
+            break;
+        case kCopyRowsAsCsv:
+            put_on_clipboard(hwnd, csv_rows(columns, on.first_row(), on.last_row()));
+            break;
+        default:
+            // Dismissed. Not an error and not a copy — the clipboard keeps
+            // whatever was on it.
+            break;
+        }
+    }
+
+    // Where the cursor's cell is on screen, for a menu asked for with the
+    // keyboard. It opens at the cell rather than at the pointer, which may be
+    // anywhere on the desktop or on another display entirely.
+    //
+    // The cell's lower leading corner, which is where Windows drops a menu from
+    // a control: a menu whose top-left is the cell's top-left covers the cell it
+    // was opened on.
+    POINT menu_point_of(const Selection& on) const {
+        const size_t at = static_cast<size_t>(on.column);
+        const float x = at < columns.size() ? columns[at].x - scroll_x : 0.0f;
+        const float y = kHeaderHeight + (static_cast<float>(on.row) - scroll_row + 1.0f) * kRowHeight;
+        const float scale = dips();
+        POINT corner{static_cast<LONG>(x / scale), static_cast<LONG>(y / scale)};
+        ClientToScreen(hwnd, &corner);
+        return corner;
     }
 
     // A key arrived with the grid focused. `key_moves` is where the keys differ
@@ -3664,6 +3879,42 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     // thing in the window that an arrow key could mean anything to.
     case WM_GETDLGCODE:
         return DLGC_WANTARROWS;
+
+    // In screen coordinates, and (-1, -1) where it was the keyboard — Shift+F10
+    // or the menu key — rather than the pointer. Those act on the cell the
+    // cursor is already on, which is the only cell they could mean.
+    case WM_CONTEXTMENU: {
+        POINT screen{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+        if (screen.x == -1 && screen.y == -1) {
+            if (window->selected) {
+                window->show_menu(window->menu_point_of(window->selection), window->selection);
+            }
+            return 0;
+        }
+
+        POINT client = screen;
+        ScreenToClient(hwnd, &client);
+        const float scale = window->dips();
+        Selection on;
+        if (!menu_cell(static_cast<float>(client.x) * scale, static_cast<float>(client.y) * scale,
+                       window->view(), window->columns,
+                       window->selected ? &window->selection : nullptr,
+                       (GetKeyState(VK_SHIFT) & 0x8000) != 0, &on)) {
+            return 0;
+        }
+        SetFocus(hwnd);
+        window->selection = on;
+        window->selected = true;
+        // Painted before the menu opens rather than left for the next idle, so
+        // the menu and the cursor agree about which cell is being acted on.
+        // `TrackPopupMenu` runs a loop of its own, and a grid that showed the
+        // move only after the menu closed would be offering to copy a cell
+        // nothing on screen points at.
+        InvalidateRect(hwnd, nullptr, FALSE);
+        UpdateWindow(hwnd);
+        window->show_menu(screen, on);
+        return 0;
+    }
 
     // Windows announces every setting the same way, so the string is the only
     // thing that says this one is about colours. Broadcast to every window on
