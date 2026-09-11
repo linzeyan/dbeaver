@@ -1024,6 +1024,24 @@ bool key_moves(WPARAM key, const Selection& from, const View& view, bool extend,
     return true;
 }
 
+// Every row of the column the cursor is in, which is what Ctrl+A means here.
+//
+// The column is kept rather than reset: the band is a range of rows whatever
+// the cursor is on, and the cell it acts from is the one the user was already
+// looking at. `AppController.swift` keeps it for the same reason.
+//
+// Anchored at the first row with the cursor on the last, rather than the other
+// way round. Either covers the same rows, but the cursor is the end a shift-key
+// moves — and after selecting everything, the only direction left to go is back
+// from the end.
+Selection all_rows(const Selection& from, int last_row) {
+    Selection every = from;
+    every.anchored = true;
+    every.anchor = 0;
+    every.row = last_row;
+    return every;
+}
+
 // The largest scroll that still fills the view. Past it the grid would show
 // blank space after the last row or column, and a scrollbar built on it would
 // reach the end of its track before the result ran out.
@@ -2298,6 +2316,18 @@ bool the_grid_draws_a_result() {
     check(!key_moves(VK_TAB, third_column, view, false, last_row, last_column, &untouched),
           "a key the grid does not use gets no answer");
 
+    // Ctrl+A. Every row, of the one column the cursor is in — the band is a
+    // range of rows whatever else is true, so there is no "all columns" for it
+    // to mean.
+    const Selection everything = all_rows(third_column, last_row);
+    check(everything.first_row() == 0 && everything.last_row() == last_row,
+          "selecting all takes in every row of the result");
+    check(everything.column == 2, "and stays in the column the cursor was in");
+    // The cursor at the far end rather than at the near one. Both cover the
+    // same rows; only this one leaves shift-up somewhere to go.
+    check(everything.row == last_row && everything.anchor == 0,
+          "with the cursor at the end it can be walked back from");
+
     // ------------------------------------------------------------------
     // The clipboard: what a copy would paste
     // ------------------------------------------------------------------
@@ -3543,6 +3573,22 @@ struct Window {
         put_on_clipboard(hwnd, clipboard_text(columns, selection));
     }
 
+    // Every row of the column the cursor is in.
+    //
+    // The view is left where it is, unlike every key that moves the cursor:
+    // selecting everything is not going anywhere, and a grid that jumped to the
+    // last row would take the reader off the rows they were looking at to show
+    // them the end of a band they can already see they have.
+    void select_all() {
+        const int last_row = static_cast<int>(rows()) - 1;
+        if (last_row < 0) {
+            return;
+        }
+        selection = all_rows(selected ? selection : Selection{}, last_row);
+        selected = true;
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
+
     // The three renderings, offered by name at a point on the screen.
     //
     // `TPM_RETURNCMD` hands the choice back here rather than posting
@@ -3597,6 +3643,15 @@ struct Window {
         const float y = kHeaderHeight + (static_cast<float>(on.row) - scroll_row + 1.0f) * kRowHeight;
         const float scale = dips();
         POINT corner{static_cast<LONG>(x / scale), static_cast<LONG>(y / scale)};
+        // Held inside the window, because the cursor need not be: Ctrl+A puts it
+        // on the last row without moving the view, and a menu opened at a point
+        // below the window has come loose from the thing it acts on.
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        corner.x = corner.x < client.left ? client.left
+                                          : (corner.x > client.right ? client.right : corner.x);
+        corner.y = corner.y < client.top ? client.top
+                                        : (corner.y > client.bottom ? client.bottom : corner.y);
         ClientToScreen(hwnd, &corner);
         return corner;
     }
@@ -3942,6 +3997,8 @@ LRESULT CALLBACK window_proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
         if ((GetKeyState(VK_CONTROL) & 0x8000) != 0) {
             if (wparam == 'C') {
                 window->copy();
+            } else if (wparam == 'A') {
+                window->select_all();
             }
             return 0;
         }
