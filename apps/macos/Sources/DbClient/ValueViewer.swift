@@ -609,7 +609,18 @@ struct CellValueViewer: View {
     /// grid every time the pencil is pressed, and takes the bottom row off it.
     /// Two literals were two chances to change one and not the other, and the
     /// first screenshot of the box caught exactly that.
-    static let height: CGFloat = 220
+    ///
+    /// 140pt is about six lines of the mono face, and it is a height paid for
+    /// out of the grid: at 220 a forty-three character value opened ten empty
+    /// lines and took the result from thirty-four rows to twenty-three. Six
+    /// lines shows a JSON document's shape and the first lines of a long text,
+    /// which is what this pane is opened to check, and the rest scrolls.
+    ///
+    /// Fixed rather than sized to the value. The cursor moves with the arrow
+    /// keys and most columns hold values of different lengths, so a pane that
+    /// tracked its content would re-lay the grid out under the reader on every
+    /// keystroke — the cell they were aiming at ending up somewhere else.
+    static let height: CGFloat = 140
 
     let rendered: RenderedValue
 

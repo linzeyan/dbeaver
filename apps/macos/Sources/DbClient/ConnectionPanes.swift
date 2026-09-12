@@ -703,7 +703,10 @@ struct ConnectionFormPane: View {
     private var colourRow: some View {
         HStack(spacing: Theme.Space.sm) {
             label("Colour")
-            HStack(spacing: Theme.Space.xs + 1) {
+            // No spacing: each swatch brings its own 24pt target and they sit
+            // edge to edge, so the row has no gaps that hit nothing. See
+            // `ColourSwatch.target`.
+            HStack(spacing: 0) {
                 ForEach(ConnectionColor.allCases) { colour in
                     ColourSwatch(
                         colour: colour,
@@ -1127,6 +1130,22 @@ private struct ColourSwatch: View {
     let isSelected: Bool
     let choose: () -> Void
 
+    /// The pressable square each dot sits in the middle of.
+    ///
+    /// The dot stays 14pt — that is the size this row was drawn at, and eight
+    /// of them are meant to read as one cluster rather than as eight controls.
+    /// What was 14pt as well was the *target*: `contentShape` was on the dot,
+    /// so the gaps between them hit nothing, and the whole row asked for a
+    /// pointer inside a fourteenth of an inch. `TabBar` writes the rule this
+    /// breaks — 24pt is the macOS control rhythm, and the 44pt in the mobile
+    /// guidelines is a fingertip measurement that does not transfer — and these
+    /// were the only controls in the window below it.
+    ///
+    /// The row carries no spacing of its own now: edge to edge at 24pt, every
+    /// pixel between two dots belongs to one of them, and the visual gap comes
+    /// out at 10pt instead of 5.
+    static let target: CGFloat = 24
+
     var body: some View {
         Button(action: choose) {
             swatch
@@ -1138,7 +1157,8 @@ private struct ColourSwatch: View {
                         )
                         .padding(-3)
                 )
-                .contentShape(Circle())
+                .frame(width: Self.target, height: Self.target)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(colour.label)

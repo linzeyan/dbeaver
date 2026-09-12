@@ -87,6 +87,52 @@ struct IconButtonStyle: ButtonStyle {
     }
 }
 
+// MARK: - Inline links
+
+/// A word inside a sentence that can be acted on: *Load more* beside the row
+/// count, *Reconnect* beside "Disconnected", *Stop* beside a running transfer.
+///
+/// Replaces `.buttonStyle(.link)`, which draws its label in the *system* accent
+/// colour — the one colour in this window nobody here chose. Measured off a
+/// capture, the status bar's links came out `#419CFF` while the selection two
+/// rows above them was `#6366F1`: two blues a shade apart, which reads as a
+/// mistake rather than as a distinction. Worse, it is not even one colour. The
+/// accent is a System Settings preference, so the only words in this window
+/// that can be pressed turn grey under Graphite and pink under Pink, and the
+/// palette's rule that indigo means "this is where you are, this can be acted
+/// on" holds for every control except the seven that most look like links.
+///
+/// Disabled is spelled out because a custom style has to: SwiftUI dims what the
+/// built-in styles draw and leaves this one's foreground exactly as stated. The
+/// accent at a third rather than the label tone, so an unavailable *Next* is
+/// still recognisably the same word and not a piece of static text.
+struct InlineLinkStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Face(configuration: configuration)
+    }
+
+    /// The tone for a state, liftable out of the draw for the reason
+    /// `IconButtonStyle.fill` is: `isPressed` cannot be introspected.
+    static func tone(pressed: Bool, enabled: Bool) -> Theme.Tone {
+        guard enabled else { return Theme.Accent.selection.opacity(0.35) }
+        return pressed ? Theme.Accent.selection.opacity(0.6) : Theme.Accent.selection
+    }
+
+    private struct Face: View {
+        let configuration: Configuration
+
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .foregroundStyle(
+                    InlineLinkStyle.tone(
+                        pressed: configuration.isPressed, enabled: isEnabled
+                    ).color)
+        }
+    }
+}
+
 // MARK: - Tabs
 
 /// The detail pane's tab bar.
@@ -409,11 +455,24 @@ struct CompactField: View {
     /// place in this window where showing what was typed is the wrong default.
     var isSecure = false
 
+    @Environment(\.isEnabled) private var isEnabled
+
     var body: some View {
         entry
             .textFieldStyle(.plain)
             .font(Theme.Typography.monoSmall)
-            .foregroundStyle(Theme.Text.primary.color)
+            // Disabled is drawn, not merely enforced. Two call sites turn this
+            // field off and both describe it as greyed — the Custom box while
+            // filter rows own the WHERE, and the cell value while the box above
+            // it holds that cell — but the tone was stated unconditionally, so
+            // both came out looking exactly like a field that takes typing and
+            // silently ignored it.
+            //
+            // Secondary rather than a label tone: what a disabled field here
+            // holds is content somebody is meant to read — the WHERE the rows
+            // compiled to, the value the box is editing — so it stays above
+            // 4.5:1 and only stops looking like an invitation.
+            .foregroundStyle(isEnabled ? Theme.Text.primary.color : Theme.Text.secondary.color)
             .focused($focus, equals: area)
             .onSubmit(onSubmit)
             .padding(.horizontal, Theme.Space.sm)

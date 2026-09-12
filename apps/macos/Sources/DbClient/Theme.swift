@@ -484,6 +484,9 @@ final class AppearanceController {
     private var pinned: Appearance.Setting?
     private var systemObserver: NSKeyValueObservation?
     private var defaultsObserver: NSObjectProtocol?
+    /// Whether the editor's slots have been reconciled with the palette in this
+    /// process. See the launch branch of `apply()`.
+    private var followed = false
 
     private init() {}
 
@@ -523,11 +526,30 @@ final class AppearanceController {
             app.appearance = setting.nsAppearance
         }
         let light = Theme.isLight(app.effectiveAppearance)
-        guard light != Appearance.current.isLight else { return }
-        // Read before the switch, because "was this slot still the palette's?"
-        // is a question about the palette that is being left behind.
-        let previous = EditorTheme.defaults
-        Appearance.current.isLight = light
-        preferences.followEditorPalette(from: previous)
+        if light != Appearance.current.isLight {
+            // Read before the switch, because "was this slot still the palette's?"
+            // is a question about the palette that is being left behind.
+            let previous = EditorTheme.defaults
+            Appearance.current.isLight = light
+            preferences.followEditorPalette(from: previous)
+        } else if !followed {
+            // Launch is a switch this process did not get to see, and the one
+            // that goes wrong. The slots on disk were written by whichever
+            // appearance the *last* launch ended in — `followEditorPalette`
+            // writes real values into the store, so once a light session has
+            // run, `#FFFFFF` is in the plist and shadows the dark default it
+            // was registered with. Coming back in dark there is no transition,
+            // and without this the window opens with a white editor pane in a
+            // near-black window, permanently: the only way back is to switch to
+            // light and back again inside one session.
+            //
+            // A colour somebody deliberately picked that happens to be the
+            // other appearance's default for the same slot moves too — the same
+            // ambiguity the transition path already accepts, and the same
+            // answer: a slot holding exactly the palette's own value is not
+            // distinguishable from one nobody has touched.
+            preferences.followEditorPaletteAcrossLaunch(isLight: light)
+        }
+        followed = true
     }
 }

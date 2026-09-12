@@ -29,6 +29,8 @@ enum EditorThemeChecks {
         checkResetRestoresEveryDefault()
         checkAnUnparseableColourFallsBackToTheDefault()
         checkAHandEditedSpellingIsFoldedToCanonical()
+        checkALaunchFollowsThePaletteTheLastSessionLeft()
+        checkALaunchLeavesAChosenColourAlone()
         checkTheBandMarksAStatementAmongSeveral()
         if failures == 0 {
             fputs("editor-theme: all checks passed\n", stderr)
@@ -40,26 +42,33 @@ enum EditorThemeChecks {
 
     /// Every slot by name, for the checks that visit each one. Named so a
     /// failure says which slot rather than "one of eleven".
+    ///
+    /// The palette's own value for a slot is reached through a key path rather
+    /// than stored beside the name: a `Theme.Tone` read here would be whichever
+    /// appearance this type first loaded under, and the checks below read it
+    /// after asking for the other one.
     private static let slots:
         [(
             name: String, keyPath: ReferenceWritableKeyPath<Preferences, String>,
-            shipped: Theme.Tone
+            tone: KeyPath<EditorTheme, Theme.Tone>
         )] = [
-            ("background", \.editorBackgroundColor, EditorTheme.defaults.background),
-            ("text", \.editorTextColor, EditorTheme.defaults.text),
-            ("keyword", \.editorKeywordColor, EditorTheme.defaults.keyword),
-            ("string", \.editorStringColor, EditorTheme.defaults.string),
-            ("dollar-quoted", \.editorDollarQuotedColor, EditorTheme.defaults.dollarQuoted),
-            ("number", \.editorNumberColor, EditorTheme.defaults.number),
-            (
-                "quoted identifier", \.editorQuotedIdentifierColor,
-                EditorTheme.defaults.quotedIdentifier
-            ),
-            ("comment", \.editorCommentColor, EditorTheme.defaults.comment),
-            ("caret", \.editorCaretColor, EditorTheme.defaults.caret),
-            ("selection", \.editorSelectionColor, EditorTheme.defaults.selection),
-            ("statement", \.editorStatementColor, EditorTheme.defaults.statement)
+            ("background", \.editorBackgroundColor, \.background),
+            ("text", \.editorTextColor, \.text),
+            ("keyword", \.editorKeywordColor, \.keyword),
+            ("string", \.editorStringColor, \.string),
+            ("dollar-quoted", \.editorDollarQuotedColor, \.dollarQuoted),
+            ("number", \.editorNumberColor, \.number),
+            ("quoted identifier", \.editorQuotedIdentifierColor, \.quotedIdentifier),
+            ("comment", \.editorCommentColor, \.comment),
+            ("caret", \.editorCaretColor, \.caret),
+            ("selection", \.editorSelectionColor, \.selection),
+            ("statement", \.editorStatementColor, \.statement)
         ]
+
+    /// The palette's current spelling for a slot.
+    private static func shipped(_ tone: KeyPath<EditorTheme, Theme.Tone>) -> String {
+        EditorTheme.defaults[keyPath: tone].hex
+    }
 
     // MARK: - The codec
 
@@ -103,7 +112,7 @@ enum EditorThemeChecks {
         expect(fresh.editorThemeIsCustom, false, "a fresh install is the Default theme")
         for slot in slots {
             expect(
-                fresh[keyPath: slot.keyPath], slot.shipped.hex,
+                fresh[keyPath: slot.keyPath], shipped(slot.tone),
                 "the \(slot.name) colour starts as the palette's own spelling")
         }
         expect(
@@ -158,7 +167,7 @@ enum EditorThemeChecks {
         preferences.resetEditorTheme()
         for slot in slots {
             expect(
-                preferences[keyPath: slot.keyPath], slot.shipped.hex,
+                preferences[keyPath: slot.keyPath], shipped(slot.tone),
                 "the \(slot.name) colour is the palette's again")
         }
         expect(preferences.editorThemeIsCustom, false, "and the menu reads Default again")
@@ -207,6 +216,60 @@ enum EditorThemeChecks {
         let preferences = Preferences(store: store)
         expect(preferences.editorKeywordColor, "#A78BFA", "the spelling reads back canonical")
         expect(preferences.editorThemeIsCustom, false, "and the theme still reads Default")
+    }
+
+    /// A launch follows the palette the last session did not end in.
+    ///
+    /// The failure this pins is the one that shipped: a session in light writes
+    /// eleven light spellings into the store, and the next launch in dark finds
+    /// no transition to carry them back, so the window opens with a white
+    /// editor pane in a near-black window — and stays that way, because the
+    /// only thing that reconciles the slots is a switch inside one session.
+    ///
+    /// Both directions, because "follows the palette" is not a fact about dark:
+    /// a Mac left in light finds a dark store after a night's work on this
+    /// branch, and a pane the colour of the canvas it is not on is illegible
+    /// either way round.
+    private static func checkALaunchFollowsThePaletteTheLastSessionLeft() {
+        for light in [false, true] {
+            let store = ScratchDefaults.store("verify-editor-theme-launch-\(light)")
+            let preferences = Preferences(store: store)
+            let ours = Theme.resolving(isLight: light) { EditorTheme.defaults }
+            let theirs = Theme.resolving(isLight: !light) { EditorTheme.defaults }
+            let appearance = light ? "light" : "dark"
+
+            // What a session that ended in the other appearance leaves behind.
+            for slot in slots {
+                preferences[keyPath: slot.keyPath] = theirs[keyPath: slot.tone].hex
+            }
+            preferences.followEditorPaletteAcrossLaunch(isLight: light)
+
+            for slot in slots {
+                expect(
+                    preferences[keyPath: slot.keyPath], ours[keyPath: slot.tone].hex,
+                    "the \(slot.name) colour is \(appearance)'s after a launch in \(appearance)")
+            }
+            expect(
+                Theme.resolving(isLight: light) { preferences.editorThemeIsCustom }, false,
+                "and eleven slots nobody chose do not add up to a Custom theme")
+        }
+    }
+
+    /// A colour the user chose is theirs in both appearances.
+    ///
+    /// The other half of the launch rule, and the one a blunter fix would
+    /// break: "put the slots back to this appearance's defaults at launch" also
+    /// passes the check above, and silently throws away every colour well
+    /// anybody ever touched.
+    private static func checkALaunchLeavesAChosenColourAlone() {
+        let store = ScratchDefaults.store("verify-editor-theme-launch-kept")
+        let preferences = Preferences(store: store)
+        preferences.editorKeywordColor = "#112233"
+        preferences.followEditorPaletteAcrossLaunch(isLight: Theme.isLight)
+        expect(preferences.editorKeywordColor, "#112233", "the chosen keyword colour survives")
+        expect(
+            preferences.editorBackgroundColor, shipped(\.background),
+            "while the slots beside it are the palette's")
     }
 
     /// Which statement the editor bands, pinned as the rule rather than as

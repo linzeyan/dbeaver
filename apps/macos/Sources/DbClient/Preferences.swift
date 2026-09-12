@@ -594,6 +594,30 @@ final class Preferences {
         }
     }
 
+    /// The same reconciliation, for the switch that happens between two
+    /// launches rather than during one.
+    ///
+    /// A session that ends in light leaves light spellings in the store —
+    /// `followEditorPalette` writes values, so after one light session the
+    /// registered defaults are shadowed by real ones. Reopening in dark there
+    /// is no transition to carry them back, and the palette that is *not* in
+    /// force is the only thing that can have written them. Named rather than
+    /// spelled at the call site because it is the one statement of "a launch is
+    /// a switch nobody watched"; `AppearanceController` calls it and so does
+    /// the check that pins it.
+    /// Both palettes are named rather than one: `followEditorPalette` reads the
+    /// appearance in force for the palette it moves slots *to*, which is right
+    /// on the switch — the flag has already flipped by then — and would make
+    /// this function's argument a half-truth, obeyed for the palette being left
+    /// and ignored for the one being joined. Stated on both sides, "reconcile
+    /// onto light" means that whatever the process happens to be drawing in,
+    /// which is what lets a check ask for the direction it is not running in.
+    func followEditorPaletteAcrossLaunch(isLight light: Bool) {
+        Theme.resolving(isLight: light) {
+            followEditorPalette(from: Theme.resolving(isLight: !light) { EditorTheme.defaults })
+        }
+    }
+
     /// Every editor colour back to the palette: the Reset control, and what
     /// choosing Default in the Theme menu means.
     func resetEditorTheme() {

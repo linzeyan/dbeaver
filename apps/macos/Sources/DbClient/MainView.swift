@@ -1360,7 +1360,20 @@ struct StructurePane: View {
                         selected: Binding(get: { section }, set: { detail = $0 }))
                     detailTable
                 }
-                .frame(minHeight: 110, idealHeight: 190, maxHeight: 340)
+                // 190 rather than 340, and stated as the ceiling rather than as
+                // an ideal because that is the only one of the three this
+                // container reads — the Query pane's editor records the same
+                // thing above its own frame: the split opens at `maxHeight`.
+                // An `idealHeight: 190` sat here saying what was wanted while
+                // the window did something else with it, so a 20-column table
+                // was cut off at 18 while 342pt below it drew one index row.
+                //
+                // The ceiling this gives up was never a ceiling anybody reached
+                // by dragging: it was where the pane already opened, and the
+                // only direction from there was smaller. What is lost is
+                // dragging Definition back out to 340 after shrinking it, and
+                // the DDL of a real table scrolls at either height.
+                .frame(minHeight: 110, maxHeight: 190)
                 .task {
                     if let opened = model.initialStructureDetail { detail = opened }
                 }
@@ -2251,15 +2264,32 @@ private struct CellEditorRow: View {
                     // directly above. The WHERE box two rows below it, which
                     // only builds a query, looked more like something you could
                     // type into than this did.
+                    // Stood down while the box above is holding this same cell.
+                    // Both were live, forty points apart, addressing one cell,
+                    // and nothing said which won — a value typed here and a
+                    // value typed there are two answers to one question, and
+                    // the box is the one the user asked for. Greyed rather than
+                    // removed, for the reason the obstacle sentence is a
+                    // sentence: controls that vanish read as a build that does
+                    // not have them, and the bar would reflow under the pointer
+                    // every time ⌥⌘V was pressed.
+                    let inTheBox = model.valueBoxSeed != nil
                     CompactField(
                         placeholder: "", text: $typed, area: .cellValue, focus: $focus,
                         onSubmit: { model.stageEdit(typed) }
                     )
-                    .help("Return stages the change; nothing is sent until Save")
+                    .disabled(inTheBox)
+                    .help(
+                        inTheBox
+                            ? "The box above is holding this value — Stage keeps it, Cancel drops it"
+                            : "Return stages the change; nothing is sent until Save"
+                    )
                     .accessibilityLabel("Value of \(cell.column)")
                     Button("Set") { model.stageEdit(typed) }
+                        .disabled(inTheBox)
                         .help("Hold this value for the selected cell")
                     Button("NULL") { model.stageEdit(nil) }
+                        .disabled(inTheBox)
                         .help("Hold NULL for the selected cell, which is not an empty string")
                 }
                 if let title = model.deleteRowsTitle {
@@ -2292,6 +2322,16 @@ private struct CellEditorRow: View {
                 Button("Save") { model.applyEdits() }
                     .keyboardShortcut("s", modifiers: .command)
                     .disabled(model.isBusy)
+                    // Filled, by the rule the value box's Stage already states:
+                    // of a pair, the one that changes something is the one that
+                    // looks like it. This is the button that reaches the
+                    // database — every other prominent button in the window
+                    // (Stage, Connect, the Save that names a favorite) does less
+                    // than it does, and this one was the plainest of them,
+                    // weighted exactly like the Revert beside it. Tinted rather
+                    // than left to the system accent, same rule, same reason.
+                    .buttonStyle(.borderedProminent)
+                    .tint(Theme.Accent.selection.color)
                     .help("Send the changes and read the rows back (⌘S)")
             }
         }
@@ -3401,7 +3441,7 @@ struct CellInspector: View {
             strip(rendered, offer: offer)
             if let rendered {
                 Rectangle().fill(Theme.Border.hairline.color).frame(height: 1)
-                if let editing, editing.isEditingValue, case .editable(let seed)? = offer {
+                if let editing, let seed = editing.valueBoxSeed {
                     CellValueEditor(model: editing, seed: seed)
                 } else {
                     CellValueViewer(rendered: rendered)
@@ -3651,12 +3691,12 @@ struct GridFindBar: View {
             .help("Look in one column instead of all of them")
 
             Button("Previous") { model.findInGrid(backwards: true) }
-                .buttonStyle(.link)
+                .buttonStyle(InlineLinkStyle())
                 .font(Theme.Typography.micro)
                 .disabled(model.gridFindText.isEmpty)
                 .help("The match before this one (⇧⌘G)")
             Button("Next") { model.findInGrid() }
-                .buttonStyle(.link)
+                .buttonStyle(InlineLinkStyle())
                 .font(Theme.Typography.micro)
                 .disabled(model.gridFindText.isEmpty)
                 .help("The next match (⌘G)")
@@ -3770,7 +3810,7 @@ struct StatusBar: View {
             // there is no automatic reconnection anywhere.
             if model.canRedial {
                 Button("Reconnect") { model.redial() }
-                    .buttonStyle(.link)
+                    .buttonStyle(InlineLinkStyle())
                     .font(Theme.Typography.micro)
                     .help("Dial the same server again — same bastion, timeout and keep-alive")
             }
@@ -3783,17 +3823,17 @@ struct StatusBar: View {
             // commentary and, until now, no way to change your mind.
             if model.isTransferring {
                 Button("Stop") { model.stopTransfer() }
-                    .buttonStyle(.link)
+                    .buttonStyle(InlineLinkStyle())
                     .font(Theme.Typography.micro)
                     .help("Stop the transfer. The rows already sent stay where they are.")
             } else if model.isExporting {
                 Button("Stop") { model.cancelExport() }
-                    .buttonStyle(.link)
+                    .buttonStyle(InlineLinkStyle())
                     .font(Theme.Typography.micro)
                     .help("Stop the export. The file keeps the rows already written.")
             } else if model.isImporting {
                 Button("Stop") { model.stopImport() }
-                    .buttonStyle(.link)
+                    .buttonStyle(InlineLinkStyle())
                     .font(Theme.Typography.micro)
                     .help("Stop reading the file. The rows already read stay in the table.")
             }
@@ -3803,7 +3843,7 @@ struct StatusBar: View {
             // something you were told.
             if model.canLoadMore {
                 Button("Load more") { model.loadMore() }
-                    .buttonStyle(.link)
+                    .buttonStyle(InlineLinkStyle())
                     .font(Theme.Typography.micro)
                     .help("Fetch the next \(AppModel.formatted(model.pageSize)) rows")
             } else if let obstacle = model.pagingObstacle, model.activeTab == .content {

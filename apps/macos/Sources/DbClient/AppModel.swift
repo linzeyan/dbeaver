@@ -3581,6 +3581,21 @@ final class AppModel {
         }
     }
 
+    /// The text the value box is holding, or nil when no box is open over the
+    /// selected cell.
+    ///
+    /// The one statement of "the box has this cell", because two views need the
+    /// answer and they need the same one: the inspector draws the box on it,
+    /// and the editor row under the grid stands its own field down on it.
+    /// Spelled out separately in each, they drifted into the state this
+    /// replaces — a box with *Stage* under it and, forty points below, a live
+    /// one-line field with *Set* beside it, both addressing the same cell, with
+    /// nothing anywhere saying which of them wins.
+    var valueBoxSeed: String? {
+        guard isEditingValue, case .editable(let seed) = editedValue else { return nil }
+        return seed
+    }
+
     /// Records what was typed into the value pane.
     ///
     /// Through `stageEdit`, so this is a bigger field and not a second way of
