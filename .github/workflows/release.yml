@@ -125,17 +125,30 @@ jobs:
       # Notes are the tag's own message plus a standing paragraph about what
       # this asset is and how to open it.
       #
+      # The message comes from the API and not from the checkout. `checkout`
+      # fetches the commit a tag points at and does not keep the tag object, so
+      # `git for-each-ref --format='%(contents)'` falls through to the commit's
+      # message — which is how v0.1.0 first went out describing this file
+      # rather than the release.
+      #
       # Not `--generate-notes`. That writes the log since the previous tag, and
       # the tags in this repository are twenty years of upstream DBeaver
       # releases — the nearest one to `v0.1.0` is `26.1.4`, and the notes would
       # come out as the diff between a Java product and a Rust rewrite.
+      #
+      # Create or edit, rather than create alone, so re-running the workflow on
+      # a tag repairs a release instead of failing on it.
       - name: Release
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          ref="repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME"
           {
-            git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)'
+            if [ "$(gh api "$ref" --jq '.object.type')" = tag ]; then
+              sha="$(gh api "$ref" --jq '.object.sha')"
+              gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq '.message'
+            fi
             cat <<'EOF'
 
           ## The download
@@ -155,10 +168,18 @@ jobs:
           `.sha256` beside the archive is what the run computed for it.
           EOF
           } > /tmp/notes.md
-          gh release create "$GITHUB_REF_NAME" \
-            "$asset" "$asset.sha256" \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file /tmp/notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file /tmp/notes.md
+            gh release upload "$GITHUB_REF_NAME" \
+              "$asset" "$asset.sha256" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "$asset" "$asset.sha256" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file /tmp/notes.md
+          fi
 
       - name: Compiler cache
         if: always()
