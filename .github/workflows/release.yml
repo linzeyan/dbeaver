@@ -1,0 +1,165 @@
+# Cuts a release from a tag: builds the macOS app, puts it through its own
+# checks, and attaches the result.
+#
+# A separate file from ci.yml rather than another job in it. That workflow is
+# organised around "which of these jobs does this push need at all", and its
+# first job answers that from the compare API — a question a tag does not have
+# an answer to. Sharing the file would mean teaching three layers of gating
+# about a ref shape none of them were built for, to reach one job that wants
+# none of the gating.
+#
+# What it ships is the macOS app and nothing else. The Rust core is a staticlib
+# the app links, not something anybody installs, and the Windows front end has
+# no window yet (plan.md, M7.1) — an empty .exe in a release would be a claim
+# this project cannot make.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Builds and attaches the .zip to the run without creating a release, so the
+  # packaging path can be exercised without spending a version number on it.
+  workflow_dispatch:
+
+# The default is read, and this workflow creates a release and uploads to it.
+permissions:
+  contents: write
+
+# Same wrapper and knobs as ci.yml, and the same reasoning: the cache is keyed
+# by the hash of each object's input, so this job finds what the last CI run on
+# this branch compiled.
+env:
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  macos:
+    name: App (macOS, arm64)
+    # Pinned for ci.yml's reason: the package's deployment target is macOS 15,
+    # so a binary built on an older runner would not launch. arm64 because that
+    # is what this runner is — the asset says so in its name rather than leaving
+    # somebody on an Intel Mac to find out by double-clicking. A universal build
+    # needs the Rust staticlib for both arches and a lipo step the Makefile does
+    # not have; it is the price of the first Intel user asking, not of this file.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The macOS CI job's key, deliberately: that job builds the same
+          # release profile on the same runner image, and this one should start
+          # from what it left.
+          shared-key: macos-release
+
+      # A release whose app reports a different version than the tag on it is a
+      # release nobody can file a bug against. The two are written in different
+      # files by different hands, so they are compared before anything is built
+      # rather than after something is published.
+      - name: Tag and Info.plist agree
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            apps/macos/Resources/Info.plist)"
+          if [ "$tagged" != "$declared" ]; then
+            echo "::error::tag $GITHUB_REF_NAME carries $tagged, Info.plist declares $declared"
+            exit 1
+          fi
+          echo "version=$declared" >> "$GITHUB_ENV"
+
+      # On a dispatch run there is no tag to take the version from, and the
+      # plist is the only other place it is written down.
+      - name: Version
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          declared="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+            apps/macos/Resources/Info.plist)"
+          echo "version=$declared" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: make fmt-check
+
+      # The same gate the macOS CI job applies, applied here too rather than
+      # assumed from it. A tag can be pushed at a commit CI never ran on, and
+      # "the tests passed somewhere else" is not a thing a release should rest
+      # on. This also builds the release binary that `make package` then bundles.
+      - name: Swift checks
+        run: |
+          set -o pipefail
+          make test-swift 2>&1 | tee /tmp/swift-checks.log && exit 0
+          python3 -c "import pathlib; \
+            print('::error::' + pathlib.Path('/tmp/swift-checks.log').read_text()[-3000:] \
+              .replace('%', '%25').replace('\n', '%0A').replace('\r', '%0D'))"
+          exit 1
+
+      # Ad-hoc signed, because that is what an unset CODESIGN_IDENTITY means and
+      # this repository has no Developer ID to give it. What that costs the
+      # person downloading it is stated in the notes below rather than left for
+      # Gatekeeper to phrase as "damaged".
+      - name: Package
+        run: make package
+
+      # `ditto`, not `zip`. The bundle carries a code signature over its own
+      # layout, and zip flattens the symlinks and extended attributes that
+      # layout is made of — the archive unpacks into an app that no longer
+      # verifies. `--keepParent` so it unpacks as DbClient.app rather than as
+      # its contents.
+      - name: Archive
+        run: |
+          asset="DbClient-${version}-macos-arm64.zip"
+          ditto -c -k --keepParent dist/DbClient.app "$asset"
+          shasum -a 256 "$asset" | tee "$asset.sha256"
+          echo "asset=$asset" >> "$GITHUB_ENV"
+
+      # Always, so a dispatch run leaves something to download and a tagged run
+      # keeps a copy independent of the release it also creates.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DbClient-${{ env.version }}-macos-arm64
+          path: |
+            ${{ env.asset }}
+            ${{ env.asset }}.sha256
+
+      # Notes are the tag's own message plus a standing paragraph about what
+      # this asset is and how to open it.
+      #
+      # Not `--generate-notes`. That writes the log since the previous tag, and
+      # the tags in this repository are twenty years of upstream DBeaver
+      # releases — the nearest one to `v0.1.0` is `26.1.4`, and the notes would
+      # come out as the diff between a Java product and a Rust rewrite.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            git for-each-ref "refs/tags/$GITHUB_REF_NAME" --format='%(contents)'
+            cat <<'EOF'
+
+          ## The download
+
+          `DbClient-*-macos-arm64.zip` is the app, built and checked by the run
+          that produced this release. Apple Silicon, macOS 15 or later.
+
+          It carries an **ad-hoc signature**, not a Developer ID, so macOS
+          quarantines it and refuses the first launch with "damaged". It is not
+          damaged — that is the message Gatekeeper uses for a signature it
+          cannot trace to a developer account. To open it:
+
+          ```
+          xattr -dr com.apple.quarantine /Applications/DbClient.app
+          ```
+
+          `.sha256` beside the archive is what the run computed for it.
+          EOF
+          } > /tmp/notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            "$asset" "$asset.sha256" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file /tmp/notes.md
+
+      - name: Compiler cache
+        if: always()
+        run: sccache --show-stats
